@@ -35,6 +35,38 @@ jobs:
           open(p,'w',encoding='utf-8').write(s)
           print(s[:600])
           PY
+      - name: Patch edge-to-edge
+        run: |
+          python3 - <<'PY2'
+          import re,os
+          st='android/app/src/main/res/values/styles.xml'
+          s=open(st,encoding='utf-8').read()
+          style="""
+          <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+              <item name="android:windowBackground">?android:colorBackground</item>
+              <item name="android:statusBarColor">@android:color/transparent</item>
+              <item name="android:navigationBarColor">@android:color/transparent</item>
+              <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+              <item name="android:windowLightStatusBar">true</item>
+              <item name="android:windowLightNavigationBar">true</item>
+              <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+              <item name="android:windowTranslucentStatus">false</item>
+          </style>
+          """
+          if 'windowLightNavigationBar' not in s:
+              s=re.sub(r'<style name="NormalTheme"[^>]*>.*?</style>', style.strip(), s, flags=re.S)
+              open(st,'w',encoding='utf-8').write(s)
+          m='android/app/src/main/kotlin/com/huanxiang/fantasy_tv/MainActivity.kt'
+          if not os.path.exists(m):
+              cands=[os.path.join(r,f) for r,_,fs in os.walk('android/app/src/main') for f in fs if f=='MainActivity.kt']
+              m=cands[0] if cands else m
+          k=open(m,encoding='utf-8').read()
+          if 'setDecorFitsSystemWindows' not in k:
+              k=k.replace('import io.flutter.embedding.android.FlutterActivity','import io.flutter.embedding.android.FlutterActivity\nimport androidx.core.view.WindowCompat')
+              k=k.replace('class MainActivity: FlutterActivity()','class MainActivity: FlutterActivity() {\n  override fun onCreate(savedInstanceState: android.os.Bundle?) {\n    super.onCreate(savedInstanceState)\n    WindowCompat.setDecorFitsSystemWindows(window, false)\n  }\n}')
+              open(m,'w',encoding='utf-8').write(k)
+          print(open(st,encoding='utf-8').read()[:300])
+          PY2
       - run: flutter pub get
       - run: flutter analyze || true
       - run: flutter build apk --release
