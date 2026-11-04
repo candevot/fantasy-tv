@@ -84,6 +84,7 @@ class _TogetherPageState extends State<TogetherPage> {
   double _rate = 1;
   double? _resumePos;
   bool _resumePlaying = false;
+  String _resumeKey = '';
 
   /* 广场 */
   List<TogetherRoomBrief> _rooms = const <TogetherRoomBrief>[];
@@ -150,9 +151,9 @@ class _TogetherPageState extends State<TogetherPage> {
       if (me.id.isNotEmpty) _myId = me.id;
       if (me.name.isNotEmpty) _myName = me.name;
       _myAvatar = me.avatar;
-      if (!first) _addSystem('已重新连接服务器');
+      if (!first && _entered) _addSystem('已重新连接服务器');
     });
-    if (_demo && _videoId.isNotEmpty) {
+    if (_demo && _videoId.isNotEmpty && !_client.hasPendingCreate) {
       // 演示中恢复连接 → 用真实房间替换本地演示房。
       _client.createRoom(
         videoId: _videoId,
@@ -191,7 +192,7 @@ class _TogetherPageState extends State<TogetherPage> {
       return;
     }
     final wasDemo = _demo;
-    final resume = _roomCode.isNotEmpty && !_demo;
+    final resume = _roomCode.isNotEmpty;
     _restoreAfterResume = resume && _captureResume();
     setState(() {
       if (wasDemo) _messages.clear();
@@ -217,6 +218,11 @@ class _TogetherPageState extends State<TogetherPage> {
 
   void _onState(TogetherRoomState state) {
     if (!mounted || !_wantsRoom) return;
+    if (_stage == _TogetherStage.entering &&
+        _roomCode.isNotEmpty &&
+        state.code != _roomCode) {
+      return; // 忽略上一个房间迟到的状态
+    }
     // rev 去旧：同一房间只接受更新的权威状态。
     if (state.code.isNotEmpty &&
         state.code == _lastRevCode &&
@@ -270,6 +276,8 @@ class _TogetherPageState extends State<TogetherPage> {
           line: _videoLine,
         );
         _markRemote(playing ? 'play' : 'pause', position);
+        _resumePos = null;
+        _resumeKey = '';
       }
     }
   }
@@ -284,6 +292,7 @@ class _TogetherPageState extends State<TogetherPage> {
         avatar: chat.avatar,
         mine: chat.userId.isNotEmpty && chat.userId == _myId,
       ));
+      _trimMessages();
     });
   }
 
@@ -304,7 +313,7 @@ class _TogetherPageState extends State<TogetherPage> {
       togetherToast(context, message.isEmpty ? '房间不存在或已解散' : message);
       if (_stage == _TogetherStage.entering) {
         _backToLobby();
-      } else if (_stage == _TogetherStage.room) {
+      } else if (_stage == _TogetherStage.room && !_demo) {
         _onClosed(message.isEmpty ? '房间已解散' : message);
       }
       return;
@@ -334,7 +343,14 @@ class _TogetherPageState extends State<TogetherPage> {
       _loadedKey = '';
       _videoLoading = false;
       _videoError = '';
+      _roomTitle = '';
+      _videoLine = 'l1';
+      _lastRev = -1;
+      _lastRevCode = '';
     });
+    _resumePos = null;
+    _resumeKey = '';
+    _restoreAfterResume = false;
     _videoSeq++;
     _disposeController();
     togetherToast(context, text);
@@ -344,11 +360,16 @@ class _TogetherPageState extends State<TogetherPage> {
   /* ------------------------------------------------------------ 建房 / 加入 */
 
   void _startCreate(String videoId, int ep) {
+    _messages.clear();
     _wantsRoom = true;
     _enteringAsHost = true;
     _entered = false;
     _demo = false;
+    _leaving = false;
     _remote = null;
+    _roomCode = '';
+    _lastRev = -1;
+    _lastRevCode = '';
     _stage = _TogetherStage.entering;
     _stageText = '正在创建房间…';
     _videoId = videoId;
@@ -370,11 +391,16 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   void _join(String code) {
+    _messages.clear();
     _wantsRoom = true;
     _enteringAsHost = false;
     _entered = false;
     _demo = false;
+    _leaving = false;
     _remote = null;
+    _roomCode = code;
+    _lastRev = -1;
+    _lastRevCode = '';
     _stage = _TogetherStage.entering;
     _stageText = '正在加入房间 $code…';
     _videoId = '';
@@ -413,6 +439,7 @@ class _TogetherPageState extends State<TogetherPage> {
     _online = false;
     _entered = true;
     _wantsRoom = true;
+    _leaving = false;
     _roomCode = '${100000 + math.Random().nextInt(900000)}';
     _roomTitle = _videoTitle.isEmpty ? '一起看' : '$_videoTitle · 一起看';
     _members = <TogetherMember>[
@@ -438,6 +465,8 @@ class _TogetherPageState extends State<TogetherPage> {
     _wantsRoom = false;
     _client.leave();
     _resumePos = null;
+    _resumeKey = '';
+    _restoreAfterResume = false;
     _videoSeq++;
     _disposeController();
     if (!mounted) return;
@@ -474,9 +503,13 @@ class _TogetherPageState extends State<TogetherPage> {
       return;
     }
     if (_stage == _TogetherStage.entering) {
-      _leaving = true;
-      _client.leave();
-      Navigator.of(context).pop();
+      if (_enteringAsHost) {
+        _leaving = true;
+        _client.leave();
+        Navigator.of(context).pop();
+      } else {
+        _backToLobby();
+      }
       return;
     }
     _exiting = true;
@@ -509,7 +542,9 @@ class _TogetherPageState extends State<TogetherPage> {
   double _displayPosition() {
     final controller = _controller;
     final state = _remote;
-    if ((_isHost || _demo) && controller != null && controller.value.isInitialized) {
+    if ((_isHost || _demo) &&
+        controller != null &&
+        controller.value.isInitialized) {
       return controller.value.position.inMilliseconds / 1000.0;
     }
     if (state != null) return _targetPosition(state);
@@ -689,8 +724,7 @@ class _TogetherPageState extends State<TogetherPage> {
     }
     if (_endedSent || !_isHost || !value.isInitialized) return;
     if (value.duration.inMilliseconds <= 0) return;
-    if (value.position >=
-        value.duration - const Duration(milliseconds: 400)) {
+    if (value.position >= value.duration - const Duration(milliseconds: 400)) {
       _endedSent = true;
       final position = value.position.inMilliseconds / 1000.0;
       if (!_demo && _online) _client.sendState('ended', position);
@@ -703,6 +737,7 @@ class _TogetherPageState extends State<TogetherPage> {
     if (controller == null || !controller.value.isInitialized) return false;
     _resumePos = controller.value.position.inMilliseconds / 1000.0;
     _resumePlaying = controller.value.isPlaying;
+    _resumeKey = '$_videoId|$_ep|$_videoLine';
     return true;
   }
 
@@ -717,6 +752,11 @@ class _TogetherPageState extends State<TogetherPage> {
   Future<void> _loadVideo(String videoId, int ep, String line) async {
     final seq = ++_videoSeq;
     _endedSent = false;
+    if (_resumePos != null && _resumeKey != '$videoId|$ep|$line') {
+      _resumePos = null;
+      _resumePlaying = false;
+      _resumeKey = '';
+    }
     await _disposeController();
     if (!mounted || seq != _videoSeq) return;
     setState(() {
@@ -749,11 +789,12 @@ class _TogetherPageState extends State<TogetherPage> {
     }
     for (final url in urls) {
       if (!mounted || seq != _videoSeq) return;
-      final controller = VideoPlayerController.networkUrl(
-        Uri.parse(url),
-        httpHeaders: play.headers,
-      );
+      VideoPlayerController? controller;
       try {
+        controller = VideoPlayerController.networkUrl(
+          Uri.parse(url),
+          httpHeaders: play.headers,
+        );
         await controller.initialize();
         if (!mounted || seq != _videoSeq) {
           await controller.dispose();
@@ -782,6 +823,7 @@ class _TogetherPageState extends State<TogetherPage> {
             );
           }
           _resumePos = null;
+          _resumeKey = '';
         }
         if (!mounted || seq != _videoSeq) return;
         setState(() {
@@ -791,8 +833,11 @@ class _TogetherPageState extends State<TogetherPage> {
         return;
       } catch (_) {
         try {
-          controller.removeListener(_onVideoValue);
-          await controller.dispose();
+          if (controller != null) {
+            controller.removeListener(_onVideoValue);
+            if (identical(_controller, controller)) _controller = null;
+            await controller.dispose();
+          }
         } catch (_) {}
       }
     }
@@ -913,6 +958,12 @@ class _TogetherPageState extends State<TogetherPage> {
           _loadedKey = '';
           _addSystem('房主换成了《${card.title}》');
         });
+        _client.createRoom(
+          videoId: card.id,
+          ep: 1,
+          line: 'l1',
+          title: '${card.title} · 一起看',
+        );
         _loadDetail(card.id);
         _syncVideo();
         return;
@@ -935,6 +986,12 @@ class _TogetherPageState extends State<TogetherPage> {
           _loadedKey = '';
           _addSystem('房主切换到第 $episode 集');
         });
+        _client.createRoom(
+          videoId: _videoId,
+          ep: episode,
+          line: _videoLine,
+          title: _videoTitle.isEmpty ? '' : '$_videoTitle · 一起看',
+        );
         _syncVideo();
         return;
       }
@@ -1014,6 +1071,13 @@ class _TogetherPageState extends State<TogetherPage> {
   void _addSystem(String text) {
     if (text.isEmpty) return;
     _messages.add(TogetherChatMessage.system(text));
+    _trimMessages();
+  }
+
+  void _trimMessages() {
+    if (_messages.length > 200) {
+      _messages.removeRange(0, _messages.length - 200);
+    }
   }
 
   bool _sendChat(String text) {
@@ -1027,6 +1091,7 @@ class _TogetherPageState extends State<TogetherPage> {
           mine: true,
           demo: true,
         ));
+        _trimMessages();
       });
       if (!_online && !_demo) togetherToast(context, '正在重连，消息暂未发出');
       return true;
@@ -1080,52 +1145,59 @@ class _TogetherPageState extends State<TogetherPage> {
                 ],
               ),
               const SizedBox(height: 8),
-              for (final member in members)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 5),
-                  child: Row(
-                    children: [
-                      TogetherAvatar(
-                        name: member.name,
-                        avatar: member.avatar,
-                        size: 30,
-                        host: member.host,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          member.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w600,
-                            color: Fx.ink,
-                          ),
-                        ),
-                      ),
-                      if (member.host)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 7,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: Fx.gold.withOpacity(.16),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Text(
-                            '房主',
-                            style: TextStyle(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w700,
-                              color: Color(0xFF9A6A00),
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final member in members)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 5),
+                        child: Row(
+                          children: [
+                            TogetherAvatar(
+                              name: member.name,
+                              avatar: member.avatar,
+                              size: 30,
+                              host: member.host,
                             ),
-                          ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                member.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: Fx.ink,
+                                ),
+                              ),
+                            ),
+                            if (member.host)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 7,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Fx.gold.withOpacity(.16),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Text(
+                                  '房主',
+                                  style: TextStyle(
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF9A6A00),
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
-                    ],
-                  ),
+                      ),
+                  ],
                 ),
+              ),
               const SizedBox(height: 4),
               GestureDetector(
                 onTap: () => Navigator.of(ctx).pop(),
@@ -1342,7 +1414,9 @@ class _TogetherPageState extends State<TogetherPage> {
                 height: 68,
                 decoration: togetherGlass(radius: 34, opacity: .7),
                 child: Icon(
-                  _roomsReachable ? Icons.groups_rounded : Icons.wifi_off_rounded,
+                  _roomsReachable
+                      ? Icons.groups_rounded
+                      : Icons.wifi_off_rounded,
                   size: 30,
                   color: Fx.accent.withOpacity(.85),
                 ),
@@ -1358,9 +1432,7 @@ class _TogetherPageState extends State<TogetherPage> {
               ),
               const SizedBox(height: 5),
               Text(
-                _roomsReachable
-                    ? '创建房间，邀请朋友一起同步看片'
-                    : '点下方按钮仍可先开一个单人演示',
+                _roomsReachable ? '创建房间，邀请朋友一起同步看片' : '点下方按钮仍可先开一个单人演示',
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 10.5,
@@ -1593,80 +1665,85 @@ class _TogetherPageState extends State<TogetherPage> {
   Widget _buildVideo() {
     final controller = _controller;
     final ready = controller != null && controller.value.isInitialized;
+    // 屏幕较矮时按高度收缩，避免视频区把聊天/输入框挤出屏幕。
+    final maxVideoHeight = MediaQuery.sizeOf(context).height * .32;
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 4, 14, 0),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(18),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: maxVideoHeight),
         child: AspectRatio(
           aspectRatio: 16 / 9,
-          child: Container(
-            color: _videoBg,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (!ready && _videoCover.startsWith('http'))
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: Opacity(
-                        opacity: .4,
-                        child: TogetherCover(
-                          cover: _videoCover,
-                          title: _videoTitle,
-                          radius: 0,
-                          showTitle: false,
-                        ),
-                      ),
-                    ),
-                  ),
-                if (!ready && _videoCover.startsWith('http'))
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [
-                              Colors.black.withOpacity(.35),
-                              Colors.black.withOpacity(.62),
-                            ],
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Container(
+              color: _videoBg,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (!ready && _videoCover.startsWith('http'))
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: Opacity(
+                          opacity: .4,
+                          child: TogetherCover(
+                            cover: _videoCover,
+                            title: _videoTitle,
+                            radius: 0,
+                            showTitle: false,
                           ),
                         ),
                       ),
                     ),
-                  ),
-                if (ready)
-                  Center(
-                    child: AspectRatio(
-                      aspectRatio: controller.value.aspectRatio > 0
-                          ? controller.value.aspectRatio
-                          : 16 / 9,
-                      child: VideoPlayer(controller),
+                  if (!ready && _videoCover.startsWith('http'))
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.black.withOpacity(.35),
+                                Colors.black.withOpacity(.62),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
                     ),
-                  )
-                else
-                  _buildVideoPlaceholder(),
-                Positioned(left: 8, top: 8, child: _buildSyncChip()),
-                if (ready) ...[
-                  Positioned.fill(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _togglePlay,
+                  if (ready)
+                    Center(
+                      child: AspectRatio(
+                        aspectRatio: controller.value.aspectRatio > 0
+                            ? controller.value.aspectRatio
+                            : 16 / 9,
+                        child: VideoPlayer(controller),
+                      ),
+                    )
+                  else
+                    _buildVideoPlaceholder(),
+                  Positioned(left: 8, top: 8, child: _buildSyncChip()),
+                  if (ready) ...[
+                    Positioned.fill(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _togglePlay,
+                      ),
                     ),
-                  ),
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: Center(child: _buildCenterIcon(controller)),
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: Center(child: _buildCenterIcon(controller)),
+                      ),
                     ),
-                  ),
-                  Positioned(
-                    left: 10,
-                    right: 10,
-                    bottom: 5,
-                    child: _buildProgress(controller),
-                  ),
+                    Positioned(
+                      left: 10,
+                      right: 10,
+                      bottom: 5,
+                      child: _buildProgress(controller),
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),
@@ -1715,7 +1792,8 @@ class _TogetherPageState extends State<TogetherPage> {
             if (!_isHost && _remote?.playing == true) ...[
               Text(
                 '跟随房主',
-                style: _timeStyle.copyWith(color: Colors.white.withOpacity(.75)),
+                style:
+                    _timeStyle.copyWith(color: Colors.white.withOpacity(.75)),
               ),
               const SizedBox(width: 8),
             ],
@@ -1949,7 +2027,9 @@ class _TogetherPageState extends State<TogetherPage> {
       child: Container(
         decoration: togetherGlass(radius: 20, opacity: .58),
         clipBehavior: Clip.antiAlias,
-        child: TogetherChatList(messages: _messages),
+        child: TogetherChatList(
+          messages: List<TogetherChatMessage>.of(_messages),
+        ),
       ),
     );
   }

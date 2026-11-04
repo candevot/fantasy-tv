@@ -253,6 +253,9 @@ class TogetherClient {
 
   bool get connected => _connected;
 
+  /// 已有待发送的 create（重连/降级后由客户端统一补发，页面不要重复建房）。
+  bool get hasPendingCreate => _pendingCreate != null;
+
   /// 至少收到过一次 pong，才敢用服务端时间推算进度。
   bool get synced => _samples.isNotEmpty;
 
@@ -299,12 +302,15 @@ class TogetherClient {
     _ping = null;
     final sub = _sub;
     _sub = null;
-    sub?.cancel();
+    if (sub != null) sub.cancel().ignore();
     final ch = _channel;
     _channel = null;
-    try {
-      ch?.sink.close();
-    } catch (_) {}
+    if (ch != null) {
+      // 连接失败的 sink.close() 可能永不返回，不能等待。
+      try {
+        ch.sink.close().ignore();
+      } catch (_) {}
+    }
     if (had || ch != null) onDown();
     _scheduleRetry();
   }
@@ -435,12 +441,14 @@ class TogetherClient {
     _openTimeout = null;
     final sub = _sub;
     _sub = null;
-    sub?.cancel();
+    if (sub != null) sub.cancel().ignore();
     final ch = _channel;
     _channel = null;
-    try {
-      ch?.sink.close();
-    } catch (_) {}
+    if (ch != null) {
+      try {
+        ch.sink.close().ignore();
+      } catch (_) {}
+    }
   }
 
   /* ------------------------------------------------------------ 收包 */
@@ -546,6 +554,15 @@ class TogetherClient {
 
   /// 先走约定的 HTTP 接口，失败再用 WS `list`，都失败就返回不可达。
   static Future<TogetherLobbyResult> fetchLobby() async {
+    try {
+      return await _fetchLobbyInner().timeout(const Duration(seconds: 8));
+    } catch (_) {
+      return const TogetherLobbyResult(
+          rooms: <TogetherRoomBrief>[], reachable: false);
+    }
+  }
+
+  static Future<TogetherLobbyResult> _fetchLobbyInner() async {
     final viaHttp = await _roomsViaHttp();
     if (viaHttp != null) {
       return TogetherLobbyResult(rooms: viaHttp, reachable: true);
@@ -554,7 +571,8 @@ class TogetherClient {
     if (viaWs != null) {
       return TogetherLobbyResult(rooms: viaWs, reachable: true);
     }
-    return const TogetherLobbyResult(rooms: <TogetherRoomBrief>[], reachable: false);
+    return const TogetherLobbyResult(
+        rooms: <TogetherRoomBrief>[], reachable: false);
   }
 
   static Future<List<TogetherRoomBrief>?> _roomsViaHttp() async {
@@ -626,10 +644,13 @@ class TogetherClient {
     } catch (_) {
       return null;
     } finally {
-      await sub?.cancel();
-      try {
-        await channel?.sink.close();
-      } catch (_) {}
+      if (sub != null) sub.cancel().ignore();
+      final opened = channel;
+      if (opened != null) {
+        try {
+          opened.sink.close().ignore();
+        } catch (_) {}
+      }
     }
   }
 }
