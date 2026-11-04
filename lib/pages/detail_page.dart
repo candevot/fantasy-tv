@@ -4,8 +4,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api.dart';
 import '../main.dart' show Nav;
 import '../models.dart';
+import '../services/download_service.dart';
 import '../theme.dart';
 import '../widgets/detail_widgets.dart';
+import '../widgets/download_sheet.dart';
 import '../widgets/player_theme.dart';
 import 'category_page.dart'
     show FxEmptyView, FxErrorView, FxPosterCard, fxErrorText;
@@ -375,8 +377,40 @@ class _DetailPageState extends State<DetailPage>
     await _loadComments(reset: true, silent: true);
   }
 
-  void _download() {
-    fxToast(context, '已加入离线缓存：$_currentEpLabel');
+  Future<void> _download() async {
+    final d = _detail;
+    if (d == null) {
+      fxToast(context, '剧集信息加载中，请稍后再试');
+      return;
+    }
+    final episodes = _episodes;
+    if (episodes.isEmpty) {
+      fxToast(context, '暂无剧集信息');
+      return;
+    }
+    try {
+      await DownloadService.instance.init();
+      if (!mounted) return;
+      final count = await showDownloadSheet(
+        context,
+        videoId: d.id,
+        title: d.title,
+        cover: d.cover,
+        lineId: _lineId,
+        lineName: _lineName,
+        episodes: episodes,
+        currentEp: _ep,
+      );
+      if (!mounted || count == null) return;
+      if (count == 0) {
+        fxToast(context, '所选剧集已在缓存队列中');
+      } else {
+        fxToast(context, '已加入下载队列：$count 集');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      fxToast(context, '加入下载失败，请稍后重试');
+    }
   }
 
   Future<void> _feedback() async {

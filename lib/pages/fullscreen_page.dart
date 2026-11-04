@@ -145,8 +145,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   bool get _playing => _controller?.value.isPlaying ?? false;
 
-  List<QualityItem> get _qualityList =>
-      _info?.quality ?? const <QualityItem>[];
+  List<QualityItem> get _qualityList => _info?.quality ?? const <QualityItem>[];
 
   /// 底部清晰度按钮文案：清晰度（无多码率）/ 自动 / 1080P ...
   String get _qualityLabel {
@@ -155,12 +154,29 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final key = _qualityKey;
     if (key == null) return '自动';
     for (final q in list) {
-      if (q.key == key) {
-        final name = q.name.trim();
-        return name.isEmpty ? q.key : name;
-      }
+      if (q.key == key) return _shortQuality(q);
     }
     return '自动';
+  }
+
+  /// 按钮上用短档位（4K / 1080P / 720P），完整名称留给清晰度面板
+  String _shortQuality(QualityItem q) {
+    final key = q.key.trim().toLowerCase();
+    switch (key) {
+      case '4k':
+      case '2160p':
+        return '4K';
+      case '1080p':
+        return '1080P';
+      case '720p':
+        return '720P';
+      case '480p':
+        return '480P';
+      case 'auto':
+        return '自动';
+    }
+    final name = q.name.trim();
+    return name.isEmpty ? q.key : name;
   }
 
   String get _epLabel {
@@ -349,7 +365,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         var start = resume;
         if (durationMs > 0 && start >= durationMs / 1000.0 - 2) start = 0;
         if (start > 0) {
-          await controller.seekTo(Duration(milliseconds: (start * 1000).round()));
+          await controller
+              .seekTo(Duration(milliseconds: (start * 1000).round()));
         }
         await controller.setLooping(false);
         if (_rate != 1.0) {
@@ -489,9 +506,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (!mounted || token != _loadToken) return;
       final controller = VideoPlayerController.networkUrl(
         Uri.parse(url),
-        httpHeaders: info.headers.isEmpty
-            ? const <String, String>{}
-            : info.headers,
+        httpHeaders:
+            info.headers.isEmpty ? const <String, String>{} : info.headers,
       );
       try {
         await controller.initialize();
@@ -541,6 +557,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _loading = false;
       _error = false;
       _errorText = '';
+      _sourceFailNotified = false;
       _controls = true;
     });
     _wake();
@@ -614,6 +631,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _episodes = List<Episode>.from(_episodes);
       _danmaku = const <DanmuItem>[];
       _showEpisodes = false;
+      _showQuality = false;
       _controls = true;
       _loading = true;
       _error = false;
@@ -933,10 +951,34 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showEpisodes = !_showEpisodes;
       _showSpeed = false;
       _showJump = false;
+      _showQuality = false;
       _inputActive = false;
       _controls = true;
     });
     if (!_showEpisodes) _wake();
+  }
+
+  void _toggleQuality() {
+    if (_loading) {
+      fxToast(context, '正在加载，请稍候');
+      return;
+    }
+    _hideTimer?.cancel();
+    _danmakuFocus.unfocus();
+    if (_qualityList.isEmpty) {
+      fxToast(context, '当前线路未提供多码率');
+      _wake();
+      return;
+    }
+    setState(() {
+      _showQuality = !_showQuality;
+      _showSpeed = false;
+      _showJump = false;
+      _showEpisodes = false;
+      _inputActive = false;
+      _controls = true;
+    });
+    if (!_showQuality) _wake();
   }
 
   void _jumpIntro() {
@@ -1004,7 +1046,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                                 color: Fx.ink)),
                         const Spacer(),
                         IconButton(
-                          onPressed: () => Navigator.of(sheetContext).pop(false),
+                          onPressed: () =>
+                              Navigator.of(sheetContext).pop(false),
                           icon: const Icon(Icons.close_rounded,
                               color: Fx.sub, size: 22),
                         ),
@@ -1014,8 +1057,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: Text('当前线路：$lineName',
-                            style: const TextStyle(
-                                fontSize: 11.5, color: Fx.sub)),
+                            style:
+                                const TextStyle(fontSize: 11.5, color: Fx.sub)),
                       ),
                     const Text('播放速度',
                         style: TextStyle(
@@ -1050,13 +1093,22 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                         spacing: 8,
                         runSpacing: 8,
                         children: [
+                          ChipTag(
+                            '自动',
+                            active: _qualityKey == null,
+                            onTap: () {
+                              Navigator.of(sheetContext).pop(false);
+                              unawaited(_selectQuality(null));
+                            },
+                          ),
                           for (final q in quality)
                             ChipTag(
                               q.name.isEmpty ? q.key : q.name,
-                              onTap: () => fxToast(
-                                context,
-                                '已选择清晰度：${q.name.isEmpty ? q.key : q.name}',
-                              ),
+                              active: _qualityKey == q.key,
+                              onTap: () {
+                                Navigator.of(sheetContext).pop(false);
+                                unawaited(_selectQuality(q.key));
+                              },
                             ),
                         ],
                       ),
@@ -1315,7 +1367,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               Text(
                 _errorText,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Fx.ink, fontSize: 12, height: 1.5),
+                style:
+                    const TextStyle(color: Fx.ink, fontSize: 12, height: 1.5),
               ),
               const SizedBox(height: 10),
               Row(
@@ -1384,7 +1437,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: FsTopBar(
             title: _title,
             epLabel: _epLabel,
-            battery: _battery,
             compact: compact,
             rotationLocked: _rotationLocked,
             onBack: () => unawaited(_exit()),
@@ -1409,7 +1461,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                 return FsCenterControls(
                   playing: playing,
                   onTogglePlay: _togglePlay,
-                  onNext: () => unawaited(_next()),
                 );
               },
             ),
@@ -1426,6 +1477,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (_showQuality)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: FsQualityPanel(
+                      items: _qualityList,
+                      currentKey: _qualityKey,
+                      onPick: (key) => unawaited(_selectQuality(key)),
+                    ),
+                  ),
+                ),
               if (_showSpeed)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -1475,7 +1538,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                   color: _danmakuColor,
                   showColors: _showColors,
                   onPickColor: (color) => setState(() => _danmakuColor = color),
-                  onTogglePalette: () => setState(() => _showColors = !_showColors),
+                  onTogglePalette: () =>
+                      setState(() => _showColors = !_showColors),
                   onSend: _sendDanmaku,
                   onClose: _closeInput,
                   compact: compact,
@@ -1494,16 +1558,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       playing: v.isInitialized && v.isPlaying,
                       rate: _rate,
                       danmakuOn: danmakuSettings.show,
+                      qualityLabel: _qualityLabel,
                       compact: compact,
                       bottomInset: bottomInset,
                       onSeek: _seekTo,
                       onTogglePlay: _togglePlay,
                       onNext: () => unawaited(_next()),
                       onToggleDanmaku: _toggleDanmaku,
-                      onDanmakuSettings: () => unawaited(_openDanmakuSettings()),
+                      onDanmakuSettings: () =>
+                          unawaited(_openDanmakuSettings()),
                       onDanmakuInput: _beginInput,
                       onJump: _toggleJump,
                       onSpeed: _toggleSpeed,
+                      onQuality: _toggleQuality,
                       onEpisodes: _toggleEpisodes,
                       onExit: () => unawaited(_exit()),
                     );

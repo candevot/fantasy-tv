@@ -138,7 +138,8 @@ class FsBottomBar extends StatelessWidget {
                 onTap: onNext,
               ),
               const SizedBox(width: 8),
-              PDanmakuToggle(on: danmakuOn, size: 34 * s, onTap: onToggleDanmaku),
+              PDanmakuToggle(
+                  on: danmakuOn, size: 34 * s, onTap: onToggleDanmaku),
               const SizedBox(width: 8),
               PGlassIcon(
                 icon: Icons.tune_rounded,
@@ -198,8 +199,7 @@ class FsBottomBar extends StatelessWidget {
               FsTextAction(
                 text: qualityLabel,
                 size: s,
-                active:
-                    qualityLabel != '自动' && qualityLabel != '清晰度',
+                active: qualityLabel != '自动' && qualityLabel != '清晰度',
                 onTap: onQuality,
               ),
               const SizedBox(width: 8),
@@ -272,11 +272,14 @@ class FsDanmakuInputBar extends StatelessWidget {
                   width: 34 * s,
                   height: 34 * s,
                   decoration: BoxDecoration(
-                    color: showColors ? Fx.accent.withOpacity(.86) : Colors.white.withOpacity(.14),
+                    color: showColors
+                        ? Fx.accent.withOpacity(.86)
+                        : Colors.white.withOpacity(.14),
                     shape: BoxShape.circle,
                     border: Border.all(color: Colors.white.withOpacity(.32)),
                   ),
-                  child: Icon(Icons.palette_rounded, size: 17 * s, color: Colors.white),
+                  child: Icon(Icons.palette_rounded,
+                      size: 17 * s, color: Colors.white),
                 ),
               ),
               const SizedBox(width: 10),
@@ -317,7 +320,8 @@ class FsDanmakuInputBar extends StatelessWidget {
                 behavior: HitTestBehavior.opaque,
                 onTap: onSend,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                   decoration: BoxDecoration(
                     gradient: Fx.brand,
                     borderRadius: BorderRadius.circular(18),
@@ -351,7 +355,8 @@ class FsDanmakuInputBar extends StatelessWidget {
                     shape: BoxShape.circle,
                     border: Border.all(color: Colors.white.withOpacity(.30)),
                   ),
-                  child: const Icon(Icons.close_rounded, size: 17, color: Colors.white),
+                  child: const Icon(Icons.close_rounded,
+                      size: 17, color: Colors.white),
                 ),
               ),
             ],
@@ -368,7 +373,8 @@ class FsDanmakuInputBar extends StatelessWidget {
 
 /// 19 色弹幕调色盘
 class FsDanmakuColorDots extends StatelessWidget {
-  const FsDanmakuColorDots({super.key, required this.color, required this.onPick});
+  const FsDanmakuColorDots(
+      {super.key, required this.color, required this.onPick});
 
   final Color color;
   final ValueChanged<Color> onPick;
@@ -396,7 +402,8 @@ class FsDanmakuColorDots extends StatelessWidget {
                   color: c,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: active ? Colors.white : Colors.white.withOpacity(.45),
+                    color:
+                        active ? Colors.white : Colors.white.withOpacity(.45),
                     width: active ? 2 : 1,
                   ),
                   boxShadow: [
@@ -408,7 +415,8 @@ class FsDanmakuColorDots extends StatelessWidget {
                   ],
                 ),
                 child: active
-                    ? const Icon(Icons.check_rounded, size: 12, color: Colors.black54)
+                    ? const Icon(Icons.check_rounded,
+                        size: 12, color: Colors.black54)
                     : null,
               ),
             ),
@@ -476,11 +484,13 @@ class _FsEpisodeStripState extends State<FsEpisodeStrip> {
         children: [
           Row(
             children: [
-              const Icon(Icons.video_library_rounded, size: 17, color: Fx.accent),
+              const Icon(Icons.video_library_rounded,
+                  size: 17, color: Fx.accent),
               const SizedBox(width: 6),
               const Text(
                 '选集',
-                style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
+                style: TextStyle(
+                    fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
               ),
               const SizedBox(width: 8),
               Text(
@@ -516,7 +526,8 @@ class _FsEpisodeStripState extends State<FsEpisodeStrip> {
                     itemBuilder: (context, i) {
                       final e = widget.episodes[i];
                       final active = e.n == widget.current;
-                      final label = e.name.isNotEmpty ? e.name : fxEpisodeLabel(e.n);
+                      final label =
+                          e.name.isNotEmpty ? e.name : fxEpisodeLabel(e.n);
                       return GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: () => widget.onPick(e.n),
@@ -530,11 +541,14 @@ class _FsEpisodeStripState extends State<FsEpisodeStrip> {
                             color: active ? null : Colors.white,
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(
-                              color: active ? Colors.transparent : const Color(0xFFE3E9F3),
+                              color: active
+                                  ? Colors.transparent
+                                  : const Color(0xFFE3E9F3),
                             ),
                             boxShadow: [
                               BoxShadow(
-                                color: Fx.accent.withOpacity(active ? .30 : .05),
+                                color:
+                                    Fx.accent.withOpacity(active ? .30 : .05),
                                 blurRadius: 10,
                                 offset: const Offset(0, 3),
                               ),
@@ -546,7 +560,8 @@ class _FsEpisodeStripState extends State<FsEpisodeStrip> {
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               fontSize: 11.5,
-                              fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                              fontWeight:
+                                  active ? FontWeight.w700 : FontWeight.w500,
                               color: active ? Colors.white : Fx.sub,
                             ),
                           ),
@@ -584,12 +599,16 @@ class FsSpeedPanel extends StatelessWidget {
               const SizedBox(width: 6),
               const Text(
                 '倍速播放',
-                style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
+                style: TextStyle(
+                    fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
               ),
               const Spacer(),
               Text(
                 '当前 ${fxRateLabel(rate)}',
-                style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700, color: Fx.accent),
+                style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: Fx.accent),
               ),
             ],
           ),
@@ -657,9 +676,7 @@ class FsQualityPanel extends StatelessWidget {
               const Text(
                 '清晰度',
                 style: TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w800,
-                    color: Fx.ink),
+                    fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
               ),
               const Spacer(),
               Text(
@@ -723,7 +740,8 @@ class FsJumpPanel extends StatelessWidget {
               const SizedBox(width: 6),
               const Text(
                 '片头 / 片尾',
-                style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
+                style: TextStyle(
+                    fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
               ),
             ],
           ),
@@ -828,11 +846,13 @@ class _FsChip extends StatelessWidget {
         duration: const Duration(milliseconds: 140),
         width: width,
         alignment: Alignment.center,
-        padding: EdgeInsets.symmetric(horizontal: width == null ? 12 : 0, vertical: 8),
+        padding: EdgeInsets.symmetric(
+            horizontal: width == null ? 12 : 0, vertical: 8),
         decoration: BoxDecoration(
           color: active ? Fx.accent : Colors.white,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: active ? Fx.accent : const Color(0xFFE4EAF4)),
+          border:
+              Border.all(color: active ? Fx.accent : const Color(0xFFE4EAF4)),
           boxShadow: [
             BoxShadow(
               color: Fx.accent.withOpacity(active ? .28 : .04),

@@ -16,7 +16,7 @@ import 'fullscreen_page.dart';
 /// 左上 返回 + 片名/集数
 /// 右上 投屏 / TV / 设置
 /// 右侧中部 弹幕开关 / 弹幕设置
-/// 底部 播放暂停 · 当前时间 · 细进度条 · 总时长 · 全屏
+/// 底部 播放暂停 · 当前时间 · 细进度条 · 总时长 · 下一集 · 全屏
 /// 3 秒无操作自动隐藏；点画面唤出/隐藏；长按 2x；双击暂停。
 class PlayerView extends StatefulWidget {
   const PlayerView({
@@ -208,9 +208,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return;
     }
 
-    final saved = seekToSaved
-        ? await fxLoadProgress(widget.videoId, _ep)
-        : 0.0;
+    final saved = seekToSaved ? await fxLoadProgress(widget.videoId, _ep) : 0.0;
     if (!mounted || token != _loadToken) return;
 
     var ok = false;
@@ -337,6 +335,31 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     widget.onEpChange?.call(next);
     if (auto) fxToast(context, '即将播放 ${fxEpisodeLabel(next)}');
     await _bootstrap(seekToSaved: true, saveOld: false);
+  }
+
+  /// 竖屏底部栏的下一集：中间只保留播放/暂停，不再放下一集
+  Future<void> _next() async {
+    final next = _nextEpNumber();
+    if (next == null) {
+      fxToast(context, '已经是最后一集了');
+      _touch();
+      return;
+    }
+    await _switchEpisode(next);
+  }
+
+  int? _nextEpNumber() {
+    final list = widget.detail?.allEpisodes ?? const <Episode>[];
+    if (list.isNotEmpty) {
+      final index = list.indexWhere((e) => e.n == _ep);
+      if (index >= 0) {
+        if (index + 1 >= list.length) return null;
+        return list[index + 1].n;
+      }
+    }
+    final total = _episodeCount;
+    if (total > 0 && _ep >= total) return null;
+    return _ep + 1;
   }
 
   /// 详情页「刷新」/错误重试可以调用
@@ -624,7 +647,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return;
     }
 
-    final target = result?.position ?? await fxLoadProgress(widget.videoId, _ep);
+    final target =
+        result?.position ?? await fxLoadProgress(widget.videoId, _ep);
     if (!mounted) return;
     final current = _controller;
     if (current != null && current.value.isInitialized) {
@@ -1064,6 +1088,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                           ),
                           const SizedBox(width: 6),
                           PGlassIcon(
+                            icon: Icons.skip_next_rounded,
+                            size: 30,
+                            iconSize: 19,
+                            tint: .13,
+                            tooltip: '下一集',
+                            onTap: () => unawaited(_next()),
+                          ),
+                          const SizedBox(width: 6),
+                          PGlassIcon(
                             icon: Icons.fullscreen_rounded,
                             size: 30,
                             iconSize: 20,
@@ -1207,9 +1240,7 @@ class _PlayerPageState extends State<PlayerPage> {
                                 ),
                               ),
                               child: Text(
-                                e.name.isEmpty
-                                    ? fxEpisodeLabel(e.n)
-                                    : e.name,
+                                e.name.isEmpty ? fxEpisodeLabel(e.n) : e.name,
                                 style: TextStyle(
                                   color: _ep == e.n
                                       ? Colors.white

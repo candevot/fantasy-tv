@@ -36,9 +36,12 @@ class FsTextAction extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: EdgeInsets.symmetric(horizontal: 12 * size, vertical: 7 * size),
+        padding:
+            EdgeInsets.symmetric(horizontal: 12 * size, vertical: 7 * size),
         decoration: BoxDecoration(
-          color: active ? Fx.accent.withOpacity(.86) : Colors.white.withOpacity(.13),
+          color: active
+              ? Fx.accent.withOpacity(.86)
+              : Colors.white.withOpacity(.13),
           borderRadius: BorderRadius.circular(18),
           border: Border.all(color: Colors.white.withOpacity(.30), width: 1),
           boxShadow: [
@@ -143,7 +146,8 @@ class _FsClockPillState extends State<FsClockPill> {
   @override
   Widget build(BuildContext context) {
     return PGlassPill(
-      padding: EdgeInsets.symmetric(horizontal: 10 * widget.size, vertical: 5 * widget.size),
+      padding: EdgeInsets.symmetric(
+          horizontal: 10 * widget.size, vertical: 5 * widget.size),
       child: Text(
         _text,
         style: TextStyle(
@@ -220,7 +224,9 @@ class FsTopBar extends StatelessWidget {
                     color: Colors.white,
                     fontSize: 14 * s,
                     fontWeight: FontWeight.w700,
-                    shadows: const [Shadow(color: Colors.black54, blurRadius: 4)],
+                    shadows: const [
+                      Shadow(color: Colors.black54, blurRadius: 4)
+                    ],
                   ),
                 ),
                 if (epLabel.isNotEmpty) ...[
@@ -232,7 +238,9 @@ class FsTopBar extends StatelessWidget {
                     style: TextStyle(
                       color: Colors.white70,
                       fontSize: 11 * s,
-                      shadows: const [Shadow(color: Colors.black54, blurRadius: 4)],
+                      shadows: const [
+                        Shadow(color: Colors.black54, blurRadius: 4)
+                      ],
                     ),
                   ),
                 ],
@@ -436,7 +444,8 @@ class FsProgressRow extends StatelessWidget {
         const SizedBox(width: 8),
         SizedBox(
           width: 48,
-          child: Text(fxTime(duration), style: _timeStyle, textAlign: TextAlign.right),
+          child: Text(fxTime(duration),
+              style: _timeStyle, textAlign: TextAlign.right),
         ),
       ],
     );
