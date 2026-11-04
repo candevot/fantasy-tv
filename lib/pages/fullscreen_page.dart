@@ -30,6 +30,16 @@ class FullPlayerResult {
   final bool playing;
 }
 
+/// 全屏画面适配档位。
+enum FsVideoFit {
+  contain('默认'),
+  cover('裁剪'),
+  stretch('拉伸');
+
+  const FsVideoFit(this.label);
+  final String label;
+}
+
 /// 全屏横屏播放页
 ///
 /// 进入即横屏 + 沉浸式，退出恢复竖屏；控件 3 秒自动隐藏，点击画面切换显隐；
@@ -123,6 +133,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 当前清晰度；null = 自动（使用 PlayInfo.url + backup）
   String? _qualityKey;
 
+  /// 画面适配：默认保持真实比例，裁剪铺满，拉伸铺满。
+  FsVideoFit _videoFit = FsVideoFit.contain;
+
   // 播放倍速
   double _rate = 1.0;
   double _rateBeforeHold = 1.0;
@@ -147,36 +160,29 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   List<QualityItem> get _qualityList => _info?.quality ?? const <QualityItem>[];
 
-  /// 底部清晰度按钮文案：清晰度（无多码率）/ 自动 / 1080P ...
+  /// 底部清晰度按钮文案：只展示接口真实返回的码率；无多码率时就是原画。
   String get _qualityLabel {
     final list = _qualityList;
-    if (list.isEmpty) return '清晰度';
+    if (list.isEmpty) return '原画';
     final key = _qualityKey;
     if (key == null) return '自动';
     for (final q in list) {
-      if (q.key == key) return _shortQuality(q);
+      if (q.key == key) return _qualityName(q);
     }
     return '自动';
   }
 
-  /// 按钮上用短档位（4K / 1080P / 720P），完整名称留给清晰度面板
-  String _shortQuality(QualityItem q) {
-    final key = q.key.trim().toLowerCase();
-    switch (key) {
-      case '4k':
-      case '2160p':
-        return '4K';
-      case '1080p':
-        return '1080P';
-      case '720p':
-        return '720P';
-      case '480p':
-        return '480P';
-      case 'auto':
-        return '自动';
-    }
+  /// 直接使用 PlayInfo.quality 里的真实名称，不再把 key 猜成 4K / 1080P。
+  String _qualityName(QualityItem q) {
     final name = q.name.trim();
     return name.isEmpty ? q.key : name;
+  }
+
+  /// 当前视频的真实分辨率，如 1280x720；未就绪时返回空串。
+  String get _resolutionText {
+    final size = _controller?.value.size;
+    if (size == null || size.width <= 0 || size.height <= 0) return '';
+    return '${size.width.round()}x${size.height.round()}';
   }
 
   String get _epLabel {
@@ -438,7 +444,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final info = _info;
     final list = _qualityList;
     if (info == null || list.isEmpty) {
-      fxToast(context, '当前线路未提供多码率');
+      fxToast(context, '当前线路仅提供原画');
       return;
     }
     if (key == _qualityKey) {
@@ -966,7 +972,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _hideTimer?.cancel();
     _danmakuFocus.unfocus();
     if (_qualityList.isEmpty) {
-      fxToast(context, '当前线路未提供多码率');
+      fxToast(context, '当前线路仅提供原画');
       _wake();
       return;
     }
@@ -1060,6 +1066,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                             style:
                                 const TextStyle(fontSize: 11.5, color: Fx.sub)),
                       ),
+                    if (_resolutionText.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text('当前分辨率：$_resolutionText',
+                            style:
+                                const TextStyle(fontSize: 11.5, color: Fx.sub)),
+                      ),
                     const Text('播放速度',
                         style: TextStyle(
                             fontSize: 12.5,
@@ -1076,6 +1089,28 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                             active: (_rate - item).abs() < .001,
                             onTap: () {
                               _setRate(item);
+                              setSheetState(() {});
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    const Text('画面比例',
+                        style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: Fx.sub)),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final fit in FsVideoFit.values)
+                          ChipTag(
+                            fit.label,
+                            active: _videoFit == fit,
+                            onTap: () {
+                              setState(() => _videoFit = fit);
                               setSheetState(() {});
                             },
                           ),
@@ -1103,7 +1138,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                           ),
                           for (final q in quality)
                             ChipTag(
-                              q.name.isEmpty ? q.key : q.name,
+                              _qualityName(q),
                               active: _qualityKey == q.key,
                               onTap: () {
                                 Navigator.of(sheetContext).pop(false);
@@ -1112,6 +1147,15 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                             ),
                         ],
                       ),
+                    ] else ...[
+                      const SizedBox(height: 14),
+                      const Text('清晰度',
+                          style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w700,
+                              color: Fx.sub)),
+                      const SizedBox(height: 8),
+                      const ChipTag('原画', active: true),
                     ],
                     const SizedBox(height: 6),
                     SwitchListTile(
@@ -1193,7 +1237,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /* ---------------------------------------------------------------- 布局 */
 
   Rect _videoRect(Size size) {
-    const aspect = 16 / 9;
+    // 裁剪 / 拉伸都是铺满整屏；默认模式按视频真实宽高比做 letterbox。
+    if (_videoFit != FsVideoFit.contain) return Offset.zero & size;
+    final video = _controller?.value;
+    var aspect = 16 / 9;
+    if (video != null && video.isInitialized) {
+      final s = video.size;
+      if (s.width > 0 && s.height > 0) {
+        aspect = s.width / s.height;
+      } else if (video.aspectRatio > 0) {
+        aspect = video.aspectRatio;
+      }
+    }
     var w = size.width;
     var h = w / aspect;
     if (h > size.height) {
@@ -1282,10 +1337,43 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null || !c.value.isInitialized) {
       return const ColoredBox(color: Colors.black);
     }
-    final ratio = c.value.aspectRatio > 0 ? c.value.aspectRatio : 16 / 9;
-    return Center(
-      child: AspectRatio(aspectRatio: ratio, child: VideoPlayer(c)),
-    );
+    final size = c.value.size;
+    final width = size.width > 0 ? size.width : 16.0;
+    final height = size.height > 0 ? size.height : 9.0;
+    final aspect = width / height;
+    switch (_videoFit) {
+      case FsVideoFit.contain:
+        // _videoRect 已按真实比例算好，这里填满该矩形。
+        return Center(
+          child: AspectRatio(aspectRatio: aspect, child: VideoPlayer(c)),
+        );
+      case FsVideoFit.cover:
+        return ClipRect(
+          child: SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: width,
+                height: height,
+                child: VideoPlayer(c),
+              ),
+            ),
+          ),
+        );
+      case FsVideoFit.stretch:
+        return ClipRect(
+          child: SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.fill,
+              child: SizedBox(
+                width: width,
+                height: height,
+                child: VideoPlayer(c),
+              ),
+            ),
+          ),
+        );
+    }
   }
 
   Widget _buildDanmakuLayer(VideoPlayerController c) {
@@ -1437,6 +1525,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: FsTopBar(
             title: _title,
             epLabel: _epLabel,
+            resolution: _resolutionText,
             compact: compact,
             rotationLocked: _rotationLocked,
             onBack: () => unawaited(_exit()),

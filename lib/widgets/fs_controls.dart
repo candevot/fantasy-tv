@@ -113,6 +113,46 @@ class FsNetSpeedPill extends StatelessWidget {
   }
 }
 
+/// 真实分辨率胶囊（取自 VideoPlayerValue.size，如 1280x720）
+class FsResolutionPill extends StatelessWidget {
+  const FsResolutionPill({
+    super.key,
+    required this.resolution,
+    this.size = 1,
+  });
+
+  final String resolution;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return PGlassPill(
+      padding: EdgeInsets.symmetric(horizontal: 9 * size, vertical: 5 * size),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.aspect_ratio_rounded,
+            size: 14 * size,
+            color: Colors.white,
+          ),
+          SizedBox(width: 3 * size),
+          Text(
+            resolution,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 11.5 * size,
+              fontWeight: FontWeight.w700,
+              letterSpacing: .2,
+              shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 时间胶囊：自带 1 秒定时刷新，避免整页重建
 class FsClockPill extends StatefulWidget {
   const FsClockPill({super.key, this.size = 1});
@@ -162,7 +202,7 @@ class _FsClockPillState extends State<FsClockPill> {
   }
 }
 
-/// 顶部控制条：返回 · 片名/第xx集 —— 网速 · 时间 · 旋转锁定 · 画中画 · 投屏 · 设置
+/// 顶部控制条：返回 · 片名/第xx集 —— 分辨率 · 网速 · 时间 · 旋转锁定 · 画中画 · 投屏 · 设置
 class FsTopBar extends StatelessWidget {
   const FsTopBar({
     super.key,
@@ -174,11 +214,15 @@ class FsTopBar extends StatelessWidget {
     required this.onPip,
     required this.onCast,
     required this.onSettings,
+    this.resolution = '',
     this.compact = false,
   });
 
   final String title;
   final String epLabel;
+
+  /// 真实分辨率文本，空串则不显示
+  final String resolution;
   final VoidCallback onBack;
   final VoidCallback onRotate;
   final bool rotationLocked;
@@ -248,6 +292,10 @@ class FsTopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
+          if (resolution.isNotEmpty) ...[
+            FsResolutionPill(resolution: resolution, size: s),
+            gap,
+          ],
           FsNetSpeedPill(size: s),
           gap,
           FsClockPill(size: s),

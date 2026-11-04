@@ -85,7 +85,7 @@ class FsBottomBar extends StatelessWidget {
   final double rate;
   final bool danmakuOn;
 
-  /// 当前清晰度（自动 / 1080P / 清晰度）
+  /// 当前清晰度（自动 / 真实码率名 / 原画）
   final String qualityLabel;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onTogglePlay;
@@ -199,7 +199,7 @@ class FsBottomBar extends StatelessWidget {
               FsTextAction(
                 text: qualityLabel,
                 size: s,
-                active: qualityLabel != '自动' && qualityLabel != '清晰度',
+                active: qualityLabel != '自动' && qualityLabel != '原画',
                 onTap: onQuality,
               ),
               const SizedBox(width: 8),

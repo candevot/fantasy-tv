@@ -30,7 +30,8 @@ class Api {
     q?.forEach((k, v) {
       if (v != null) m[k] = '$v';
     });
-    return Uri.parse('$base$path').replace(queryParameters: m.isEmpty ? null : m);
+    return Uri.parse('$base$path')
+        .replace(queryParameters: m.isEmpty ? null : m);
   }
 
   static Future<Map<String, dynamic>> _get(String path,
@@ -76,7 +77,11 @@ class Api {
   }
 
   static Future<List<VideoCard>> category(
-      {String type = '', String area = '', String year = '', String sort = 'latest', int page = 1}) async {
+      {String type = '',
+      String area = '',
+      String year = '',
+      String sort = 'latest',
+      int page = 1}) async {
     final d = await _get('/category', {
       'type': type,
       'area': area,
@@ -103,14 +108,17 @@ class Api {
 
   static Future<PlayInfo> play(String id, int ep, String line) async {
     final d = await _get('/play', {'id': id, 'ep': ep, 'line': line});
+    // 解析线路可能返回 /api/proxy?u=... 相对地址，视频内核只认绝对地址。
+    d['url'] = abs('${d['url'] ?? ''}');
+    final backup = (d['backup'] ?? []) as List;
+    d['backup'] = <String>[for (final u in backup) abs('$u')];
     return PlayInfo.fromJson(d);
   }
 
   static Future<List<DanmuItem>> danmu(String id, int ep) async {
     try {
-      final r = await http
-          .get(_u('/danmu', {'id': id, 'ep': ep}))
-          .timeout(_timeout);
+      final r =
+          await http.get(_u('/danmu', {'id': id, 'ep': ep})).timeout(_timeout);
       final j = jsonDecode(utf8.decode(r.bodyBytes));
       final list = j is Map ? (j['data'] ?? []) : j;
       return (list as List)
