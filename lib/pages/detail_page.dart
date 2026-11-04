@@ -47,6 +47,7 @@ class _DetailPageState extends State<DetailPage>
   bool _descOpen = false;
   bool _noticeClosed = false;
   bool _fav = false;
+  bool _openingTogether = false;
   int _autoLineTries = 0;
   int _relatedOffset = 0;
 
@@ -438,8 +439,19 @@ class _DetailPageState extends State<DetailPage>
     fxToast(context, '已收到反馈：$reason，感谢支持');
   }
 
-  void _together() {
-    Nav.together(context, videoId: widget.id, ep: _ep);
+  Future<void> _together() async {
+    if (_openingTogether) return;
+    _openingTogether = true;
+    try {
+      // 先暂停并释放详情页内嵌播放器，房间内只保留一起看自己的播放器。
+      await _playerKey.currentState?.pauseAndReleaseForTogether();
+      if (!mounted) return;
+      await Nav.together(context, videoId: widget.id, ep: _ep);
+      if (!mounted) return;
+      await _playerKey.currentState?.resumeAfterTogether();
+    } finally {
+      _openingTogether = false;
+    }
   }
 
   void _onCommentTap() {

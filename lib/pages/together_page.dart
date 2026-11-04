@@ -9,6 +9,7 @@ import '../models.dart';
 import '../theme.dart';
 import '../widgets/together_chat.dart';
 import '../widgets/together_client.dart';
+import '../widgets/together_fullscreen.dart';
 import '../widgets/together_picker.dart';
 import '../widgets/together_ui.dart';
 
@@ -33,6 +34,22 @@ class TogetherPage extends StatefulWidget {
 
 class _TogetherPageState extends State<TogetherPage> {
   static const Color _videoBg = Color(0xFF101722);
+  static const List<DeviceOrientation> _landscape = <DeviceOrientation>[
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ];
+
+  /// 与 main.dart 里保持一致，退出全屏后恢复。
+  static const SystemUiOverlayStyle _appOverlay = SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.dark,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarDividerColor: Colors.transparent,
+    systemNavigationBarIconBrightness: Brightness.dark,
+    systemStatusBarContrastEnforced: false,
+    systemNavigationBarContrastEnforced: false,
+  );
+
   static const TextStyle _timeStyle = TextStyle(
     fontSize: 9,
     fontWeight: FontWeight.w600,
@@ -50,6 +67,7 @@ class _TogetherPageState extends State<TogetherPage> {
   bool _leaving = false;
   bool _wantsRoom = false;
   bool _restoreAfterResume = false;
+  bool _fullscreen = false;
 
   bool _online = false;
   bool _isHost = false;
@@ -124,6 +142,10 @@ class _TogetherPageState extends State<TogetherPage> {
     _ticker = null;
     _heartbeat = null;
     _enterTimer = null;
+    if (_fullscreen) {
+      _fullscreen = false;
+      unawaited(_restoreSystemUi());
+    }
     final controller = _controller;
     _controller = null;
     if (controller != null) {
@@ -299,6 +321,7 @@ class _TogetherPageState extends State<TogetherPage> {
   void _onClosed(String reason) {
     if (!mounted || _leaving) return;
     _enterTimer?.cancel();
+    if (_fullscreen) unawaited(_exitFullscreen());
     final text = reason.isEmpty ? '房间已解散' : reason;
     _wantsRoom = false;
     setState(() {
@@ -400,6 +423,7 @@ class _TogetherPageState extends State<TogetherPage> {
 
   void _backToEntry() {
     _enterTimer?.cancel();
+    if (_fullscreen) unawaited(_exitFullscreen());
     _wantsRoom = false;
     _client.leave();
     _resumePos = null;
@@ -434,6 +458,10 @@ class _TogetherPageState extends State<TogetherPage> {
 
   Future<void> _confirmExit() async {
     if (!mounted || _exiting) return;
+    if (_fullscreen) {
+      await _exitFullscreen();
+      return;
+    }
     if (_stage == _TogetherStage.entry) {
       Navigator.of(context).pop();
       return;
@@ -462,6 +490,37 @@ class _TogetherPageState extends State<TogetherPage> {
     _leaving = true;
     _client.leave();
     Navigator.of(context).pop();
+  }
+
+  /* ------------------------------------------------------------ 全屏 */
+
+  Future<void> _enterFullscreen() async {
+    if (_fullscreen || _stage != _TogetherStage.room) return;
+    FocusScope.of(context).unfocus();
+    setState(() => _fullscreen = true);
+    try {
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      await SystemChrome.setPreferredOrientations(_landscape);
+      SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light);
+    } catch (_) {
+      // 桌面 / 模拟器上不支持也无所谓。
+    }
+  }
+
+  Future<void> _exitFullscreen() async {
+    if (!_fullscreen) return;
+    if (mounted) setState(() => _fullscreen = false);
+    await _restoreSystemUi();
+  }
+
+  Future<void> _restoreSystemUi() async {
+    try {
+      await SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
+        DeviceOrientation.portraitUp,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      SystemChrome.setSystemUIOverlayStyle(_appOverlay);
+    } catch (_) {}
   }
 
   /* ------------------------------------------------------------ 同步 / 播放 */
@@ -1183,22 +1242,56 @@ class _TogetherPageState extends State<TogetherPage> {
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
+        if (_fullscreen) {
+          _exitFullscreen();
+          return;
+        }
         _confirmExit();
       },
       child: Scaffold(
-        backgroundColor: const Color(0xFFF6F8FC),
-        resizeToAvoidBottomInset: true,
-        body: FxBackground(
-          child: SafeArea(
-            bottom: false,
-            child: switch (_stage) {
-              _TogetherStage.entry => _buildEntry(),
-              _TogetherStage.entering => _buildEntering(),
-              _TogetherStage.room => _buildRoom(),
-            },
-          ),
-        ),
+        backgroundColor:
+            _fullscreen ? Colors.black : const Color(0xFFF6F8FC),
+        resizeToAvoidBottomInset: !_fullscreen,
+        body: _fullscreen
+            ? _buildFullscreen()
+            : FxBackground(
+                child: SafeArea(
+                  bottom: false,
+                  child: switch (_stage) {
+                    _TogetherStage.entry => _buildEntry(),
+                    _TogetherStage.entering => _buildEntering(),
+                    _TogetherStage.room => _buildRoom(),
+                  },
+                ),
+              ),
       ),
+    );
+  }
+
+  Widget _buildFullscreen() {
+    final controller = _controller;
+    final duration = controller != null && controller.value.isInitialized
+        ? controller.value.duration.inMilliseconds / 1000.0
+        : 0.0;
+    final title = _videoTitle.isNotEmpty
+        ? _videoTitle
+        : (_roomTitle.isNotEmpty ? _roomTitle : '一起看');
+    return TogetherFullscreenView(
+      controller: controller,
+      messages: List<TogetherChatMessage>.of(_messages),
+      members: _members,
+      roomCode: _roomCode,
+      title: title,
+      ep: _ep,
+      isHost: _isHost,
+      online: _online,
+      position: _displayPosition(),
+      duration: duration,
+      onExit: _exitFullscreen,
+      onTogglePlay: _togglePlay,
+      onSeek: _seekTo,
+      onHostOnly: _hostOnlyToast,
+      onShowMembers: _showMembers,
     );
   }
 
@@ -1782,11 +1875,38 @@ class _TogetherPageState extends State<TogetherPage> {
                       bottom: 5,
                       child: _buildProgress(controller),
                     ),
+                    Positioned(
+                      right: 8,
+                      top: 8,
+                      child: _buildFullscreenButton(),
+                    ),
                   ],
                 ],
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFullscreenButton() {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _enterFullscreen,
+      child: Container(
+        width: 30,
+        height: 30,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(.44),
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: Colors.white.withOpacity(.22)),
+        ),
+        child: const Icon(
+          Icons.fullscreen_rounded,
+          size: 19,
+          color: Colors.white,
         ),
       ),
     );

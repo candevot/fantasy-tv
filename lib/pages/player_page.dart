@@ -160,6 +160,37 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     await fxSaveProgress(widget.videoId, _ep, seconds);
   }
 
+  /// 进入一起看房间前调用：暂停并彻底释放当前播放器，
+  /// 避免房间内同时存在详情页播放器和一起看播放器（不是静音）。
+  Future<void> pauseAndReleaseForTogether() async {
+    _loadToken++;
+    _hideTimer?.cancel();
+    await _saveProgress();
+    final controller = _controller;
+    _controller = null;
+    if (controller != null) {
+      controller.removeListener(_onVideoValue);
+      try {
+        await controller.pause();
+      } catch (_) {}
+      try {
+        await controller.dispose();
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _error = false;
+      _errorText = '';
+    });
+  }
+
+  /// 从一起看房间返回后调用：重新加载播放器并恢复进度。
+  Future<void> resumeAfterTogether() async {
+    if (!mounted) return;
+    await _bootstrap(seekToSaved: true, saveOld: false);
+  }
+
   Future<void> _bootstrap({
     required bool seekToSaved,
     bool saveOld = true,
@@ -263,6 +294,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         }
         _controller?.removeListener(_onVideoValue);
         await _controller?.dispose();
+        // 释放/切换发生在初始化过程中时，不再把新 controller 挂回页面。
+        if (!mounted || token != _loadToken) {
+          controller.removeListener(_onVideoValue);
+          await controller.dispose();
+          return;
+        }
         _controller = controller;
         if (widget.autoPlay) {
           await controller.play();
