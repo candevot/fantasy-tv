@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api.dart';
@@ -143,50 +142,6 @@ class TogetherRoomInfo {
   }
 }
 
-/// 广场里的房间摘要（HTTP `GET /api/together/rooms` / WS `list`）。
-class TogetherRoomBrief {
-  const TogetherRoomBrief({
-    required this.code,
-    required this.title,
-    required this.videoTitle,
-    required this.cover,
-    required this.host,
-    required this.members,
-    required this.ep,
-    required this.playing,
-  });
-
-  final String code;
-  final String title;
-  final String videoTitle;
-  final String cover;
-  final String host;
-  final int members;
-  final int ep;
-  final bool playing;
-
-  factory TogetherRoomBrief.fromJson(Map<String, dynamic> j) {
-    final title = '${j['title'] ?? '一起看'}';
-    return TogetherRoomBrief(
-      code: '${j['code'] ?? ''}',
-      title: title,
-      videoTitle: '${j['videoTitle'] ?? title}',
-      cover: '${j['cover'] ?? ''}',
-      host: '${j['host'] ?? j['hostName'] ?? ''}',
-      members: togetherInt(j['members'], 1),
-      ep: togetherInt(j['ep'], 1),
-      playing: '${j['state'] ?? 'pause'}' == 'play',
-    );
-  }
-}
-
-/// 广场拉取结果：reachable 用来区分「没有房间」和「连不上服务器」。
-class TogetherLobbyResult {
-  const TogetherLobbyResult({required this.rooms, required this.reachable});
-  final List<TogetherRoomBrief> rooms;
-  final bool reachable;
-}
-
 /// 收听到的聊天消息。
 class TogetherChatIncoming {
   const TogetherChatIncoming({
@@ -272,7 +227,14 @@ class TogetherClient {
     _retry = null;
     _connecting = true;
     try {
-      final ch = WebSocketChannel.connect(Uri.parse(Api.wsBase));
+      final ws = Uri.parse(Api.wsBase);
+      final uri = Api.token.isEmpty
+          ? ws
+          : ws.replace(queryParameters: <String, String>{
+              ...ws.queryParameters,
+              'token': Api.token,
+            });
+      final ch = WebSocketChannel.connect(uri);
       _channel = ch;
       // 连接失败会由 stream.onError 处理；ready 的错误必须被消费，否则是未处理异常。
       ch.ready.ignore();
@@ -548,109 +510,5 @@ class TogetherClient {
     if (_samples.length > 5) _samples.removeAt(0);
     final sorted = List<int>.from(_samples)..sort();
     _offset = sorted[sorted.length ~/ 2];
-  }
-
-  /* ------------------------------------------------------------ 广场 */
-
-  /// 先走约定的 HTTP 接口，失败再用 WS `list`，都失败就返回不可达。
-  static Future<TogetherLobbyResult> fetchLobby() async {
-    try {
-      return await _fetchLobbyInner().timeout(const Duration(seconds: 8));
-    } catch (_) {
-      return const TogetherLobbyResult(
-          rooms: <TogetherRoomBrief>[], reachable: false);
-    }
-  }
-
-  static Future<TogetherLobbyResult> _fetchLobbyInner() async {
-    final viaHttp = await _roomsViaHttp();
-    if (viaHttp != null) {
-      return TogetherLobbyResult(rooms: viaHttp, reachable: true);
-    }
-    final viaWs = await _roomsViaWs();
-    if (viaWs != null) {
-      return TogetherLobbyResult(rooms: viaWs, reachable: true);
-    }
-    return const TogetherLobbyResult(
-        rooms: <TogetherRoomBrief>[], reachable: false);
-  }
-
-  static Future<List<TogetherRoomBrief>?> _roomsViaHttp() async {
-    try {
-      final r = await http
-          .get(Uri.parse('${Api.base}/together/rooms'))
-          .timeout(const Duration(seconds: 6));
-      if (r.statusCode != 200) return null;
-      final decoded = jsonDecode(utf8.decode(r.bodyBytes));
-      dynamic list;
-      if (decoded is List) {
-        list = decoded;
-      } else if (decoded is Map) {
-        final data = decoded['data'] ?? decoded['rooms'] ?? decoded['items'];
-        if (data is List) {
-          list = data;
-        } else if (data is Map) {
-          list = data['rooms'] ?? data['items'] ?? data['list'];
-        }
-      }
-      if (list is! List) return null;
-      return list
-          .whereType<Map>()
-          .map((e) => TogetherRoomBrief.fromJson(togetherMap(e)))
-          .where((e) => e.code.isNotEmpty)
-          .toList();
-    } catch (_) {
-      return null;
-    }
-  }
-
-  static Future<List<TogetherRoomBrief>?> _roomsViaWs() async {
-    WebSocketChannel? channel;
-    StreamSubscription<dynamic>? sub;
-    final completer = Completer<List<TogetherRoomBrief>?>();
-    void finish(List<TogetherRoomBrief>? value) {
-      if (!completer.isCompleted) completer.complete(value);
-    }
-
-    try {
-      channel = WebSocketChannel.connect(Uri.parse(Api.wsBase));
-      sub = channel.stream.listen(
-        (raw) {
-          try {
-            final decoded = jsonDecode('$raw');
-            if (decoded is! Map) return;
-            if ('${decoded['action']}' != 'rooms') return;
-            final list = decoded['rooms'];
-            if (list is! List) return;
-            finish(list
-                .whereType<Map>()
-                .map((e) => TogetherRoomBrief.fromJson(togetherMap(e)))
-                .where((e) => e.code.isNotEmpty)
-                .toList());
-          } catch (_) {
-            // 忽略坏包，继续等下一次。
-          }
-        },
-        onError: (_) => finish(null),
-        onDone: () => finish(null),
-        cancelOnError: false,
-      );
-      await channel.ready.timeout(const Duration(seconds: 5));
-      channel.sink.add(jsonEncode({'action': 'list'}));
-      return await completer.future.timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => null,
-      );
-    } catch (_) {
-      return null;
-    } finally {
-      if (sub != null) sub.cancel().ignore();
-      final opened = channel;
-      if (opened != null) {
-        try {
-          opened.sink.close().ignore();
-        } catch (_) {}
-      }
-    }
   }
 }

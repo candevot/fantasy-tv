@@ -5,7 +5,7 @@ import '../theme.dart';
 
 /// 一起看 · 通用数据与小部件。
 ///
-/// 这一层不依赖一起看的网络/播放状态，广场、房间、选片弹层共用。
+/// 这一层不依赖一起看的网络/播放状态，入口、房间、选片弹层共用。
 class TogetherMember {
   const TogetherMember({
     required this.id,

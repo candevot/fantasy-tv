@@ -170,7 +170,7 @@ class _TogetherPageState extends State<TogetherPage> {
       if (_enteringAsHost) {
         _degradeToDemo();
       } else {
-        _backToLobby();
+        _backToEntry();
         togetherToast(context, '连不上服务器，稍后再试');
       }
       return;
@@ -310,7 +310,7 @@ class _TogetherPageState extends State<TogetherPage> {
     if (code == 'not_found' || code == 'room_full') {
       togetherToast(context, message.isEmpty ? '房间不存在或已解散' : message);
       if (_stage == _TogetherStage.entering) {
-        _backToLobby();
+        _backToEntry();
       } else if (_stage == _TogetherStage.room && !_demo) {
         _onClosed(message.isEmpty ? '房间已解散' : message);
       }
@@ -422,7 +422,7 @@ class _TogetherPageState extends State<TogetherPage> {
       if (_enteringAsHost) {
         _degradeToDemo();
       } else {
-        _backToLobby();
+        _backToEntry();
         togetherToast(context, '连不上服务器，稍后再试');
       }
     });
@@ -458,7 +458,7 @@ class _TogetherPageState extends State<TogetherPage> {
     togetherToast(context, '未连接服务器，已进入单人演示');
   }
 
-  void _backToLobby() {
+  void _backToEntry() {
     _enterTimer?.cancel();
     _wantsRoom = false;
     _client.leave();
@@ -505,7 +505,7 @@ class _TogetherPageState extends State<TogetherPage> {
         _client.leave();
         Navigator.of(context).pop();
       } else {
-        _backToLobby();
+        _backToEntry();
       }
       return;
     }
@@ -760,88 +760,118 @@ class _TogetherPageState extends State<TogetherPage> {
       _videoLoading = true;
       _videoError = '';
     });
-    PlayInfo? info;
-    try {
-      info = await Api.play(videoId, ep, line.isEmpty ? 'l1' : line);
-    } catch (_) {
-      info = null;
+
+    // 一起看不能用房间状态里的 line（可能是 parse 线路）：
+    // 先取详情，按顺序尝试所有非 parse 线路，每条线路内再试 backup。
+    var lines = _linesVideoId == videoId
+        ? _videoLines.where((l) => !l.needsParse).toList()
+        : <LineInfo>[];
+    if (lines.isEmpty) {
+      try {
+        final detail = await Api.detail(videoId);
+        if (!mounted || seq != _videoSeq) return;
+        _linesVideoId = videoId;
+        _videoLines = detail.lines;
+        if (_videoId == videoId) {
+          setState(() {
+            if (detail.title.isNotEmpty) _videoTitle = detail.title;
+            _videoCover = detail.cover;
+            _episodes = detail.allEpisodes;
+          });
+        }
+        lines = detail.lines.where((l) => !l.needsParse).toList();
+      } catch (_) {
+        lines = <LineInfo>[];
+      }
     }
-    if (!mounted || seq != _videoSeq) return;
-    final play = info;
-    final urls = <String>[];
-    if (play != null) {
+    if (lines.isEmpty) {
+      if (!mounted || seq != _videoSeq) return;
+      setState(() {
+        _videoLoading = false;
+        _videoError = '房主暂未选择可播线路';
+      });
+      return;
+    }
+
+    for (final lineInfo in lines) {
+      if (!mounted || seq != _videoSeq) return;
+      PlayInfo? play;
+      try {
+        play = await Api.play(videoId, ep, lineInfo.id);
+      } catch (_) {
+        continue;
+      }
+      if (!mounted || seq != _videoSeq) return;
+      if (play.type.trim().toLowerCase() == 'parse') continue;
+
+      final urls = <String>[];
       final primary = play.url.trim();
       if (primary.isNotEmpty) urls.add(primary);
       for (final raw in play.backup) {
         final url = raw.trim();
         if (url.isNotEmpty && !urls.contains(url)) urls.add(url);
       }
-    }
-    if (play == null || urls.isEmpty) {
-      setState(() {
-        _videoLoading = false;
-        _videoError = play == null ? '暂时拿不到播放地址' : '当前线路没有可用地址';
-      });
-      return;
-    }
-    for (final url in urls) {
-      if (!mounted || seq != _videoSeq) return;
-      VideoPlayerController? controller;
-      try {
-        controller = VideoPlayerController.networkUrl(
-          Uri.parse(url),
-          httpHeaders: play.headers,
-        );
-        await controller.initialize();
-        if (!mounted || seq != _videoSeq) {
-          await controller.dispose();
-          return;
-        }
-        controller.addListener(_onVideoValue);
-        await controller.setLooping(false);
-        _controller = controller;
-        _rate = 1;
-        final state = _remote;
-        if (!_isHost && state != null) {
-          await _seekAndMaybePlay(controller, state);
-        } else if (_isHost && _resumePos != null) {
-          final position = _resumePos!;
-          await controller.seekTo(
-            Duration(milliseconds: (position * 1000).round()),
-          );
-          if (_resumePlaying) await controller.play();
-          if (!_demo && _online) {
-            _client.sendState(
-              _resumePlaying ? 'play' : 'pause',
-              position,
-              videoId: _videoId,
-              ep: _ep,
-              line: _videoLine,
-            );
-          }
-          _resumePos = null;
-          _resumeKey = '';
-        }
+      if (urls.isEmpty) continue;
+
+      for (final url in urls) {
         if (!mounted || seq != _videoSeq) return;
-        setState(() {
-          _videoLoading = false;
-          _videoError = '';
-        });
-        return;
-      } catch (_) {
+        VideoPlayerController? controller;
         try {
-          if (controller != null) {
-            controller.removeListener(_onVideoValue);
-            if (identical(_controller, controller)) _controller = null;
+          controller = VideoPlayerController.networkUrl(
+            Uri.parse(url),
+            httpHeaders: play.headers,
+          );
+          await controller.initialize();
+          if (!mounted || seq != _videoSeq) {
             await controller.dispose();
+            return;
           }
-        } catch (_) {}
+          controller.addListener(_onVideoValue);
+          await controller.setLooping(false);
+          _controller = controller;
+          _rate = 1;
+          final state = _remote;
+          if (!_isHost && state != null) {
+            await _seekAndMaybePlay(controller, state);
+          } else if (_isHost && _resumePos != null) {
+            final position = _resumePos!;
+            await controller.seekTo(
+              Duration(milliseconds: (position * 1000).round()),
+            );
+            if (_resumePlaying) await controller.play();
+            if (!_demo && _online) {
+              _client.sendState(
+                _resumePlaying ? 'play' : 'pause',
+                position,
+                videoId: _videoId,
+                ep: _ep,
+                line: _videoLine,
+              );
+            }
+            _resumePos = null;
+            _resumeKey = '';
+          }
+          if (!mounted || seq != _videoSeq) return;
+          setState(() {
+            _videoLoading = false;
+            _videoError = '';
+          });
+          return;
+        } catch (_) {
+          try {
+            if (controller != null) {
+              controller.removeListener(_onVideoValue);
+              if (identical(_controller, controller)) _controller = null;
+              await controller.dispose();
+            }
+          } catch (_) {}
+        }
       }
     }
     if (!mounted || seq != _videoSeq) return;
     setState(() {
       _videoLoading = false;
-      _videoError = '播放失败，稍后再试';
+      _videoError = '房主暂未选择可播线路';
     });
   }
 
@@ -881,6 +911,8 @@ class _TogetherPageState extends State<TogetherPage> {
       final detail = await Api.detail(videoId);
       if (!mounted || _videoId != videoId) return;
       setState(() {
+        _linesVideoId = videoId;
+        _videoLines = detail.lines;
         if (detail.title.isNotEmpty) _videoTitle = detail.title;
         _videoCover = detail.cover;
         _episodes = detail.allEpisodes;
@@ -1521,7 +1553,7 @@ class _TogetherPageState extends State<TogetherPage> {
             ),
             const SizedBox(height: 16),
             GestureDetector(
-              onTap: _backToLobby,
+              onTap: _backToEntry,
               child: Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 18, vertical: 8),

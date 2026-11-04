@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
@@ -104,8 +103,10 @@ class Auth extends ChangeNotifier {
   Future<void> refresh() async {
     if (_refreshing || _token.isEmpty) return;
     _refreshing = true;
+    final token = _token;
     try {
       final data = await Api.me();
+      if (_token != token) return;
       final user = AuthUser.fromJson(data);
       if (user.id.isEmpty) return;
       _user = user;
@@ -113,7 +114,7 @@ class Auth extends ChangeNotifier {
       await sp.setString(_kUser, jsonEncode(user.toJson()));
       notifyListeners();
     } on ApiException catch (e) {
-      if (e.code == 401) await _clearSession();
+      if (e.code == 401 && _token == token) await _clearSession();
     } catch (_) {
       // 网络异常时保留本地登录态，下次进入再校验。
     } finally {

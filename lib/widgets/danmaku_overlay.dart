@@ -10,7 +10,6 @@ import 'package:http/http.dart' as http;
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
-import 'player_theme.dart';
 
 /// 全局共享的弹幕设置（竖屏 / 全屏 / 设置抽屉实时同步）
 class DanmakuSettings extends ChangeNotifier {

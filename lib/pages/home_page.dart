@@ -311,7 +311,7 @@ class _HomePageState extends State<HomePage> {
                           fontWeight: FontWeight.w800,
                           color: Fx.ink,
                           letterSpacing: .4)),
-                  Text('高清 4K · 多线路 · 纯净追剧',
+                  Text('高清 · 免费 · 无广告',
                       style: TextStyle(
                           fontSize: 9,
                           color: Fx.sub.withOpacity(.9),
@@ -333,42 +333,20 @@ class _HomePageState extends State<HomePage> {
                       width: 34,
                       height: 34,
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(.72),
+                        gradient: Fx.brand,
                         shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white),
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(0xFF50729F).withOpacity(.10),
-                            blurRadius: 12,
-                            offset: const Offset(0, 4),
+                            color: Fx.accent.withOpacity(.30),
+                            blurRadius: 14,
+                            offset: const Offset(0, 5),
                           ),
                         ],
                       ),
                       child: const Icon(Icons.groups_rounded,
-                          size: 19, color: Fx.accent),
+                          size: 19, color: Colors.white),
                     ),
                   ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(.65),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.white),
-                ),
-                child: const Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.verified_rounded,
-                        size: 12, color: Color(0xFF5BC8A8)),
-                    SizedBox(width: 3),
-                    Text('纯净版',
-                        style:
-                            TextStyle(fontSize: 9.5, color: Fx.sub)),
-                  ],
                 ),
               ),
             ],
