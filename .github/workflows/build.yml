@@ -22,6 +22,13 @@ jobs:
           flutter create --platforms=android --org com.huanxiang --project-name fantasy_tv _tmp
           cp -r _tmp/android ./android
           rm -rf _tmp
+      - name: Apply app icons
+        run: |
+          for pair in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            k=${pair%%:*}; sz=${pair##*:}
+            cp assets/icons/ic_launcher-${sz}.png android/app/src/main/res/mipmap-${k}/ic_launcher.png
+          done
+          ls -l android/app/src/main/res/mipmap-xxxhdpi/
       - name: Patch manifest
         run: |
           python3 - <<'PY'
