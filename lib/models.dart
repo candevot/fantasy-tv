@@ -79,7 +79,7 @@ bool _lineNamesMatch(String a, String b) {
   return a.startsWith(b) || b.startsWith(a);
 }
 
-/// 合并「量子线路」「量子线路·线路2」这类同源线路：
+/// 合并「高清线路」「高清线路·线路2」这类同源线路：
 /// 只保留一条可播放线路（优先非 parse），剧集仍按整部剧合并展示。
 List<LineInfo> mergeLines(List<LineInfo> lines) {
   final groups = <List<LineInfo>>[];

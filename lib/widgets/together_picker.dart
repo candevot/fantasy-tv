@@ -48,74 +48,10 @@ class _TogetherVideoPicker extends StatefulWidget {
 }
 
 class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
-  static final _demoItems = <VideoCard>[
-    VideoCard(
-      id: 'v1001',
-      title: '长安夜行',
-      cover: '',
-      rating: 8.8,
-      year: 2026,
-      status: '更新至36集',
-      episodes: 36,
-      category: '剧集',
-    ),
-    VideoCard(
-      id: 'v1002',
-      title: '雾港来信',
-      cover: '',
-      rating: 8.5,
-      year: 2025,
-      status: '全24集',
-      episodes: 24,
-      category: '剧集',
-    ),
-    VideoCard(
-      id: 'v1003',
-      title: '星河旅人',
-      cover: '',
-      rating: 8.2,
-      year: 2026,
-      status: '全18集',
-      episodes: 18,
-      category: '动漫',
-    ),
-    VideoCard(
-      id: 'v1004',
-      title: '晚风吻过你',
-      cover: '',
-      rating: 8.0,
-      year: 2025,
-      status: '全30集',
-      episodes: 30,
-      category: '剧集',
-    ),
-    VideoCard(
-      id: 'v1005',
-      title: '九霄之上',
-      cover: '',
-      rating: 7.9,
-      year: 2026,
-      status: '更新至22集',
-      episodes: 22,
-      category: '动漫',
-    ),
-    VideoCard(
-      id: 'v1006',
-      title: '暗夜追凶',
-      cover: '',
-      rating: 8.6,
-      year: 2026,
-      status: '全12集',
-      episodes: 12,
-      category: '电影',
-    ),
-  ];
-
   final TextEditingController _query = TextEditingController();
   Timer? _debounce;
   List<VideoCard> _items = const [];
   bool _loading = true;
-  bool _usingDemo = false;
   bool _error = false;
   String _activeQuery = '';
 
@@ -137,7 +73,6 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
     setState(() {
       _loading = true;
       _error = false;
-      _usingDemo = false;
       _activeQuery = '';
     });
 
@@ -153,27 +88,17 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
         final home = await Api.home('recommend').timeout(const Duration(seconds: 7));
         items = [for (final section in home.sections) ...section.items];
       } catch (_) {
-        // 内容服务器也不可用，走演示片单。
+        // 服务器不可用时保持空列表，不做本地假数据兜底。
       }
     }
     if (!mounted) return;
 
     final seen = <String>{};
     items = items.where((e) => e.id.isNotEmpty && seen.add(e.id)).toList();
-    if (items.isEmpty) {
-      setState(() {
-        _loading = false;
-        _items = _demoItems;
-        _usingDemo = true;
-        _error = false;
-      });
-      return;
-    }
     setState(() {
       _loading = false;
       _items = items;
-      _usingDemo = false;
-      _error = false;
+      _error = items.isEmpty;
     });
   }
 
@@ -194,7 +119,6 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
     setState(() {
       _loading = true;
       _error = false;
-      _usingDemo = false;
       _activeQuery = q;
     });
     try {
@@ -331,50 +255,6 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                     ),
                   ),
                 ),
-                if (_usingDemo)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 7,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFF4D8).withOpacity(.82),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(
-                            Icons.cloud_off_rounded,
-                            size: 13,
-                            color: Color(0xFF9A6A00),
-                          ),
-                          const SizedBox(width: 6),
-                          const Expanded(
-                            child: Text(
-                              '内容服务器未连接，先看看演示影片',
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: Color(0xFF9A6A00),
-                              ),
-                            ),
-                          ),
-                          GestureDetector(
-                            onTap: _loadHot,
-                            child: const Text(
-                              '重试',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF9A6A00),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
                 Expanded(child: _buildBody()),
               ],
             ),
@@ -416,7 +296,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
             ),
             const SizedBox(height: 10),
             Text(
-              '加载失败，请检查服务器',
+              '暂无内容，请稍后重试',
               style: TextStyle(fontSize: 12, color: Fx.sub.withOpacity(.9)),
             ),
             const SizedBox(height: 14),
@@ -457,7 +337,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
             ),
             const SizedBox(height: 10),
             Text(
-              _activeQuery.isEmpty ? '暂时没有可选的影片' : '没有找到「$_activeQuery」',
+              _activeQuery.isEmpty ? '暂无内容，请稍后重试' : '没有找到「$_activeQuery」',
               style: TextStyle(fontSize: 12, color: Fx.sub.withOpacity(.9)),
             ),
           ],

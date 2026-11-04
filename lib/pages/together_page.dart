@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -53,12 +52,9 @@ class _TogetherPageState extends State<TogetherPage> {
   bool _restoreAfterResume = false;
 
   bool _online = false;
-  bool _demo = false;
   bool _isHost = false;
 
   String _myId = '';
-  String _myName = '我';
-  String _myAvatar = '';
 
   String _roomCode = '';
   String _roomTitle = '';
@@ -147,19 +143,8 @@ class _TogetherPageState extends State<TogetherPage> {
       _online = true;
       _downReported = false;
       if (me.id.isNotEmpty) _myId = me.id;
-      if (me.name.isNotEmpty) _myName = me.name;
-      _myAvatar = me.avatar;
       if (!first && _entered) _addSystem('已重新连接服务器');
     });
-    if (_demo && _videoId.isNotEmpty && !_client.hasPendingCreate) {
-      // 演示中恢复连接 → 用真实房间替换本地演示房。
-      _client.createRoom(
-        videoId: _videoId,
-        ep: _ep,
-        line: _videoLine,
-        title: _videoTitle.isEmpty ? '' : '$_videoTitle · 一起看',
-      );
-    }
   }
 
   void _onDown() {
@@ -167,12 +152,8 @@ class _TogetherPageState extends State<TogetherPage> {
     final wasOnline = _online;
     setState(() => _online = false);
     if (!_entered && _stage == _TogetherStage.entering) {
-      if (_enteringAsHost) {
-        _degradeToDemo();
-      } else {
-        _backToEntry();
-        togetherToast(context, '连不上服务器，稍后再试');
-      }
+      _backToEntry();
+      togetherToast(context, '连不上服务器，稍后再试');
       return;
     }
     if (wasOnline && _entered && !_downReported) {
@@ -189,14 +170,11 @@ class _TogetherPageState extends State<TogetherPage> {
       _client.leave();
       return;
     }
-    final wasDemo = _demo;
     final resume = _roomCode.isNotEmpty;
     _restoreAfterResume = resume && _captureResume();
     setState(() {
-      if (wasDemo) _messages.clear();
       _stage = _TogetherStage.room;
       _entered = true;
-      _demo = false;
       _online = true;
       _isHost = true;
       _roomCode = info.code;
@@ -244,7 +222,6 @@ class _TogetherPageState extends State<TogetherPage> {
       _remote = state;
       _stage = _TogetherStage.room;
       _entered = true;
-      _demo = false;
       _online = true;
       if (state.code.isNotEmpty) _roomCode = state.code;
       if (state.title.isNotEmpty) _roomTitle = state.title;
@@ -311,7 +288,7 @@ class _TogetherPageState extends State<TogetherPage> {
       togetherToast(context, message.isEmpty ? '房间不存在或已解散' : message);
       if (_stage == _TogetherStage.entering) {
         _backToEntry();
-      } else if (_stage == _TogetherStage.room && !_demo) {
+      } else if (_stage == _TogetherStage.room) {
         _onClosed(message.isEmpty ? '房间已解散' : message);
       }
       return;
@@ -327,7 +304,6 @@ class _TogetherPageState extends State<TogetherPage> {
     setState(() {
       _stage = _TogetherStage.entry;
       _entered = false;
-      _demo = false;
       _isHost = false;
       _roomCode = '';
       _remote = null;
@@ -361,7 +337,6 @@ class _TogetherPageState extends State<TogetherPage> {
     _wantsRoom = true;
     _enteringAsHost = true;
     _entered = false;
-    _demo = false;
     _leaving = false;
     _remote = null;
     _roomCode = '';
@@ -393,7 +368,6 @@ class _TogetherPageState extends State<TogetherPage> {
     _wantsRoom = true;
     _enteringAsHost = false;
     _entered = false;
-    _demo = false;
     _leaving = false;
     _remote = null;
     _roomCode = code;
@@ -419,43 +393,9 @@ class _TogetherPageState extends State<TogetherPage> {
     _enterTimer?.cancel();
     _enterTimer = Timer(const Duration(seconds: 5), () {
       if (!mounted || _entered || _stage != _TogetherStage.entering) return;
-      if (_enteringAsHost) {
-        _degradeToDemo();
-      } else {
-        _backToEntry();
-        togetherToast(context, '连不上服务器，稍后再试');
-      }
+      _backToEntry();
+      togetherToast(context, '连不上服务器，稍后再试');
     });
-  }
-
-  /// 连不上服务器时的优雅降级：单人演示房，聊天/播放仍然可用。
-  void _degradeToDemo() {
-    if (!mounted || _entered) return;
-    _enterTimer?.cancel();
-    _demo = true;
-    _isHost = true;
-    _online = false;
-    _entered = true;
-    _wantsRoom = true;
-    _leaving = false;
-    _roomCode = '${100000 + math.Random().nextInt(900000)}';
-    _roomTitle = _videoTitle.isEmpty ? '一起看' : '$_videoTitle · 一起看';
-    _members = <TogetherMember>[
-      TogetherMember(
-        id: _myId.isEmpty ? 'me' : _myId,
-        name: _myName,
-        avatar: _myAvatar,
-        host: true,
-      ),
-    ];
-    setState(() {
-      _stage = _TogetherStage.room;
-      _addSystem('房间: $_roomCode');
-      _addSystem('未连接服务器 · 当前为单人演示');
-    });
-    _loadedKey = '';
-    _syncVideo();
-    togetherToast(context, '未连接服务器，已进入单人演示');
   }
 
   void _backToEntry() {
@@ -471,7 +411,6 @@ class _TogetherPageState extends State<TogetherPage> {
     setState(() {
       _stage = _TogetherStage.entry;
       _entered = false;
-      _demo = false;
       _isHost = false;
       _online = false;
       _roomCode = '';
@@ -539,9 +478,7 @@ class _TogetherPageState extends State<TogetherPage> {
   double _displayPosition() {
     final controller = _controller;
     final state = _remote;
-    if ((_isHost || _demo) &&
-        controller != null &&
-        controller.value.isInitialized) {
+    if (_isHost && controller != null && controller.value.isInitialized) {
       return controller.value.position.inMilliseconds / 1000.0;
     }
     if (state != null) return _targetPosition(state);
@@ -642,7 +579,7 @@ class _TogetherPageState extends State<TogetherPage> {
     final position = controller.value.position.inMilliseconds / 1000.0;
     if (controller.value.isPlaying) {
       controller.pause().catchError((_) {});
-      if (!_demo && _online) _client.sendState('pause', position);
+      if (_online) _client.sendState('pause', position);
       _markRemote('pause', position);
       setState(() {});
       return;
@@ -655,7 +592,7 @@ class _TogetherPageState extends State<TogetherPage> {
     _endedSent = false;
     final start = atEnd ? 0.0 : position;
     controller.play().catchError((_) {});
-    if (!_demo && _online) _client.sendState('play', start);
+    if (_online) _client.sendState('play', start);
     _markRemote('play', start);
     setState(() {});
   }
@@ -673,7 +610,7 @@ class _TogetherPageState extends State<TogetherPage> {
     if (duration > 0 && target > duration) target = duration;
     _seekController(target);
     _endedSent = false;
-    if (!_demo && _online) {
+    if (_online) {
       _client.sendSeek(target);
       _markRemote(_remote?.playing == true ? 'play' : 'pause', target);
     }
@@ -697,7 +634,7 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   void _hostHeartbeat() {
-    if (!mounted || !_isHost || _demo || !_online) return;
+    if (!mounted || !_isHost || !_online) return;
     final controller = _controller;
     final state = _remote;
     if (controller == null ||
@@ -724,7 +661,7 @@ class _TogetherPageState extends State<TogetherPage> {
     if (value.position >= value.duration - const Duration(milliseconds: 400)) {
       _endedSent = true;
       final position = value.position.inMilliseconds / 1000.0;
-      if (!_demo && _online) _client.sendState('ended', position);
+      if (_online) _client.sendState('ended', position);
       _markRemote('ended', position);
     }
   }
@@ -839,7 +776,7 @@ class _TogetherPageState extends State<TogetherPage> {
               Duration(milliseconds: (position * 1000).round()),
             );
             if (_resumePlaying) await controller.play();
-            if (!_demo && _online) {
+            if (_online) {
               _client.sendState(
                 _resumePlaying ? 'play' : 'pause',
                 position,
@@ -978,23 +915,8 @@ class _TogetherPageState extends State<TogetherPage> {
       _videoTitle = card.title;
       _videoCover = card.cover;
       _episodes = const <Episode>[];
-      if (_demo || !_online) {
-        setState(() {
-          _videoId = card.id;
-          _ep = 1;
-          _videoLine = 'l1';
-          _remote = null;
-          _loadedKey = '';
-          _addSystem('房主换成了《${card.title}》');
-        });
-        _client.createRoom(
-          videoId: card.id,
-          ep: 1,
-          line: 'l1',
-          title: '${card.title} · 一起看',
-        );
-        _loadDetail(card.id);
-        _syncVideo();
+      if (!_online) {
+        togetherToast(context, '未连接服务器，请稍后重试');
         return;
       }
       _client.sendState('pause', 0, videoId: card.id, ep: 1, line: 'l1');
@@ -1009,19 +931,8 @@ class _TogetherPageState extends State<TogetherPage> {
         title: _videoTitle,
       );
       if (!mounted || episode == null || episode == _ep) return;
-      if (_demo || !_online) {
-        setState(() {
-          _ep = episode;
-          _loadedKey = '';
-          _addSystem('房主切换到第 $episode 集');
-        });
-        _client.createRoom(
-          videoId: _videoId,
-          ep: episode,
-          line: _videoLine,
-          title: _videoTitle.isEmpty ? '' : '$_videoTitle · 一起看',
-        );
-        _syncVideo();
+      if (!_online) {
+        togetherToast(context, '未连接服务器，请稍后重试');
         return;
       }
       // 服务器会广播 room_state 和「切换到第 N 集」系统消息。
@@ -1110,20 +1021,9 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   bool _sendChat(String text) {
-    if (_demo || !_client.connected) {
-      setState(() {
-        _messages.add(TogetherChatMessage(
-          text: text,
-          time: DateTime.now(),
-          user: _myName,
-          avatar: _myAvatar,
-          mine: true,
-          demo: true,
-        ));
-        _trimMessages();
-      });
-      if (!_online && !_demo) togetherToast(context, '正在重连，消息暂未发出');
-      return true;
+    if (!_client.connected) {
+      togetherToast(context, '正在重连，消息暂未发出');
+      return false;
     }
     // 服务器会把消息广播回所有人（包括自己），无需本地回显。
     _client.sendChat(text);
@@ -1304,7 +1204,7 @@ class _TogetherPageState extends State<TogetherPage> {
 
   String get _roomSubtitle {
     final count = _members.isEmpty ? 1 : _members.length;
-    final net = _demo ? '单人演示' : (_online ? '已连接' : '未连接');
+    final net = _online ? '已连接' : '未连接';
     final role = _isHost ? '房主' : '跟随房主';
     return '$count 人 · $net · $role';
   }
@@ -1586,7 +1486,7 @@ class _TogetherPageState extends State<TogetherPage> {
         if (!keyboard) ...[
           _buildVideo(),
           _buildInfoRow(),
-          if (_demo || !_online) _buildNetBanner(),
+          if (!_online) _buildNetBanner(),
         ] else
           const SizedBox(height: 4),
         const SizedBox(height: 2),
@@ -1948,20 +1848,14 @@ class _TogetherPageState extends State<TogetherPage> {
   Widget _buildSyncChip() {
     final state = _remote;
     final String text;
-    if (_demo) {
-      text = '单人演示';
-    } else if (!_online) {
+    if (!_online) {
       text = '未连接';
     } else if (_isHost) {
       text = state?.playing == true ? '房主 · 播放中' : '房主 · 已暂停';
     } else {
       text = state?.playing == true ? '跟随房主 · 播放中' : '跟随房主 · 已暂停';
     }
-    final dot = _demo
-        ? Fx.gold
-        : _online
-            ? const Color(0xFF57D3A3)
-            : const Color(0xFFFF8A80);
+    final dot = _online ? const Color(0xFF57D3A3) : const Color(0xFFFF8A80);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
@@ -1978,7 +1872,7 @@ class _TogetherPageState extends State<TogetherPage> {
           ),
           const SizedBox(width: 4),
           Text(
-            _online && !_demo ? '$text · ${_client.rtt}ms' : text,
+            _online ? '$text · ${_client.rtt}ms' : text,
             style: const TextStyle(
               fontSize: 8.5,
               fontWeight: FontWeight.w600,
@@ -2131,7 +2025,7 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   Widget _buildNetBanner() {
-    final text = _demo ? '未连接服务器 · 单人演示（联网后自动同步）' : '连接已断开 · 正在自动重连…';
+    const text = '连接已断开 · 正在自动重连…';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
       child: Container(
@@ -2179,7 +2073,7 @@ class _TogetherPageState extends State<TogetherPage> {
     return SafeArea(
       top: false,
       child: TogetherComposer(
-        enabled: _online || _demo,
+        enabled: _online,
         onSend: _sendChat,
       ),
     );

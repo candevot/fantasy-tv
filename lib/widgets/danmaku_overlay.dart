@@ -88,10 +88,9 @@ class DanmakuSettings extends ChangeNotifier {
 
 final DanmakuSettings danmakuSettings = DanmakuSettings();
 
-/// 解析 PlayInfo.danmu：支持 XML / JSON / URL，失败或为空时用演示弹幕。
+/// 解析 PlayInfo.danmu：支持 XML / JSON / URL，失败或为空时返回空列表。
 Future<List<DanmuItem>> loadDanmakuSource(String source) async {
-  final parsed = await _parseDanmaku(source);
-  return parsed.isEmpty ? demoDanmaku() : parsed;
+  return _parseDanmaku(source);
 }
 
 Future<List<DanmuItem>> _parseDanmaku(String source) async {
@@ -262,32 +261,6 @@ String _charFromCode(int? code) {
   if (code == null || code < 0 || code > 0x10FFFF) return '';
   return String.fromCharCode(code);
 }
-
-/// 演示弹幕（接口失败 / 空数据时兜底）
-List<DanmuItem> demoDanmaku() => <DanmuItem>[
-      DanmuItem(1.2, '来了来了！', '#FFFFFF', 1),
-      DanmuItem(2.6, '前排打卡', '#FFFFFF', 2),
-      DanmuItem(3.1, '这个镜头绝了', '#69F0AE', 1),
-      DanmuItem(4.4, '老婆好美啊啊啊', '#FF80AB', 1),
-      DanmuItem(5.8, '台词好戳我', '#FFFFFF', 1),
-      DanmuItem(7.2, '什么神仙画面', '#80D8FF', 1),
-      DanmuItem(8.9, '进度条撑住', '#FFFFFF', 3),
-      DanmuItem(10.5, '前方高能！', '#FFF176', 1),
-      DanmuItem(12.1, '这也太甜了吧', '#FF80AB', 1),
-      DanmuItem(13.7, '导演加鸡腿', '#FFFFFF', 1),
-      DanmuItem(15.2, '弹幕护体', '#B388FF', 1),
-      DanmuItem(17.0, '好喜欢这段配乐', '#FFFFFF', 2),
-      DanmuItem(18.6, '别走开，后面更精彩', '#80D8FF', 1),
-      DanmuItem(20.1, '我宣布这是本集最佳', '#FFF176', 1),
-      DanmuItem(22.3, '笑死我了哈哈哈哈', '#FFFFFF', 1),
-      DanmuItem(24.0, '这个眼神有故事', '#69F0AE', 1),
-      DanmuItem(26.5, '截图当壁纸了', '#FF80AB', 1),
-      DanmuItem(28.9, '一集根本不够看', '#FFFFFF', 3),
-      DanmuItem(31.2, '第二遍来打卡', '#B388FF', 1),
-      DanmuItem(34.0, '弹幕比剧情还精彩', '#FFFFFF', 1),
-      DanmuItem(37.5, '求更新求更新', '#80D8FF', 1),
-      DanmuItem(41.0, '这个转场好丝滑', '#FFFFFF', 1),
-    ];
 
 /// 右侧滑出的白玻璃弹幕设置抽屉
 Future<void> showDanmakuSettingsPanel(BuildContext context) {

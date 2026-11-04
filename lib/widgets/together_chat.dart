@@ -12,7 +12,6 @@ class TogetherChatMessage {
     this.avatar = '',
     this.mine = false,
     this.system = false,
-    this.demo = false,
   });
 
   final String text;
@@ -22,19 +21,14 @@ class TogetherChatMessage {
   final bool mine;
   final bool system;
 
-  /// 本地演示模式模拟出来的消息，连上服务器后会清掉。
-  final bool demo;
-
   factory TogetherChatMessage.system(
     String text, {
     DateTime? time,
-    bool demo = false,
   }) =>
       TogetherChatMessage(
         text: text,
         time: time ?? DateTime.now(),
         system: true,
-        demo: demo,
       );
 
   factory TogetherChatMessage.fromServer(

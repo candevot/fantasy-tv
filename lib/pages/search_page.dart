@@ -18,18 +18,6 @@ class SearchPage extends StatefulWidget {
 
 class _SearchPageState extends State<SearchPage> {
   static const String _historyKey = 'fx_search_history_v1';
-  static const List<String> _hotWords = [
-    '长安夜行',
-    '深海迷途',
-    '灵笼纪元',
-    '九霄之上',
-    '短剧逆袭',
-    '首尔之春',
-    '悬疑剧',
-    '高分综艺',
-    '4K 电影',
-    '一起看',
-  ];
 
   final TextEditingController _q = TextEditingController();
   final TextEditingController _ai = TextEditingController();
@@ -38,6 +26,7 @@ class _SearchPageState extends State<SearchPage> {
   final ScrollController _scroll = ScrollController();
 
   List<String> _history = [];
+  List<String> _hotWords = const [];
   List<VideoCard> _results = [];
   String? _mode;
   String? _lastQuery;
@@ -57,6 +46,7 @@ class _SearchPageState extends State<SearchPage> {
     _q.addListener(_onQueryChanged);
     _scroll.addListener(_onScroll);
     _loadHistory();
+    _loadHotWords();
     if (widget.openAi) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _aiFocus.requestFocus();
@@ -94,6 +84,25 @@ class _SearchPageState extends State<SearchPage> {
       if (!mounted) return;
       setState(() => _history = h);
     } catch (_) {}
+  }
+
+  Future<void> _loadHotWords() async {
+    List<VideoCard> items = const [];
+    try {
+      items = await Api.rank('hot');
+    } catch (_) {
+      return;
+    }
+    if (!mounted) return;
+    final seen = <String>{};
+    final words = <String>[];
+    for (final item in items) {
+      final title = item.title.trim();
+      if (title.isEmpty || !seen.add(title)) continue;
+      words.add(title);
+      if (words.length >= 10) break;
+    }
+    setState(() => _hotWords = words);
   }
 
   Future<void> _saveHistory(String q) async {
@@ -450,7 +459,7 @@ class _SearchPageState extends State<SearchPage> {
           ),
           const SizedBox(height: 12),
           if (_history.isEmpty)
-            const Text('暂无搜索记录，试试下面的热搜',
+            const Text('暂无搜索记录',
                 style: TextStyle(fontSize: 11.5, color: Fx.sub))
           else
             Wrap(
@@ -490,6 +499,13 @@ class _SearchPageState extends State<SearchPage> {
           const SizedBox(height: 8),
           LayoutBuilder(
             builder: (ctx, cons) {
+              if (_hotWords.isEmpty) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 10),
+                  child: Text('暂无热搜，请稍后重试',
+                      style: TextStyle(fontSize: 11.5, color: Fx.sub)),
+                );
+              }
               final half = (cons.maxWidth - 10) / 2;
               return Wrap(
                 children: [
