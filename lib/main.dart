@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'api.dart';
+import 'auth.dart';
 import 'theme.dart';
 import 'pages/home_page.dart';
 import 'pages/category_page.dart';
@@ -17,6 +18,7 @@ import 'pages/player_page.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Api.init();
+  await Auth.instance.init();
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
@@ -171,7 +173,7 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                     const SizedBox(height: 8),
                     Opacity(
                       opacity: fadeText,
-                      child: const Text('高清 4K · 多线路 · 纯净追剧',
+                      child: const Text('高清 · 免费 · 无广告',
                           style: TextStyle(fontSize: 12, color: Fx.sub, letterSpacing: 1.5)),
                     ),
                   ],

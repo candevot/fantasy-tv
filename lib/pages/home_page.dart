@@ -8,6 +8,7 @@ import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
 import 'search_page.dart';
+import 'together_page.dart';
 
 class _Channel {
   const _Channel(this.key, this.label);
@@ -318,6 +319,38 @@ class _HomePageState extends State<HomePage> {
                 ],
               ),
               const Spacer(),
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const TogetherPage()),
+                ),
+                child: Tooltip(
+                  message: '一起看',
+                  child: Semantics(
+                    button: true,
+                    label: '一起看',
+                    child: Container(
+                      width: 34,
+                      height: 34,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(.72),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFF50729F).withOpacity(.10),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: const Icon(Icons.groups_rounded,
+                          size: 19, color: Fx.accent),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 8, vertical: 4),

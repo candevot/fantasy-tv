@@ -296,3 +296,41 @@ class TogetherRoom {
         (j['members'] ?? 1) as int,
       );
 }
+
+/// 登录用户（服务器 `/api/user/me`、`/api/user/profile` 的 user 字段）。
+class AuthUser {
+  const AuthUser({
+    required this.id,
+    required this.account,
+    required this.nickname,
+    required this.avatar,
+    required this.signature,
+  });
+
+  final String id, account, nickname, avatar, signature;
+
+  factory AuthUser.fromJson(Map<String, dynamic> j) => AuthUser(
+        id: '${j['id'] ?? ''}',
+        account: '${j['account'] ?? ''}',
+        nickname: '${j['nickname'] ?? ''}',
+        avatar: '${j['avatar'] ?? ''}',
+        signature: '${j['signature'] ?? ''}',
+      );
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'id': id,
+        'account': account,
+        'nickname': nickname,
+        'avatar': avatar,
+        'signature': signature,
+      };
+
+  AuthUser copyWith({String? nickname, String? avatar, String? signature}) =>
+      AuthUser(
+        id: id,
+        account: account,
+        nickname: nickname ?? this.nickname,
+        avatar: avatar ?? this.avatar,
+        signature: signature ?? this.signature,
+      );
+}

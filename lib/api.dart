@@ -9,7 +9,10 @@ import 'models.dart';
 class Api {
   static String base = 'http://47.96.0.112:8787/api';
   static String wsBase = 'ws://47.96.0.112:8787/ws/together';
-  static const Duration _timeout = Duration(seconds: 8);
+  static const Duration _timeout = Duration(seconds: 10);
+
+  /// 登录 token（由 Auth 维护）；存在时所有请求都带 Bearer。
+  static String token = '';
 
   static Future<void> init() async {
     final sp = await SharedPreferences.getInstance();
@@ -34,16 +37,61 @@ class Api {
         .replace(queryParameters: m.isEmpty ? null : m);
   }
 
-  static Future<Map<String, dynamic>> _get(String path,
-      [Map<String, dynamic>? q]) async {
-    final r = await http.get(_u(path, q)).timeout(_timeout);
-    final j = jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
-    if ((j['code'] ?? -1) != 0) {
-      throw ApiException('${j['msg'] ?? '请求失败'}');
+  static Map<String, String> _headers({bool json = false}) => <String, String>{
+        'Accept': 'application/json',
+        if (json) 'Content-Type': 'application/json',
+        if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+      };
+
+  static Map<String, dynamic> _decode(http.Response r) {
+    dynamic j;
+    try {
+      j = jsonDecode(utf8.decode(r.bodyBytes));
+    } catch (_) {
+      throw ApiException('服务器返回异常（HTTP ${r.statusCode}）',
+          code: r.statusCode);
+    }
+    if (j is! Map) {
+      throw ApiException('服务器返回异常（HTTP ${r.statusCode}）',
+          code: r.statusCode);
+    }
+    final code = j['code'];
+    final ok = code == 0 || code == '0';
+    if (!ok) {
+      throw ApiException('${j['msg'] ?? '请求失败'}',
+          code: code is num ? code.toInt() : r.statusCode);
     }
     final d = j['data'];
     return d is Map<String, dynamic> ? d : <String, dynamic>{'data': d};
   }
+
+  static Future<Map<String, dynamic>> _get(String path,
+      [Map<String, dynamic>? q]) async {
+    final r = await http.get(_u(path, q), headers: _headers()).timeout(_timeout);
+    return _decode(r);
+  }
+
+  static Future<Map<String, dynamic>> _post(String path,
+      [Map<String, dynamic>? body]) async {
+    final r = await http
+        .post(_u(path),
+            headers: _headers(json: true),
+            body: jsonEncode(body ?? const <String, dynamic>{}))
+        .timeout(_timeout);
+    return _decode(r);
+  }
+
+  static Future<Map<String, dynamic>> _put(String path,
+      [Map<String, dynamic>? body]) async {
+    final r = await http
+        .put(_u(path),
+            headers: _headers(json: true),
+            body: jsonEncode(body ?? const <String, dynamic>{}))
+        .timeout(_timeout);
+    return _decode(r);
+  }
+
+  /* ------------------------------------------------------------ 内容 */
 
   static Future<HomeData> home(String channel) async {
     final d = await _get('/home', {'channel': channel});
@@ -117,8 +165,9 @@ class Api {
 
   static Future<List<DanmuItem>> danmu(String id, int ep) async {
     try {
-      final r =
-          await http.get(_u('/danmu', {'id': id, 'ep': ep})).timeout(_timeout);
+      final r = await http
+          .get(_u('/danmu', {'id': id, 'ep': ep}), headers: _headers())
+          .timeout(_timeout);
       final j = jsonDecode(utf8.decode(r.bodyBytes));
       final list = j is Map ? (j['data'] ?? []) : j;
       return (list as List)
@@ -137,6 +186,63 @@ class Api {
         .toList();
   }
 
+  /* ------------------------------------------------------------ 账号 */
+
+  /// `POST /api/auth/register` → `{token,user}`；注册成功即自动登录。
+  static Future<Map<String, dynamic>> register({
+    required String account,
+    required String password,
+    String? nickname,
+  }) async {
+    final d = await _post('/auth/register', <String, dynamic>{
+      'account': account,
+      'password': password,
+      if (nickname != null && nickname.trim().isNotEmpty)
+        'nickname': nickname.trim(),
+    });
+    if ('${d['token'] ?? ''}'.isEmpty) {
+      throw ApiException('服务器未返回登录凭证');
+    }
+    return d;
+  }
+
+  /// `POST /api/auth/login` → `{token,user}`。
+  static Future<Map<String, dynamic>> login({
+    required String account,
+    required String password,
+  }) async {
+    final d = await _post('/auth/login', <String, dynamic>{
+      'account': account,
+      'password': password,
+    });
+    if ('${d['token'] ?? ''}'.isEmpty) {
+      throw ApiException('服务器未返回登录凭证');
+    }
+    return d;
+  }
+
+  static Future<Map<String, dynamic>> me() => _get('/user/me');
+
+  /// `PUT /api/user/profile` → `{ok,user}`。
+  static Future<AuthUser> updateProfile({
+    String? nickname,
+    String? avatar,
+    String? signature,
+  }) async {
+    final d = await _put('/user/profile', <String, dynamic>{
+      if (nickname != null) 'nickname': nickname,
+      if (avatar != null) 'avatar': avatar,
+      if (signature != null) 'signature': signature,
+    });
+    final raw = d['user'];
+    if (raw is Map) return AuthUser.fromJson(Map<String, dynamic>.from(raw));
+    return AuthUser.fromJson(d);
+  }
+
+  static Future<void> logout() async {
+    await _post('/auth/logout');
+  }
+
   /// 绝对地址：服务器可能返回相对代理地址 /api/proxy?u=...
   static String abs(String url) {
     if (url.isEmpty) return url;
@@ -147,8 +253,9 @@ class Api {
 }
 
 class ApiException implements Exception {
-  ApiException(this.message);
+  ApiException(this.message, {this.code = 0});
   final String message;
+  final int code;
   @override
   String toString() => message;
 }

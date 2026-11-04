@@ -12,6 +12,9 @@ dependencies:
   video_player: ^2.9.2
   web_socket_channel: ^2.4.0
   shared_preferences: ^2.2.2
+  image_picker: ^1.1.2
+  image: ^4.2.0
+  path_provider: ^2.1.4
 dev_dependencies:
   flutter_test:
     sdk: flutter
