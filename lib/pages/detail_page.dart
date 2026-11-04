@@ -295,17 +295,22 @@ class _DetailPageState extends State<DetailPage>
   }
 
   /// 换线路；[auto] = 播放失败后自动切下一条（有限次）。
-  void _switchNextLine({bool auto = false}) {
+  /// [needsParse] 表示当前线路返回的是需要解析器的播放页。
+  void _switchNextLine({bool auto = false, bool needsParse = false}) {
     final lines = _detail?.lines ?? const <LineInfo>[];
     if (lines.length < 2) {
-      fxToast(
-        context,
-        lines.isEmpty ? '暂无可用线路，请稍后重试' : '当前只有一条线路，请稍后重试',
-      );
+      if (auto) {
+        _showPlaybackError(needsParse: needsParse);
+      } else {
+        fxToast(
+          context,
+          lines.isEmpty ? '暂无可用线路，请稍后重试' : '当前只有一条线路，请稍后重试',
+        );
+      }
       return;
     }
     if (auto && _autoLineTries >= lines.length - 1) {
-      fxToast(context, '所有线路都不可用，请稍后重试');
+      _showPlaybackError(needsParse: needsParse);
       return;
     }
     final index = lines.indexWhere((l) => l.id == _lineId);
@@ -314,9 +319,23 @@ class _DetailPageState extends State<DetailPage>
       _autoLineTries++;
       setState(() => _lineId = next.id);
       _saveHistory();
-      fxToast(context, '线路播放失败，已自动切换「${next.name}」');
+      fxToast(
+        context,
+        needsParse ? '该线路需解析，已为你切换下一线路' : '线路播放失败，已自动切换「${next.name}」',
+      );
     } else {
       _selectLine(next);
+    }
+  }
+
+  /// 全部线路都试过仍不可播：在播放器里显示错误 + 重试/换线路按钮。
+  void _showPlaybackError({bool needsParse = false}) {
+    final message = needsParse ? '所有线路都需解析，暂时无法播放，请重试或换线路' : '所有线路都不可用，请重试或换线路';
+    final player = _playerKey.currentState;
+    if (player != null) {
+      player.showSourceError(message);
+    } else {
+      fxToast(context, message);
     }
   }
 
@@ -405,7 +424,7 @@ class _DetailPageState extends State<DetailPage>
       if (count == 0) {
         fxToast(context, '所选剧集已在缓存队列中');
       } else {
-        fxToast(context, '已加入下载队列：$count 集');
+        fxToast(context, '已加入离线缓存');
       }
     } catch (e) {
       if (!mounted) return;
@@ -581,6 +600,7 @@ class _DetailPageState extends State<DetailPage>
           detail: d,
           onEpChange: _onEpChange,
           onSourceFailed: () => _switchNextLine(auto: true),
+          onParseRequired: () => _switchNextLine(auto: true, needsParse: true),
           onChangeLine: d.lines.length > 1 ? () => _switchNextLine() : null,
           onPlaybackStarted: () => _autoLineTries = 0,
           autoPlay: true,
@@ -653,11 +673,46 @@ class _DetailPageState extends State<DetailPage>
               separatorBuilder: (context, i) => const SizedBox(width: 8),
               itemBuilder: (context, i) {
                 final line = d.lines[i];
-                return DetailLineCard(
-                  name: line.name.isEmpty ? '线路${i + 1}' : line.name,
-                  count: total,
-                  active: line.id == _lineId,
-                  onTap: () => _selectLine(line),
+                final needsParse = line.type.trim().toLowerCase() == 'parse';
+                return SizedBox(
+                  width: 102,
+                  height: 60,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      DetailLineCard(
+                        name: line.name.isEmpty ? '线路${i + 1}' : line.name,
+                        count: total,
+                        active: line.id == _lineId,
+                        onTap: () => _selectLine(line),
+                      ),
+                      if (needsParse)
+                        Positioned(
+                          top: 4,
+                          right: 4,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 3, vertical: 1),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF4DF),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(
+                                color: Fx.gold.withOpacity(.48),
+                              ),
+                            ),
+                            child: const Text(
+                              '需解析',
+                              style: TextStyle(
+                                fontSize: 7.5,
+                                height: 1.1,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFFC77800),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
                 );
               },
             ),

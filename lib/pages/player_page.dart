@@ -28,6 +28,7 @@ class PlayerView extends StatefulWidget {
     this.onEpChange,
     this.onFullscreen,
     this.onSourceFailed,
+    this.onParseRequired,
     this.onPlaybackStarted,
     this.onChangeLine,
     this.autoPlay = true,
@@ -40,6 +41,9 @@ class PlayerView extends StatefulWidget {
   final ValueChanged<int>? onEpChange;
   final VoidCallback? onFullscreen;
   final VoidCallback? onSourceFailed;
+
+  /// 接口返回解析页（type == 'parse'）或没有直链地址时回调；由外层切下一线路。
+  final VoidCallback? onParseRequired;
   final VoidCallback? onPlaybackStarted;
   final VoidCallback? onChangeLine;
   final bool autoPlay;
@@ -188,6 +192,23 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     if (!mounted || token != _loadToken) return;
     _info = info;
+
+    // TW 等线路可能返回一个需要解析器处理的播放页地址（type == 'parse'），
+    // 或干脆没有直链。这类线路不当作播放错误，交给外层自动切下一条线路。
+    final isParse = info.type.trim().toLowerCase() == 'parse';
+    if (isParse || info.url.trim().isEmpty) {
+      if (widget.onParseRequired != null) {
+        widget.onParseRequired!();
+      } else if (mounted && token == _loadToken) {
+        setState(() {
+          _loading = false;
+          _error = true;
+          _errorText = isParse ? '该线路需解析，暂时无法直接播放，请切换线路' : '当前线路没有可用播放地址，请切换线路';
+        });
+        _notifySourceFailed();
+      }
+      return;
+    }
 
     final all = <String>[
       if (info.url.trim().isNotEmpty) info.url.trim(),
@@ -367,6 +388,17 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     await _saveProgress();
     if (!mounted) return;
     await _bootstrap(seekToSaved: true, saveOld: false);
+  }
+
+  /// 详情页试完全部线路仍不可播时调用，展示错误与重试/换线路按钮。
+  void showSourceError(String message) {
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _error = true;
+      _errorText = message;
+      _sourceFailNotified = true;
+    });
   }
 
   // ---------------------------------------------------------------- controls
