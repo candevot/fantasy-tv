@@ -48,7 +48,7 @@ class _TogetherVideoPicker extends StatefulWidget {
 }
 
 class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
-  static const _demoItems = <VideoCard>[
+  static final _demoItems = <VideoCard>[
     VideoCard(
       id: 'v1001',
       title: '长安夜行',

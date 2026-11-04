@@ -230,7 +230,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         controller.addListener(_onVideoValue);
         await controller.setLooping(false);
         if (_rate != 1.0) {
-          await controller.setPlaybackRate(_rate);
+          await controller.setPlaybackSpeed(_rate);
         }
         final durationMs = controller.value.duration.inMilliseconds;
         var resume = saved;
@@ -302,7 +302,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return;
     }
     if (!v.isInitialized) return;
-    if (!v.isEnded) {
+    if (!v.isCompleted) {
       _ended = false;
       return;
     }
@@ -409,14 +409,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
     _rateBeforeHold = _rate;
-    c.setPlaybackRate(2.0);
+    c.setPlaybackSpeed(2.0);
     setState(() => _holding2x = true);
     _showControls();
   }
 
   void _endHold2x() {
     if (!_holding2x) return;
-    _controller?.setPlaybackRate(_rateBeforeHold);
+    _controller?.setPlaybackSpeed(_rateBeforeHold);
     if (!mounted) return;
     setState(() => _holding2x = false);
     _touch();
@@ -424,7 +424,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   void _setRate(double rate) {
     _rate = rate;
-    _controller?.setPlaybackRate(rate);
+    _controller?.setPlaybackSpeed(rate);
     _touch();
   }
 
