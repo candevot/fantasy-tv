@@ -143,12 +143,11 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                                   ),
                                 ),
                                 const Center(
-                                  child: Text('幻想',
+                                  child: Text('幻',
                                       style: TextStyle(
                                           color: Colors.white,
-                                          fontSize: 44,
-                                          fontWeight: FontWeight.w900,
-                                          letterSpacing: 1)),
+                                          fontSize: 62,
+                                          fontWeight: FontWeight.w900)),
                                 ),
                               ],
                             ),

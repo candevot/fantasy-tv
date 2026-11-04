@@ -54,7 +54,7 @@ class FsGlassCard extends StatelessWidget {
 
 /// 底部控制栏
 /// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 弹幕开关 · 弹幕设置 ·
-/// 弹幕输入框 · 片头/尾 · 倍速 · 选集 · 全屏（退出）
+/// 弹幕输入框 · 片头/尾 · 倍速 · 清晰度 · 选集 · 全屏（退出）
 class FsBottomBar extends StatelessWidget {
   const FsBottomBar({
     super.key,
@@ -63,6 +63,7 @@ class FsBottomBar extends StatelessWidget {
     required this.playing,
     required this.rate,
     required this.danmakuOn,
+    required this.qualityLabel,
     required this.onSeek,
     required this.onTogglePlay,
     required this.onNext,
@@ -71,6 +72,7 @@ class FsBottomBar extends StatelessWidget {
     required this.onDanmakuInput,
     required this.onJump,
     required this.onSpeed,
+    required this.onQuality,
     required this.onEpisodes,
     required this.onExit,
     this.compact = false,
@@ -82,6 +84,9 @@ class FsBottomBar extends StatelessWidget {
   final bool playing;
   final double rate;
   final bool danmakuOn;
+
+  /// 当前清晰度（自动 / 1080P / 清晰度）
+  final String qualityLabel;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onTogglePlay;
   final VoidCallback onNext;
@@ -90,6 +95,7 @@ class FsBottomBar extends StatelessWidget {
   final VoidCallback onDanmakuInput;
   final VoidCallback onJump;
   final VoidCallback onSpeed;
+  final VoidCallback onQuality;
   final VoidCallback onEpisodes;
   final VoidCallback onExit;
   final bool compact;
@@ -187,6 +193,14 @@ class FsBottomBar extends StatelessWidget {
                 size: s,
                 active: (rate - 1).abs() > .001,
                 onTap: onSpeed,
+              ),
+              const SizedBox(width: 8),
+              FsTextAction(
+                text: qualityLabel,
+                size: s,
+                active:
+                    qualityLabel != '自动' && qualityLabel != '清晰度',
+                onTap: onQuality,
               ),
               const SizedBox(width: 8),
               FsTextAction(text: '选集', size: s, onTap: onEpisodes),
@@ -599,6 +613,95 @@ class FsSpeedPanel extends StatelessWidget {
   }
 }
 
+/// 清晰度弹层：自动 + 当前线路提供的全部码率
+class FsQualityPanel extends StatelessWidget {
+  const FsQualityPanel({
+    super.key,
+    required this.items,
+    required this.currentKey,
+    required this.onPick,
+  });
+
+  final List<QualityItem> items;
+
+  /// null 表示「自动」
+  final String? currentKey;
+
+  /// null 表示切回自动
+  final ValueChanged<String?> onPick;
+
+  String get _currentLabel {
+    if (currentKey == null) return '自动';
+    for (final q in items) {
+      if (q.key == currentKey) {
+        final name = q.name.trim();
+        return name.isEmpty ? q.key : name;
+      }
+    }
+    return '自动';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FsGlassCard(
+      width: 330,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.high_quality_rounded,
+                  size: 17, color: Fx.accent),
+              const SizedBox(width: 6),
+              const Text(
+                '清晰度',
+                style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w800,
+                    color: Fx.ink),
+              ),
+              const Spacer(),
+              Text(
+                '当前 $_currentLabel',
+                style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: Fx.accent),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _FsChip(
+                label: '自动',
+                active: currentKey == null,
+                width: 76,
+                onTap: () => onPick(null),
+              ),
+              for (final q in items)
+                _FsChip(
+                  label: q.name.trim().isEmpty ? q.key : q.name.trim(),
+                  active: currentKey == q.key,
+                  width: 76,
+                  onTap: () => onPick(q.key),
+                ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          Text(
+            items.isEmpty ? '当前线路未提供多码率' : '切换后保持当前播放进度',
+            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 片头 / 片尾弹层
 class FsJumpPanel extends StatelessWidget {
   const FsJumpPanel({super.key, required this.onIntro, required this.onOutro});
@@ -740,6 +843,8 @@ class _FsChip extends StatelessWidget {
         ),
         child: Text(
           label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             fontSize: 12,
             fontWeight: active ? FontWeight.w700 : FontWeight.w600,

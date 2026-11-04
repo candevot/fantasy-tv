@@ -117,7 +117,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _showSpeed = false;
   bool _showEpisodes = false;
   bool _showJump = false;
+  bool _showQuality = false;
   bool _showColors = true;
+
+  /// 当前清晰度；null = 自动（使用 PlayInfo.url + backup）
+  String? _qualityKey;
 
   // 播放倍速
   double _rate = 1.0;
@@ -136,12 +140,28 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   final TextEditingController _danmakuCtrl = TextEditingController();
   final FocusNode _danmakuFocus = FocusNode();
 
-  // 未接电池插件，按截图占位
-  final int _battery = 34;
-
-  bool get _panelOpen => _showSpeed || _showEpisodes || _showJump;
+  bool get _panelOpen =>
+      _showSpeed || _showEpisodes || _showJump || _showQuality;
 
   bool get _playing => _controller?.value.isPlaying ?? false;
+
+  List<QualityItem> get _qualityList =>
+      _info?.quality ?? const <QualityItem>[];
+
+  /// 底部清晰度按钮文案：清晰度（无多码率）/ 自动 / 1080P ...
+  String get _qualityLabel {
+    final list = _qualityList;
+    if (list.isEmpty) return '清晰度';
+    final key = _qualityKey;
+    if (key == null) return '自动';
+    for (final q in list) {
+      if (q.key == key) {
+        final name = q.name.trim();
+        return name.isEmpty ? q.key : name;
+      }
+    }
+    return '自动';
+  }
 
   String get _epLabel {
     for (final e in _episodes) {
@@ -253,6 +273,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _errorText = '';
       _ended = false;
       _sourceFailNotified = false;
+      _qualityKey = null;
     });
 
     List<DanmuItem>? presetDanmaku;
@@ -389,6 +410,141 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _sourceFailNotified = true;
     if (!mounted) return;
     fxToast(context, '当前线路播放失败，可返回竖屏切换线路');
+  }
+
+  /// 切换清晰度：真正换 networkUrl，并恢复切换前的进度 / 倍速 / 播放状态。
+  Future<void> _selectQuality(String? key) async {
+    if (_loading) {
+      fxToast(context, '正在加载，请稍候');
+      return;
+    }
+    final info = _info;
+    final list = _qualityList;
+    if (info == null || list.isEmpty) {
+      fxToast(context, '当前线路未提供多码率');
+      return;
+    }
+    if (key == _qualityKey) {
+      _closePanels();
+      _wake();
+      return;
+    }
+
+    QualityItem? picked;
+    if (key != null) {
+      for (final q in list) {
+        if (q.key == key) {
+          picked = q;
+          break;
+        }
+      }
+      if (picked == null) {
+        fxToast(context, '该清晰度暂不可用');
+        return;
+      }
+    }
+
+    final urls = <String>[];
+    if (picked == null) {
+      for (final u in <String>[info.url, ...info.backup]) {
+        final url = u.trim();
+        if (url.isNotEmpty && !urls.contains(url)) urls.add(url);
+      }
+    } else {
+      final url = picked.url.trim();
+      if (url.isNotEmpty) urls.add(url);
+    }
+    if (urls.isEmpty) {
+      fxToast(context, '当前清晰度没有可用的播放地址');
+      return;
+    }
+
+    final old = _controller;
+    if (old == null || !old.value.isInitialized) {
+      fxToast(context, '播放器尚未就绪，请稍后再试');
+      return;
+    }
+    final wasPlaying = old.value.isPlaying;
+    final resume = old.value.position;
+    unawaited(old.pause());
+
+    _hideTimer?.cancel();
+    _danmakuFocus.unfocus();
+    setState(() {
+      _showQuality = false;
+      _showSpeed = false;
+      _showEpisodes = false;
+      _showJump = false;
+      _inputActive = false;
+      _loading = true;
+      _error = false;
+      _errorText = '';
+      _ended = false;
+      _controls = true;
+    });
+
+    final token = ++_loadToken;
+    VideoPlayerController? fresh;
+    for (final url in urls) {
+      if (!mounted || token != _loadToken) return;
+      final controller = VideoPlayerController.networkUrl(
+        Uri.parse(url),
+        httpHeaders: info.headers.isEmpty
+            ? const <String, String>{}
+            : info.headers,
+      );
+      try {
+        await controller.initialize();
+        if (!mounted || token != _loadToken) {
+          await controller.dispose();
+          return;
+        }
+        final duration = controller.value.duration;
+        var target = resume;
+        if (duration > Duration.zero &&
+            target >= duration - const Duration(milliseconds: 1500)) {
+          target = Duration.zero;
+        }
+        if (target > Duration.zero) await controller.seekTo(target);
+        await controller.setLooping(false);
+        try {
+          await controller.setPlaybackSpeed(_holding2x ? 2.0 : _rate);
+        } catch (_) {}
+        if (wasPlaying) await controller.play();
+        fresh = controller;
+        break;
+      } catch (_) {
+        try {
+          await controller.dispose();
+        } catch (_) {}
+      }
+    }
+
+    if (!mounted || token != _loadToken) {
+      await fresh?.dispose();
+      return;
+    }
+    if (fresh == null) {
+      setState(() => _loading = false);
+      if (wasPlaying) unawaited(old.play());
+      _wake();
+      fxToast(context, '切换清晰度失败，请重试');
+      return;
+    }
+
+    old.removeListener(_onVideoValue);
+    fresh.addListener(_onVideoValue);
+    _controller = fresh;
+    unawaited(old.dispose());
+    setState(() {
+      _qualityKey = key;
+      _loading = false;
+      _error = false;
+      _errorText = '';
+      _controls = true;
+    });
+    _wake();
+    _showSeekHint('清晰度：$_qualityLabel');
   }
 
   Future<double> _saveProgress() async {
@@ -531,6 +687,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showSpeed = false;
       _showEpisodes = false;
       _showJump = false;
+      _showQuality = false;
     });
   }
 
@@ -561,6 +718,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showSpeed = false;
       _showEpisodes = false;
       _showJump = false;
+      _showQuality = false;
     });
     if (!_inputActive) _wake();
   }
@@ -574,6 +732,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showSpeed = false;
       _showEpisodes = false;
       _showJump = false;
+      _showQuality = false;
     });
     _hideTimer?.cancel();
     fxToast(context, '已锁定，点击左侧锁图标解锁');
@@ -741,6 +900,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showSpeed = !_showSpeed;
       _showJump = false;
       _showEpisodes = false;
+      _showQuality = false;
       _inputActive = false;
       _controls = true;
     });
@@ -754,6 +914,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showJump = !_showJump;
       _showSpeed = false;
       _showEpisodes = false;
+      _showQuality = false;
       _inputActive = false;
       _controls = true;
     });

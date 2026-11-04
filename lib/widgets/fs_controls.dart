@@ -72,29 +72,30 @@ class FsTextAction extends StatelessWidget {
   }
 }
 
-/// 电量胶囊。
+/// 网速占位胶囊。
 ///
-/// 说明：项目未引入电池插件，这里按截图占位显示；需要真实电量时只需要把
-/// [percent] 换成平台通道读到的值即可，UI 不用改。
-class FsBatteryPill extends StatelessWidget {
-  const FsBatteryPill({super.key, this.percent = 34, this.size = 1});
+/// 说明：video_player 不暴露实时下载码率，项目也没有引入测速插件，
+/// 这里只显示不带数字的「网速 --」，不再展示写死的假电量。
+class FsNetSpeedPill extends StatelessWidget {
+  const FsNetSpeedPill({super.key, this.size = 1});
 
-  final int percent;
   final double size;
 
   @override
   Widget build(BuildContext context) {
-    final p = percent.clamp(0, 100);
-    final color = p <= 20 ? const Color(0xFFFFB020) : Colors.white;
     return PGlassPill(
       padding: EdgeInsets.symmetric(horizontal: 9 * size, vertical: 5 * size),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.battery_std_rounded, size: 15 * size, color: color),
+          Icon(
+            Icons.network_check_rounded,
+            size: 15 * size,
+            color: Colors.white,
+          ),
           SizedBox(width: 3 * size),
           Text(
-            '$p%',
+            '网速 --',
             style: TextStyle(
               color: Colors.white,
               fontSize: 11.5 * size,
@@ -157,7 +158,7 @@ class _FsClockPillState extends State<FsClockPill> {
   }
 }
 
-/// 顶部控制条：返回 · 片名/第xx集 —— 电量% · 时间 · 旋转锁定 · 画中画 · 投屏 · 设置
+/// 顶部控制条：返回 · 片名/第xx集 —— 网速 · 时间 · 旋转锁定 · 画中画 · 投屏 · 设置
 class FsTopBar extends StatelessWidget {
   const FsTopBar({
     super.key,
@@ -169,7 +170,6 @@ class FsTopBar extends StatelessWidget {
     required this.onPip,
     required this.onCast,
     required this.onSettings,
-    this.battery = 34,
     this.compact = false,
   });
 
@@ -181,7 +181,6 @@ class FsTopBar extends StatelessWidget {
   final VoidCallback onPip;
   final VoidCallback onCast;
   final VoidCallback onSettings;
-  final int battery;
   final bool compact;
 
   @override
@@ -241,7 +240,7 @@ class FsTopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          FsBatteryPill(percent: battery, size: s),
+          FsNetSpeedPill(size: s),
           gap,
           FsClockPill(size: s),
           const SizedBox(width: 8),
@@ -285,42 +284,26 @@ class FsTopBar extends StatelessWidget {
   }
 }
 
-/// 中部：播放/暂停 + 下一集
+/// 中部：只保留播放/暂停一个圆钮（下一集在底部控制栏）
 class FsCenterControls extends StatelessWidget {
   const FsCenterControls({
     super.key,
     required this.playing,
     required this.onTogglePlay,
-    required this.onNext,
   });
 
   final bool playing;
   final VoidCallback onTogglePlay;
-  final VoidCallback onNext;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        PGlassIcon(
-          icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-          size: 58,
-          iconSize: 34,
-          tint: .18,
-          tooltip: playing ? '暂停' : '播放',
-          onTap: onTogglePlay,
-        ),
-        const SizedBox(width: 20),
-        PGlassIcon(
-          icon: Icons.skip_next_rounded,
-          size: 46,
-          iconSize: 25,
-          tint: .16,
-          tooltip: '下一集',
-          onTap: onNext,
-        ),
-      ],
+    return PGlassIcon(
+      icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+      size: 58,
+      iconSize: 34,
+      tint: .18,
+      tooltip: playing ? '暂停' : '播放',
+      onTap: onTogglePlay,
     );
   }
 }
