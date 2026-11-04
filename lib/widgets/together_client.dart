@@ -271,6 +271,8 @@ class TogetherClient {
     try {
       final ch = WebSocketChannel.connect(Uri.parse(Api.wsBase));
       _channel = ch;
+      // 连接失败会由 stream.onError 处理；ready 的错误必须被消费，否则是未处理异常。
+      ch.ready.ignore();
       _sub = ch.stream.listen(
         _onData,
         onError: (_) => _fail(),
@@ -381,7 +383,10 @@ class TogetherClient {
     int? ep,
     String? line,
   }) {
-    if (!host) return;
+    // 房主标记由服务器判定：即使本地标记过期，也让服务器拒绝并回发权威状态。
+    if (videoId != null && videoId.isNotEmpty) _hostVideoId = videoId;
+    if (ep != null && ep > 0) _hostEp = ep;
+    if (line != null && line.isNotEmpty) _hostLine = line;
     _send({
       'action': 'state',
       'state': state,
@@ -394,7 +399,6 @@ class TogetherClient {
 
   /// 房主：拖动进度。
   void sendSeek(double position) {
-    if (!host) return;
     _send({'action': 'seek', 'position': position < 0 ? 0 : position});
   }
 
@@ -405,7 +409,8 @@ class TogetherClient {
 
   /// 房主：切集 / 换线路（服务器会重置进度并广播）。
   void sendEpisode(int ep, {String? line}) {
-    if (!host) return;
+    if (ep > 0) _hostEp = ep;
+    if (line != null && line.isNotEmpty) _hostLine = line;
     _send({
       'action': 'episode',
       'ep': ep,
@@ -414,7 +419,7 @@ class TogetherClient {
   }
 
   void leave() {
-    if (_connected) _send({'action': 'leave'});
+    if (_connected && code.isNotEmpty) _send({'action': 'leave'});
     code = '';
     host = false;
     _pendingCreate = null;
@@ -506,13 +511,8 @@ class TogetherClient {
     selfId = '${user['id'] ?? ''}';
     selfName = '${user['name'] ?? '观众'}';
     selfAvatar = '${user['avatar'] ?? ''}';
-    onOpen(TogetherMember(
-      id: selfId,
-      name: selfName,
-      avatar: selfAvatar,
-    ));
     _startPing();
-    // 断线重连：房主重建房间，成员按房间号 rejoin。
+    // 断线重连：房主重建房间，成员按房间号 rejoin（在 onOpen 前发出，避免重复 create）。
     final pending = _pendingCreate;
     if (pending != null) {
       _send(pending);
@@ -523,6 +523,11 @@ class TogetherClient {
         _send({'action': 'join', 'code': code});
       }
     }
+    onOpen(TogetherMember(
+      id: selfId,
+      name: selfName,
+      avatar: selfAvatar,
+    ));
   }
 
   void _onPong(Map<String, dynamic> msg) {

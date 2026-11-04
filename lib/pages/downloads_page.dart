@@ -126,11 +126,12 @@ class _DownloadsPageState extends State<DownloadsPage> {
 
   Future<void> _play(DownloadTask task) async {
     final path = task.filePath;
-    if (path == null || !await File(path).exists()) {
+    final exists = path != null && await File(path).exists();
+    if (!mounted) return;
+    if (!exists) {
       _toast('缓存文件不存在，请删除后重新下载');
       return;
     }
-    if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => OfflinePlayerPage(task: task)),
     );

@@ -523,7 +523,9 @@ class DownloadService extends ChangeNotifier {
       _notifyNow();
       await _persist();
 
-      final isMp4 = type == 'mp4' || type == 'direct_mp4' || looksMp4;
+      // 地址后缀优先于接口的 type：部分接口会把 m3u8 误标成 mp4。
+      final isMp4 =
+          looksMp4 || (!looksHls && (type == 'mp4' || type == 'direct_mp4'));
       if (isMp4) {
         await _downloadMp4(task, uri, play.headers);
       } else {
@@ -713,7 +715,16 @@ class DownloadService extends ChangeNotifier {
 
     // 以本地 .part 的真实长度作为断点，避免上次异常退出时 task.bytes
     // 比实际写入多，Range 跳过尚未落盘的数据导致文件损坏。
-    var received = await part.exists() ? await part.length() : 0;
+    // 若这个 .part 上一次属于 HLS（例如切换线路后重试），必须丢弃，
+    // 否则会把 TS 字节和 MP4 Range 响应拼成一个损坏文件。
+    var received = 0;
+    if (task.ext.toLowerCase() == 'mp4' && await part.exists()) {
+      received = await part.length();
+    } else if (await part.exists()) {
+      try {
+        await part.delete();
+      } catch (_) {}
+    }
 
     task
       ..ext = 'mp4'

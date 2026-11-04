@@ -47,6 +47,9 @@ class _TogetherPageState extends State<TogetherPage> {
   bool _enteringAsHost = false;
   String _stageText = '';
   bool _exiting = false;
+  bool _leaving = false;
+  bool _wantsRoom = false;
+  bool _restoreAfterResume = false;
 
   bool _online = false;
   bool _demo = false;
@@ -182,9 +185,16 @@ class _TogetherPageState extends State<TogetherPage> {
 
   void _onRoom(TogetherRoomInfo info) {
     if (!mounted) return;
+    if (!_wantsRoom) {
+      // 用户已取消进入，服务器却建好了房：顺手清理。
+      _client.leave();
+      return;
+    }
+    final wasDemo = _demo;
     final resume = _roomCode.isNotEmpty && !_demo;
-    if (resume) _captureResume();
+    _restoreAfterResume = resume && _captureResume();
     setState(() {
+      if (wasDemo) _messages.clear();
       _stage = _TogetherStage.room;
       _entered = true;
       _demo = false;
@@ -206,7 +216,7 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   void _onState(TogetherRoomState state) {
-    if (!mounted) return;
+    if (!mounted || !_wantsRoom) return;
     // rev 去旧：同一房间只接受更新的权威状态。
     if (state.code.isNotEmpty &&
         state.code == _lastRevCode &&
@@ -239,11 +249,29 @@ class _TogetherPageState extends State<TogetherPage> {
       if (state.ep > 0) _ep = state.ep;
       if (state.line.isNotEmpty) _videoLine = state.line;
       if (firstEnter) _addSystem('房间: ${state.code}');
-      if (changedVideo && !_isHost) _addSystem('房主换了一部影片');
+      if (changedVideo && !firstEnter && !_isHost) {
+        _addSystem('房主换了一部影片');
+      }
     });
     if (changedVideo) _loadDetail(_videoId);
     _syncVideo();
     _applyRemotePlayback(state);
+    if (_restoreAfterResume && _isHost) {
+      _restoreAfterResume = false;
+      final controller = _controller;
+      if (controller != null && controller.value.isInitialized) {
+        final position = controller.value.position.inMilliseconds / 1000.0;
+        final playing = controller.value.isPlaying;
+        _client.sendState(
+          playing ? 'play' : 'pause',
+          position,
+          videoId: _videoId,
+          ep: _ep,
+          line: _videoLine,
+        );
+        _markRemote(playing ? 'play' : 'pause', position);
+      }
+    }
   }
 
   void _onChat(TogetherChatIncoming chat) {
@@ -274,18 +302,22 @@ class _TogetherPageState extends State<TogetherPage> {
     }
     if (code == 'not_found' || code == 'room_full') {
       togetherToast(context, message.isEmpty ? '房间不存在或已解散' : message);
-      if (_stage == _TogetherStage.entering) _backToLobby();
+      if (_stage == _TogetherStage.entering) {
+        _backToLobby();
+      } else if (_stage == _TogetherStage.room) {
+        _onClosed(message.isEmpty ? '房间已解散' : message);
+      }
       return;
     }
     if (message.isNotEmpty) togetherToast(context, message);
   }
 
   void _onClosed(String reason) {
-    if (!mounted) return;
+    if (!mounted || _leaving) return;
     _enterTimer?.cancel();
     final text = reason.isEmpty ? '房间已解散' : reason;
+    _wantsRoom = false;
     setState(() {
-      _addSystem(text);
       _stage = _TogetherStage.lobby;
       _entered = false;
       _demo = false;
@@ -303,6 +335,7 @@ class _TogetherPageState extends State<TogetherPage> {
       _videoLoading = false;
       _videoError = '';
     });
+    _videoSeq++;
     _disposeController();
     togetherToast(context, text);
     _loadRooms();
@@ -311,6 +344,7 @@ class _TogetherPageState extends State<TogetherPage> {
   /* ------------------------------------------------------------ 建房 / 加入 */
 
   void _startCreate(String videoId, int ep) {
+    _wantsRoom = true;
     _enteringAsHost = true;
     _entered = false;
     _demo = false;
@@ -322,6 +356,7 @@ class _TogetherPageState extends State<TogetherPage> {
     _videoLine = 'l1';
     _loadedKey = '';
     _videoError = '';
+    _online = _client.connected;
     _client.createRoom(
       videoId: videoId,
       ep: _ep,
@@ -335,6 +370,7 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   void _join(String code) {
+    _wantsRoom = true;
     _enteringAsHost = false;
     _entered = false;
     _demo = false;
@@ -348,6 +384,7 @@ class _TogetherPageState extends State<TogetherPage> {
     _ep = 1;
     _loadedKey = '';
     _videoError = '';
+    _online = _client.connected;
     _client.joinRoom(code);
     _client.connect();
     _armEnterTimer();
@@ -375,6 +412,7 @@ class _TogetherPageState extends State<TogetherPage> {
     _isHost = true;
     _online = false;
     _entered = true;
+    _wantsRoom = true;
     _roomCode = '${100000 + math.Random().nextInt(900000)}';
     _roomTitle = _videoTitle.isEmpty ? '一起看' : '$_videoTitle · 一起看';
     _members = <TogetherMember>[
@@ -397,8 +435,10 @@ class _TogetherPageState extends State<TogetherPage> {
 
   void _backToLobby() {
     _enterTimer?.cancel();
+    _wantsRoom = false;
     _client.leave();
     _resumePos = null;
+    _videoSeq++;
     _disposeController();
     if (!mounted) return;
     setState(() {
@@ -434,6 +474,7 @@ class _TogetherPageState extends State<TogetherPage> {
       return;
     }
     if (_stage == _TogetherStage.entering) {
+      _leaving = true;
       _client.leave();
       Navigator.of(context).pop();
       return;
@@ -449,6 +490,7 @@ class _TogetherPageState extends State<TogetherPage> {
     );
     _exiting = false;
     if (!ok || !mounted) return;
+    _leaving = true;
     _client.leave();
     Navigator.of(context).pop();
   }
@@ -556,13 +598,13 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   void _togglePlay() {
+    if (!_isHost) {
+      _hostOnlyToast();
+      return;
+    }
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
       togetherToast(context, '视频还没准备好');
-      return;
-    }
-    if (!_isHost) {
-      _hostOnlyToast();
       return;
     }
     final position = controller.value.position.inMilliseconds / 1000.0;
@@ -656,11 +698,12 @@ class _TogetherPageState extends State<TogetherPage> {
     }
   }
 
-  void _captureResume() {
+  bool _captureResume() {
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
+    if (controller == null || !controller.value.isInitialized) return false;
     _resumePos = controller.value.position.inMilliseconds / 1000.0;
     _resumePlaying = controller.value.isPlaying;
+    return true;
   }
 
   void _syncVideo() {
@@ -861,7 +904,6 @@ class _TogetherPageState extends State<TogetherPage> {
       _videoTitle = card.title;
       _videoCover = card.cover;
       _episodes = const <Episode>[];
-      _loadDetail(card.id);
       if (_demo || !_online) {
         setState(() {
           _videoId = card.id;
@@ -871,6 +913,7 @@ class _TogetherPageState extends State<TogetherPage> {
           _loadedKey = '';
           _addSystem('房主换成了《${card.title}》');
         });
+        _loadDetail(card.id);
         _syncVideo();
         return;
       }
@@ -974,7 +1017,7 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   bool _sendChat(String text) {
-    if (_demo || !_online) {
+    if (_demo || !_client.connected) {
       setState(() {
         _messages.add(TogetherChatMessage(
           text: text,
@@ -1404,12 +1447,17 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   Widget _buildRoom() {
+    // 键盘弹出时把视频区收起，保证聊天与输入框不被挤压。
+    final keyboard = MediaQuery.of(context).viewInsets.bottom > 0;
     return Column(
       children: [
         _buildHeader(),
-        _buildVideo(),
-        _buildInfoRow(),
-        if (_demo || !_online) _buildNetBanner(),
+        if (!keyboard) ...[
+          _buildVideo(),
+          _buildInfoRow(),
+          if (_demo || !_online) _buildNetBanner(),
+        ] else
+          const SizedBox(height: 4),
         const SizedBox(height: 2),
         Expanded(child: _buildChat()),
         _buildComposer(),
@@ -1447,7 +1495,7 @@ class _TogetherPageState extends State<TogetherPage> {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                            fontSize: 15,
+                            fontSize: 14,
                             fontWeight: FontWeight.w800,
                             color: Fx.ink,
                           ),
@@ -1493,7 +1541,7 @@ class _TogetherPageState extends State<TogetherPage> {
   Widget _buildMemberStack() {
     final members = _members;
     if (members.isEmpty) return const SizedBox.shrink();
-    final shown = members.take(3).toList();
+    final shown = members.take(2).toList();
     final extra = members.length - shown.length;
     const step = 18.0;
     const size = 26.0;
