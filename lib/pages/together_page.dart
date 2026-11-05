@@ -189,6 +189,10 @@ class _TogetherPageState extends State<TogetherPage>
   int _liveReloadAt = 0;
   bool _liveJumping = false;
 
+  /// 直播房期望的播放状态：建房默认在播；房主每次 play / pause 立即更新
+  /// 并广播，成员则以最新的 room_state 为准，不自行猜成「在播」。
+  bool _livePlaying = true;
+
   bool get _isLive => _liveChannel != null;
 
   List<Episode> _episodes = const <Episode>[];
@@ -216,6 +220,11 @@ class _TogetherPageState extends State<TogetherPage>
   bool _frozenFrameOpaque = false;
   Timer? _frozenFadeTimer;
   Timer? _frozenFallbackTimer;
+
+  /// 直播首帧等待上限：open 成功但 10 秒仍没有画面时显示「加载失败，重试」，
+  /// 和全屏播放页的兜底一致。
+  static const Duration _liveFirstFrameTimeout = Duration(seconds: 10);
+  Timer? _liveFirstFrameTimer;
 
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度不动。
   int _videoEpoch = 0;
@@ -271,6 +280,7 @@ class _TogetherPageState extends State<TogetherPage>
     _enterTimer = null;
     _frozenFadeTimer?.cancel();
     _frozenFallbackTimer?.cancel();
+    _liveFirstFrameTimer?.cancel();
     _frozenFrame?.dispose();
     _frozenFrame = null;
     _joinCtrl.dispose();
@@ -425,13 +435,16 @@ class _TogetherPageState extends State<TogetherPage>
     _resetSyncState();
     _downReported = false;
     if (_isLive) {
+      // 直播房一建好就默认在播：先把本地权威状态置为 playing，
+      // 再广播给服务器 / 成员，不能等服务端回一个默认的暂停态。
+      _livePlaying = true;
       _position.value = 0;
       if (_isHost && _online) _sendLiveState(true);
       _syncVideo();
       return;
     }
-    // 建房沿用详情页当前位置 / 播放状态，并立刻广播给房间，成员加入
-    // 时就能按房主的 lineId 和进度拉流。
+    // 建房沿用详情页当前进度，并按默认 playing 立刻广播给房间，
+    // 成员加入时就能按房主的 lineId、进度和播放态拉流。
     final startPosition = _resumePos ?? 0;
     _position.value = startPosition;
     if (_isHost && _online) {
@@ -495,6 +508,9 @@ class _TogetherPageState extends State<TogetherPage>
         _loadedKey = '';
         _loadingKey = '';
       }
+      // 成员以房主最新状态为准：房主暂停 / 回到开头后再邀请，
+      // 新成员也必须先按暂停态拉流，不能先自己播一段再跳。
+      if (!_isHost) _livePlaying = state.playing;
       if (changedChannel || changedLine) _syncVideo();
       if (!_isHost) {
         _applyLiveRemote(state, prev);
@@ -536,7 +552,9 @@ class _TogetherPageState extends State<TogetherPage>
       _playInfo = null;
       _qualityKey = null;
     }
-    if (changedVideo || changedEp) {
+    if ((changedVideo || changedEp) && !_isHost) {
+      // 成员只跟权威 state；房主切换时保留本地播放意图，避免回调把
+      // 刚发出去的 play 覆盖成 pause。
       _resumePos = null;
       _resumePlaying = false;
     }
@@ -556,13 +574,15 @@ class _TogetherPageState extends State<TogetherPage>
 
   void _onChat(TogetherChatIncoming chat) {
     if (!mounted || chat.text.isEmpty) return;
-    _appendMessage(TogetherChatMessage(
-      text: chat.text,
-      time: DateTime.now(),
-      user: chat.name,
-      avatar: chat.avatar,
-      mine: chat.userId.isNotEmpty && chat.userId == _myId,
-    ));
+    _appendMessage(
+      TogetherChatMessage(
+        text: chat.text,
+        time: DateTime.now(),
+        user: chat.name,
+        avatar: chat.avatar,
+        mine: chat.userId.isNotEmpty && chat.userId == _myId,
+      ),
+    );
   }
 
   void _onSystem(String text) {
@@ -738,6 +758,9 @@ class _TogetherPageState extends State<TogetherPage>
     _roomTitle = '${_videoTitle} · 一起看';
     _stage = _TogetherStage.entering;
     _stageText = '正在创建直播房间…';
+    // 直播默认在播：房间还没收到服务端状态前也按 playing 处理，
+    // 成员加入时看到的房主状态就是「播放中」。
+    _livePlaying = true;
     _loadedKey = '';
     _loadingKey = '';
     _videoLoading = false;
@@ -761,6 +784,7 @@ class _TogetherPageState extends State<TogetherPage>
 
   /// 房主广播直播播放状态：只同步 play/pause 和线路，不传进度。
   void _sendLiveState(bool playing) {
+    _livePlaying = playing;
     if (!_online) return;
     _client.sendState(
       playing ? 'play' : 'pause',
@@ -789,6 +813,7 @@ class _TogetherPageState extends State<TogetherPage>
   /// 成员收到直播权威状态：只跟 play/pause；从暂停恢复时回到直播最新位置。
   void _applyLiveRemote(TogetherRoomState state, TogetherRoomState? prev) {
     if (_isHost) return;
+    _livePlaying = state.playing;
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
     if (!state.playing) {
@@ -825,18 +850,11 @@ class _TogetherPageState extends State<TogetherPage>
     }
     if (_liveLastProgressAt > 0 && now - _liveLastProgressAt > 6000) {
       _liveLastProgressAt = now;
-      _liveJumpToEdge(
-        toast: _isHost ? null : '直播已跳过',
-        force: _isHost,
-      );
+      _liveJumpToEdge(toast: _isHost ? null : '直播已跳过', force: _isHost);
     }
   }
 
-  void _createRoom(
-    String videoId,
-    int ep, {
-    VideoDetail? detail,
-  }) {
+  void _createRoom(String videoId, int ep, {VideoDetail? detail}) {
     _liveChannel = null;
     _liveLineId = '';
     _clearMessages();
@@ -861,6 +879,11 @@ class _TogetherPageState extends State<TogetherPage>
     _loadedKey = '';
     _loadingKey = '';
     _videoError = '';
+    // 建房默认 state = playing：当前集、当前进度直接开播，不要求用户
+    // 先进房再点一次播放；房主随后暂停 / 拖动后，成员以服务器权威
+    // state 为准（见 _onState / _loadVideo）。
+    if (_resumePos == null) _resumePos = 0;
+    _resumePlaying = true;
     _online = _client.connected;
     _client.createRoom(
       videoId: videoId,
@@ -944,11 +967,13 @@ class _TogetherPageState extends State<TogetherPage>
     if (_fullscreen) unawaited(_exitFullscreen());
     _client.leave();
     _videoSeq++;
+    _cancelLiveFirstFrameTimer();
     _resumePos = null;
     _resumePlaying = false;
     _detailVideoId = '';
     _liveChannel = null;
     _liveLineId = '';
+    _livePlaying = true;
     _position.value = 0;
     unawaited(_disposeController());
     _resetSyncState();
@@ -1043,7 +1068,8 @@ class _TogetherPageState extends State<TogetherPage>
       lineId: _isLive ? _liveLineId : _videoLine,
       position: position.isFinite && position > 0 ? position : 0,
       playing: !forcePaused &&
-          (controller?.value.isPlaying ?? _remote?.playing ?? false),
+          (controller?.value.isPlaying ??
+              (_isLive ? _livePlaying : (_remote?.playing ?? false))),
       kind: _isLive ? 'live' : 'video',
     );
   }
@@ -1081,10 +1107,14 @@ class _TogetherPageState extends State<TogetherPage>
   /* ------------------------------------------------------------ 生命周期 / 定时 */
 
   void _startTimers() {
-    _ticker ??=
-        Timer.periodic(const Duration(milliseconds: 500), (_) => _tick());
-    _heartbeat ??=
-        Timer.periodic(const Duration(seconds: 9), (_) => _hostHeartbeat());
+    _ticker ??= Timer.periodic(
+      const Duration(milliseconds: 500),
+      (_) => _tick(),
+    );
+    _heartbeat ??= Timer.periodic(
+      const Duration(seconds: 9),
+      (_) => _hostHeartbeat(),
+    );
   }
 
   void _resync() {
@@ -1092,7 +1122,7 @@ class _TogetherPageState extends State<TogetherPage>
     if (_isLive) {
       final controller = _controller;
       if (_isHost) {
-        final playing = controller?.value.isPlaying ?? true;
+        final playing = controller?.value.isPlaying ?? _livePlaying;
         _sendLiveState(playing);
       } else {
         final remote = _remote;
@@ -1151,13 +1181,15 @@ class _TogetherPageState extends State<TogetherPage>
   /// expect = position + (now + clockOffset - serverTime) / 1000 * rate。
   /// 房主倍速不为 1 时，进度同样按倍速推进，否则 9 秒心跳之间会被误判成 drift。
   double _targetPosition(TogetherRoomState state) {
-    return _clampPosition(togetherExpectedPosition(
-      position: state.position,
-      serverTime: state.serverTime,
-      nowServerMs: _client.nowServerMs(),
-      playing: state.playing && _client.synced,
-      rate: _baseRate(state),
-    ));
+    return _clampPosition(
+      togetherExpectedPosition(
+        position: state.position,
+        serverTime: state.serverTime,
+        nowServerMs: _client.nowServerMs(),
+        playing: state.playing && _client.synced,
+        rate: _baseRate(state),
+      ),
+    );
   }
 
   double _displayPosition() {
@@ -1308,15 +1340,17 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     _setControllerRate(target);
-    unawaited(Future<void>.delayed(const Duration(milliseconds: 250), () {
-      if (!mounted) return;
-      final controller = _controller;
-      if (controller == null || !controller.value.isInitialized) return;
-      if ((controller.rate - target).abs() <= 0.02) return;
-      _microRateUnsupported = true;
-      _microRateRetryAt = DateTime.now().millisecondsSinceEpoch + 10000;
-      _setControllerRate(base);
-    }));
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 250), () {
+        if (!mounted) return;
+        final controller = _controller;
+        if (controller == null || !controller.value.isInitialized) return;
+        if ((controller.rate - target).abs() <= 0.02) return;
+        _microRateUnsupported = true;
+        _microRateRetryAt = DateTime.now().millisecondsSinceEpoch + 10000;
+        _setControllerRate(base);
+      }),
+    );
   }
 
   /// 房主本地 seek（不进入成员防抖流程）。
@@ -1340,12 +1374,14 @@ class _TogetherPageState extends State<TogetherPage>
     final future = controller.seekTo(
       Duration(milliseconds: (target * 1000).round()),
     );
-    unawaited(future.catchError((_) {}).whenComplete(() {
-      if (!mounted || token != _seekToken) return;
-      _seeking = false;
-      _seekGuardUntil =
-          DateTime.now().millisecondsSinceEpoch + togetherSeekCooldownMs;
-    }));
+    unawaited(
+      future.catchError((_) {}).whenComplete(() {
+        if (!mounted || token != _seekToken) return;
+        _seeking = false;
+        _seekGuardUntil =
+            DateTime.now().millisecondsSinceEpoch + togetherSeekCooldownMs;
+      }),
+    );
   }
 
   /// 收到新房主 state：先立即应用 play / pause / seek / rate，再做一次 drift 决策。
@@ -1459,8 +1495,10 @@ class _TogetherPageState extends State<TogetherPage>
     final controller = _controller;
     if (controller == null || !mounted) return;
     final value = controller.value;
+    if (_hasFirstFrame(value)) _cancelLiveFirstFrameTimer();
     _maybeFadeFrozenFrame();
     if (value.hasError && _videoError.isEmpty) {
+      _cancelLiveFirstFrameTimer();
       _clearFrozenFrame();
       setState(() => _videoError = '播放中断，点重试即可恢复');
       return;
@@ -1767,6 +1805,8 @@ class _TogetherPageState extends State<TogetherPage>
     // 服务端 episode 动作会重置为 pause；这里带播放意图发 state，
     // 切集视为继续播放，只有切换前确实暂停才保持暂停。
     final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
+    _resumePos = 0;
+    _resumePlaying = playing;
     _client.sendState(
       playing ? 'play' : 'pause',
       0,
@@ -1807,6 +1847,8 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
+    _resumePos = 0;
+    _resumePlaying = playing;
     _client.sendState(
       playing ? 'play' : 'pause',
       0,
@@ -1887,13 +1929,12 @@ class _TogetherPageState extends State<TogetherPage>
     _loadedKey = '';
     _loadingKey = '';
     _syncVideo();
-    final playing = _controller?.value.isPlaying ?? true;
-    _client.sendState(
-      playing ? 'play' : 'pause',
-      0,
-      line: lineId,
-      live: true,
-    );
+    // 换线路不能把房主的暂停态「换」成播放：优先跟随当前播放器，
+    // 播放器还没就绪时用最近一次广播的状态。
+    final playing = _controller?.value.isPlaying ?? _livePlaying;
+    _livePlaying = playing;
+    _client.sendState(playing ? 'play' : 'pause', 0, line: lineId, live: true);
+    _markRemote(playing ? 'play' : 'pause', 0);
     togetherToast(context, '正在切换直播线路…');
   }
 
@@ -2057,6 +2098,7 @@ class _TogetherPageState extends State<TogetherPage>
     if (channel == null) return;
     final line = _liveLine;
     if (line == null || line.url.trim().isEmpty) {
+      _cancelLiveFirstFrameTimer();
       if (mounted) {
         setState(() {
           _videoLoading = false;
@@ -2072,6 +2114,16 @@ class _TogetherPageState extends State<TogetherPage>
     _endedSent = false;
     // 本次拉流是否已作废（页面销毁 / 被换线、重连的新请求取代）。
     bool stale() => !mounted || seq != _videoSeq;
+    _cancelLiveFirstFrameTimer();
+
+    // 换台 / 换线路前先抓下旧画面：新流首帧出来前用快照顶住，
+    // 不让房间在加载的几秒里变成纯黑。
+    final frozen = await _captureVideoFrame();
+    if (stale()) {
+      frozen?.dispose();
+      return;
+    }
+    if (frozen != null) _showFrozenFrame(frozen);
 
     final previous = _controller;
     _controller = null;
@@ -2086,9 +2138,10 @@ class _TogetherPageState extends State<TogetherPage>
     if (previous != null) await _releasePlayer(previous);
     if (stale()) return;
 
-    // 房主建房时还没有 room_state，按播放处理；之后跟随权威状态，
-    // 房主暂停时切线路也不会突然自己播起来。
-    final shouldPlay = _remote?.playing ?? true;
+    // 直播默认在播；房主暂停时沿用本地状态，成员以最新 room_state 为准。
+    // 这里先记下期望值，open 完成后还会再取一次，避免加载期间房主切了状态。
+    final shouldPlay = _isHost ? _livePlaying : (_remote?.playing ?? true);
+    _armLiveFirstFrameTimeout(seq);
     FxPlayer? controller;
     try {
       controller = FxPlayer.create(readyTimeout: const Duration(seconds: 20));
@@ -2104,12 +2157,13 @@ class _TogetherPageState extends State<TogetherPage>
         return;
       }
 
-      final old = _controller;
-      old?.removeListener(_onVideoValue);
-      _controller = controller;
-      controller.addListener(_onVideoValue);
-      if (old != null) unawaited(old.dispose());
-      if (!shouldPlay) {
+      // open(play:true) 只负责起播意图：ready 之后必须再显式 play，
+      // 否则部分直播源停在首帧不动，用户得手点一次播放。
+      final wantPlay =
+          _isHost ? _livePlaying : (_remote?.playing ?? shouldPlay);
+      if (wantPlay) {
+        await controller.play().catchError((_) {});
+      } else {
         // 暂停态也先拉一帧，避免房主暂停后成员看到纯黑。
         await controller.play().catchError((_) {});
         await Future<void>.delayed(const Duration(milliseconds: 60));
@@ -2119,6 +2173,16 @@ class _TogetherPageState extends State<TogetherPage>
         await _dropLivePlayer(controller);
         return;
       }
+
+      final old = _controller;
+      old?.removeListener(_onVideoValue);
+      _controller = controller;
+      controller.addListener(_onVideoValue);
+      if (old != null) unawaited(old.dispose());
+      if (_hasFirstFrame(controller.value)) {
+        _cancelLiveFirstFrameTimer();
+      }
+      _maybeFadeFrozenFrame();
       _loadedKey = key;
       _loadingKey = '';
       _liveLastPosMs = -1;
@@ -2128,14 +2192,19 @@ class _TogetherPageState extends State<TogetherPage>
         _videoLoading = false;
         _videoError = '';
       });
+      debugPrint(
+        'room autoplay ep=$_ep state=${wantPlay ? 'playing' : 'paused'} live=1',
+      );
       // 房主重新拉流后广播当前播放状态，成员跟着对齐。
-      if (_isHost) _sendLiveState(controller.value.isPlaying);
+      if (_isHost) _sendLiveState(wantPlay);
       _applyLiveRemote(_remote ?? _emptyLiveState(), _remote);
     } catch (_) {
       // 失败也要先把本次创建（可能已挂到 _controller）的实例释放掉，
       // 再决定是否展示错误，避免卡顿重连叠加时遗留孤儿播放器。
       if (controller != null) await _dropLivePlayer(controller);
       if (stale()) return;
+      _cancelLiveFirstFrameTimer();
+      _clearFrozenFrame();
       _loadingKey = '';
       _loadedKey = '';
       setState(() {
@@ -2143,6 +2212,39 @@ class _TogetherPageState extends State<TogetherPage>
         _videoError = '直播源加载失败，请重试';
       });
     }
+  }
+
+  /// 直播首帧兜底：10 秒还没有画面参数就放弃本次拉流并显示重试入口，
+  /// 不让用户对着冻结的旧画面一直等。
+  void _armLiveFirstFrameTimeout(int seq) {
+    _cancelLiveFirstFrameTimer();
+    _liveFirstFrameTimer = Timer(_liveFirstFrameTimeout, () {
+      _liveFirstFrameTimer = null;
+      if (!mounted || seq != _videoSeq) return;
+      final controller = _controller;
+      if (controller != null && _hasFirstFrame(controller.value)) return;
+      // 作废还在 open 中的请求；已挂上的播放器直接释放，交给重试重建。
+      _videoSeq++;
+      _loadingKey = '';
+      _loadedKey = '';
+      final pending = _controller;
+      _controller = null;
+      if (pending != null) {
+        pending.removeListener(_onVideoValue);
+        unawaited(_releasePlayer(pending));
+      }
+      _clearFrozenFrame();
+      if (!mounted) return;
+      setState(() {
+        _videoLoading = false;
+        _videoError = '加载失败，重试';
+      });
+    });
+  }
+
+  void _cancelLiveFirstFrameTimer() {
+    _liveFirstFrameTimer?.cancel();
+    _liveFirstFrameTimer = null;
   }
 
   /// 直播拉流作废时释放本次创建的播放器。
@@ -2348,24 +2450,25 @@ class _TogetherPageState extends State<TogetherPage>
           }
 
           final duration = controller.value.duration.inMilliseconds / 1000.0;
+          final state = _remote;
           double target;
           bool shouldPlay;
           if (_isHost) {
             final resume = localResumePos;
-            final state = _remote;
             if (resume != null) {
               target = resume;
               shouldPlay = localResumePlaying;
-            } else if (state != null && state.playing) {
+            } else if (state != null) {
               target = _targetPosition(state);
-              shouldPlay = true;
+              shouldPlay = state.playing;
             } else {
+              // 建房 / 首次进入没有 state 时默认播放，不能等用户点。
               target = 0;
-              shouldPlay = false;
+              shouldPlay = true;
             }
           } else {
-            final state = _remote;
             target = state == null ? 0 : _targetPosition(state);
+            // 成员严格跟随房主：房主暂停就停在权威位置，不先播再跳。
             shouldPlay = state?.playing ?? false;
           }
           if (!target.isFinite || target < 0) target = 0;
@@ -2379,10 +2482,14 @@ class _TogetherPageState extends State<TogetherPage>
             _isHost ? _hostRate : (_remote?.rate ?? 1.0),
           );
           await controller.setRate(controllerRate);
-          if (shouldPlay) {
+          // 打开成功即按房间 state 执行真正起播；open 只负责把流准备好，
+          // 不能依赖用户再点一次播放按钮。
+          var wantPlay = shouldPlay;
+          if (!_isHost) wantPlay = _remote?.playing ?? shouldPlay;
+          if (wantPlay) {
             await controller.play();
           } else {
-            // 暂停态也先拉一帧，避免切集/切线路后黑屏。
+            // 暂停态也先拉一帧，避免切集/切线路后黑屏；随后停回权威位置。
             await controller.play();
             await Future<void>.delayed(const Duration(milliseconds: 60));
             await controller.pause();
@@ -2406,6 +2513,13 @@ class _TogetherPageState extends State<TogetherPage>
               _fadeOutFrozenFrame,
             );
           }
+          // 再补一次 play：某些内核在 attach 视频层后会退回 paused。
+          if (wantPlay) {
+            await controller.play().catchError((_) {});
+          }
+          debugPrint(
+            'room autoplay ep=$_ep state=${wantPlay ? 'playing' : 'paused'}',
+          );
 
           _resumePos = null;
           _resumePlaying = false;
@@ -2487,6 +2601,7 @@ class _TogetherPageState extends State<TogetherPage>
 
   void _retryVideo() {
     if (!mounted) return;
+    _cancelLiveFirstFrameTimer();
     _loadedKey = '';
     _loadingKey = '';
     _videoError = '';
@@ -2515,7 +2630,8 @@ class _TogetherPageState extends State<TogetherPage>
   void _publishChat() {
     if (!mounted) return;
     _chat.value = List<TogetherChatMessage>.unmodifiable(
-        List<TogetherChatMessage>.from(_messages));
+      List<TogetherChatMessage>.from(_messages),
+    );
   }
 
   void _clearMessages() {
@@ -2865,8 +2981,10 @@ class _TogetherPageState extends State<TogetherPage>
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(15),
-                            borderSide:
-                                const BorderSide(color: Fx.accent, width: 1.2),
+                            borderSide: const BorderSide(
+                              color: Fx.accent,
+                              width: 1.2,
+                            ),
                           ),
                         ),
                       ),

@@ -393,11 +393,13 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                     if (!value.isInitialized || !value.isBuffering) {
                       return const SizedBox.shrink();
                     }
-                    // 真实已缓冲位置 ÷ 时长；未就绪时只转圈，不写 100%。
-                    final percent = fxBufferedPercent(
+                    // 真实已缓冲位置 ÷ 时长；直播没有时长时退回 libmpv 的
+                    // cache-buffering-state，仍然只显示真实进度，不写 100%。
+                    final durationPercent = fxBufferedPercent(
                       value.buffered,
                       value.duration,
                     );
+                    final percent = durationPercent ?? value.bufferingPercent;
                     return FxLoadingOverlay(
                       title:
                           percent == null ? '加载中…' : '缓冲中 ${percent.round()}%',

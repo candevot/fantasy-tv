@@ -482,12 +482,13 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                   if (!value.isInitialized || !value.isBuffering) {
                     return const SizedBox.shrink();
                   }
-                  // 真实已缓冲位置 ÷ 总时长；时长未知时用不确定转圈，
-                  // 不能把 bufferingPercentage 当百分比直接写到 100%。
-                  final percent = fxBufferedPercent(
+                  // 真实已缓冲位置 ÷ 总时长；直播没有时长时退回 libmpv 的
+                  // cache-buffering-state，仍然只显示真实进度，不写 100%。
+                  final durationPercent = fxBufferedPercent(
                     value.buffered,
                     value.duration,
                   );
+                  final percent = durationPercent ?? value.bufferingPercent;
                   return FxLoadingOverlay(
                     title: percent == null ? '加载中…' : '缓冲中 ${percent.round()}%',
                     percent: percent,
