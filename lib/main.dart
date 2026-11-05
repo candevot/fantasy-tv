@@ -18,19 +18,37 @@ import 'pages/player_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
-  await Api.init();
-  await Auth.instance.init();
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.dark,
-    systemNavigationBarColor: Colors.transparent,
-    systemNavigationBarDividerColor: Colors.transparent,
-    systemNavigationBarIconBrightness: Brightness.dark,
-    systemStatusBarContrastEnforced: false,
-    systemNavigationBarContrastEnforced: false,
-  ));
+  // 启动兜底：播放内核初始化 / 配置读取失败也不许白屏闪退，
+  // 记日志后照常 runApp，让用户至少能进首页并看到提示。
+  try {
+    MediaKit.ensureInitialized();
+  } catch (e, st) {
+    debugPrint('[boot] MediaKit.ensureInitialized failed: $e\n$st');
+  }
+  try {
+    await Api.init();
+  } catch (e, st) {
+    debugPrint('[boot] Api.init failed: $e\n$st');
+  }
+  try {
+    await Auth.instance.init();
+  } catch (e, st) {
+    debugPrint('[boot] Auth.init failed: $e\n$st');
+  }
+  try {
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.dark,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarDividerColor: Colors.transparent,
+      systemNavigationBarIconBrightness: Brightness.dark,
+      systemStatusBarContrastEnforced: false,
+      systemNavigationBarContrastEnforced: false,
+    ));
+  } catch (e, st) {
+    debugPrint('[boot] SystemChrome setup failed: $e\n$st');
+  }
   runApp(const FantasyApp());
 }
 

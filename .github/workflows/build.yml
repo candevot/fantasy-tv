@@ -19,9 +19,20 @@ jobs:
           cache: true
       - name: Generate android shell
         run: |
+          # android/ 不入库，只提交固定签名的 android/fx-release.jks；
+          # 用 cp -r src/. dst/ 合并，避免把 android/ 变成 android/android/。
           flutter create --platforms=android --org com.huanxiang --project-name fantasy_tv _tmp
-          cp -r _tmp/android ./android
+          mkdir -p android
+          cp -r _tmp/android/. ./android/
           rm -rf _tmp
+          test -f android/fx-release.jks
+      - name: Patch release signing (fixed keystore)
+        run: |
+          test -f android/fx-release.jks
+          python3 tools/patch_signing.py
+          echo '--- signing cert ---'
+          keytool -list -v -keystore android/fx-release.jks -storepass fx123456 \
+            | grep -E 'Alias name|Valid from|SHA256:'
       - name: Apply app icons
         run: |
           for pair in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
@@ -75,9 +86,26 @@ jobs:
           print(open(st,encoding='utf-8').read()[:300])
           PY2
       - run: flutter pub get
-      - run: flutter analyze || true
-      - run: flutter build apk --release
+      - run: flutter analyze
+      - name: Build release APKs (split per ABI)
+        run: |
+          echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"
+          flutter build apk --release --split-per-abi \
+            --build-number=${{ github.run_number }} \
+            --build-name=1.0.${{ github.run_number }}
+          ls -lh build/app/outputs/flutter-apk/
+      - name: Verify APK signature
+        run: |
+          APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          test -f "$APK"
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1 || true)
+          if [ -n "$APKSIGNER" ] && [ -x "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs "$APK"
+          else
+            echo 'apksigner not found, skip JAR signature check'
+          fi
+          sha256sum "$APK"
       - uses: actions/upload-artifact@v4
         with:
           name: fantasy-tv-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk

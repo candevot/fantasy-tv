@@ -50,6 +50,11 @@ except urllib.error.HTTPError as e:
     open('/tmp/fx_art.zip','wb').write(data)
 print('artifact bytes', len(open('/tmp/fx_art.zip','rb').read()))
 PY
-cd /tmp && rm -rf fx_apk && mkdir fx_apk && cd fx_apk && unzip -o -q /tmp/fx_art.zip && cp app-release.apk "/sdcard/Download/DSH-Go/幻想影视-正式版.apk"
+cd /tmp && rm -rf fx_apk && mkdir fx_apk && cd fx_apk && unzip -o -q /tmp/fx_art.zip
+# CI 现在用 --split-per-abi 出包，只取 arm64-v8a 那一个。
+APK=app-arm64-v8a-release.apk
+test -f "$APK"
+cp "$APK" "/sdcard/Download/DSH-Go/幻想影视-正式版.apk"
 ls -lh "/sdcard/Download/DSH-Go/幻想影视-正式版.apk"
+sha256sum "$APK"
 echo "DONE"

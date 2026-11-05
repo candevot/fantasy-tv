@@ -1,0 +1,18 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+.idea/
+.vscode/
+
+# CI 生成的 android 壳（仅提交固定签名文件 android/fx-release.jks）
+/android/*
+!/android/fx-release.jks
+
+# 本地签名配置（密码不进仓库；keystore 本身已提交，私有仓库可接受）
+key.properties

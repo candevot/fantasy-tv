@@ -1,3 +1,51 @@
+// ---------------------------------------------------------------------------
+// JSON 安全取值：服务端数据脏（null、数字混进字符串、对象冒充数组）时，
+// 宁可让单个字段退化成默认值、单个条目跳过，也不让整个页面解析失败。
+// ---------------------------------------------------------------------------
+
+String _asStr(Object? v, {String fallback = ''}) {
+  if (v is String) return v;
+  if (v is num || v is bool) return '$v';
+  return fallback;
+}
+
+num _asNum(Object? v, {num fallback = 0}) {
+  if (v is num) return v;
+  if (v is String) return num.tryParse(v.trim()) ?? fallback;
+  if (v is bool) return v ? 1 : 0;
+  return fallback;
+}
+
+int _asInt(Object? v, {int fallback = 0}) {
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  if (v is String) {
+    final s = v.trim();
+    return int.tryParse(s) ?? double.tryParse(s)?.toInt() ?? fallback;
+  }
+  return fallback;
+}
+
+/// 不是列表就当作空列表（对象 / 字符串 / null 都不再抛 cast 异常）。
+List<Object?> _asList(Object? v) => v is List ? v : const <Object?>[];
+
+/// 不是 Map 就当作空 Map；键统一转成 String。
+Map<String, dynamic> _asMap(Object? v) {
+  if (v is Map<String, dynamic>) return v;
+  if (v is Map) {
+    return <String, dynamic>{
+      for (final e in v.entries) _asStr(e.key): e.value,
+    };
+  }
+  return <String, dynamic>{};
+}
+
+/// 字符串数组：跳过对象 / 数组 / null 条目，空串也丢掉。
+List<String> _asStrList(Object? v) => <String>[
+      for (final e in _asList(v))
+        if (e is String || e is num || e is bool) _asStr(e),
+    ].where((t) => t.trim().isNotEmpty).toList();
+
 class VideoCard {
   final String id, title, cover, status, category;
   final num rating;
@@ -17,15 +65,15 @@ class VideoCard {
   });
 
   factory VideoCard.fromJson(Map<String, dynamic> j) => VideoCard(
-        id: '${j['id'] ?? ''}',
-        title: '${j['title'] ?? ''}',
-        cover: '${j['cover'] ?? ''}',
-        rating: (j['rating'] ?? 0) as num,
-        year: (j['year'] ?? 0) as int,
-        status: '${j['status'] ?? ''}',
-        episodes: (j['episodes'] ?? 0) as int,
-        category: '${j['category'] ?? ''}',
-        tags: ((j['tags'] ?? []) as List).map((e) => '$e').toList(),
+        id: _asStr(j['id']),
+        title: _asStr(j['title']),
+        cover: _asStr(j['cover']),
+        rating: _asNum(j['rating']),
+        year: _asInt(j['year']),
+        status: _asStr(j['status']),
+        episodes: _asInt(j['episodes']),
+        category: _asStr(j['category']),
+        tags: _asStrList(j['tags']),
       );
 }
 
@@ -34,11 +82,11 @@ class BannerItem {
   final num rating;
   BannerItem(this.id, this.title, this.cover, this.desc, this.rating);
   factory BannerItem.fromJson(Map<String, dynamic> j) => BannerItem(
-      '${j['id'] ?? ''}',
-      '${j['title'] ?? ''}',
-      '${j['cover'] ?? ''}',
-      '${j['desc'] ?? ''}',
-      (j['rating'] ?? 0) as num);
+      _asStr(j['id']),
+      _asStr(j['title']),
+      _asStr(j['cover']),
+      _asStr(j['desc']),
+      _asNum(j['rating']));
 }
 
 class HomeSection {
@@ -61,9 +109,13 @@ class LineInfo {
   final String? source, from;
   LineInfo(this.id, this.name, this.type, this.priority,
       {this.source, this.from});
-  factory LineInfo.fromJson(Map<String, dynamic> j) => LineInfo('${j['id']}',
-      '${j['name']}', '${j['type'] ?? 'hls'}', (j['priority'] ?? 0) as int,
-      source: _lineOptStr(j['source']), from: _lineOptStr(j['from']));
+  factory LineInfo.fromJson(Map<String, dynamic> j) => LineInfo(
+      _asStr(j['id']),
+      _asStr(j['name']),
+      _asStr(j['type'], fallback: 'hls'),
+      _asInt(j['priority']),
+      source: _lineOptStr(j['source']),
+      from: _lineOptStr(j['from']));
 
   bool get needsParse => type.trim().toLowerCase() == 'parse';
 
@@ -138,7 +190,7 @@ class Episode {
   final String name;
   Episode(this.n, this.name, this.duration);
   factory Episode.fromJson(Map<String, dynamic> j) => Episode(
-      (j['n'] ?? 0) as int, '${j['name'] ?? ''}', (j['duration'] ?? 0) as int);
+      _asInt(j['n']), _asStr(j['name']), _asInt(j['duration']));
 }
 
 class EpisodeGroup {
@@ -155,6 +207,10 @@ class VideoDetail {
   final List<LineInfo> lines;
   final List<EpisodeGroup> groups;
   final List<VideoCard> related;
+
+  /// 猜你喜欢的 id（服务端 `related` 返回的是 id 数组），
+  /// 详情页据此补卡片；老接口的 `relatedCards` 仍然兼容。
+  final List<String> relatedIds;
 
   VideoDetail({
     required this.id,
@@ -174,56 +230,90 @@ class VideoDetail {
     required this.lines,
     required this.groups,
     required this.related,
+    this.relatedIds = const <String>[],
   });
 
   List<Episode> get allEpisodes => [for (final g in groups) ...g.episodes];
 
-  factory VideoDetail.fromJson(Map<String, dynamic> j) => VideoDetail(
-        id: '${j['id'] ?? ''}',
-        title: '${j['title'] ?? ''}',
-        cover: '${j['cover'] ?? ''}',
-        backdrop: '${j['backdrop'] ?? j['cover'] ?? ''}',
-        rating: (j['rating'] ?? 0) as num,
-        year: (j['year'] ?? 0) as int,
-        area: '${j['area'] ?? ''}',
-        category: '${j['category'] ?? ''}',
-        status: '${j['status'] ?? ''}',
-        episodes: (j['episodes'] ?? 0) as int,
-        desc: '${j['desc'] ?? ''}',
-        tags: ((j['tags'] ?? []) as List).map((e) => '$e').toList(),
-        director: ((j['director'] ?? []) as List).map((e) => '$e').toList(),
-        cast: ((j['cast'] ?? []) as List).map((e) => '$e').toList(),
-        lines: mergeLines(((j['lines'] ?? []) as List)
-            .map((e) => LineInfo.fromJson(Map<String, dynamic>.from(e)))
-            .toList()),
-        groups: ((j['episodeGroups'] ?? []) as List).map((e) {
-          final m = Map<String, dynamic>.from(e);
-          return EpisodeGroup(
-            '${m['name'] ?? '正片'}',
-            ((m['episodes'] ?? []) as List)
-                .map((x) => Episode.fromJson(Map<String, dynamic>.from(x)))
-                .toList(),
-          );
-        }).toList(),
-        related: ((j['relatedCards'] ?? []) as List)
-            .map((e) => VideoCard.fromJson(Map<String, dynamic>.from(e)))
-            .toList(),
-      );
+  factory VideoDetail.fromJson(Map<String, dynamic> j) {
+    // `related` 是 id 数组（也兼容直接给卡片对象），`relatedCards` 是旧字段。
+    final cards = <VideoCard>[];
+    final ids = <String>[];
+    void readRelated(Object? raw) {
+      for (final e in _asList(raw)) {
+        if (e is Map) {
+          cards.add(VideoCard.fromJson(_asMap(e)));
+          continue;
+        }
+        final id = _asStr(e).trim();
+        if (id.isNotEmpty && !ids.contains(id)) ids.add(id);
+      }
+    }
+
+    readRelated(j['related']);
+    readRelated(j['relatedCards']);
+
+    // 线路 / 分组 / 单集里的坏条目直接跳过，不让整页解析失败。
+    final lines = <LineInfo>[
+      for (final e in _asList(j['lines']))
+        if (e is Map) LineInfo.fromJson(_asMap(e)),
+    ];
+    final groups = <EpisodeGroup>[];
+    for (final raw in _asList(j['episodeGroups'])) {
+      if (raw is! Map) continue;
+      final m = _asMap(raw);
+      groups.add(EpisodeGroup(
+        _asStr(m['name'], fallback: '正片'),
+        <Episode>[
+          for (final x in _asList(m['episodes']))
+            if (x is Map) Episode.fromJson(_asMap(x)),
+        ],
+      ));
+    }
+
+    final cover = _asStr(j['cover']);
+    return VideoDetail(
+      id: _asStr(j['id']),
+      title: _asStr(j['title']),
+      cover: cover,
+      backdrop: _asStr(j['backdrop'], fallback: cover),
+      rating: _asNum(j['rating']),
+      year: _asInt(j['year']),
+      area: _asStr(j['area']),
+      category: _asStr(j['category']),
+      status: _asStr(j['status']),
+      episodes: _asInt(j['episodes']),
+      desc: _asStr(j['desc']),
+      tags: _asStrList(j['tags']),
+      director: _asStrList(j['director']),
+      cast: _asStrList(j['cast']),
+      lines: mergeLines(lines),
+      groups: groups,
+      related: cards,
+      relatedIds: ids,
+    );
+  }
 }
 
 class QualityItem {
   final String key, name, url;
-  QualityItem(this.key, this.name, this.url);
+
+  /// 该清晰度地址自己的请求头（服务端可能只给某一路带 Referer/UA）。
+  final Map<String, String> headers;
+
+  QualityItem(this.key, this.name, this.url, [this.headers = const {}]);
 }
 
 /// 部分苹果CMS/采集源会校验 UA；bfvvs 系播放地址还必须带站内 Referer。
 const String kMaccmsReferer = 'https://hn.bfvvs.com/';
 const String kDefaultVideoUserAgent = 'Mozilla/5.0';
 
-Map<String, String> _playHeaders(String url, Map raw) {
-  final headers = <String, String>{
-    for (final e in raw.entries) '${e.key}': '${e.value}',
-  };
+Map<String, String> _playHeaders(String url, Map<String, dynamic> raw) {
+  final headers = <String, String>{};
+  for (final e in raw.entries) {
+    final v = _asStr(e.value);
+    if (v.trim().isNotEmpty) headers['${e.key}'] = v;
+  }
   bool has(String name) =>
       headers.keys.any((k) => k.toLowerCase() == name.toLowerCase());
 
@@ -252,17 +342,29 @@ class PlayInfo {
   });
 
   factory PlayInfo.fromJson(Map<String, dynamic> j) {
-    final url = '${j['url'] ?? ''}';
+    final url = _asStr(j['url']);
+    final quality = <QualityItem>[];
+    for (final e in _asList(j['quality'])) {
+      if (e is! Map) continue;
+      final q = _asMap(e);
+      final qUrl = _asStr(q['url']);
+      // 没有地址的清晰度没有意义，跳过即可。
+      if (qUrl.trim().isEmpty) continue;
+      quality.add(QualityItem(
+        _asStr(q['key']),
+        _asStr(q['name']),
+        qUrl,
+        _playHeaders(qUrl, _asMap(q['headers'])),
+      ));
+    }
     return PlayInfo(
       url: url,
-      type: '${j['type'] ?? 'hls'}',
-      lineName: '${j['lineName'] ?? ''}',
-      parsePage: '${j['parsePage'] ?? ''}',
-      quality: ((j['quality'] ?? []) as List)
-          .map((e) => QualityItem('${e['key']}', '${e['name']}', '${e['url']}'))
-          .toList(),
-      backup: ((j['backup'] ?? []) as List).map((e) => '$e').toList(),
-      headers: _playHeaders(url, (j['headers'] ?? {}) as Map),
+      type: _asStr(j['type'], fallback: 'hls'),
+      lineName: _asStr(j['lineName']),
+      parsePage: _asStr(j['parsePage']),
+      quality: quality,
+      backup: _asStrList(j['backup']),
+      headers: _playHeaders(url, _asMap(j['headers'])),
     );
   }
 }
@@ -274,15 +376,15 @@ class CommentItem {
   CommentItem(this.user, this.avatar, this.content, this.time, this.score,
       this.likes, this.replies);
   factory CommentItem.fromJson(Map<String, dynamic> j) {
-    final u = Map<String, dynamic>.from(j['user'] ?? {});
+    final u = _asMap(j['user']);
     return CommentItem(
-        '${u['name'] ?? '影迷'}',
-        '${u['avatar'] ?? ''}',
-        '${j['content'] ?? ''}',
-        '${j['time'] ?? ''}',
-        (j['score'] ?? 0) as num,
-        (j['likes'] ?? 0) as int,
-        ((j['replies'] ?? []) as List).length);
+        _asStr(u['name'], fallback: '影迷'),
+        _asStr(u['avatar']),
+        _asStr(j['content']),
+        _asStr(j['time']),
+        _asNum(j['score']),
+        _asInt(j['likes']),
+        _asList(j['replies']).length);
   }
 }
 
@@ -292,12 +394,12 @@ class TogetherRoom {
   TogetherRoom(this.code, this.title, this.videoTitle, this.cover, this.host,
       this.members);
   factory TogetherRoom.fromJson(Map<String, dynamic> j) => TogetherRoom(
-        '${j['code'] ?? ''}',
-        '${j['title'] ?? ''}',
-        '${j['videoTitle'] ?? ''}',
-        '${j['cover'] ?? ''}',
-        '${j['host'] ?? ''}',
-        (j['members'] ?? 1) as int,
+        _asStr(j['code']),
+        _asStr(j['title']),
+        _asStr(j['videoTitle']),
+        _asStr(j['cover']),
+        _asStr(j['host']),
+        _asInt(j['members'], fallback: 1),
       );
 }
 
@@ -314,11 +416,11 @@ class AuthUser {
   final String id, account, nickname, avatar, signature;
 
   factory AuthUser.fromJson(Map<String, dynamic> j) => AuthUser(
-        id: '${j['id'] ?? ''}',
-        account: '${j['account'] ?? ''}',
-        nickname: '${j['nickname'] ?? ''}',
-        avatar: '${j['avatar'] ?? ''}',
-        signature: '${j['signature'] ?? ''}',
+        id: _asStr(j['id']),
+        account: _asStr(j['account']),
+        nickname: _asStr(j['nickname']),
+        avatar: _asStr(j['avatar']),
+        signature: _asStr(j['signature']),
       );
 
   Map<String, dynamic> toJson() => <String, dynamic>{
