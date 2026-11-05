@@ -11,6 +11,7 @@ import 'models.dart';
 class Api {
   static String base = 'http://47.96.0.112:8787/api';
   static String wsBase = 'ws://47.96.0.112:8787/ws/together';
+
   /// 所有接口统一 8 秒超时；失败最多重试 1 次。
   static const Duration _timeout = Duration(seconds: 8);
   static const Duration _retryDelay = Duration(milliseconds: 500);
@@ -59,8 +60,7 @@ class Api {
         // 指数退避：唯一一次重试前等 500ms。
         await Future<void>.delayed(
           Duration(
-              milliseconds:
-                  _retryDelay.inMilliseconds * (1 << (attempt - 1))),
+              milliseconds: _retryDelay.inMilliseconds * (1 << (attempt - 1))),
         );
       }
       try {
@@ -75,14 +75,12 @@ class Api {
       } on SocketException {
         failure = ApiException.network();
       } on HandshakeException {
-        failure =
-            ApiException.network(message: '安全连接失败，请检查网络后重试');
+        failure = ApiException.network(message: '安全连接失败，请检查网络后重试');
       } on http.ClientException {
         failure = ApiException.network();
       } catch (e) {
         if (e is ApiException) rethrow;
-        failure =
-            ApiException('网络请求失败，请稍后重试', kind: ApiErrorKind.network);
+        failure = ApiException('网络请求失败，请稍后重试', kind: ApiErrorKind.network);
       }
     }
     throw failure ?? ApiException.network();
@@ -164,30 +162,97 @@ class Api {
     return HomeData(banners, sections);
   }
 
-  /// `GET /api/live` → `{items:[{id,title,cover,url,group}]}`。
-  /// 新接口可能直接返回 items（不带 code/data 包装），这里不走 _decode，
-  /// 两种结构都兼容；404、空结构、脏数据一律按空列表处理，由页面展示空态。
-  static Future<List<LiveChannel>> live() async {
+  /// `GET /api/live` → `{groups:[{id,name,cover,channels:[{id,name,url,cover}]}]}`。
+  /// 兼容两种历史结构：顶层 `items` 扁平数组、`data.items`。
+  /// 404 / 空结构 / 脏数据一律返回空列表，由页面展示空态。
+  static Future<List<LiveGroup>> liveGroups() async {
     final r = await _send(() => http.get(_u('/live'), headers: _headers()));
-    if (r.statusCode == 404) return const <LiveChannel>[];
+    if (r.statusCode == 404) return const <LiveGroup>[];
     dynamic j;
     try {
       j = jsonDecode(utf8.decode(r.bodyBytes));
     } catch (_) {
-      return const <LiveChannel>[];
+      return const <LiveGroup>[];
     }
-    dynamic raw;
-    if (j is Map) {
-      raw = j['items'];
-      final data = j['data'];
-      if (raw is! List && data is Map) raw = data['items'];
-      if (raw is! List) raw = data;
+    if (j is! Map) return const <LiveGroup>[];
+    final data = j['data'];
+    final body = data is Map ? data : j;
+    final rawGroups = body['groups'];
+    if (rawGroups is List) {
+      final out = <LiveGroup>[];
+      for (final e in rawGroups) {
+        if (e is! Map) continue;
+        final g = LiveGroup.fromJson(Map<String, dynamic>.from(e));
+        if (g.name.trim().isEmpty || g.channels.isEmpty) continue;
+        out.add(g);
+      }
+      return out;
     }
-    if (raw is! List) return const <LiveChannel>[];
-    return <LiveChannel>[
-      for (final e in raw)
-        if (e is Map) LiveChannel.fromJson(Map<String, dynamic>.from(e)),
+
+    // 旧结构：扁平 items，按 group 字段现场分组（保持首次出现顺序）。
+    dynamic raw = body['items'];
+    if (raw is! List) raw = body;
+    if (raw is! List) return const <LiveGroup>[];
+    final order = <String>[];
+    final map = <String, List<LiveChannel>>{};
+    for (final e in raw) {
+      if (e is! Map) continue;
+      final c = LiveChannel.fromJson(Map<String, dynamic>.from(e));
+      if (c.title.isEmpty || c.url.isEmpty) continue;
+      final key = c.group.trim().isEmpty ? '其他' : c.group.trim();
+      if (!map.containsKey(key)) {
+        map[key] = <LiveChannel>[];
+        order.add(key);
+      }
+      map[key]!.add(c);
+    }
+    return <LiveGroup>[
+      for (final k in order)
+        LiveGroup(id: k, name: k, cover: '', channels: map[k]!),
     ];
+  }
+
+  /// 扁平频道列表：直播页/搜索等只需要频道时使用。
+  static Future<List<LiveChannel>> live() async {
+    final groups = await liveGroups();
+    return <LiveChannel>[for (final g in groups) ...g.channels];
+  }
+
+  /// 单频道详情：优先 `GET /api/live/channel?id=`（新服务端可选接口），
+  /// 404 / 老服务端没有该接口时退回 `/api/live` 全文里按 id 查。
+  static Future<LiveChannel?> liveChannel(String id) async {
+    final key = id.trim();
+    if (key.isEmpty) return null;
+    try {
+      final r = await _send(
+        () => http.get(_u('/live/channel', {'id': key}), headers: _headers()),
+      );
+      if (r.statusCode != 404) {
+        dynamic j;
+        try {
+          j = jsonDecode(utf8.decode(r.bodyBytes));
+        } catch (_) {}
+        if (j is Map) {
+          final data = j['data'];
+          final raw =
+              data is Map ? (data['channel'] ?? data) : (j['channel'] ?? j);
+          if (raw is Map) {
+            final c = LiveChannel.fromJson(Map<String, dynamic>.from(raw));
+            if (c.id.isNotEmpty && c.lines.isNotEmpty) return c;
+          }
+        }
+      }
+    } catch (_) {
+      // 老服务端直接 404 / 断网：继续走列表兜底。
+    }
+    try {
+      for (final group in await liveGroups()) {
+        for (final channel in group.channels) {
+          if (channel.id == key) return channel;
+        }
+      }
+    } catch (_) {}
+    return null;
   }
 
   static Future<List<VideoCard>> search(String q, int page) async {

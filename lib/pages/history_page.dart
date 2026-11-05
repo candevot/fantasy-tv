@@ -34,7 +34,8 @@ class FxStore {
     }
   }
 
-  static Future<void> write(String key, List<Map<String, dynamic>> items) async {
+  static Future<void> write(
+      String key, List<Map<String, dynamic>> items) async {
     try {
       final sp = await SharedPreferences.getInstance();
       await sp.setStringList(key, items.map((e) => jsonEncode(e)).toList());
@@ -161,12 +162,18 @@ class FxStore {
     int episodes = 0,
     String category = '',
     List<String> tags = const [],
+    String kind = 'video',
+    String group = '',
+    String url = '',
+    List<Map<String, dynamic>> lines = const <Map<String, dynamic>>[],
   }) async {
     if (id.isEmpty) return;
     final list = await read(favoriteKey);
-    list.removeWhere((e) => '${e['id']}' == id);
+    list.removeWhere(
+        (e) => '${e['id']}' == id && '${e['kind'] ?? 'video'}' == kind);
     list.insert(0, <String, dynamic>{
       'id': id,
+      'kind': kind,
       'title': title,
       'cover': cover,
       'rating': rating,
@@ -175,6 +182,9 @@ class FxStore {
       'episodes': episodes,
       'category': category,
       'tags': tags,
+      if (group.isNotEmpty) 'group': group,
+      if (url.isNotEmpty) 'url': url,
+      if (lines.isNotEmpty) 'lines': lines,
       'updatedAt': DateTime.now().millisecondsSinceEpoch,
     });
     await write(favoriteKey, list);
@@ -271,7 +281,10 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Future<void> _load() async {
     final raw = await FxStore.read(FxStore.historyKey);
-    final list = raw.map(WatchRecord.fromMap).where((e) => e.id.isNotEmpty).toList()
+    final list = raw
+        .map(WatchRecord.fromMap)
+        .where((e) => e.id.isNotEmpty)
+        .toList()
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     if (!mounted) return;
     setState(() {
@@ -388,8 +401,7 @@ class _HistoryPageState extends State<HistoryPage> {
           padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
           child: Row(
             children: [
-              const Icon(Icons.cloud_done_rounded,
-                  size: 13, color: Fx.sub),
+              const Icon(Icons.cloud_done_rounded, size: 13, color: Fx.sub),
               const SizedBox(width: 5),
               Text('共 ${_items.length} 条 · 仅保存在本机',
                   style: const TextStyle(fontSize: 10.5, color: Fx.sub)),
@@ -410,8 +422,7 @@ class _HistoryPageState extends State<HistoryPage> {
                 children: [
                   if (showHeader)
                     Padding(
-                      padding: EdgeInsets.fromLTRB(
-                          2, i == 0 ? 4 : 16, 2, 8),
+                      padding: EdgeInsets.fromLTRB(2, i == 0 ? 4 : 16, 2, 8),
                       child: Row(
                         children: [
                           Container(
@@ -487,8 +498,8 @@ class _HistoryPageState extends State<HistoryPage> {
                           value: r.progress,
                           minHeight: 3,
                           backgroundColor: Colors.white.withOpacity(.4),
-                          valueColor: const AlwaysStoppedAnimation<Color>(
-                              Fx.accent),
+                          valueColor:
+                              const AlwaysStoppedAnimation<Color>(Fx.accent),
                         ),
                       ),
                   ],
@@ -513,14 +524,12 @@ class _HistoryPageState extends State<HistoryPage> {
                   Text(epAndLine,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontSize: 11, color: Fx.accent)),
+                      style: const TextStyle(fontSize: 11, color: Fx.accent)),
                   const SizedBox(height: 5),
                   Text(progressText,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontSize: 10.5, color: Fx.sub)),
+                      style: const TextStyle(fontSize: 10.5, color: Fx.sub)),
                   const SizedBox(height: 6),
                   Row(
                     children: [
@@ -553,8 +562,7 @@ class _HistoryPageState extends State<HistoryPage> {
                   color: Colors.white.withOpacity(.6),
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.close_rounded,
-                    size: 15, color: Fx.sub),
+                child: const Icon(Icons.close_rounded, size: 15, color: Fx.sub),
               ),
             ),
           ],

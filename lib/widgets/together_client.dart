@@ -5,6 +5,8 @@ import 'dart:math' as math;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api.dart';
+import '../models.dart';
+import 'together_sync.dart';
 import 'together_ui.dart';
 
 /* ========================================================================== */
@@ -41,8 +43,11 @@ class TogetherRoomState {
     required this.playing,
     required this.ended,
     required this.position,
-    required this.at,
-    required this.rev,
+    required this.serverTime,
+    required this.seq,
+    required this.rate,
+    this.kind = '',
+    this.liveChannel,
   });
 
   final String code;
@@ -56,17 +61,42 @@ class TogetherRoomState {
   final bool ended;
   final double position;
 
-  /// 服务端毫秒时间戳（客户端用 offset 换算成本地时钟）。
-  final int at;
+  /// 服务端毫秒时间戳：这份 position 对应的服务器时刻。
+  final int serverTime;
 
-  /// 权威版本号，单调递增。
-  final int rev;
+  /// 权威版本号（服务端 `seq`，旧服务端为 `rev`），单调递增。
+  final int seq;
+
+  /// 房主播放倍速，成员跟随。
+  final double rate;
+
+  /// 房间类型：`live` = 直播一起看；普通剧集为空 / `video`。
+  final String kind;
+
+  /// 直播房解析出的频道（含线路）；普通房为 null。
+  final LiveChannel? liveChannel;
+
+  bool get isLive => kind == 'live' || liveChannel != null;
+
+  /// 旧字段别名，保留给仍读 at / rev / line 的地方。
+  int get at => serverTime;
+  int get rev => seq;
+  String get lineId => line;
 
   factory TogetherRoomState.fromJson(Map<String, dynamic> j) {
-    final rawState = '${j['state'] ?? 'pause'}';
+    final rawState = '${j['state'] ?? ''}';
+    final rawPlaying = j['playing'];
+    final playing = rawPlaying is bool ? rawPlaying : rawState == 'play';
+    final serverAt = togetherInt(j['serverTime']);
+    final serverTime = serverAt > 0 ? serverAt : togetherInt(j['at']);
+    final rawSeq = togetherInt(j['seq']);
+    final seq = rawSeq > 0 ? rawSeq : togetherInt(j['rev']);
+    final title = '${j['title'] ?? '一起看'}';
+    final live = togetherLiveChannel(j) ?? decodeLiveRoomTitle(title);
+    final rawKind = '${j['kind'] ?? ''}'.trim();
     return TogetherRoomState(
       code: '${j['code'] ?? ''}',
-      title: '${j['title'] ?? '一起看'}',
+      title: title,
       hostId: '${j['hostId'] ?? ''}',
       members: ((j['members'] ?? []) as List)
           .whereType<Map>()
@@ -74,12 +104,15 @@ class TogetherRoomState {
           .toList(),
       videoId: '${j['videoId'] ?? ''}',
       ep: togetherInt(j['ep'], 1),
-      line: '${j['line'] ?? 'l1'}',
-      playing: rawState == 'play',
+      line: '${j['lineId'] ?? j['line'] ?? 'l1'}',
+      playing: playing,
       ended: rawState == 'ended',
       position: togetherDouble(j['position']),
-      at: togetherInt(j['at']),
-      rev: togetherInt(j['rev']),
+      serverTime: serverTime,
+      seq: seq,
+      rate: togetherClampRate(togetherDouble(j['rate'], 1)),
+      kind: rawKind.isEmpty ? (live != null ? 'live' : '') : rawKind,
+      liveChannel: live,
     );
   }
 
@@ -87,8 +120,9 @@ class TogetherRoomState {
     bool? playing,
     bool? ended,
     double? position,
-    int? at,
+    int? serverTime,
     int? ep,
+    double? rate,
   }) {
     return TogetherRoomState(
       code: code,
@@ -101,10 +135,32 @@ class TogetherRoomState {
       playing: playing ?? this.playing,
       ended: ended ?? this.ended,
       position: position ?? this.position,
-      at: at ?? this.at,
-      rev: rev,
+      serverTime: serverTime ?? this.serverTime,
+      seq: seq,
+      rate: rate ?? this.rate,
+      kind: kind,
+      liveChannel: liveChannel,
     );
   }
+}
+
+/// 从 room_state / create payload 里解析直播频道。
+///
+/// 新服务端给 `kind/channelId/lines`；老服务端只把频道编码在 title 里。
+LiveChannel? togetherLiveChannel(Map<String, dynamic> j) {
+  final kind = '${j['kind'] ?? j['roomKind'] ?? ''}'.trim();
+  final id = '${j['channelId'] ?? ''}'.trim();
+  final lines = j['lines'] ?? j['liveLines'];
+  if (kind != 'live' && id.isEmpty && lines is! List) return null;
+  final raw = <String, dynamic>{
+    'id': id.isNotEmpty ? id : '${j['videoId'] ?? ''.trim()}',
+    'title': '${j['liveName'] ?? j['channelName'] ?? j['name'] ?? ''}',
+    'cover': '${j['liveCover'] ?? j['cover'] ?? ''}',
+    'group': '${j['liveGroup'] ?? j['group'] ?? ''}',
+    'lines': lines is List ? lines : const <Object?>[],
+  };
+  final channel = LiveChannel.tryFrom(raw);
+  return channel;
 }
 
 /// `create` 的响应（`action: room`）。
@@ -117,6 +173,8 @@ class TogetherRoomInfo {
     required this.line,
     required this.hostId,
     required this.members,
+    this.kind = '',
+    this.liveChannel,
   });
 
   final String code;
@@ -127,10 +185,16 @@ class TogetherRoomInfo {
   final String hostId;
   final List<TogetherMember> members;
 
+  /// 直播房类型与频道数据。
+  final String kind;
+  final LiveChannel? liveChannel;
+
   factory TogetherRoomInfo.fromJson(Map<String, dynamic> j) {
+    final title = '${j['title'] ?? '一起看'}';
+    final live = togetherLiveChannel(j) ?? decodeLiveRoomTitle(title);
     return TogetherRoomInfo(
       code: '${j['code'] ?? ''}',
-      title: '${j['title'] ?? '一起看'}',
+      title: title,
       videoId: '${j['videoId'] ?? ''}',
       ep: togetherInt(j['ep'], 1),
       line: '${j['line'] ?? 'l1'}',
@@ -139,6 +203,10 @@ class TogetherRoomInfo {
           .whereType<Map>()
           .map((e) => TogetherMember.fromJson(togetherMap(e)))
           .toList(),
+      kind: '${j['kind'] ?? ''}'.trim().isEmpty
+          ? (live != null ? 'live' : '')
+          : '${j['kind']}'.trim(),
+      liveChannel: live,
     );
   }
 }
@@ -180,12 +248,17 @@ class TogetherClient {
   final void Function(String reason) onClosed;
 
   static const Duration _pingPeriod = Duration(seconds: 10);
+  static const Duration _clockRefreshPeriod = Duration(seconds: 30);
+  static const int _clockPingCount = 3;
+  static const Duration _clockPingGap = Duration(milliseconds: 120);
+  static const Duration _clockRoundTimeout = Duration(milliseconds: 1200);
   static final RegExp _codePattern = RegExp(r'^\d{6}$');
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
   Timer? _retry;
   Timer? _ping;
+  Timer? _clockTimer;
   Timer? _openTimeout;
   bool _closed = false;
   bool _connecting = false;
@@ -211,27 +284,38 @@ class TogetherClient {
   int _hostEp = 1;
   String _hostLine = 'l1';
   String _hostTitle = '';
+  String _hostKind = '';
+  String _hostChannelId = '';
+  Map<String, dynamic> _hostLive = const <String, dynamic>{};
   Map<String, dynamic>? _pendingCreate;
 
   String selfId = '';
   String selfName = '';
   String selfAvatar = '';
 
-  int _offset = 0;
-  int _rtt = 0;
+  /// 时钟偏移：serverTime - Date.now()，3 次 ping 的中位数，30 秒刷新一次。
+  final TogetherClock _clock = TogetherClock();
   int _lastPingAt = 0;
-  final List<int> _samples = <int>[];
+  int _clockRound = 0;
+  int _clockFinishedRound = 0;
+  int _clockPingId = 0;
+  final Map<int, List<int>> _clockOffsets = <int, List<int>>{};
+  final Map<int, List<int>> _clockRtts = <int, List<int>>{};
+  final Map<int, int> _clockPingRound = <int, int>{};
 
   bool get connected => _connected;
 
   /// 已有待发送的 create（重连/降级后由客户端统一补发，页面不要重复建房）。
   bool get hasPendingCreate => _pendingCreate != null;
 
-  /// 至少收到过一次 pong，才敢用服务端时间推算进度。
-  bool get synced => _samples.isNotEmpty;
+  /// 至少完成过一轮 3 次 ping 的中位数校准，才敢用服务端时间推算进度。
+  bool get synced => _clock.ready;
+
+  /// 时钟偏移（毫秒），供调试 / 页面展示。
+  int get clockOffset => _clock.offsetMs;
 
   /// 最近一次 RTT（毫秒）。
-  int get rtt => _rtt;
+  int get rtt => _clock.rttMs;
 
   /// 下一次自动重连的等待秒数（0 表示未在重连）。
   int get retryDelaySeconds => _retryDelaySec;
@@ -239,7 +323,9 @@ class TogetherClient {
   /// 房间号是否合法：只接受 6 位数字。
   static bool validCode(String code) => _codePattern.hasMatch(code.trim());
 
-  int nowServerMs() => DateTime.now().millisecondsSinceEpoch + _offset;
+  /// 本地当前时间换算成服务器时钟：Date.now() + offset。
+  int nowServerMs() =>
+      _clock.nowServerMs(DateTime.now().millisecondsSinceEpoch);
 
   /* ------------------------------------------------------------ 连接 */
 
@@ -288,6 +374,8 @@ class TogetherClient {
     _connected = false;
     _connecting = false;
     _lastPongAt = 0;
+    _stopClockSync();
+    _clock.reset();
     _openTimeout?.cancel();
     _openTimeout = null;
     _ping?.cancel();
@@ -321,12 +409,14 @@ class TogetherClient {
     _ping?.cancel();
     ping();
     _ping = Timer.periodic(_pingPeriod, (_) => _pingTick());
+    _startClockSync();
   }
 
   /// 切后台时暂停心跳，回前台再恢复，省电也避免后台误判超时。
   void pauseHeartbeat() {
     _ping?.cancel();
     _ping = null;
+    _stopClockSync();
   }
 
   void resumeHeartbeat() {
@@ -338,7 +428,8 @@ class TogetherClient {
   void _pingTick() {
     if (_closed || !_connected) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (_lastPongAt > 0 && now - _lastPongAt >= _pingPeriod.inMilliseconds * 2) {
+    if (_lastPongAt > 0 &&
+        now - _lastPongAt >= _pingPeriod.inMilliseconds * 2) {
       // 两个 ping 周期都没有 pong：连接已经死了（半开 TCP），主动重连。
       _fail();
       return;
@@ -346,11 +437,78 @@ class TogetherClient {
     ping();
   }
 
+  /// 心跳 ping（不带 id）：只测活，不参与时钟中位数。
   void ping() {
     if (_closed || !_connected) return;
     final t = DateTime.now().millisecondsSinceEpoch;
     _lastPingAt = t;
     _send({'action': 'ping', 't': t});
+  }
+
+  /// 3 次 ping 取中位数，然后每 30 秒重校一次。
+  void _startClockSync() {
+    _stopClockSync();
+    _clockBurst();
+    _clockTimer = Timer.periodic(_clockRefreshPeriod, (_) => _clockBurst());
+  }
+
+  void _stopClockSync() {
+    _clockTimer?.cancel();
+    _clockTimer = null;
+    // 让已经排队的 burst 定时器失效，避免切后台后还继续发 ping。
+    _clockFinishedRound = _clockRound;
+    _clockOffsets.clear();
+    _clockRtts.clear();
+    _clockPingRound.clear();
+  }
+
+  void _clockBurst() {
+    if (_closed || !_connected) return;
+    final round = ++_clockRound;
+    _clockOffsets[round] = <int>[];
+    _clockRtts[round] = <int>[];
+    for (var i = 0; i < _clockPingCount; i++) {
+      Timer(_clockPingGap * i, () {
+        if (_closed || !_connected || round <= _clockFinishedRound) return;
+        final id = ++_clockPingId;
+        final t = DateTime.now().millisecondsSinceEpoch;
+        _clockPingRound[id] = round;
+        _lastPingAt = t;
+        _send({'action': 'ping', 't': t, 'id': id});
+      });
+    }
+    // 弱网丢了 1–2 个 pong 时也别一直等：超时用已有样本收尾。
+    Timer(_clockRoundTimeout, () => _finishClockRound(round));
+  }
+
+  void _finishClockRound(int round) {
+    if (round <= _clockFinishedRound) return;
+    final offsets = _clockOffsets.remove(round) ?? const <int>[];
+    final rtts = _clockRtts.remove(round) ?? const <int>[];
+    _clockFinishedRound = round;
+    // 丢掉这一轮没收到 pong 的 ping id，避免长期运行后 Map 累积。
+    _clockPingRound.removeWhere((_, pendingRound) => pendingRound <= round);
+    if (offsets.isEmpty) return;
+    _clock.update(
+      offsetMs: TogetherClock.median(offsets),
+      rttMs: TogetherClock.median(rtts),
+    );
+  }
+
+  void _collectClockPong(Map<String, dynamic> msg, int sent, int recv) {
+    final id = togetherInt(msg['id']);
+    final round = id > 0 ? _clockPingRound.remove(id) : 0;
+    if (round == null || round <= 0) return;
+    final offsets = _clockOffsets[round];
+    final rtts = _clockRtts[round];
+    if (offsets == null || rtts == null) return;
+    if (round <= _clockFinishedRound) return;
+    final serverTime = togetherInt(msg['serverTime']);
+    final serverAt = serverTime > 0 ? serverTime : togetherInt(msg['serverAt']);
+    if (serverAt <= 0) return;
+    offsets.add(serverAt - (sent + recv) ~/ 2);
+    rtts.add(recv - sent);
+    if (offsets.length >= _clockPingCount) _finishClockRound(round);
   }
 
   /// 回到前台时主动要一次权威状态（服务器对已在房间的连接会直接回 room_state）。
@@ -378,11 +536,17 @@ class TogetherClient {
     int ep = 1,
     String line = 'l1',
     String title = '',
+    String kind = '',
+    String channelId = '',
+    Map<String, dynamic> live = const <String, dynamic>{},
   }) {
     _hostVideoId = videoId;
     _hostEp = ep < 1 ? 1 : ep;
     _hostLine = line.isEmpty ? 'l1' : line;
     _hostTitle = title;
+    _hostKind = kind;
+    _hostChannelId = channelId;
+    _hostLive = live;
     host = true;
     code = '';
     _rejoining = false;
@@ -392,13 +556,26 @@ class TogetherClient {
     }
   }
 
-  Map<String, dynamic> _createPayload() => <String, dynamic>{
+  Map<String, dynamic> _createPayload() {
+    if (_hostKind == 'live') {
+      return <String, dynamic>{
         'action': 'create',
-        'videoId': _hostVideoId,
-        'ep': _hostEp,
+        // 直播频道 id 不是影片 id：不能传 videoId，否则服务端会报 not_found。
+        'kind': 'live',
+        'channelId': _hostChannelId,
         'line': _hostLine,
         if (_hostTitle.isNotEmpty) 'title': _hostTitle,
+        ..._hostLive,
       };
+    }
+    return <String, dynamic>{
+      'action': 'create',
+      'videoId': _hostVideoId,
+      'ep': _hostEp,
+      'line': _hostLine,
+      if (_hostTitle.isNotEmpty) 'title': _hostTitle,
+    };
+  }
 
   bool joinRoom(String roomCode) {
     final value = roomCode.trim();
@@ -423,6 +600,8 @@ class TogetherClient {
     String? videoId,
     int? ep,
     String? line,
+    double? rate,
+    bool live = false,
   }) {
     // 房主标记由服务器判定：即使本地标记过期，也让服务器拒绝并回发权威状态。
     if (videoId != null && videoId.isNotEmpty) _hostVideoId = videoId;
@@ -431,11 +610,23 @@ class TogetherClient {
     _send({
       'action': 'state',
       'state': state,
+      'playing': state == 'play',
       'position': position < 0 ? 0 : position,
       if (videoId != null && videoId.isNotEmpty) 'videoId': videoId,
       if (ep != null && ep > 0) 'ep': ep,
       if (line != null && line.isNotEmpty) 'line': line,
+      if (rate != null && rate > 0) 'rate': rate,
+      if (live) ...<String, dynamic>{
+        'kind': 'live',
+        'channelId': _hostChannelId,
+        ..._hostLive,
+      },
     });
+  }
+
+  /// 房主：修改倍速，立刻广播给成员。
+  void sendRate(double rate) {
+    _send({'action': 'rate', 'rate': rate});
   }
 
   /// 房主：拖动进度。
@@ -473,6 +664,7 @@ class TogetherClient {
     _closed = true;
     _retry?.cancel();
     _ping?.cancel();
+    _stopClockSync();
     _openTimeout?.cancel();
     _retry = null;
     _ping = null;
@@ -617,12 +809,20 @@ class TogetherClient {
     final recv = DateTime.now().millisecondsSinceEpoch;
     _lastPongAt = recv;
     final sent = togetherInt(msg['t'], _lastPingAt);
-    final serverAt = togetherInt(msg['serverAt']);
+    final serverTime = togetherInt(msg['serverTime']);
+    final serverAt = serverTime > 0 ? serverTime : togetherInt(msg['serverAt']);
     if (serverAt <= 0 || sent <= 0) return;
-    _rtt = recv - sent;
-    _samples.add(serverAt - (sent + recv) ~/ 2);
-    if (_samples.length > 5) _samples.removeAt(0);
-    final sorted = List<int>.from(_samples)..sort();
-    _offset = sorted[sorted.length ~/ 2];
+    final id = togetherInt(msg['id']);
+    if (id > 0) {
+      _collectClockPong(msg, sent, recv);
+      return;
+    }
+    // 兼容旧服务端（没有 id）：只在尚未完成中位数校准时兜底采一次。
+    if (!_clock.ready) {
+      _clock.update(
+        offsetMs: serverAt - (sent + recv) ~/ 2,
+        rttMs: recv - sent,
+      );
+    }
   }
 }

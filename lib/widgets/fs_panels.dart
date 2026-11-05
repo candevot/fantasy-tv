@@ -65,15 +65,16 @@ class FsBottomBar extends StatelessWidget {
     required this.rate,
     required this.qualityLabel,
     this.qualityActive = false,
-    required this.onSeek,
+    this.onSeek,
     required this.onTogglePlay,
-    required this.onNext,
-    required this.onSpeed,
-    required this.onQuality,
-    required this.onEpisodes,
+    this.onNext,
+    this.onSpeed,
+    this.onQuality,
+    this.onEpisodes,
     required this.onExit,
     this.compact = false,
     this.bottomInset = 0,
+    this.live = false,
   });
 
   final Duration position;
@@ -87,15 +88,19 @@ class FsBottomBar extends StatelessWidget {
 
   /// 当前选中的不是主播放地址时高亮入口。
   final bool qualityActive;
-  final ValueChanged<Duration> onSeek;
+  final ValueChanged<Duration>? onSeek;
   final VoidCallback onTogglePlay;
-  final VoidCallback onNext;
-  final VoidCallback onSpeed;
-  final VoidCallback onQuality;
-  final VoidCallback onEpisodes;
+  final VoidCallback? onNext;
+  final VoidCallback? onSpeed;
+  final VoidCallback? onQuality;
+  final VoidCallback? onEpisodes;
   final VoidCallback onExit;
   final bool compact;
   final double bottomInset;
+
+  /// 直播：隐藏进度条 / 下一集 / 倍速 / 选集，显示 LIVE，只保留
+  /// 播放暂停、清晰度（线路切换）和退出全屏。
+  final bool live;
 
   @override
   Widget build(BuildContext context) {
@@ -112,19 +117,20 @@ class FsBottomBar extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          FxSeekRow(
-            position: position,
-            duration: duration,
-            buffered: buffered,
-            onSeek: onSeek,
-            height: 5,
-            touchHeight: 40,
-            thumbSize: 16,
-            labelWidth: 48,
-            timeFontSize: 11,
-            timeFontWeight: FontWeight.w600,
-          ),
-          const SizedBox(height: 4),
+          if (!live)
+            FxSeekRow(
+              position: position,
+              duration: duration,
+              buffered: buffered,
+              onSeek: onSeek ?? (_) {},
+              height: 5,
+              touchHeight: 40,
+              thumbSize: 16,
+              labelWidth: 48,
+              timeFontSize: 11,
+              timeFontWeight: FontWeight.w600,
+            ),
+          if (!live) const SizedBox(height: 4),
           Row(
             children: [
               PGlassIcon(
@@ -136,23 +142,28 @@ class FsBottomBar extends StatelessWidget {
                 onTap: onTogglePlay,
               ),
               const SizedBox(width: 8),
-              PGlassIcon(
-                icon: Icons.skip_next_rounded,
-                size: 34 * s,
-                iconSize: 19 * s,
-                tint: .16,
-                tooltip: '下一集',
-                onTap: onNext,
-              ),
-              const Spacer(),
-              const SizedBox(width: 10),
-              FsTextAction(
-                text: '倍速',
-                size: s,
-                active: (rate - 1).abs() > .001,
-                onTap: onSpeed,
-              ),
-              const SizedBox(width: 8),
+              if (live) ...[
+                const _FsLiveBadge(),
+                const Spacer(),
+              ] else ...[
+                PGlassIcon(
+                  icon: Icons.skip_next_rounded,
+                  size: 34 * s,
+                  iconSize: 19 * s,
+                  tint: .16,
+                  tooltip: '下一集',
+                  onTap: onNext,
+                ),
+                const Spacer(),
+                const SizedBox(width: 10),
+                FsTextAction(
+                  text: '倍速',
+                  size: s,
+                  active: (rate - 1).abs() > .001,
+                  onTap: onSpeed,
+                ),
+                const SizedBox(width: 8),
+              ],
               if (qualityLabel.isNotEmpty) ...[
                 FsTextAction(
                   text: qualityLabel,
@@ -162,8 +173,10 @@ class FsBottomBar extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
               ],
-              FsTextAction(text: '选集', size: s, onTap: onEpisodes),
-              const SizedBox(width: 8),
+              if (!live) ...[
+                FsTextAction(text: '选集', size: s, onTap: onEpisodes),
+                const SizedBox(width: 8),
+              ],
               PGlassIcon(
                 icon: Icons.fullscreen_exit_rounded,
                 size: 34 * s,
@@ -709,6 +722,39 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                       );
                     },
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 底部控制条的 LIVE 标识：红点 + LIVE + 当前线路。
+class _FsLiveBadge extends StatelessWidget {
+  const _FsLiveBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFF4D4F).withOpacity(.20),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFFF6B6B).withOpacity(.55)),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.circle, size: 6, color: Color(0xFFFF5A5A)),
+          SizedBox(width: 5),
+          Text(
+            'LIVE',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              letterSpacing: .5,
+            ),
           ),
         ],
       ),

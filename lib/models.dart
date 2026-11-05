@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 // ---------------------------------------------------------------------------
 // JSON 安全取值：服务端数据脏（null、数字混进字符串、对象冒充数组）时，
 // 宁可让单个字段退化成默认值、单个条目跳过，也不让整个页面解析失败。
@@ -222,10 +224,128 @@ class HomeData {
   HomeData(this.banners, this.sections);
 }
 
-/// 直播频道条目：`GET /api/live` → `{items:[{id,title,cover,url,group}]}`。
-/// 先只用于首页 2 列卡片展示；url/group 缺失时退化成空串，不影响展示。
+/// 直播线路：同一频道可能有 4K / 1080P / 720P 多条流。
+///
+/// 服务端（`GET /api/live`）只给 `{label,url,height}`，没有 id：
+/// 解析时按高度降序排序后补 `l1…lN`，保证同房间的成员拿到相同 lineId。
+class LiveLine {
+  final String id, name, url;
+  final int height;
+
+  const LiveLine({
+    required this.id,
+    required this.name,
+    required this.url,
+    this.height = 0,
+  });
+
+  /// 展示用清晰度：优先服务端 label，其次按实际高度分档。
+  String get qualityLabel {
+    final raw = name.trim().toUpperCase();
+    if (raw == '4K' || raw == '1080P' || raw == '720P' || raw == 'SD') {
+      return raw == 'SD' ? '标清' : raw;
+    }
+    final label = liveQualityLabel(height);
+    return label.isEmpty ? (raw.isEmpty ? '直播' : name.trim()) : label;
+  }
+
+  /// 线路卡副标题：服务端 label 与清晰度重复时退回线路序号。
+  String subtitle(int index) {
+    final n = name.trim();
+    if (n.isEmpty || n.toUpperCase() == qualityLabel.toUpperCase()) {
+      return '线路 ${index + 1}';
+    }
+    return n;
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'id': id,
+        'name': name,
+        'url': url,
+        if (height > 0) 'height': height,
+      };
+
+  factory LiveLine.fromJson(Map<String, dynamic> j) {
+    final name = _asStr(j['label']).trim().isNotEmpty
+        ? _asStr(j['label'])
+        : (_asStr(j['name']).trim().isNotEmpty
+            ? _asStr(j['name'])
+            : _asStr(j['resolution']));
+    var height = _asInt(j['height']);
+    if (height <= 0) height = _heightFromLabel(name);
+    return LiveLine(
+      id: _asStr(j['id']),
+      name: name,
+      url: _asStr(j['url']).trim().isNotEmpty
+          ? _asStr(j['url'])
+          : _asStr(j['playUrl']),
+      height: height,
+    );
+  }
+}
+
+/// 4K / 1080P / 720P / 标清；0 高度返回空串（旧接口没有分辨率）。
+String liveQualityLabel(int height) {
+  if (height >= 2160) return '4K';
+  if (height >= 1080) return '1080P';
+  if (height >= 720) return '720P';
+  if (height > 0) return '标清';
+  return '';
+}
+
+int _heightFromLabel(String raw) {
+  final s = raw.trim().toUpperCase();
+  if (s.contains('4K') || s.contains('2160')) return 2160;
+  if (s.contains('1080')) return 1080;
+  if (s.contains('720')) return 720;
+  if (s.contains('576') || s.contains('480') || s.contains('SD')) return 480;
+  return 0;
+}
+
+List<LiveLine> _parseLiveLines(Object? raw, String fallbackUrl) {
+  final input = <LiveLine>[];
+  for (final e in _asList(raw)) {
+    if (e is String) {
+      final url = e.trim();
+      if (url.isEmpty) continue;
+      input.add(LiveLine(id: '', name: '', url: url));
+    } else if (e is Map) {
+      final line = LiveLine.fromJson(_asMap(e));
+      if (line.url.trim().isEmpty) continue;
+      input.add(line);
+    }
+  }
+  if (input.isEmpty && fallbackUrl.trim().isNotEmpty) {
+    input.add(LiveLine(id: 'l1', name: '', url: fallbackUrl.trim()));
+  }
+  // 按高度降序；高度相同时保持服务端顺序，避免成员之间排序不一致。
+  final indexed = <MapEntry<int, LiveLine>>[
+    for (var i = 0; i < input.length; i++) MapEntry<int, LiveLine>(i, input[i]),
+  ];
+  indexed.sort((a, b) {
+    final byHeight = b.value.height.compareTo(a.value.height);
+    return byHeight != 0 ? byHeight : a.key.compareTo(b.key);
+  });
+  final seen = <String>{};
+  final out = <LiveLine>[];
+  for (var i = 0; i < indexed.length; i++) {
+    final line = indexed[i].value;
+    if (!seen.add(line.url)) continue;
+    out.add(LiveLine(
+      id: line.id.trim().isEmpty ? 'l${out.length + 1}' : line.id.trim(),
+      name: line.name,
+      url: line.url,
+      height: line.height,
+    ));
+  }
+  return out;
+}
+
+/// 直播频道条目：`GET /api/live` → `groups[].channels[]`
+/// （兼容旧版扁平 `items`）。`lines` 为空时用 url 兜底成单线路。
 class LiveChannel {
   final String id, title, cover, url, group;
+  final List<LiveLine> lines;
 
   const LiveChannel({
     required this.id,
@@ -233,15 +353,129 @@ class LiveChannel {
     required this.cover,
     this.url = '',
     this.group = '',
+    this.lines = const <LiveLine>[],
   });
 
-  factory LiveChannel.fromJson(Map<String, dynamic> j) => LiveChannel(
-        id: _asStr(j['id']),
-        title: _asStr(j['title']),
-        cover: _asStr(j['cover']),
-        url: _asStr(j['url']),
-        group: _asStr(j['group']),
+  factory LiveChannel.fromJson(Map<String, dynamic> j) {
+    final title = _asStr(j['title']).trim().isNotEmpty
+        ? _asStr(j['title'])
+        : _asStr(j['name']);
+    final url = _asStr(j['url']);
+    return LiveChannel(
+      id: _asStr(j['id']),
+      title: title,
+      cover: _asStr(j['cover']).trim().isNotEmpty
+          ? _asStr(j['cover'])
+          : _asStr(j['logo']),
+      url: url,
+      group: _asStr(j['group']),
+      lines: _parseLiveLines(j['lines'], url),
+    );
+  }
+
+  LiveChannel copyWith({String? group}) => LiveChannel(
+        id: id,
+        title: title,
+        cover: cover,
+        url: url,
+        group: group ?? this.group,
+        lines: lines,
       );
+
+  Map<String, dynamic> toMap() => <String, dynamic>{
+        'id': id,
+        'title': title,
+        'cover': cover,
+        'url': url,
+        'group': group,
+        'lines': [for (final line in lines) line.toJson()],
+      };
+
+  /// 从收藏 / 房间标题里还原频道；数据不合法时返回 null。
+  static LiveChannel? tryFrom(Object? raw) {
+    if (raw is Map) {
+      final c = LiveChannel.fromJson(_asMap(raw));
+      return c.id.isEmpty || c.lines.isEmpty ? null : c;
+    }
+    return null;
+  }
+}
+
+/// 一起看房间标题里携带直播频道的标记。
+///
+/// 旧服务端只回传 `title` 文本，不会透传 `kind/channelId/lines`；把频道
+/// 压缩进标题后，成员加入时仍能解析出频道和线路。新服务端若透传了
+/// `kind/channelId/lines`，则优先使用结构化字段，这里只是兼容兜底。
+const String liveRoomMarker = '#FXLV#';
+
+String encodeLiveRoomTitle(LiveChannel channel) {
+  try {
+    final raw = jsonEncode(channel.toMap());
+    final code = base64Url.encode(utf8.encode(raw)).replaceAll('=', '');
+    final name = channel.title.trim().isEmpty ? '电视直播' : channel.title.trim();
+    return '$name · 一起看$liveRoomMarker$code';
+  } catch (_) {
+    return '${channel.title} · 一起看';
+  }
+}
+
+/// 从房间标题里拆出频道；不是直播房 / 数据损坏时返回 null。
+LiveChannel? decodeLiveRoomTitle(String title) {
+  final at = title.lastIndexOf(liveRoomMarker);
+  if (at < 0) return null;
+  final code = title.substring(at + liveRoomMarker.length).trim();
+  if (code.isEmpty) return null;
+  try {
+    final normalized = base64Url.normalize(code);
+    final json = jsonDecode(utf8.decode(base64Url.decode(normalized)));
+    final channel = LiveChannel.tryFrom(json);
+    if (channel == null) return null;
+    return channel;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// 房间列表 / 标题展示时去掉编码尾巴。
+String stripLiveRoomTitle(String title) {
+  final at = title.lastIndexOf(liveRoomMarker);
+  return at < 0 ? title : title.substring(0, at).trim();
+}
+
+/// 直播分组：`GET /api/live` → `{groups:[{id,name,cover,channels:[…]}]}`。
+/// 首页直播 Tab 显示分组卡，点开后进入该组的频道列表。
+class LiveGroup {
+  final String id, name, cover;
+  final List<LiveChannel> channels;
+
+  const LiveGroup({
+    required this.id,
+    required this.name,
+    required this.cover,
+    required this.channels,
+  });
+
+  int get count => channels.length;
+
+  factory LiveGroup.fromJson(Map<String, dynamic> j) {
+    final name = _asStr(j['name']);
+    final raw = j['channels'] is List ? j['channels'] : j['items'];
+    final list = <LiveChannel>[];
+    if (raw is List) {
+      for (final e in raw) {
+        if (e is! Map) continue;
+        final c = LiveChannel.fromJson(Map<String, dynamic>.from(e));
+        if (c.title.isEmpty || c.lines.isEmpty) continue;
+        list.add(c.copyWith(group: c.group.isEmpty ? name : c.group));
+      }
+    }
+    return LiveGroup(
+      id: _asStr(j['id']),
+      name: name,
+      cover: _asStr(j['cover']),
+      channels: list,
+    );
+  }
 }
 
 class LineInfo {

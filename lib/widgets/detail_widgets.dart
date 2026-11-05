@@ -371,12 +371,20 @@ class DetailLineCard extends StatelessWidget {
     required this.count,
     required this.active,
     this.onTap,
+    this.subtitle,
+    this.width = 102,
   });
 
   final String name;
   final int count;
   final bool active;
   final VoidCallback? onTap;
+
+  /// 第二行文案；为空时显示「共 N 集」（直播线路用清晰度 / 线路名）。
+  final String? subtitle;
+
+  /// 卡片宽度；直播线路文字更长时可适当加宽。
+  final double width;
 
   @override
   Widget build(BuildContext context) {
@@ -385,7 +393,7 @@ class DetailLineCard extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        width: 102,
+        width: width,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
         decoration: BoxDecoration(
           color: active
@@ -421,7 +429,9 @@ class DetailLineCard extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '共$count集',
+              subtitle ?? '共$count集',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 10.5,
                 fontWeight: active ? FontWeight.w700 : FontWeight.w400,

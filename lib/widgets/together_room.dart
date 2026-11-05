@@ -56,6 +56,7 @@ class TogetherRoomView extends StatefulWidget {
     required this.onRetry,
     required this.onHostOnly,
     this.keyboardVisible = false,
+    this.isLive = false,
   });
 
   final FxPlayer? player;
@@ -105,6 +106,9 @@ class TogetherRoomView extends StatefulWidget {
   /// 键盘是否弹起。由页面层（Scaffold 之上）读取 viewInsets 传入：
   /// Scaffold 在 resizeToAvoidBottomInset=true 时会把 body 的 viewInsets 清零。
   final bool keyboardVisible;
+
+  /// 直播房：隐藏进度、选集、换剧，显示 LIVE。
+  final bool isLive;
 
   @override
   State<TogetherRoomView> createState() => _TogetherRoomViewState();
@@ -302,18 +306,20 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           ),
           const SizedBox(width: 6),
           TogetherPill(
-            text: '换源',
+            text: widget.isLive ? '换线' : '换源',
             height: 30,
             locked: !widget.isHost,
             onTap: widget.onSwitchLine,
           ),
-          const SizedBox(width: 6),
-          TogetherPill(
-            text: '换剧',
-            height: 30,
-            locked: !widget.isHost,
-            onTap: widget.onChangeDrama,
-          ),
+          if (!widget.isLive) ...[
+            const SizedBox(width: 6),
+            TogetherPill(
+              text: '换剧',
+              height: 30,
+              locked: !widget.isHost,
+              onTap: widget.onChangeDrama,
+            ),
+          ],
         ],
       ),
     );
@@ -371,9 +377,9 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 ),
               ),
             if (widget.loading)
-              const Positioned.fill(
+              Positioned.fill(
                 child: FxLoadingOverlay(
-                  title: '正在加载视频…',
+                  title: widget.isLive ? '正在加载直播…' : '正在加载视频…',
                   dim: false,
                   compact: true,
                 ),
@@ -456,25 +462,30 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 onTap: _togglePlay,
               ),
               const SizedBox(width: 8),
-              Expanded(
-                child: _RoomProgress(
-                  position: widget.position,
-                  duration: player.value.duration,
-                  enabled: widget.isHost,
-                  onSeek: _seekTo,
-                  onBlocked: widget.onHostOnly,
+              if (widget.isLive)
+                const Expanded(child: _RoomLiveBadge())
+              else
+                Expanded(
+                  child: _RoomProgress(
+                    position: widget.position,
+                    duration: player.value.duration,
+                    enabled: widget.isHost,
+                    onSeek: _seekTo,
+                    onBlocked: widget.onHostOnly,
+                  ),
                 ),
-              ),
               const SizedBox(width: 6),
-              PGlassIcon(
-                icon: Icons.list_alt_rounded,
-                size: 32,
-                iconSize: 19,
-                tint: .20,
-                tooltip: '选集',
-                onTap: widget.onEpisodes,
-              ),
-              const SizedBox(width: 6),
+              if (!widget.isLive) ...[
+                PGlassIcon(
+                  icon: Icons.list_alt_rounded,
+                  size: 32,
+                  iconSize: 19,
+                  tint: .20,
+                  tooltip: '选集',
+                  onTap: widget.onEpisodes,
+                ),
+                const SizedBox(width: 6),
+              ],
               PGlassIcon(
                 icon: Icons.fullscreen_rounded,
                 size: 32,
@@ -540,7 +551,11 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           ),
           const SizedBox(height: 8),
           Text(
-            loading ? '正在加载视频…' : (widget.isHost ? '点击播放，和朋友一起看' : '等待房主播放'),
+            widget.isLive
+                ? (loading ? '正在加载直播…' : '等待房主开始直播')
+                : (loading
+                    ? '正在加载视频…'
+                    : (widget.isHost ? '点击播放，和朋友一起看' : '等待房主播放')),
             style: TextStyle(
               fontSize: 11,
               color: Colors.white.withOpacity(.72),
@@ -589,7 +604,10 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 _errorAction('重试', widget.onRetry),
                 if (widget.isHost) ...[
                   const SizedBox(width: 10),
-                  _errorAction('换剧/选集', widget.onMedia),
+                  _errorAction(
+                    widget.isLive ? '换线路' : '换剧/选集',
+                    widget.isLive ? widget.onSwitchLine : widget.onMedia,
+                  ),
                 ],
               ],
             ),
@@ -649,13 +667,17 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  count > 0 ? '$_epLabel · 共 $count 集' : _epLabel,
+                  widget.isLive
+                      ? '直播中'
+                      : (count > 0 ? '$_epLabel · 共 $count 集' : _epLabel),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 10,
                     fontWeight: FontWeight.w600,
-                    color: Fx.sub.withOpacity(.92),
+                    color: widget.isLive
+                        ? const Color(0xFFFF5A5A)
+                        : Fx.sub.withOpacity(.92),
                   ),
                 ),
               ],
@@ -757,6 +779,42 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
 /* ========================================================================== */
 /*  房间视频区进度条：房主可拖，成员拖动只提示「跟随房主」                      */
 /* ========================================================================== */
+
+/// 直播房视频区底部的 LIVE 标识（替代进度条）。
+class _RoomLiveBadge extends StatelessWidget {
+  const _RoomLiveBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFF4D4F).withOpacity(.20),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFFF6B6B).withOpacity(.5)),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.circle, size: 6, color: Color(0xFFFF5A5A)),
+            SizedBox(width: 5),
+            Text(
+              'LIVE',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+                letterSpacing: .5,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 class _RoomProgress extends StatefulWidget {
   const _RoomProgress({

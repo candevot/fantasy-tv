@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
 import 'history_page.dart';
+import 'live_detail_page.dart';
 
 /* ========================================================================== */
 /*  收藏                                                                       */
@@ -21,9 +23,17 @@ class FavRecord {
     required this.category,
     required this.tags,
     required this.updatedAt,
+    this.kind = 'video',
+    this.group = '',
+    this.url = '',
+    this.lines = const <LiveLine>[],
   });
 
   final String id;
+  final String kind;
+  final String group;
+  final String url;
+  final List<LiveLine> lines;
   final String title;
   final String cover;
   final num rating;
@@ -47,10 +57,19 @@ class FavRecord {
             ? (m['tags'] as List).map((e) => '$e').toList()
             : <String>[],
         updatedAt: fxInt(m['updatedAt']),
+        kind: fxStr(m['kind'], 'video').isEmpty
+            ? 'video'
+            : fxStr(m['kind'], 'video'),
+        group: fxStr(m['group']),
+        url: fxStr(m['url']),
+        lines: LiveChannel.fromJson(m).lines,
       );
+
+  bool get isLive => kind == 'live';
 
   Map<String, dynamic> toMap() => <String, dynamic>{
         'id': id,
+        'kind': kind,
         'title': title,
         'cover': cover,
         'rating': rating,
@@ -59,6 +78,9 @@ class FavRecord {
         'episodes': episodes,
         'category': category,
         'tags': tags,
+        if (group.isNotEmpty) 'group': group,
+        if (url.isNotEmpty) 'url': url,
+        if (lines.isNotEmpty) 'lines': [for (final l in lines) l.toJson()],
         'updatedAt': updatedAt,
       };
 }
@@ -145,9 +167,23 @@ class _FavoritePageState extends State<FavoritePage> {
     ));
   }
 
-  void _open(String id) {
+  void _open(FavRecord r) {
+    if (r.isLive) {
+      final channel = LiveChannel(
+        id: r.id,
+        title: r.title,
+        cover: r.cover,
+        url: r.url,
+        group: r.group,
+        lines: r.lines,
+      );
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => LiveDetailPage(channel: channel)),
+      );
+      return;
+    }
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => DetailPage(id: id)),
+      MaterialPageRoute(builder: (_) => DetailPage(id: r.id)),
     );
   }
 
@@ -204,16 +240,18 @@ class _FavoritePageState extends State<FavoritePage> {
 
   Widget _card(FavRecord r) {
     final tags = r.tags.take(3).join(' / ');
-    final meta = [
-      if (r.year > 0) '${r.year}',
-      fxCategoryName(r.category),
-      if (r.episodes > 0) '${r.episodes} 集',
-    ].join(' · ');
+    final meta = r.isLive
+        ? [if (r.group.isNotEmpty) r.group, '直播'].join(' · ')
+        : [
+            if (r.year > 0) '${r.year}',
+            fxCategoryName(r.category),
+            if (r.episodes > 0) '${r.episodes} 集',
+          ].join(' · ');
     return GlassCard(
       padding: const EdgeInsets.all(10),
       radius: 18,
       opacity: .62,
-      onTap: () => _open(r.id),
+      onTap: () => _open(r),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

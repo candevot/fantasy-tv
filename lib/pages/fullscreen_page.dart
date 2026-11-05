@@ -85,6 +85,7 @@ class FullPlayerPage extends StatefulWidget {
     this.qualityKey,
     this.canChangeLine = false,
     this.fillScreen = false,
+    this.isLive = false,
   });
 
   /// 竖屏播放页正在使用的播放器实例（全屏直接复用）
@@ -118,6 +119,10 @@ class FullPlayerPage extends StatefulWidget {
 
   /// 全屏是否撑满（默认关、contain）；打开才 cover。
   final bool fillScreen;
+
+  /// 直播全屏：复用同一个播放器，但隐藏进度条 / 选集 / 倍速 / 下一集，
+  /// 左右横滑不再 seek，底部常驻 LIVE。默认 false，不影响点播。
+  final bool isLive;
 
   @override
   State<FullPlayerPage> createState() => _FullPlayerPageState();
@@ -292,6 +297,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   bool get _playing => _controller?.value.isPlaying ?? false;
 
+  /// 直播模式：不做进度回写、倍速、选集、看门狗与按秒 seek。
+  bool get _isLive => widget.isLive;
+
   List<QualityItem> get _qualityList => _info?.quality ?? const <QualityItem>[];
 
   /// 只有 ≥2 个真实码率才提供清晰度入口（产品要求，单码率不显示）。
@@ -405,17 +413,20 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
     WidgetsBinding.instance.addObserver(this);
     unawaited(_enterImmersive());
-    _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (!mounted) return;
-      unawaited(_saveProgress());
-      _maybePrewarmNext();
-    });
-    _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
-    _resetWatchdogClock();
-    _startHideTimer();
-    if (widget.videoId.isNotEmpty && _episodes.isEmpty) {
-      unawaited(_loadEpisodeMeta());
+    if (!_isLive) {
+      _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+        if (!mounted) return;
+        unawaited(_saveProgress());
+        _maybePrewarmNext();
+      });
+      _watchdogTimer =
+          Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
+      _resetWatchdogClock();
+      if (widget.videoId.isNotEmpty && _episodes.isEmpty) {
+        unawaited(_loadEpisodeMeta());
+      }
     }
+    _startHideTimer();
   }
 
   @override
@@ -784,6 +795,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 切换清晰度：真正换 networkUrl，并恢复切换前的进度 / 倍速 / 播放状态。
   /// 新清晰度失败时回退打开原来的播放地址；连回退也失败才进入错误态。
   Future<void> _selectQuality(String? key) async {
+    if (_isLive) return;
     if (_loading || _switching) {
       fxToast(context, '正在切换，请稍候');
       return;
@@ -964,6 +976,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Future<double> _saveProgress({bool ended = false}) async {
+    if (_isLive) return 0; // 直播没有可回写的观看进度。
     if (_loading || _error) return 0;
     final c = _controller;
     final ep = _loadedEp;
@@ -998,6 +1011,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 播放中位置连续 12 秒不前进（仍在 buffering / 应该播放）时重开当前地址；
   /// 一次自愈仍失败则退出全屏并请求竖屏切下一条线路。
   void _checkWatchdog() {
+    if (_isLive) return;
     if (!mounted || _watchdogBusy) return;
     if (_loading || _error || _switching || _backgrounded) {
       _resetWatchdogClock();
@@ -1367,12 +1381,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _ended = false;
       return;
     }
+    if (_isLive) return; // 直播流断开由重新拉流处理，不走「播完下一集」。
     if (_ended) return;
     _ended = true;
     unawaited(_handleEnded());
   }
 
   Future<void> _handleEnded() async {
+    if (_isLive) return;
     await _saveProgress(ended: true);
     if (!mounted) return;
     if (_loopMode == FxLoopMode.single) {
@@ -1401,6 +1417,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 当前集播过 30 秒后后台预热下一集 /api/play 与 m3u8（只请求，不 open）。
   void _maybePrewarmNext() {
+    if (_isLive) return;
     if (!mounted || _loading || _error) return;
     final c = _controller;
     final loaded = _loadedEp;
@@ -1433,6 +1450,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Future<void> _switchEp(int next, {bool auto = false}) async {
+    if (_isLive) return;
     if (_loading || _switching) return;
     if (next == _ep) {
       _closePanels();
@@ -1456,6 +1474,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Future<void> _next() async {
+    if (_isLive) return;
     final next = _nextEpNumber();
     if (next == null) {
       fxToast(context, '已经是最后一集了');
@@ -1583,6 +1602,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   void _seekTo(Duration d) {
+    if (_isLive) return; // 直播没有可回看的进度。
     final c = _controller;
     if (c == null || _loading || _switching || !c.value.isInitialized) return;
     unawaited(c.seekTo(d));
@@ -1590,6 +1610,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   void _seekBy(int seconds) {
+    if (_isLive) return;
     final c = _controller;
     if (c == null || _loading || _switching || !c.value.isInitialized) return;
     final total = c.value.duration;
@@ -1627,6 +1648,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   void _startHold2x() {
+    if (_isLive) return;
     final c = _controller;
     if (c == null ||
         _loading ||
@@ -1655,6 +1677,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   void _toggleSpeed() {
+    if (_isLive) {
+      fxToast(context, '直播不支持倍速');
+      return;
+    }
     _hideTimer?.cancel();
     setState(() {
       _showSpeed = !_showSpeed;
@@ -1665,6 +1691,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Future<void> _openEpisodeSheet() async {
+    if (_isLive) {
+      fxToast(context, '直播没有选集');
+      return;
+    }
     if (_loading || _switching) return;
     _hideTimer?.cancel();
     if (_episodes.isEmpty) {
@@ -1684,6 +1714,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   void _toggleQuality() {
+    if (_isLive) return;
     if (_loading || _switching) {
       fxToast(context, '正在切换，请稍候');
       return;
@@ -1709,6 +1740,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Future<void> _openMorePanel() async {
+    if (_isLive) {
+      fxToast(context, '直播暂不支持更多设置');
+      _wake();
+      return;
+    }
     _hideTimer?.cancel();
     if (mounted) setState(() => _controls = true);
     await showFxMorePanel(
@@ -1858,8 +1894,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     onTap: _onSurfaceTap,
                     onDoubleTap: _togglePlay,
                     onSeek: _seekTo,
-                    onLongPressStart: _startHold2x,
-                    onLongPressEnd: _endHold2x,
+                    enableSeek: !_isLive,
+                    onLongPressStart: _isLive ? null : _startHold2x,
+                    onLongPressEnd: _isLive ? null : _endHold2x,
                     onGestureStart: _hideControls,
                     resetBrightnessOnDispose: true,
                   ),
@@ -2034,17 +2071,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _errorAction('重试', () {
-                    unawaited(_retryPlayback());
-                  }),
-                  if (widget.canChangeLine) ...[
+                  if (!_isLive) ...[
+                    _errorAction('重试', () {
+                      unawaited(_retryPlayback());
+                    }),
+                    if (widget.canChangeLine) ...[
+                      const SizedBox(width: 10),
+                      _errorAction(
+                        '换线路',
+                        () => unawaited(_exit(requestLineChange: true)),
+                      ),
+                    ],
                     const SizedBox(width: 10),
-                    _errorAction(
-                      '换线路',
-                      () => unawaited(_exit(requestLineChange: true)),
-                    ),
                   ],
-                  const SizedBox(width: 10),
                   _errorAction('退出全屏', () => unawaited(_exit())),
                 ],
               ),
@@ -2099,8 +2138,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           right: 0,
           child: FsTopBar(
             title: _title,
-            epLabel: _epLabel,
-            quality: _qualityText,
+            epLabel: _isLive ? 'LIVE · 直播中' : _epLabel,
+            quality: _isLive ? '' : _qualityText,
             compact: compact,
             onBack: () => unawaited(_exit()),
             onCast: () => fxToast(context, '投屏：暂无可用设备'),
@@ -2112,6 +2151,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: FsSideControls(
             onLock: _lock,
             onSeekBy: _seekBy,
+            showSeek: !_isLive,
           ),
         ),
         Positioned(
@@ -2121,7 +2161,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (_showQuality)
+              if (!_isLive && _showQuality)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: Align(
@@ -2134,7 +2174,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     ),
                   ),
                 ),
-              if (_showSpeed)
+              if (!_isLive && _showSpeed)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: Align(
@@ -2162,16 +2202,22 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       buffered: v.buffered,
                       playing: v.isInitialized && v.isPlaying,
                       rate: _rate,
-                      qualityLabel: _canChangeQuality ? '清晰度' : '',
-                      qualityActive: _canChangeQuality && _qualityKey != null,
+                      qualityLabel: _isLive
+                          ? ''
+                          : (_canChangeQuality ? '清晰度' : ''),
+                      qualityActive:
+                          !_isLive && _canChangeQuality && _qualityKey != null,
                       compact: compact,
                       bottomInset: bottomInset,
-                      onSeek: _seekTo,
+                      live: _isLive,
+                      onSeek: _isLive ? null : _seekTo,
                       onTogglePlay: _togglePlay,
-                      onNext: () => unawaited(_next()),
-                      onSpeed: _toggleSpeed,
-                      onQuality: _toggleQuality,
-                      onEpisodes: () => unawaited(_openEpisodeSheet()),
+                      onNext: _isLive ? null : () => unawaited(_next()),
+                      onSpeed: _isLive ? null : _toggleSpeed,
+                      onQuality: _isLive ? null : _toggleQuality,
+                      onEpisodes: _isLive
+                          ? null
+                          : () => unawaited(_openEpisodeSheet()),
                       onExit: () => unawaited(_exit()),
                     );
                   },

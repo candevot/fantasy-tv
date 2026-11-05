@@ -8,6 +8,7 @@ import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
+import 'live_detail_page.dart';
 import 'search_page.dart';
 import 'together_page.dart';
 
@@ -51,9 +52,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _error;
 
   /// 直播频道单独维护：接口可能为空 / 404，失败也按空态处理，不弹错误。
-  List<LiveChannel> _liveItems = const <LiveChannel>[];
+  List<LiveGroup> _liveGroups = const <LiveGroup>[];
   bool _liveLoading = false;
   bool _liveLoaded = false;
+
+  /// 首页直播 Tab 直接展示频道（分组只作为副标题），点一次就进详情。
+  List<LiveChannel> get _liveChannels =>
+      <LiveChannel>[for (final group in _liveGroups) ...group.channels];
 
   @override
   void initState() {
@@ -204,10 +209,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final req = ++_req;
     setState(() => _liveLoading = true);
     try {
-      final items = await Api.live();
+      final groups = await Api.liveGroups();
       if (!mounted || req != _req || _channel != 'live') return;
       setState(() {
-        _liveItems = items;
+        _liveGroups = groups;
         _liveLoaded = true;
         _liveLoading = false;
       });
@@ -215,7 +220,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它频道。
       if (!mounted || req != _req || _channel != 'live') return;
       setState(() {
-        _liveItems = const <LiveChannel>[];
+        _liveGroups = const <LiveGroup>[];
         _liveLoaded = true;
         _liveLoading = false;
       });
@@ -444,12 +449,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ];
   }
 
-  /// 直播频道：2 列卡片；接口为空 / 失败时展示占位空态，不影响其它频道。
+  /// 直播频道：2 列卡片，点频道直接进入直播详情；接口为空 / 失败时展示
+  /// 占位空态，不影响其它频道。
   List<Widget> _liveBody() {
+    final channels = _liveChannels;
     if (_liveLoading && !_liveLoaded) {
       return const [SliverToBoxAdapter(child: _HomeSkeleton())];
     }
-    if (_liveItems.isEmpty) {
+    if (channels.isEmpty) {
       return [
         SliverFillRemaining(
           hasScrollBody: false,
@@ -465,7 +472,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     return [
       SliverPadding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 24),
         sliver: SliverGrid(
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 2,
@@ -474,11 +481,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             childAspectRatio: 1.05,
           ),
           delegate: SliverChildBuilderDelegate(
-            (ctx, i) => _LiveCard(
-              item: _liveItems[i],
-              onTap: () => _toast('直播即将上线'),
-            ),
-            childCount: _liveItems.length,
+            (ctx, i) {
+              final channel = channels[i];
+              return _LiveChannelCard(
+                channel: channel,
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => LiveDetailPage(channel: channel),
+                  ),
+                ),
+              );
+            },
+            childCount: channels.length,
           ),
         ),
       ),
@@ -922,17 +936,17 @@ class _HomeSkeleton extends StatelessWidget {
   }
 }
 
-/// 直播卡片：封面 + 台名 + 分组标签。直播源尚未接入，点击只给占位提示。
-class _LiveCard extends StatelessWidget {
-  const _LiveCard({required this.item, required this.onTap});
+/// 直播频道卡：封面（或渐变占位）+ 频道名 + 分组；点一次进直播详情。
+class _LiveChannelCard extends StatelessWidget {
+  const _LiveChannelCard({required this.channel, required this.onTap});
 
-  final LiveChannel item;
+  final LiveChannel channel;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final title = item.title.trim().isEmpty ? '未命名频道' : item.title.trim();
-    final group = item.group.trim();
+    final title = channel.title.trim().isEmpty ? '未命名频道' : channel.title.trim();
+    final group = channel.group.trim();
     return RepaintBoundary(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
@@ -958,7 +972,23 @@ class _LiveCard extends StatelessWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    FxCover(url: item.cover, title: title, radius: 10),
+                    if (channel.cover.trim().isEmpty)
+                      Container(
+                        decoration: BoxDecoration(
+                          gradient: Fx.brand,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Center(
+                          child: Icon(Icons.live_tv_rounded,
+                              color: Colors.white, size: 34),
+                        ),
+                      )
+                    else
+                      FxCover(
+                          url: channel.cover,
+                          title: title,
+                          radius: 10,
+                          showText: false),
                     Positioned(
                       top: 6,
                       left: 6,
@@ -988,6 +1018,28 @@ class _LiveCard extends StatelessWidget {
                         ),
                       ),
                     ),
+                    if (channel.lines.length > 1)
+                      Positioned(
+                        right: 6,
+                        bottom: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(.46),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            '${channel.lines.length} 条线路',
+                            style: const TextStyle(
+                              fontSize: 9,
+                              height: 1.1,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -1002,27 +1054,13 @@ class _LiveCard extends StatelessWidget {
                   color: Fx.ink,
                 ),
               ),
-              if (group.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Fx.accent.withOpacity(.10),
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Text(
-                    group,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w500,
-                      color: Fx.accent,
-                    ),
-                  ),
-                ),
-              ],
+              const SizedBox(height: 2),
+              Text(
+                group.isEmpty ? '直播中' : group,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 10, color: Fx.sub),
+              ),
             ],
           ),
         ),

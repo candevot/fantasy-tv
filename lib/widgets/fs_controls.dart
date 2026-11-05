@@ -284,10 +284,14 @@ class FsSideControls extends StatelessWidget {
     super.key,
     required this.onLock,
     required this.onSeekBy,
+    this.showSeek = true,
   });
 
   final VoidCallback onLock;
   final ValueChanged<int> onSeekBy;
+
+  /// 直播没有可回看的进度：只保留左侧锁屏，隐藏 ±10s。
+  final bool showSeek;
 
   @override
   Widget build(BuildContext context) {
@@ -308,35 +312,36 @@ class FsSideControls extends StatelessWidget {
             ),
           ),
         ),
-        Positioned(
-          right: 14,
-          top: 0,
-          bottom: 0,
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                PGlassIcon(
-                  icon: Icons.forward_10_rounded,
-                  size: 44,
-                  iconSize: 23,
-                  tint: .16,
-                  tooltip: '快进 10 秒',
-                  onTap: () => onSeekBy(10),
-                ),
-                const SizedBox(height: 22),
-                PGlassIcon(
-                  icon: Icons.replay_10_rounded,
-                  size: 44,
-                  iconSize: 23,
-                  tint: .16,
-                  tooltip: '后退 10 秒',
-                  onTap: () => onSeekBy(-10),
-                ),
-              ],
+        if (showSeek)
+          Positioned(
+            right: 14,
+            top: 0,
+            bottom: 0,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  PGlassIcon(
+                    icon: Icons.forward_10_rounded,
+                    size: 44,
+                    iconSize: 23,
+                    tint: .16,
+                    tooltip: '快进 10 秒',
+                    onTap: () => onSeekBy(10),
+                  ),
+                  const SizedBox(height: 22),
+                  PGlassIcon(
+                    icon: Icons.replay_10_rounded,
+                    size: 44,
+                    iconSize: 23,
+                    tint: .16,
+                    tooltip: '后退 10 秒',
+                    onTap: () => onSeekBy(-10),
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
       ],
     );
   }

@@ -18,6 +18,8 @@ dependencies:
   media_kit_libs_video: 1.0.6
   web_socket_channel: ^2.4.0
   shared_preferences: ^2.2.2
+  # 直播详情「分享」调系统分享面板；10.x 兼容 Flutter 3.24 / compileSdk 34。
+  share_plus: ^10.1.4
   image_picker: ^1.1.2
   image: ^4.2.0
   path_provider: ^2.1.4

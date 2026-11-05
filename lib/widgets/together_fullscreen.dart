@@ -64,6 +64,7 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.onRetry,
     required this.onHostOnly,
     required this.onSendChat,
+    this.isLive = false,
   });
 
   final FxPlayer? player;
@@ -114,6 +115,9 @@ class TogetherFullscreenView extends StatefulWidget {
   final VoidCallback onRetry;
   final VoidCallback onHostOnly;
   final bool Function(String text) onSendChat;
+
+  /// 直播房：隐藏进度 / 选集 / 倍速 / 换剧，显示 LIVE。
+  final bool isLive;
 
   @override
   State<TogetherFullscreenView> createState() => _TogetherFullscreenViewState();
@@ -459,6 +463,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               child: FxPlayerGestures(
                 player: player,
                 enabled: widget.errorText.isEmpty,
+                enableSeek: !widget.isLive,
                 onTap: _onSurfaceTap,
                 onDoubleTap: _wake,
                 onSeek: (value) => _seekTo(value.inMilliseconds / 1000.0),
@@ -610,6 +615,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
           child: FsSideControls(
             onLock: _lock,
             onSeekBy: _seekBy,
+            showSeek: !widget.isLive,
           ),
         ),
         Positioned(
@@ -627,12 +633,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                     child: FsQualityPanel(
                       items: widget.qualities,
                       currentKey: widget.qualityKey,
-                      showSource: true,
+                      showSource: !widget.isLive,
                       onPick: _openQualityPanel,
                     ),
                   ),
                 ),
-              if (_showSpeed)
+              if (_showSpeed && !widget.isLive)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: Align(
@@ -710,14 +716,20 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             tooltip: '换源',
             onTap: widget.onSwitchLine,
           ),
-          const SizedBox(width: 7),
-          PGlassIcon(
-            icon: Icons.movie_filter_rounded,
-            size: 32,
-            iconSize: 17,
-            tooltip: '换剧',
-            onTap: widget.onChangeDrama,
-          ),
+          if (!widget.isLive) ...[
+            const SizedBox(width: 7),
+            PGlassIcon(
+              icon: Icons.movie_filter_rounded,
+              size: 32,
+              iconSize: 17,
+              tooltip: '换剧',
+              onTap: widget.onChangeDrama,
+            ),
+          ],
+          if (widget.isLive) ...[
+            const SizedBox(width: 8),
+            const _LivePill(),
+          ],
           if (widget.qualityLabel.isNotEmpty) ...[
             const SizedBox(width: 12),
             FsQualityPill(label: widget.qualityLabel),
@@ -772,6 +784,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   }
 
   String get _epLabel {
+    if (widget.isLive) return 'LIVE · 直播中';
     for (final episode in widget.episodes) {
       if (episode.n == widget.ep) {
         return fxEpisodeLabel(episode.n, episode.name);
@@ -800,6 +813,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               buffered: value?.buffered ?? Duration.zero,
               playing: value?.isInitialized == true && value!.isPlaying,
               rate: widget.rate,
+              live: widget.isLive,
               qualityLabel: widget.canChangeQuality ? '清晰度' : '',
               qualityActive:
                   widget.canChangeQuality && widget.qualityKey != null,
@@ -1086,6 +1100,35 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 }
 
 /// 顶部 / 中央短提示胶囊（3.0x 快进中）。
+/// 全屏一起看顶栏的 LIVE 胶囊。
+class _LivePill extends StatelessWidget {
+  const _LivePill();
+
+  @override
+  Widget build(BuildContext context) {
+    return PGlassPill(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.circle, size: 6, color: Color(0xFFFF5A5A)),
+          SizedBox(width: 4),
+          Text(
+            'LIVE',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: .5,
+              shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _FsBadge extends StatelessWidget {
   const _FsBadge({required this.text});
 

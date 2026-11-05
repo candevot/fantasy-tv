@@ -30,6 +30,7 @@ class FxPlayerGestures extends StatefulWidget {
     this.onGestureStart,
     this.enabled = true,
     this.enableVertical = true,
+    this.enableSeek = true,
     this.resetBrightnessOnDispose = true,
   });
 
@@ -48,6 +49,9 @@ class FxPlayerGestures extends StatefulWidget {
 
   /// 是否启用左半屏亮度 / 右半屏音量上下滑。
   final bool enableVertical;
+
+  /// 是否启用左右滑调进度；直播没有可回看的进度，传 false。
+  final bool enableSeek;
 
   /// 退出页面时是否把应用亮度恢复成系统亮度。
   /// 全屏退出、竖屏离开播放页时都要恢复。
@@ -349,10 +353,13 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
       onLongPressCancel: widget.enabled && widget.onLongPressEnd != null
           ? () => widget.onLongPressEnd!()
           : null,
-      onHorizontalDragStart: widget.enabled ? _onHorizontalStart : null,
-      onHorizontalDragUpdate: widget.enabled ? _onHorizontalUpdate : null,
-      onHorizontalDragEnd: widget.enabled ? _onHorizontalEnd : null,
-      onHorizontalDragCancel: widget.enabled
+      onHorizontalDragStart:
+          widget.enabled && widget.enableSeek ? _onHorizontalStart : null,
+      onHorizontalDragUpdate:
+          widget.enabled && widget.enableSeek ? _onHorizontalUpdate : null,
+      onHorizontalDragEnd:
+          widget.enabled && widget.enableSeek ? _onHorizontalEnd : null,
+      onHorizontalDragCancel: widget.enabled && widget.enableSeek
           ? () {
               _mode = _GestureMode.none;
               _hideHudSoon();
