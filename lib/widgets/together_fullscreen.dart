@@ -493,7 +493,11 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             ),
           if (widget.loading)
             Positioned.fill(
-              child: FxLoadingOverlay(title: fxLoadingEpisodeText(widget.ep)),
+              child: FxLoadingOverlay(
+                title: fxLoadingEpisodeText(widget.ep),
+                // 有最后一帧时不再压暗，让切换过程继续看得到画面。
+                dim: widget.frozenFrame == null,
+              ),
             ),
           if (!_locked)
             Positioned.fill(
