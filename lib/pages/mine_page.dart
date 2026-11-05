@@ -160,8 +160,8 @@ class _MinePageState extends State<MinePage> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消',
-                style: TextStyle(fontSize: 13, color: Fx.sub)),
+            child:
+                const Text('取消', style: TextStyle(fontSize: 13, color: Fx.sub)),
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
@@ -205,17 +205,17 @@ class _MinePageState extends State<MinePage> {
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(
               parent: BouncingScrollPhysics()),
-          padding: const EdgeInsets.fromLTRB(18, 6, 18, 110),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
           children: [
             Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const Text('我的',
                     style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w800,
-                        color: Fx.ink,
-                        letterSpacing: -.3)),
+                        fontSize: 20,
+                        height: 1.2,
+                        fontWeight: FontWeight.w600,
+                        color: Fx.ink)),
                 const Spacer(),
                 Container(
                   padding:
@@ -227,39 +227,31 @@ class _MinePageState extends State<MinePage> {
                   ),
                   child: const Text('v1.0.0',
                       style: TextStyle(
-                          fontSize: 9.5, color: Color(0xFFA6B1C2))),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w400,
+                          color: Color(0xFFA6B1C2))),
                 ),
               ],
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 16),
             _profile(),
-            const SizedBox(height: 18),
-            _statHeader(),
-            const SizedBox(height: 8),
+            const SizedBox(height: 20),
+            _sectionHeader('观看统计', trailing: '仅统计本机'),
+            const SizedBox(height: 10),
             _stats(),
             const SizedBox(height: 20),
-            const Text('我的功能',
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: Fx.ink)),
-            const SizedBox(height: 8),
-            _entryCard(),
-            const SizedBox(height: 26),
+            _sectionHeader('我的功能'),
+            const SizedBox(height: 10),
+            _entryGrid(),
+            const SizedBox(height: 28),
             const Center(
-              child: Column(
-                children: [
-                  Text('幻想影视 · 纯净追剧',
-                      style: TextStyle(
-                          fontSize: 10.5,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF9AA6B8),
-                          letterSpacing: .3)),
-                  SizedBox(height: 4),
-                  Text('无广告 · 无会员 · 只为看好剧',
-                      style: TextStyle(
-                          fontSize: 9.5, color: Color(0xFFB3BECD))),
-                ],
+              child: Text(
+                '无广告 · 无会员 · 只为看好剧',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w400,
+                    color: Color(0xFFA6B1C2),
+                    letterSpacing: .3),
               ),
             ),
           ],
@@ -268,11 +260,32 @@ class _MinePageState extends State<MinePage> {
     );
   }
 
+  Widget _sectionHeader(String title, {String? trailing}) {
+    return Row(
+      children: [
+        Text(title,
+            style: const TextStyle(
+                fontSize: 17,
+                height: 1.2,
+                fontWeight: FontWeight.w600,
+                color: Fx.ink)),
+        const Spacer(),
+        if (trailing != null)
+          Text(trailing,
+              style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                  color: Color(0xFFA6B1C2))),
+      ],
+    );
+  }
+
   Widget _profile() {
     final user = Auth.instance.user;
     final logged = user != null;
+    final account = user?.account.trim() ?? '';
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           colors: [
@@ -283,7 +296,7 @@ class _MinePageState extends State<MinePage> {
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: Colors.white.withOpacity(.95)),
         boxShadow: [
           BoxShadow(
@@ -310,12 +323,13 @@ class _MinePageState extends State<MinePage> {
                         child: Text(
                           logged
                               ? (user.nickname.isEmpty ? '幻想用户' : user.nickname)
-                              : '点击登录/注册',
+                              : '点击登录 / 注册',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              fontSize: 19,
-                              fontWeight: FontWeight.w800,
+                              fontSize: 18,
+                              height: 1.2,
+                              fontWeight: FontWeight.w600,
                               color: Fx.ink),
                         ),
                       ),
@@ -341,17 +355,38 @@ class _MinePageState extends State<MinePage> {
                   ],
                 ),
                 const SizedBox(height: 6),
-                Text(
-                  logged
-                      ? (user.account.isEmpty ? '已登录' : user.account)
-                      : '登录后可修改昵称与头像',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11, color: Fx.sub),
+                Row(
+                  children: [
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: logged
+                            ? const Color(0xFF4CC38A)
+                            : const Color(0xFFF2B45E),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        logged
+                            ? (account.isEmpty ? '已登录' : '已登录 · $account')
+                            : '未登录 · 登录后同步观看记录',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w400,
+                            color: Fx.sub),
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
+          const SizedBox(width: 8),
           if (logged)
             Tooltip(
               message: '退出登录',
@@ -370,7 +405,9 @@ class _MinePageState extends State<MinePage> {
                       size: 16, color: Color(0xFF8E99A8)),
                 ),
               ),
-            ),
+            )
+          else
+            GradButton(text: '登录', height: 32, onTap: _openLogin),
         ],
       ),
     );
@@ -448,8 +485,7 @@ class _MinePageState extends State<MinePage> {
                       height: 18,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        valueColor:
-                            AlwaysStoppedAnimation<Color>(Colors.white),
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
                       ),
                     ),
                   ),
@@ -463,9 +499,8 @@ class _MinePageState extends State<MinePage> {
 
   Widget _avatarFallback(AuthUser? user) {
     final nickname = user?.nickname ?? '幻';
-    final char = nickname.isNotEmpty
-        ? String.fromCharCode(nickname.runes.first)
-        : '幻';
+    final char =
+        nickname.isNotEmpty ? String.fromCharCode(nickname.runes.first) : '幻';
     return Container(
       width: 64,
       height: 64,
@@ -482,24 +517,9 @@ class _MinePageState extends State<MinePage> {
     );
   }
 
-  Widget _statHeader() {
-    return const Row(
-      children: [
-        Text('观看统计',
-            style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                color: Fx.ink)),
-        Spacer(),
-        Text('仅统计本机',
-            style: TextStyle(fontSize: 9.5, color: Color(0xFFA6B1C2))),
-      ],
-    );
-  }
-
   Widget _stats() {
     return GlassCard(
-      padding: const EdgeInsets.symmetric(vertical: 15),
+      padding: const EdgeInsets.symmetric(vertical: 16),
       radius: 20,
       child: Row(
         children: [
@@ -523,15 +543,16 @@ class _MinePageState extends State<MinePage> {
             child: Text(
               value,
               style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w900,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
                   color: Colors.white,
-                  height: 1.1),
+                  height: 1.15),
             ),
           ),
           const SizedBox(height: 4),
           Text(label,
-              style: const TextStyle(fontSize: 10, color: Fx.sub)),
+              style: const TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub)),
         ],
       ),
     );
@@ -540,68 +561,74 @@ class _MinePageState extends State<MinePage> {
   Widget _divider() {
     return Container(
       width: 1,
-      height: 26,
+      height: 28,
       color: Fx.ink.withOpacity(.06),
     );
   }
 
-  Widget _entryCard() {
+  Widget _entryGrid() {
     final entries = _entries;
-    return GlassCard(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-      radius: 20,
-      child: Column(
-        children: [
-          for (var i = 0; i < entries.length; i++) ...[
-            _entryRow(entries[i]),
-            if (i != entries.length - 1)
-              Padding(
-                padding: const EdgeInsets.only(left: 50),
-                child: Container(height: 1, color: Fx.ink.withOpacity(.05)),
-              ),
+    return LayoutBuilder(
+      builder: (ctx, cons) {
+        const gap = 12.0;
+        final itemWidth = (cons.maxWidth - gap) / 2;
+        return Wrap(
+          spacing: gap,
+          runSpacing: gap,
+          children: [
+            for (final e in entries)
+              SizedBox(width: itemWidth, child: _entryTile(e)),
           ],
-        ],
-      ),
+        );
+      },
     );
   }
 
-  Widget _entryRow(_Entry e) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
+  Widget _entryTile(_Entry e) {
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      radius: 18,
+      opacity: .62,
       onTap: () => _open(e.builder(context)),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 11),
-        child: Row(
-          children: [
-            Container(
-              width: 38,
-              height: 38,
-              decoration: BoxDecoration(
-                color: e.color.withOpacity(.11),
-                borderRadius: BorderRadius.circular(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: e.color.withOpacity(.11),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(e.icon, size: 19, color: e.color),
               ),
-              child: Icon(e.icon, size: 19, color: e.color),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(e.label,
-                      style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: Fx.ink)),
-                  const SizedBox(height: 2),
-                  Text(e.subtitle,
-                      style: const TextStyle(fontSize: 10.5, color: Fx.sub)),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right_rounded,
-                size: 19, color: Color(0xFFB3BECD)),
-          ],
-        ),
+              const Spacer(),
+              const Icon(Icons.chevron_right_rounded,
+                  size: 18, color: Color(0xFFB3BECD)),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(e.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  fontSize: 14,
+                  height: 1.2,
+                  fontWeight: FontWeight.w500,
+                  color: Fx.ink)),
+          const SizedBox(height: 4),
+          Text(e.subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  fontSize: 12,
+                  height: 1.2,
+                  fontWeight: FontWeight.w400,
+                  color: Fx.sub)),
+        ],
       ),
     );
   }
@@ -671,16 +698,14 @@ class _NicknameDialogState extends State<_NicknameDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消',
-              style: TextStyle(fontSize: 13, color: Fx.sub)),
+          child:
+              const Text('取消', style: TextStyle(fontSize: 13, color: Fx.sub)),
         ),
         TextButton(
           onPressed: _save,
           child: const Text('保存',
               style: TextStyle(
-                  fontSize: 13,
-                  color: Fx.accent,
-                  fontWeight: FontWeight.w700)),
+                  fontSize: 13, color: Fx.accent, fontWeight: FontWeight.w700)),
         ),
       ],
     );

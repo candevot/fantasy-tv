@@ -302,7 +302,7 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _searchBar() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 14, 4),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
       child: Row(
         children: [
           GestureDetector(
@@ -322,11 +322,11 @@ class _SearchPageState extends State<SearchPage> {
           const SizedBox(width: 8),
           Expanded(
             child: Container(
-              height: 42,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              height: 44,
+              padding: const EdgeInsets.symmetric(horizontal: 13),
               decoration: BoxDecoration(
                 color: Colors.white.withOpacity(.78),
-                borderRadius: BorderRadius.circular(21),
+                borderRadius: BorderRadius.circular(22),
                 border: Border.all(color: Colors.white),
                 boxShadow: [
                   BoxShadow(
@@ -347,15 +347,20 @@ class _SearchPageState extends State<SearchPage> {
                       textInputAction: TextInputAction.search,
                       onSubmitted: _search,
                       style: const TextStyle(
-                          fontSize: 13.5, color: Fx.ink, height: 1.2),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w400,
+                          color: Fx.ink,
+                          height: 1.2),
                       cursorColor: Fx.accent,
                       decoration: const InputDecoration(
                         isDense: true,
                         border: InputBorder.none,
                         hintText: '搜索片名、演员、导演',
-                        hintStyle:
-                            TextStyle(fontSize: 12.5, color: Fx.sub),
-                        contentPadding: EdgeInsets.only(top: 12, bottom: 11),
+                        hintStyle: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w400,
+                            color: Fx.sub),
+                        contentPadding: EdgeInsets.only(top: 13, bottom: 12),
                       ),
                     ),
                   ),
@@ -372,13 +377,13 @@ class _SearchPageState extends State<SearchPage> {
               ),
             ),
           ),
-          const SizedBox(width: 9),
+          const SizedBox(width: 10),
           GestureDetector(
             onTap: () => _search(_q.text),
             child: Text(
               '搜索',
               style: TextStyle(
-                fontSize: 13.5,
+                fontSize: 14,
                 fontWeight: FontWeight.w600,
                 color: _q.text.isEmpty ? Fx.sub : Fx.accent,
               ),
@@ -408,17 +413,20 @@ class _SearchPageState extends State<SearchPage> {
     return ListView(
       controller: _scroll,
       physics: const BouncingScrollPhysics(),
-      padding: EdgeInsets.fromLTRB(18, 10, 18, 30 + bottom),
+      padding: EdgeInsets.fromLTRB(16, 12, 16, 30 + bottom),
       children: [
         _historyCard(),
-        const SizedBox(height: 13),
+        const SizedBox(height: 12),
         _hotCard(),
-        const SizedBox(height: 13),
+        const SizedBox(height: 12),
         _aiCard(),
-        const SizedBox(height: 18),
+        const SizedBox(height: 20),
         const Center(
           child: Text('内容来自幻想影视片库 · 每日更新',
-              style: TextStyle(fontSize: 10.5, color: Color(0xFFA6B1C2))),
+              style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                  color: Color(0xFFA6B1C2))),
         ),
       ],
     );
@@ -426,19 +434,20 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _historyCard() {
     return GlassCard(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               Icon(Icons.history_rounded,
-                  size: 16, color: Fx.accent.withOpacity(.85)),
-              const SizedBox(width: 6),
+                  size: 18, color: Fx.accent.withOpacity(.85)),
+              const SizedBox(width: 7),
               const Text('搜索历史',
                   style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 17,
+                      height: 1.2,
+                      fontWeight: FontWeight.w600,
                       color: Fx.ink)),
               const Spacer(),
               if (_history.isNotEmpty)
@@ -453,7 +462,10 @@ class _SearchPageState extends State<SearchPage> {
                             size: 15, color: Fx.sub),
                         SizedBox(width: 3),
                         Text('清空',
-                            style: TextStyle(fontSize: 11, color: Fx.sub)),
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w400,
+                                color: Fx.sub)),
                       ],
                     ),
                   ),
@@ -463,14 +475,14 @@ class _SearchPageState extends State<SearchPage> {
           const SizedBox(height: 12),
           if (_history.isEmpty)
             const Text('暂无搜索记录',
-                style: TextStyle(fontSize: 11.5, color: Fx.sub))
+                style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub))
           else
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final h in _history)
-                  ChipTag(h, onTap: () => _search(h)),
+                for (final h in _history) ChipTag(h, onTap: () => _search(h)),
               ],
             ),
         ],
@@ -480,33 +492,40 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _hotCard() {
     return GlassCard(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Row(
             children: [
               Icon(Icons.local_fire_department_rounded,
-                  size: 17, color: Color(0xFFFF8A3D)),
-              SizedBox(width: 5),
+                  size: 19, color: Color(0xFFFF8A3D)),
+              SizedBox(width: 6),
               Text('热搜榜',
                   style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 17,
+                      height: 1.2,
+                      fontWeight: FontWeight.w600,
                       color: Fx.ink)),
               SizedBox(width: 7),
               Text('大家都在搜',
-                  style: TextStyle(fontSize: 10.5, color: Fx.sub)),
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w400,
+                      color: Fx.sub)),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           LayoutBuilder(
             builder: (ctx, cons) {
               if (_hotWords.isEmpty) {
                 return const Padding(
                   padding: EdgeInsets.symmetric(vertical: 10),
                   child: Text('暂无热搜，请稍后重试',
-                      style: TextStyle(fontSize: 11.5, color: Fx.sub)),
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w400,
+                          color: Fx.sub)),
                 );
               }
               final half = (cons.maxWidth - 10) / 2;
@@ -519,17 +538,16 @@ class _SearchPageState extends State<SearchPage> {
                         behavior: HitTestBehavior.opaque,
                         onTap: () => _search(_hotWords[i]),
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 7),
+                          padding: const EdgeInsets.symmetric(vertical: 8),
                           child: Row(
                             children: [
                               SizedBox(
-                                width: 18,
+                                width: 20,
                                 child: Text(
                                   '${i + 1}',
                                   style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w800,
-                                    fontStyle: FontStyle.italic,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
                                     color: i == 0
                                         ? Fx.gold
                                         : i == 1
@@ -546,7 +564,9 @@ class _SearchPageState extends State<SearchPage> {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                      fontSize: 12, color: Fx.ink),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w400,
+                                      color: Fx.ink),
                                 ),
                               ),
                               if (i < 3)
@@ -591,8 +611,8 @@ class _SearchPageState extends State<SearchPage> {
           Row(
             children: [
               Container(
-                width: 32,
-                height: 32,
+                width: 34,
+                height: 34,
                 decoration: BoxDecoration(
                   gradient: Fx.brand,
                   borderRadius: BorderRadius.circular(10),
@@ -614,11 +634,16 @@ class _SearchPageState extends State<SearchPage> {
                 children: [
                   Text('AI 找片',
                       style: TextStyle(
-                          fontSize: 14.5,
-                          fontWeight: FontWeight.w800,
+                          fontSize: 17,
+                          height: 1.2,
+                          fontWeight: FontWeight.w600,
                           color: Fx.ink)),
+                  SizedBox(height: 2),
                   Text('一句话，从片库里找到它',
-                      style: TextStyle(fontSize: 10, color: Fx.sub)),
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w400,
+                          color: Fx.sub)),
                 ],
               ),
               const Spacer(),
@@ -635,10 +660,14 @@ class _SearchPageState extends State<SearchPage> {
             ],
           ),
           if (_showAi) ...[
-            const SizedBox(height: 11),
+            const SizedBox(height: 12),
             const Text(
               '描述剧情、题材或氛围，例如「想找一部反转不断的悬疑剧」',
-              style: TextStyle(fontSize: 11, height: 1.5, color: Fx.sub),
+              style: TextStyle(
+                  fontSize: 12,
+                  height: 1.5,
+                  fontWeight: FontWeight.w400,
+                  color: Fx.sub),
             ),
             const SizedBox(height: 10),
             Container(
@@ -655,13 +684,16 @@ class _SearchPageState extends State<SearchPage> {
                 maxLines: 2,
                 textInputAction: TextInputAction.done,
                 onSubmitted: (_) => _aiFind(),
-                style: const TextStyle(fontSize: 12.5, color: Fx.ink),
+                style: const TextStyle(fontSize: 13, color: Fx.ink),
                 cursorColor: Fx.accent,
                 decoration: const InputDecoration(
                   isDense: true,
                   border: InputBorder.none,
                   hintText: '比如：2024 年高分悬疑，最好有反转',
-                  hintStyle: TextStyle(fontSize: 11.5, color: Color(0xFFB3BECD)),
+                  hintStyle: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w400,
+                      color: Color(0xFFB3BECD)),
                   contentPadding: EdgeInsets.symmetric(vertical: 9),
                 ),
               ),
@@ -680,19 +712,21 @@ class _SearchPageState extends State<SearchPage> {
                     },
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 9, vertical: 4),
+                          horizontal: 9, vertical: 5),
                       decoration: BoxDecoration(
                         color: Colors.white.withOpacity(.6),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(e,
                           style: const TextStyle(
-                              fontSize: 10.5, color: Fx.sub)),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w400,
+                              color: Fx.sub)),
                     ),
                   ),
               ],
             ),
-            const SizedBox(height: 11),
+            const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
               height: 40,
@@ -711,20 +745,21 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _resultsView() {
     final width = MediaQuery.of(context).size.width;
-    final itemWidth = (width - 36 - 20) / 3;
+    final itemWidth = (width - 32 - 20) / 3;
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(18, 8, 18, 10),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
           child: Row(
             children: [
               Text(_mode == 'ai' ? 'AI 推荐' : '搜索结果',
                   style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 17,
+                      height: 1.2,
+                      fontWeight: FontWeight.w600,
                       color: Fx.ink)),
-              const SizedBox(width: 7),
+              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   _mode == 'ai'
@@ -732,7 +767,8 @@ class _SearchPageState extends State<SearchPage> {
                       : '「${_lastQuery ?? ''}」· ${_results.length} 部',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+                  style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
                 ),
               ),
               if (_loading)
@@ -753,13 +789,13 @@ class _SearchPageState extends State<SearchPage> {
             physics: const BouncingScrollPhysics(),
             slivers: [
               SliverPadding(
-                padding: const EdgeInsets.fromLTRB(18, 0, 18, 0),
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
                 sliver: SliverGrid(
                   gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: 3,
                     crossAxisSpacing: 10,
-                    mainAxisSpacing: 16,
-                    mainAxisExtent: itemWidth * 1.5 + 46,
+                    mainAxisSpacing: 10,
+                    mainAxisExtent: itemWidth * 1.5 + 48,
                   ),
                   delegate: SliverChildBuilderDelegate(
                     (ctx, i) {
@@ -818,7 +854,10 @@ class _SearchPageState extends State<SearchPage> {
               : _mode == 'ai'
                   ? '以上由 AI 根据片库匹配，仅供参考'
                   : '',
-          style: const TextStyle(fontSize: 10.5, color: Color(0xFFA6B1C2)),
+          style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w400,
+              color: Color(0xFFA6B1C2)),
         ),
       ),
     );

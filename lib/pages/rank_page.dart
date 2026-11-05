@@ -142,7 +142,7 @@ class _RankPageState extends State<RankPage> {
         children: [
           _header(),
           if (_error != null && _items.isNotEmpty) _retryBar(),
-          const SizedBox(height: 4),
+          const SizedBox(height: 12),
           Expanded(child: _content()),
         ],
       ),
@@ -152,7 +152,7 @@ class _RankPageState extends State<RankPage> {
   /// 刷新失败但还有旧榜单：顶部细条提示 + 重试，不整页报错。
   Widget _retryBar() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
       child: Row(
         children: [
           const Icon(Icons.error_outline_rounded, size: 14, color: Fx.sub),
@@ -162,7 +162,8 @@ class _RankPageState extends State<RankPage> {
               '刷新失败，当前为上次榜单',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 11.5, color: Fx.sub),
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
             ),
           ),
           GestureDetector(
@@ -173,7 +174,7 @@ class _RankPageState extends State<RankPage> {
               child: Text(
                 '重试',
                 style: TextStyle(
-                  fontSize: 11.5,
+                  fontSize: 12,
                   fontWeight: FontWeight.w600,
                   color: Fx.accent,
                 ),
@@ -187,35 +188,42 @@ class _RankPageState extends State<RankPage> {
 
   Widget _header() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 6, 18, 0),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('排行榜',
-                      style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w800,
-                          color: Fx.ink,
-                          letterSpacing: -.3)),
-                  SizedBox(height: 2),
-                  Text('发现此刻最热的剧集',
-                      style: TextStyle(fontSize: 11, color: Fx.sub)),
-                ],
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('排行榜',
+                        style: TextStyle(
+                            fontSize: 20,
+                            height: 1.2,
+                            fontWeight: FontWeight.w600,
+                            color: Fx.ink)),
+                    SizedBox(height: 2),
+                    Text('发现此刻最热的剧集',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w400,
+                            color: Fx.sub)),
+                  ],
+                ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               _periodButton(),
               const SizedBox(width: 8),
               GestureDetector(
                 onTap: _loading ? null : _load,
                 child: Container(
-                  width: 34,
-                  height: 34,
+                  width: 36,
+                  height: 36,
                   decoration: BoxDecoration(
                     color: Colors.white.withOpacity(.72),
                     shape: BoxShape.circle,
@@ -223,7 +231,7 @@ class _RankPageState extends State<RankPage> {
                   ),
                   child: _loading
                       ? const Padding(
-                          padding: EdgeInsets.all(9),
+                          padding: EdgeInsets.all(10),
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
                             valueColor:
@@ -236,76 +244,56 @@ class _RankPageState extends State<RankPage> {
               ),
             ],
           ),
-          const SizedBox(height: 13),
-          SizedBox(
-            height: 34,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: _types.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
-              itemBuilder: (ctx, i) {
-                final t = _types[i];
-                final active = t.key == _type;
-                return GestureDetector(
-                  onTap: () => _selectType(t.key),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    padding: const EdgeInsets.symmetric(horizontal: 15),
-                    decoration: BoxDecoration(
-                      gradient: active ? Fx.brand : null,
-                      color: active ? null : Colors.white.withOpacity(.65),
-                      borderRadius: BorderRadius.circular(17),
-                      border: Border.all(
-                        color: active ? Colors.transparent : Colors.white,
-                      ),
-                      boxShadow: active
-                          ? [
-                              BoxShadow(
-                                color: Fx.accent.withOpacity(.28),
-                                blurRadius: 12,
-                                offset: const Offset(0, 4),
-                              ),
-                            ]
-                          : null,
-                    ),
-                    child: Center(
-                      child: Text(
-                        t.label,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight:
-                              active ? FontWeight.w700 : FontWeight.w400,
-                          color: active ? Colors.white : Fx.sub,
+          const SizedBox(height: 14),
+          Container(
+            height: 40,
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(.58),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.white.withOpacity(.92)),
+            ),
+            child: Row(
+              children: [
+                for (final t in _types)
+                  Expanded(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => _selectType(t.key),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.easeOutCubic,
+                        decoration: BoxDecoration(
+                          gradient: t.key == _type ? Fx.brand : null,
+                          borderRadius: BorderRadius.circular(17),
+                          boxShadow: t.key == _type
+                              ? [
+                                  BoxShadow(
+                                    color: Fx.accent.withOpacity(.22),
+                                    blurRadius: 10,
+                                    offset: const Offset(0, 3),
+                                  ),
+                                ]
+                              : null,
+                        ),
+                        child: Center(
+                          child: Text(
+                            t.label,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: t.key == _type
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                              color: t.key == _type ? Colors.white : Fx.sub,
+                            ),
+                          ),
                         ),
                       ),
                     ),
                   ),
-                );
-              },
+              ],
             ),
           ),
-          const SizedBox(height: 9),
-          Row(
-            children: [
-              const Icon(Icons.insights_rounded, size: 13, color: Fx.sub),
-              const SizedBox(width: 5),
-              Expanded(
-                child: Text(
-                  '$_periodName · 根据片库热度整理，实时更新',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-                ),
-              ),
-              if (!_loading && _raw.isNotEmpty)
-                Text('TOP ${_raw.length}',
-                    style: const TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFFA6B1C2))),
-            ],
-          ),
-          const SizedBox(height: 6),
         ],
       ),
     );
@@ -347,11 +335,11 @@ class _RankPageState extends State<RankPage> {
           ),
       ],
       child: Container(
-        height: 34,
+        height: 36,
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(
           color: Colors.white.withOpacity(.8),
-          borderRadius: BorderRadius.circular(17),
+          borderRadius: BorderRadius.circular(18),
           border: Border.all(color: Colors.white),
           boxShadow: [
             BoxShadow(
@@ -366,9 +354,7 @@ class _RankPageState extends State<RankPage> {
           children: [
             Text(_periodName,
                 style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Fx.ink)),
+                    fontSize: 12, fontWeight: FontWeight.w600, color: Fx.ink)),
             const SizedBox(width: 2),
             const Icon(Icons.expand_more_rounded, size: 16, color: Fx.sub),
           ],
@@ -398,153 +384,136 @@ class _RankPageState extends State<RankPage> {
       backgroundColor: Colors.white,
       onRefresh: _load,
       child: ListView.separated(
-        physics:
-            const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
-        padding: const EdgeInsets.fromLTRB(18, 6, 18, 104),
+        physics: const AlwaysScrollableScrollPhysics(
+            parent: BouncingScrollPhysics()),
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 104),
         itemCount: _items.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 10),
+        separatorBuilder: (_, __) => const SizedBox(height: 12),
         itemBuilder: (ctx, i) => _row(_items[i], i),
       ),
     );
   }
 
-  Widget _row(VideoCard item, int i) {
+  Widget _rankBadge(int i) {
+    final top = i < 3;
     final color = _rankColor(i);
-    final tagLine = item.tags.isEmpty
-        ? fxCategoryName(item.category)
-        : item.tags.take(3).join(' · ');
-    final metaLine = [
+    return Container(
+      width: 34,
+      height: 38,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        gradient: top
+            ? LinearGradient(
+                colors: [color, color.withOpacity(.72)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              )
+            : null,
+        color: top ? null : Colors.white.withOpacity(.66),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(
+          color: top ? Colors.white.withOpacity(.38) : Colors.white,
+        ),
+        boxShadow: top
+            ? [
+                BoxShadow(
+                  color: color.withOpacity(.26),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ]
+            : null,
+      ),
+      child: Text(
+        '${i + 1}',
+        style: TextStyle(
+          fontSize: top ? 16 : 14,
+          height: 1,
+          fontWeight: FontWeight.w700,
+          color: top ? Colors.white : Fx.sub,
+        ),
+      ),
+    );
+  }
+
+  Widget _row(VideoCard item, int i) {
+    final meta = [
       if (item.year > 0) '${item.year}',
-      if (item.status.isNotEmpty) item.status,
-      if (item.episodes > 0) '全 ${item.episodes} 集',
+      fxCategoryName(item.category),
     ].join(' · ');
+    final update = item.status.isNotEmpty
+        ? '${item.status}${item.episodes > 0 ? ' · 共 ${item.episodes} 集' : ''}'
+        : (item.episodes > 0 ? '全 ${item.episodes} 集' : '榜单热度上升中');
     return GlassCard(
       padding: const EdgeInsets.all(10),
       radius: 18,
       opacity: i < 3 ? .72 : .6,
       onTap: () => _openDetail(item.id),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
+          _rankBadge(i),
+          const SizedBox(width: 10),
           SizedBox(
-            width: 32,
-            child: Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Column(
-                children: [
-                  Text(
-                    '${i + 1}',
-                    style: TextStyle(
-                      fontSize: i < 3 ? 22 : 16,
-                      height: 1,
-                      fontWeight: FontWeight.w900,
-                      fontStyle: FontStyle.italic,
-                      color: color,
-                    ),
-                  ),
-                  if (i < 3) ...[
-                    const SizedBox(height: 4),
-                    Container(
-                      width: 13,
-                      height: 2.5,
-                      decoration: BoxDecoration(
-                        color: color.withOpacity(.55),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          SizedBox(
-            width: 62,
-            height: 93,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                FxCover(url: item.cover, title: item.title, radius: 11),
-                if (item.rating > 0)
-                  Positioned(
-                    right: 4,
-                    bottom: 4,
-                    child: RatingBadge(item.rating),
-                  ),
-              ],
-            ),
+            width: 64,
+            height: 96,
+            child: FxCover(url: item.cover, title: item.title, radius: 14),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: SizedBox(
-              height: 93,
+              height: 96,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(
                     item.title,
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        fontSize: 14.5,
-                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                        height: 1.25,
+                        fontWeight: FontWeight.w500,
                         color: Fx.ink),
                   ),
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 4),
                   Row(
                     children: [
-                      const Icon(Icons.star_rounded,
-                          size: 13, color: Fx.gold),
-                      const SizedBox(width: 2),
+                      const Icon(Icons.star_rounded, size: 14, color: Fx.gold),
+                      const SizedBox(width: 3),
                       Text(
-                        item.rating > 0
-                            ? item.rating.toStringAsFixed(1)
-                            : '—',
+                        item.rating > 0 ? item.rating.toStringAsFixed(1) : '—',
                         style: const TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
                             color: Fx.gold),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          metaLine,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style:
-                              const TextStyle(fontSize: 10, color: Fx.sub),
+                      if (meta.isNotEmpty) ...[
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            meta,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w400,
+                                color: Fx.sub),
+                          ),
                         ),
-                      ),
+                      ],
                     ],
                   ),
-                  const SizedBox(height: 6),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Fx.accent.withOpacity(.08),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Text(
-                      tagLine,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontSize: 9.5, color: Fx.accent),
-                    ),
-                  ),
-                  const SizedBox(height: 5),
+                  const Spacer(),
                   Text(
-                    item.status.isNotEmpty
-                        ? '${item.status}${item.episodes > 0 ? ' · 共 ${item.episodes} 集' : ''}'
-                        : (item.tags.isNotEmpty
-                            ? item.tags.join(' / ')
-                            : '片库热度持续上升中'),
+                    update,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        fontSize: 10.5, height: 1.3, color: Fx.sub),
+                        fontSize: 12,
+                        height: 1.2,
+                        fontWeight: FontWeight.w400,
+                        color: Fx.sub),
                   ),
                 ],
               ),

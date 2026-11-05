@@ -107,7 +107,7 @@ class _HomePageState extends State<HomePage> {
       content: Text(msg),
       behavior: SnackBarBehavior.floating,
       backgroundColor: const Color(0xEE1B2430),
-      margin: const EdgeInsets.fromLTRB(18, 0, 18, 96),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 96),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
     ));
   }
@@ -175,14 +175,31 @@ class _HomePageState extends State<HomePage> {
   void _openSectionMore(HomeSection s) {
     var type = _channel == 'recommend' ? '' : _channel;
     var title = type.isEmpty ? '全部片库' : _channelLabel;
-    if (s.title.contains('动漫')) {
+    if (s.title.contains('电影')) {
+      type = 'movie';
+      title = '电影';
+    } else if (s.title.contains('动漫')) {
       type = 'manhua';
       title = '动漫';
+    } else if (s.title.contains('综艺')) {
+      type = 'zongyi';
+      title = '综艺';
     } else if (s.title.contains('直播')) {
       type = 'live';
       title = '直播';
     }
     _openCategory(type, title);
+  }
+
+  /// 服务端分区名较长，首页统一成短标题，保持分区节奏一致。
+  String _sectionLabel(String raw) {
+    if (raw.contains('最新')) return '最新更新';
+    if (raw.contains('电影')) return '电影';
+    if (raw.contains('动漫')) return '动漫';
+    if (raw.contains('综艺')) return '综艺';
+    if (raw.contains('高分')) return '高分好剧';
+    if (raw.contains('今日') || raw.contains('热播')) return '今日热播';
+    return raw;
   }
 
   @override
@@ -246,13 +263,13 @@ class _HomePageState extends State<HomePage> {
         SliverToBoxAdapter(child: _banner(data.banners)),
       SliverList(
         delegate: SliverChildBuilderDelegate(
-          (ctx, i) => _section(sections[i], i == 0),
+          (ctx, i) => _section(sections[i]),
           childCount: sections.length,
         ),
       ),
       SliverToBoxAdapter(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(0, 26, 0, 0),
+          padding: const EdgeInsets.fromLTRB(0, 24, 0, 0),
           child: Column(
             children: [
               Container(
@@ -263,9 +280,12 @@ class _HomePageState extends State<HomePage> {
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
-              const SizedBox(height: 9),
+              const SizedBox(height: 8),
               const Text('已经到底啦 · 发现更多好片',
-                  style: TextStyle(fontSize: 11, color: Color(0xFFA6B1C2))),
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w400,
+                      color: Color(0xFFA6B1C2))),
             ],
           ),
         ),
@@ -275,48 +295,54 @@ class _HomePageState extends State<HomePage> {
 
   Widget _header() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 6, 18, 0),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               Container(
-                width: 34,
-                height: 34,
+                width: 36,
+                height: 36,
                 decoration: BoxDecoration(
-                  gradient: Fx.brand,
                   borderRadius: BorderRadius.circular(11),
                   boxShadow: [
                     BoxShadow(
-                      color: Fx.accent.withOpacity(.28),
+                      color: Fx.accent.withOpacity(.18),
                       blurRadius: 14,
                       offset: const Offset(0, 5),
                     ),
                   ],
                 ),
-                child: const Icon(Icons.play_arrow_rounded,
-                    color: Colors.white, size: 23),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(11),
+                  child: Image.asset('assets/logo.png', fit: BoxFit.cover),
+                ),
               ),
-              const SizedBox(width: 9),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('幻想影视',
-                      style: TextStyle(
-                          fontSize: 20.5,
-                          fontWeight: FontWeight.w800,
-                          color: Fx.ink,
-                          letterSpacing: .4)),
-                  Text('高画 · 免费 · 无广',
-                      style: TextStyle(
-                          fontSize: 13,
-                          color: Fx.sub.withOpacity(.9),
-                          letterSpacing: .2)),
-                ],
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('幻想影视',
+                        style: TextStyle(
+                            fontSize: 20,
+                            height: 1.2,
+                            fontWeight: FontWeight.w600,
+                            color: Fx.ink)),
+                    const SizedBox(height: 2),
+                    Text('高画 · 免费 · 无广',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w400,
+                            color: Fx.sub)),
+                  ],
+                ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: () => Navigator.of(context).push(
@@ -328,21 +354,33 @@ class _HomePageState extends State<HomePage> {
                     button: true,
                     label: '一起看',
                     child: Container(
-                      width: 34,
-                      height: 34,
+                      height: 36,
+                      padding: const EdgeInsets.symmetric(horizontal: 11),
                       decoration: BoxDecoration(
-                        gradient: Fx.brand,
-                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(.72),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: Colors.white),
                         boxShadow: [
                           BoxShadow(
-                            color: Fx.accent.withOpacity(.30),
-                            blurRadius: 14,
-                            offset: const Offset(0, 5),
+                            color: const Color(0xFF50729F).withOpacity(.08),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
                           ),
                         ],
                       ),
-                      child: const Icon(Icons.groups_rounded,
-                          size: 19, color: Colors.white),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.groups_rounded,
+                              size: 16, color: Fx.accent),
+                          SizedBox(width: 5),
+                          Text('一起看',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: Fx.ink)),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -351,9 +389,9 @@ class _HomePageState extends State<HomePage> {
           ),
           const SizedBox(height: 14),
           _searchBar(),
-          const SizedBox(height: 13),
+          const SizedBox(height: 12),
           _channelTabs(),
-          const SizedBox(height: 6),
+          const SizedBox(height: 12),
         ],
       ),
     );
@@ -361,10 +399,10 @@ class _HomePageState extends State<HomePage> {
 
   Widget _searchBar() {
     return Container(
-      height: 42,
+      height: 44,
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(.72),
-        borderRadius: BorderRadius.circular(21),
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(color: Colors.white.withOpacity(.95)),
         boxShadow: [
           BoxShadow(
@@ -374,7 +412,7 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 13),
+      padding: const EdgeInsets.symmetric(horizontal: 14),
       child: Row(
         children: [
           const Icon(Icons.search_rounded, size: 18, color: Fx.sub),
@@ -386,15 +424,18 @@ class _HomePageState extends State<HomePage> {
               child: const Align(
                 alignment: Alignment.centerLeft,
                 child: Text('搜索片名、演员、导演',
-                    style: TextStyle(fontSize: 12.5, color: Fx.sub)),
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w400,
+                        color: Fx.sub)),
               ),
             ),
           ),
           GestureDetector(
             onTap: () => _openSearch(ai: true),
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+              height: 26,
+              padding: const EdgeInsets.symmetric(horizontal: 9),
               decoration: BoxDecoration(
                 gradient: Fx.brand,
                 borderRadius: BorderRadius.circular(13),
@@ -420,8 +461,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _channelTabs() {
-    return SizedBox(
-      height: 36,
+    return Container(
+      height: 42,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(.58),
+        borderRadius: BorderRadius.circular(21),
+        border: Border.all(color: Colors.white.withOpacity(.92)),
+      ),
       child: Row(
         children: [
           for (final c in _channels)
@@ -429,30 +476,34 @@ class _HomePageState extends State<HomePage> {
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: () => _selectChannel(c.key),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  decoration: BoxDecoration(
+                    gradient: c.key == _channel ? Fx.brand : null,
+                    borderRadius: BorderRadius.circular(17),
+                    boxShadow: c.key == _channel
+                        ? [
+                            BoxShadow(
+                              color: Fx.accent.withOpacity(.22),
+                              blurRadius: 10,
+                              offset: const Offset(0, 3),
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Center(
+                    child: Text(
                       c.label,
                       style: TextStyle(
-                        fontSize: c.key == _channel ? 18 : 17,
+                        fontSize: 14,
                         fontWeight: c.key == _channel
-                            ? FontWeight.w800
+                            ? FontWeight.w600
                             : FontWeight.w400,
-                        color: c.key == _channel ? Fx.ink : Fx.sub,
+                        color: c.key == _channel ? Colors.white : Fx.sub,
                       ),
                     ),
-                    const SizedBox(height: 5),
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 220),
-                      width: c.key == _channel ? 18 : 0,
-                      height: 3,
-                      decoration: BoxDecoration(
-                        gradient: c.key == _channel ? Fx.brand : null,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -465,143 +516,146 @@ class _HomePageState extends State<HomePage> {
     return Column(
       children: [
         SizedBox(
-          height: 188,
-          child: NotificationListener<ScrollNotification>(
-            onNotification: (n) {
-              if (n is ScrollStartNotification && n.dragDetails != null) {
-                _dragging = true;
-                _timer?.cancel();
-              } else if (n is ScrollEndNotification && _dragging) {
-                _dragging = false;
-                _restartAuto();
-              }
-              return false;
-            },
-            child: PageView.builder(
-              controller: _bannerCtrl,
-              itemCount: banners.length,
-              onPageChanged: (i) => setState(() => _bannerIndex = i),
-              itemBuilder: (ctx, i) {
-                final b = banners[i];
-                return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 5),
-                  child: GestureDetector(
-                    onTap: () => _openDetail(b.id),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(20),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          FxCover(
-                            url: b.cover,
-                            title: b.title,
-                            radius: 20,
-                            big: true,
-                            showText: false,
-                          ),
-                          DecoratedBox(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [
-                                  Colors.black.withOpacity(.02),
-                                  Colors.black.withOpacity(.12),
-                                  Colors.black.withOpacity(.74),
-                                ],
-                                stops: const [0, .42, 1],
+          height: 178,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (n) {
+                if (n is ScrollStartNotification && n.dragDetails != null) {
+                  _dragging = true;
+                  _timer?.cancel();
+                } else if (n is ScrollEndNotification && _dragging) {
+                  _dragging = false;
+                  _restartAuto();
+                }
+                return false;
+              },
+              child: PageView.builder(
+                controller: _bannerCtrl,
+                itemCount: banners.length,
+                onPageChanged: (i) => setState(() => _bannerIndex = i),
+                itemBuilder: (ctx, i) {
+                  final b = banners[i];
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: GestureDetector(
+                      onTap: () => _openDetail(b.id),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(18),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            FxCover(
+                              url: b.cover,
+                              title: b.title,
+                              radius: 18,
+                              big: true,
+                              showText: false,
+                            ),
+                            DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Colors.black.withOpacity(.02),
+                                    Colors.black.withOpacity(.12),
+                                    Colors.black.withOpacity(.74),
+                                  ],
+                                  stops: const [0, .42, 1],
+                                ),
                               ),
                             ),
-                          ),
-                          Positioned(
-                            top: 10,
-                            right: 10,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(.32),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                    color: Colors.white.withOpacity(.24)),
+                            Positioned(
+                              top: 10,
+                              right: 10,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withOpacity(.32),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                      color: Colors.white.withOpacity(.24)),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.star_rounded,
+                                        size: 12, color: Fx.gold),
+                                    const SizedBox(width: 2),
+                                    Text(
+                                      b.rating > 0
+                                          ? b.rating.toStringAsFixed(1)
+                                          : '推荐',
+                                      style: const TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w600,
+                                          color: Colors.white),
+                                    ),
+                                  ],
+                                ),
                               ),
-                              child: Row(
+                            ),
+                            Positioned(
+                              left: 16,
+                              right: 16,
+                              bottom: 13,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  const Icon(Icons.star_rounded,
-                                      size: 12, color: Fx.gold),
-                                  const SizedBox(width: 2),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 7, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      gradient: Fx.brand,
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: const Text('正在热播',
+                                        style: TextStyle(
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.w600,
+                                            color: Colors.white)),
+                                  ),
+                                  const SizedBox(height: 6),
                                   Text(
-                                    b.rating > 0
-                                        ? b.rating.toStringAsFixed(1)
-                                        : '推荐',
+                                    b.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
-                                        fontSize: 10.5,
-                                        fontWeight: FontWeight.w700,
+                                        fontSize: 20,
+                                        height: 1.2,
+                                        fontWeight: FontWeight.w600,
                                         color: Colors.white),
                                   ),
+                                  if (b.desc.isNotEmpty) ...[
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      b.desc,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          fontSize: 12,
+                                          height: 1.45,
+                                          fontWeight: FontWeight.w400,
+                                          color: Colors.white.withOpacity(.84)),
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),
-                          ),
-                          Positioned(
-                            left: 16,
-                            right: 16,
-                            bottom: 13,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 7, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    gradient: Fx.brand,
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: const Text('正在热播',
-                                      style: TextStyle(
-                                          fontSize: 8.5,
-                                          color: Colors.white,
-                                          fontWeight: FontWeight.w600)),
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  b.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w800,
-                                      color: Colors.white,
-                                      letterSpacing: .3),
-                                ),
-                                if (b.desc.isNotEmpty) ...[
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    b.desc,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        fontSize: 10.5,
-                                        height: 1.45,
-                                        color:
-                                            Colors.white.withOpacity(.84)),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
           ),
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: List.generate(
@@ -625,26 +679,27 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _section(HomeSection s, bool first) {
+  Widget _section(HomeSection s) {
     final count = s.items.length > 12 ? 12 : s.items.length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SizedBox(height: first ? 18 : 23),
-        FxSectionTitle(title: s.title, onMore: () => _openSectionMore(s)),
+        const SizedBox(height: 20),
+        FxSectionTitle(
+            title: _sectionLabel(s.title), onMore: () => _openSectionMore(s)),
         const SizedBox(height: 12),
         SizedBox(
-          height: 226,
+          height: 212,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 18),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
             itemCount: count,
-            separatorBuilder: (_, __) => const SizedBox(width: 12),
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
             itemBuilder: (ctx, i) {
               final item = s.items[i];
               return FxPosterCard(
                 item: item,
-                width: 116,
+                width: 112,
                 onTap: () => _openDetail(item.id),
               );
             },
@@ -690,48 +745,51 @@ class _HomeSkeletonState extends State<_HomeSkeleton>
   @override
   Widget build(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
-    final itemWidth = (width - 36 - 24) / 3;
+    final itemWidth = (width - 32 - 20) / 3;
     return AnimatedBuilder(
       animation: _c,
       builder: (ctx, _) => Opacity(
         opacity: .55 + .35 * _c.value,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 18, 18, 0),
+          padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _box(height: 170, radius: 20),
-              const SizedBox(height: 26),
-              _box(height: 17, width: 132, radius: 7),
-              const SizedBox(height: 14),
+              _box(height: 176, radius: 18),
+              const SizedBox(height: 20),
+              _box(height: 17, width: 132, radius: 6),
+              const SizedBox(height: 10),
               Row(
                 children: [
                   for (var i = 0; i < 3; i++) ...[
-                    if (i != 0) const SizedBox(width: 12),
+                    if (i != 0) const SizedBox(width: 10),
                     SizedBox(
                       width: itemWidth,
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          _box(height: itemWidth * 1.5),
-                          const SizedBox(height: 8),
-                          _box(height: 11, width: itemWidth * .84, radius: 5),
-                          const SizedBox(height: 5),
-                          _box(height: 9, width: itemWidth * .55, radius: 4),
+                          _box(height: itemWidth * 1.5, radius: 14),
+                          const SizedBox(height: 6),
+                          _box(height: 14, width: itemWidth * .84, radius: 4),
+                          const SizedBox(height: 4),
+                          _box(height: 11, width: itemWidth * .55, radius: 3),
                         ],
                       ),
                     ),
                   ],
                 ],
               ),
-              const SizedBox(height: 28),
-              _box(height: 17, width: 156, radius: 7),
-              const SizedBox(height: 14),
+              const SizedBox(height: 20),
+              _box(height: 17, width: 156, radius: 6),
+              const SizedBox(height: 10),
               Row(
                 children: [
                   for (var i = 0; i < 3; i++) ...[
-                    if (i != 0) const SizedBox(width: 12),
-                    _box(height: itemWidth * 1.5, width: itemWidth),
+                    if (i != 0) const SizedBox(width: 10),
+                    SizedBox(
+                      width: itemWidth,
+                      child: _box(height: itemWidth * 1.5, radius: 14),
+                    ),
                   ],
                 ],
               ),

@@ -87,7 +87,8 @@ String fxTimeAgo(int ms) {
   final diff = now.difference(d);
   if (diff.isNegative || diff.inMinutes < 1) return '刚刚';
   if (diff.inMinutes < 60) return '${diff.inMinutes} 分钟前';
-  final sameDay = now.year == d.year && now.month == d.month && now.day == d.day;
+  final sameDay =
+      now.year == d.year && now.month == d.month && now.day == d.day;
   if (sameDay) return '今天 ${_two(d.hour)}:${_two(d.minute)}';
   final yesterday = now.subtract(const Duration(days: 1));
   if (yesterday.year == d.year &&
@@ -281,6 +282,8 @@ class FxPosterCard extends StatelessWidget {
     return parts.join(' · ');
   }
 
+  String get _status => item.status.isNotEmpty ? item.status : _sub;
+
   @override
   Widget build(BuildContext context) {
     final card = Column(
@@ -292,29 +295,36 @@ class FxPosterCard extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              FxCover(url: item.cover, title: item.title),
+              FxCover(url: item.cover, title: item.title, radius: 14),
               if (showRating && item.rating > 0)
                 Positioned(top: 6, right: 6, child: RatingBadge(item.rating)),
-              if (item.status.isNotEmpty)
-                Positioned(left: 6, bottom: 6, child: FxStatusTag(item.status)),
             ],
           ),
         ),
-        const SizedBox(height: 7),
+        const SizedBox(height: 6),
         Text(
           item.title,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
-              fontSize: 12.5, fontWeight: FontWeight.w600, color: Fx.ink),
+            fontSize: 14,
+            height: 1.2,
+            fontWeight: FontWeight.w500,
+            color: Fx.ink,
+          ),
         ),
-        if (showSubtitle) ...[
+        if (showSubtitle && _status.isNotEmpty) ...[
           const SizedBox(height: 3),
           Text(
-            _sub,
+            _status,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+            style: const TextStyle(
+              fontSize: 12,
+              height: 1.2,
+              fontWeight: FontWeight.w400,
+              color: Fx.sub,
+            ),
           ),
         ],
       ],
@@ -345,22 +355,22 @@ class FxSectionTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
-            width: 4,
-            height: 17,
+            width: 3,
+            height: 16,
             decoration: BoxDecoration(
               gradient: Fx.brand,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
-          const SizedBox(width: 9),
+          const SizedBox(width: 8),
           Text(title,
               style: const TextStyle(
-                  fontSize: 17.5, fontWeight: FontWeight.w800, color: Fx.ink)),
+                  fontSize: 17, fontWeight: FontWeight.w600, color: Fx.ink)),
           if (subtitle != null) ...[
             const SizedBox(width: 8),
             Expanded(
@@ -368,7 +378,8 @@ class FxSectionTitle extends StatelessWidget {
                 subtitle!,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
               ),
             ),
           ] else
@@ -383,7 +394,10 @@ class FxSectionTitle extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(moreText,
-                        style: const TextStyle(fontSize: 12, color: Fx.sub)),
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w400,
+                            color: Fx.sub)),
                     const Icon(Icons.chevron_right_rounded,
                         size: 16, color: Fx.sub),
                   ],
@@ -440,7 +454,8 @@ class FxErrorView extends StatelessWidget {
                 textAlign: TextAlign.center,
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, height: 1.5, color: Fx.sub),
+                style:
+                    const TextStyle(fontSize: 12, height: 1.5, color: Fx.sub),
               ),
               const SizedBox(height: 16),
               GradButton(
@@ -530,20 +545,38 @@ class FxLoadingView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(
-            width: 26,
-            height: 26,
-            child: CircularProgressIndicator(
-              strokeWidth: 2.4,
-              valueColor: AlwaysStoppedAnimation<Color>(Fx.accent),
-            ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: GlassCard(
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
+          radius: 18,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.4,
+                  valueColor: AlwaysStoppedAnimation<Color>(Fx.accent),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w400,
+                    color: Fx.sub,
+                  ),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          Text(label, style: const TextStyle(fontSize: 12, color: Fx.sub)),
-        ],
+        ),
       ),
     );
   }
@@ -592,10 +625,8 @@ class FxPageScaffold extends StatelessWidget {
                             shape: BoxShape.circle,
                             border: Border.all(color: Colors.white),
                           ),
-                          child: const Icon(
-                              Icons.arrow_back_ios_new_rounded,
-                              size: 16,
-                              color: Fx.ink),
+                          child: const Icon(Icons.arrow_back_ios_new_rounded,
+                              size: 16, color: Fx.ink),
                         ),
                       ),
                     ),
@@ -651,7 +682,6 @@ class FxTextAction extends StatelessWidget {
     );
   }
 }
-
 
 /* ========================================================================== */
 /*  分类页                                                                     */
@@ -932,15 +962,15 @@ class _CategoryPageState extends State<CategoryPage> {
 
   Widget _buildContent(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
-    final itemWidth = (width - 36 - 20) / 3;
+    final itemWidth = (width - 32 - 20) / 3;
     return RefreshIndicator(
       color: Fx.accent,
       backgroundColor: Colors.white,
       onRefresh: () => _load(reset: true),
       child: CustomScrollView(
         controller: _scroll,
-        physics:
-            const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+        physics: const AlwaysScrollableScrollPhysics(
+            parent: BouncingScrollPhysics()),
         slivers: [
           SliverToBoxAdapter(child: _header()),
           if (_refreshError != null && _items.isNotEmpty)
@@ -978,13 +1008,13 @@ class _CategoryPageState extends State<CategoryPage> {
             )
           else ...[
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(18, 4, 18, 0),
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
               sliver: SliverGrid(
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 3,
                   crossAxisSpacing: 10,
-                  mainAxisSpacing: 16,
-                  mainAxisExtent: itemWidth * 1.5 + 46,
+                  mainAxisSpacing: 10,
+                  mainAxisExtent: itemWidth * 1.5 + 48,
                 ),
                 delegate: SliverChildBuilderDelegate(
                   (ctx, i) {
@@ -1010,11 +1040,11 @@ class _CategoryPageState extends State<CategoryPage> {
 
   Widget _refreshBanner() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       child: GestureDetector(
         onTap: () => _load(reset: true),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           decoration: BoxDecoration(
             color: const Color(0xFFFFF3E6),
             borderRadius: BorderRadius.circular(12),
@@ -1024,14 +1054,16 @@ class _CategoryPageState extends State<CategoryPage> {
             children: [
               const Icon(Icons.refresh_rounded,
                   size: 14, color: Color(0xFFB26A1F)),
-              const SizedBox(width: 5),
+              const SizedBox(width: 6),
               Expanded(
                 child: Text(
                   '刷新失败：${_refreshError!} · 点击重试',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style:
-                      const TextStyle(fontSize: 11, color: Color(0xFFB26A1F)),
+                  style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w400,
+                      color: Color(0xFFB26A1F)),
                 ),
               ),
             ],
@@ -1043,7 +1075,7 @@ class _CategoryPageState extends State<CategoryPage> {
 
   Widget _header() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 6, 18, 0),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1068,10 +1100,10 @@ class _CategoryPageState extends State<CategoryPage> {
               ],
               const Text('分类',
                   style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.w800,
-                      color: Fx.ink,
-                      letterSpacing: -.3)),
+                      fontSize: 20,
+                      height: 1.2,
+                      fontWeight: FontWeight.w600,
+                      color: Fx.ink)),
               const Spacer(),
               if (_filtered)
                 GestureDetector(
@@ -1085,11 +1117,11 @@ class _CategoryPageState extends State<CategoryPage> {
                     _reload();
                   },
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    height: 32,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(.7),
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(16),
                       border: Border.all(color: Colors.white),
                     ),
                     child: const Row(
@@ -1097,25 +1129,29 @@ class _CategoryPageState extends State<CategoryPage> {
                       children: [
                         Icon(Icons.restart_alt_rounded,
                             size: 14, color: Fx.sub),
-                        SizedBox(width: 2),
+                        SizedBox(width: 3),
                         Text('重置',
-                            style: TextStyle(fontSize: 11, color: Fx.sub)),
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w400,
+                                color: Fx.sub)),
                       ],
                     ),
                   ),
                 ),
             ],
           ),
-          const SizedBox(height: 3),
+          const SizedBox(height: 4),
           Text(
             widget.initialTitle == null
                 ? '精选好剧，随心看'
                 : '${widget.initialTitle} · 为你精选',
-            style: const TextStyle(fontSize: 11.5, color: Fx.sub),
+            style: const TextStyle(
+                fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
           ),
-          const SizedBox(height: 13),
+          const SizedBox(height: 14),
           SizedBox(
-            height: 34,
+            height: 36,
             child: ListView(
               scrollDirection: Axis.horizontal,
               children: [
@@ -1133,16 +1169,6 @@ class _CategoryPageState extends State<CategoryPage> {
               ],
             ),
           ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              const Icon(Icons.grid_view_rounded, size: 13, color: Fx.sub),
-              const SizedBox(width: 5),
-              Text('已加载 ${_items.length} 部',
-                  style: const TextStyle(fontSize: 11, color: Fx.sub)),
-            ],
-          ),
-          const SizedBox(height: 8),
         ],
       ),
     );
@@ -1150,37 +1176,46 @@ class _CategoryPageState extends State<CategoryPage> {
 
   Widget _filterPill(
       String label, String value, bool active, VoidCallback onTap) {
-    final color = active ? Fx.accent : Fx.ink;
+    final fg = active ? Colors.white : Fx.ink;
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        height: 34,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        height: 36,
+        padding: const EdgeInsets.symmetric(horizontal: 13),
         decoration: BoxDecoration(
-          color: active
-              ? Fx.accent.withOpacity(.10)
-              : Colors.white.withOpacity(.72),
-          borderRadius: BorderRadius.circular(17),
+          gradient: active ? Fx.brand : null,
+          color: active ? null : Colors.white.withOpacity(.72),
+          borderRadius: BorderRadius.circular(18),
           border: Border.all(
-            color: active ? Fx.accent.withOpacity(.55) : Colors.white,
-            width: active ? 1.1 : 1,
+            color: active ? Colors.transparent : Colors.white,
           ),
+          boxShadow: active
+              ? [
+                  BoxShadow(
+                    color: Fx.accent.withOpacity(.22),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ]
+              : null,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(label,
                 style: TextStyle(
-                    fontSize: 11.5, color: active ? Fx.accent : Fx.sub)),
-            const SizedBox(width: 3),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w400,
+                    color: active ? Colors.white.withOpacity(.82) : Fx.sub)),
+            const SizedBox(width: 4),
             Text(value,
                 style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w600,
-                    color: color)),
+                    fontSize: 12, fontWeight: FontWeight.w600, color: fg)),
             const SizedBox(width: 1),
             Icon(Icons.expand_more_rounded,
-                size: 15, color: active ? Fx.accent : Fx.sub),
+                size: 15,
+                color: active ? Colors.white.withOpacity(.9) : Fx.sub),
           ],
         ),
       ),
@@ -1220,7 +1255,10 @@ class _CategoryPageState extends State<CategoryPage> {
         padding: EdgeInsets.symmetric(vertical: 22),
         child: Center(
           child: Text('— 已经到底啦 —',
-              style: TextStyle(fontSize: 11, color: Color(0xFFA6B1C2))),
+              style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                  color: Color(0xFFA6B1C2))),
         ),
       );
     }
