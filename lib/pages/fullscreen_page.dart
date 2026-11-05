@@ -48,7 +48,7 @@ class FullPlayerResult {
   /// 退出时的播放倍速，交回竖屏继续使用
   final double rate;
 
-  /// 退出时选择的清晰度 key；null = 原画（主播放地址）
+  /// 退出时选择的清晰度 key；null = 主播放地址
   final String? qualityKey;
 
   /// 退出时 [ep] 是否真的加载成功并处于可播放状态。
@@ -205,10 +205,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// loading 浮层文案（切清晰度时不同）。
   String? _loadingHint;
 
-  /// 已展示过的分辨率标签：videoParams 晚到时补一次重建。
-  String _resolutionSeen = '';
+  /// 已展示过的画质胶囊文案：videoParams 晚到时补一次重建。
+  String _qualitySeen = '';
 
-  /// 当前清晰度；null = 原画（使用 PlayInfo.url + backup）
+  /// 当前清晰度；null = 主播放地址（使用 PlayInfo.url + backup）
   String? _qualityKey;
 
   // 播放倍速
@@ -231,18 +231,21 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 只有 ≥2 个真实码率才提供清晰度入口（产品要求，单码率不显示）。
   bool get _canChangeQuality => _qualityList.length >= 2;
 
+  /// 顶栏唯一的画质胶囊：按真实视频宽度分档，未就绪时为空。
+  String get _qualityText => fxPlayerQuality(_controller);
+
   /// 底部清晰度按钮文案：单码率返回空串，直接隐藏入口。
   String get _qualityLabel {
     if (!_canChangeQuality) return '';
     final key = _qualityKey;
-    if (key == null) return '原画';
+    if (key == null) return '默认';
     for (final q in _qualityList) {
       if (q.key == key) return _qualityName(q);
     }
-    return '原画';
+    return '默认';
   }
 
-  /// 主播放地址不在码率列表里时，用真实的「原画」档代表它。
+  /// 主播放地址不在码率列表里时，用「默认」档代表它。
   bool get _showSourceTier {
     final info = _info;
     if (info == null) return false;
@@ -615,7 +618,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final list = _qualityList;
     // 产品要求：只有 1 个画质时没有清晰度入口；这里再兜一层。
     if (info == null || list.length < 2) {
-      fxToast(context, '当前线路仅提供原画');
+      fxToast(context, '当前线路暂无更多清晰度');
       return;
     }
     if (key == _qualityKey) {
@@ -974,9 +977,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         });
       }
     }
-    final resolution = fxResolutionLabel(v.videoWidth ?? v.width);
-    if (resolution.isNotEmpty && resolution != _resolutionSeen) {
-      _resolutionSeen = resolution;
+    final quality = _qualityText;
+    if (quality.isNotEmpty && quality != _qualitySeen) {
+      _qualitySeen = quality;
       setState(() {});
     }
     if (v.hasError) {
@@ -1285,7 +1288,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     _hideTimer?.cancel();
     if (!_canChangeQuality) {
-      fxToast(context, '当前线路仅提供原画');
+      fxToast(context, '当前线路暂无更多清晰度');
       _wake();
       return;
     }
@@ -1534,10 +1537,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null || !c.value.isInitialized) {
       return const ColoredBox(color: Colors.black);
     }
+    // 底部控制条：26 上边距 + 40 进度条 + 4 间距 + 34 按钮 + 6 下边距，
+    // 再留 12dp 间距，字幕层就不会压在进度条/按钮上。
+    final controlsHeight =
+        26.0 + 40.0 + 4.0 + 34.0 + 6.0 + MediaQuery.paddingOf(context).bottom;
     // 画面固定自适应：等比完整显示并居中，不裁剪、不变形。
     return ClipRect(
       child: SizedBox.expand(
-        child: c.buildVideo(fit: BoxFit.contain),
+        child: FxPlayerSurface(
+          player: c,
+          fit: BoxFit.contain,
+          subtitleBottom: controlsHeight + 12,
+        ),
       ),
     );
   }
@@ -1653,6 +1664,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: FsTopBar(
             title: _title,
             epLabel: _epLabel,
+            quality: _qualityText,
             compact: compact,
             onBack: () => unawaited(_exit()),
             onCast: () => fxToast(context, '投屏：暂无可用设备'),

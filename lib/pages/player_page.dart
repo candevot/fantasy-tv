@@ -1238,7 +1238,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           children: [
             if (c != null && c.value.isInitialized && !_fullscreenActive)
               SizedBox.expand(
-                child: c.buildVideo(fit: BoxFit.contain),
+                child: FxPlayerSurface(
+                  player: c,
+                  fit: BoxFit.contain,
+                  subtitleBottom: fxSubtitleMinBottom,
+                ),
               ),
             // 手势层：双击暂停 / 横扫调进度 / 上下滑亮度音量只在全屏生效。
             if (c != null)
@@ -1486,6 +1490,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     ],
                   ),
                 ),
+                if (c != null)
+                  AnimatedBuilder(
+                    animation: c,
+                    builder: (context, _) {
+                      final quality = fxPlayerQuality(c);
+                      if (quality.isEmpty) return const SizedBox.shrink();
+                      return Padding(
+                        padding: const EdgeInsets.only(left: 12),
+                        child: FsQualityPill(label: quality, size: .95),
+                      );
+                    },
+                  ),
                 PGlassIcon(
                   icon: Icons.tv_rounded,
                   size: 31,

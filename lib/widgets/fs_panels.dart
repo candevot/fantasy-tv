@@ -85,7 +85,7 @@ class FsBottomBar extends StatelessWidget {
   /// 清晰度切换入口文案；空串时不显示入口。
   final String qualityLabel;
 
-  /// 当前选中的不是「原画」档时高亮入口。
+  /// 当前选中的不是主播放地址时高亮入口。
   final bool qualityActive;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onTogglePlay;
@@ -251,13 +251,13 @@ class FsQualityPanel extends StatelessWidget {
 
   final List<QualityItem> items;
 
-  /// null 表示当前使用主播放地址（原画）。
+  /// null 表示当前使用主播放地址。
   final String? currentKey;
 
   /// null 表示切回主播放地址。
   final ValueChanged<String?> onPick;
 
-  /// 主地址不在 items 里时，用「原画」这一真实档位代表它。
+  /// 主地址不在 items 里时，用「默认」档位代表它。
   final bool showSource;
 
   QualityItem? get _current {
@@ -268,9 +268,9 @@ class FsQualityPanel extends StatelessWidget {
   }
 
   String get _currentLabel {
-    if (currentKey == null) return '原画';
+    if (currentKey == null) return '默认';
     final q = _current;
-    if (q == null) return '原画';
+    if (q == null) return '默认';
     final name = q.name.trim();
     return name.isEmpty ? q.key : name;
   }
@@ -280,7 +280,7 @@ class FsQualityPanel extends StatelessWidget {
     final options = <Widget>[
       if (showSource)
         _FsChip(
-          label: '原画',
+          label: '默认',
           active: currentKey == null,
           onTap: () => onPick(null),
         ),

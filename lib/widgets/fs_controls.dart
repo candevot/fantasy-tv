@@ -75,89 +75,33 @@ class FsTextAction extends StatelessWidget {
   }
 }
 
-/// 真实分辨率胶囊（取自 media_kit videoParams，如 1280x720）
-class FsResolutionPill extends StatelessWidget {
-  const FsResolutionPill({
-    super.key,
-    required this.resolution,
-    this.size = 1,
-  });
-
-  final String resolution;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return PGlassPill(
-      padding: EdgeInsets.symmetric(horizontal: 9 * size, vertical: 5 * size),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.aspect_ratio_rounded,
-            size: 14 * size,
-            color: Colors.white,
-          ),
-          SizedBox(width: 3 * size),
-          Text(
-            resolution,
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 11.5 * size,
-              fontWeight: FontWeight.w700,
-              letterSpacing: .2,
-              shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 当前画质胶囊：纯信息展示，不可点击（切换入口在底部「清晰度」按钮）。
+/// 顶栏唯一的画质胶囊：只显示 4K / 1080P / 720P / 标清。
+///
+/// 纯信息展示，不可点击；切换清晰度仍在底部「清晰度」按钮。
 class FsQualityPill extends StatelessWidget {
   const FsQualityPill({
     super.key,
-    required this.quality,
+    required this.label,
     this.size = 1,
-    this.maxWidth = 190,
   });
 
-  final String quality;
+  final String label;
   final double size;
-  final double maxWidth;
 
   @override
   Widget build(BuildContext context) {
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxWidth: maxWidth),
-      child: PGlassPill(
-        padding: EdgeInsets.symmetric(horizontal: 9 * size, vertical: 5 * size),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.high_quality_rounded,
-              size: 14 * size,
-              color: Colors.white,
-            ),
-            SizedBox(width: 3 * size),
-            Flexible(
-              child: Text(
-                quality,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 11.5 * size,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: .2,
-                  shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
-                ),
-              ),
-            ),
-          ],
+    if (label.isEmpty) return const SizedBox.shrink();
+    return PGlassPill(
+      padding: EdgeInsets.symmetric(horizontal: 10 * size, vertical: 5 * size),
+      child: Text(
+        label,
+        maxLines: 1,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 11.5 * size,
+          fontWeight: FontWeight.w700,
+          letterSpacing: .2,
+          shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
         ),
       ),
     );
@@ -213,9 +157,9 @@ class _FsClockPillState extends State<FsClockPill> {
   }
 }
 
-/// 顶部控制条（对齐腾讯）：返回 · 片名/第xx集 · 投屏 · 截图 · 更多。
+/// 顶部控制条（对齐腾讯）：返回 · 片名/第xx集 · 画质 · 投屏 · 截图 · 更多。
 ///
-/// 不再展示分辨率 / 假网速 / 画质胶囊等冗余信息，顶部只留核心操作。
+/// 画质只保留一个胶囊，内容限定为 4K / 1080P / 720P / 标清。
 class FsTopBar extends StatelessWidget {
   const FsTopBar({
     super.key,
@@ -225,11 +169,15 @@ class FsTopBar extends StatelessWidget {
     required this.onCast,
     required this.onScreenshot,
     required this.onMore,
+    this.quality = '',
     this.compact = false,
   });
 
   final String title;
   final String epLabel;
+
+  /// 画质胶囊文案；空串时不显示，避免出现空胶囊。
+  final String quality;
   final VoidCallback onBack;
   final VoidCallback onCast;
   final VoidCallback onScreenshot;
@@ -296,6 +244,10 @@ class FsTopBar extends StatelessWidget {
               ],
             ),
           ),
+          if (quality.isNotEmpty) ...[
+            const SizedBox(width: 12),
+            FsQualityPill(label: quality, size: s),
+          ],
           const SizedBox(width: 8),
           PGlassIcon(
             icon: Icons.tv_rounded,

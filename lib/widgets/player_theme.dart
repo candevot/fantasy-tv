@@ -3,9 +3,11 @@ import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models.dart';
+import '../services/fx_player.dart';
 import '../theme.dart';
 
 /// 播放器通用小工具：时间格式、进度持久化、白玻璃控件。
@@ -54,18 +56,65 @@ String fxClock(DateTime t) => '${fxPad2(t.hour)}:${fxPad2(t.minute)}';
 
 /// 分辨率通俗标签：4K / 1080P / 720P / 标清。
 ///
-/// 传入的 [width] 是视频原始宽度；有帧率信息时拼成「4K · 60帧」。
-String fxResolutionLabel(int? width, {num? fps}) {
+/// 只按视频原始宽度分档，不再拼接其他后缀；未就绪时返回空串。
+String fxResolutionLabel(int? width) {
   if (width == null || width <= 0) return '';
-  final tier = width >= 3800
-      ? '4K'
-      : width >= 1800
-          ? '1080P'
-          : width >= 1200
-              ? '720P'
-              : '标清';
-  if (fps != null && fps > 0) return '$tier · ${fps.round()}帧';
-  return tier;
+  if (width >= 3800) return '4K';
+  if (width >= 1800) return '1080P';
+  if (width >= 1200) return '720P';
+  return '标清';
+}
+
+/// 顶栏唯一的画质胶囊文案：取播放器真实视频宽度，未就绪时为空。
+String fxPlayerQuality(FxPlayer? player) {
+  final value = player?.value;
+  if (value == null || !value.isInitialized) return '';
+  final width = (value.videoWidth ?? 0) > 0 ? value.videoWidth : value.width;
+  return fxResolutionLabel(width);
+}
+
+/// 字幕距播放器底部的安全距离：至少 96dp，始终高过底部控件区。
+const double fxSubtitleMinBottom = 96;
+
+/// 播放器画面：固定等比完整显示，并把字幕抬到控件区上方。
+///
+/// [subtitleBottom] 必须不小于 [fxSubtitleMinBottom]；全屏时传
+/// 「底部控件高度 + 安全间距」，避免字幕被进度条/按钮盖住。
+class FxPlayerSurface extends StatelessWidget {
+  const FxPlayerSurface({
+    super.key,
+    required this.player,
+    this.fit = BoxFit.contain,
+    this.subtitleBottom = fxSubtitleMinBottom,
+  });
+
+  final FxPlayer player;
+  final BoxFit fit;
+  final double subtitleBottom;
+
+  @override
+  Widget build(BuildContext context) {
+    return Video(
+      controller: player.videoController,
+      controls: NoVideoControls,
+      fit: fit,
+      alignment: Alignment.center,
+      fill: Colors.black,
+      wakelock: true,
+      pauseUponEnteringBackgroundMode: false,
+      resumeUponEnteringForegroundMode: false,
+      subtitleViewConfiguration: SubtitleViewConfiguration(
+        padding: EdgeInsets.fromLTRB(
+          24,
+          0,
+          24,
+          subtitleBottom < fxSubtitleMinBottom
+              ? fxSubtitleMinBottom
+              : subtitleBottom,
+        ),
+      ),
+    );
+  }
 }
 
 String fxProgressKey(String videoId, int ep) => 'pos_${videoId}_$ep';
