@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:video_player/video_player.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/fx_player.dart';
 import '../theme.dart';
 import '../widgets/danmaku_overlay.dart';
 import '../widgets/fs_controls.dart';
@@ -100,7 +100,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     systemNavigationBarContrastEnforced: false,
   );
 
-  VideoPlayerController? _controller;
+  FxPlayer? _controller;
   PlayInfo? _info;
   List<DanmuItem> _danmaku = const <DanmuItem>[];
 
@@ -180,9 +180,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 当前视频的真实分辨率，如 1280x720；未就绪时返回空串。
   String get _resolutionText {
-    final size = _controller?.value.size;
-    if (size == null || size.width <= 0 || size.height <= 0) return '';
-    return '${size.width.round()}x${size.height.round()}';
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return '';
+    // media_kit 的 videoParams 提供解码后的真实宽高（如 3840x2160）。
+    return c.value.resolutionText;
   }
 
   String get _epLabel {
@@ -356,13 +357,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     var ok = false;
     for (final url in candidates) {
       if (!mounted || token != _loadToken) return;
-      final controller = VideoPlayerController.networkUrl(
-        Uri.parse(url),
-        httpHeaders:
-            source.headers.isEmpty ? const <String, String>{} : source.headers,
-      );
+      final controller = FxPlayer.create();
       try {
-        await controller.initialize();
+        await controller.open(url, headers: source.headers);
         if (!mounted || token != _loadToken) {
           await controller.dispose();
           return;
@@ -377,7 +374,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         await controller.setLooping(false);
         if (_rate != 1.0) {
           try {
-            await controller.setPlaybackSpeed(_rate);
+            await controller.setRate(_rate);
           } catch (_) {}
         }
         await controller.play();
@@ -507,16 +504,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     });
 
     final token = ++_loadToken;
-    VideoPlayerController? fresh;
+    FxPlayer? fresh;
     for (final url in urls) {
       if (!mounted || token != _loadToken) return;
-      final controller = VideoPlayerController.networkUrl(
-        Uri.parse(url),
-        httpHeaders:
-            info.headers.isEmpty ? const <String, String>{} : info.headers,
-      );
+      final controller = FxPlayer.create();
       try {
-        await controller.initialize();
+        await controller.open(url, headers: info.headers);
         if (!mounted || token != _loadToken) {
           await controller.dispose();
           return;
@@ -530,7 +523,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (target > Duration.zero) await controller.seekTo(target);
         await controller.setLooping(false);
         try {
-          await controller.setPlaybackSpeed(_holding2x ? 2.0 : _rate);
+          await controller.setRate(_holding2x ? 2.0 : _rate);
         } catch (_) {}
         if (wasPlaying) await controller.play();
         fresh = controller;
@@ -823,7 +816,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
     try {
-      await c.setPlaybackSpeed(rate);
+      await c.setRate(rate);
     } catch (_) {}
   }
 
@@ -1199,7 +1192,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                               fontSize: 13.5,
                               fontWeight: FontWeight.w600,
                               color: Fx.ink)),
-                      subtitle: Text('video_player · HLS / MP4 自适应',
+                      subtitle: Text('media_kit · libmpv · HLS / 加密 / 多编码',
                           style: TextStyle(fontSize: 10.5, color: Fx.sub)),
                     ),
                   ],
@@ -1333,7 +1326,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     );
   }
 
-  Widget _buildVideoSurface(VideoPlayerController? c) {
+  Widget _buildVideoSurface(FxPlayer? c) {
     if (c == null || !c.value.isInitialized) {
       return const ColoredBox(color: Colors.black);
     }
@@ -1345,38 +1338,24 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       case FsVideoFit.contain:
         // _videoRect 已按真实比例算好，这里填满该矩形。
         return Center(
-          child: AspectRatio(aspectRatio: aspect, child: VideoPlayer(c)),
+          child: AspectRatio(aspectRatio: aspect, child: c.buildVideo()),
         );
       case FsVideoFit.cover:
         return ClipRect(
           child: SizedBox.expand(
-            child: FittedBox(
-              fit: BoxFit.cover,
-              child: SizedBox(
-                width: width,
-                height: height,
-                child: VideoPlayer(c),
-              ),
-            ),
+            child: c.buildVideo(fit: BoxFit.cover),
           ),
         );
       case FsVideoFit.stretch:
         return ClipRect(
           child: SizedBox.expand(
-            child: FittedBox(
-              fit: BoxFit.fill,
-              child: SizedBox(
-                width: width,
-                height: height,
-                child: VideoPlayer(c),
-              ),
-            ),
+            child: c.buildVideo(fit: BoxFit.fill),
           ),
         );
     }
   }
 
-  Widget _buildDanmakuLayer(VideoPlayerController c) {
+  Widget _buildDanmakuLayer(FxPlayer c) {
     return AnimatedBuilder(
       animation: c,
       builder: (context, _) {
@@ -1509,7 +1488,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Widget _buildControls(
-    VideoPlayerController? c,
+    FxPlayer? c,
     double keyboard,
     EdgeInsets pad,
   ) {

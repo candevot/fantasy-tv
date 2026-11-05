@@ -1,10 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/fx_player.dart';
 import '../theme.dart';
 import '../widgets/danmaku_overlay.dart';
 import '../widgets/player_theme.dart';
@@ -53,7 +53,7 @@ class PlayerView extends StatefulWidget {
 }
 
 class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
-  VideoPlayerController? _controller;
+  FxPlayer? _controller;
   PlayInfo? _info;
   List<DanmuItem> _danmaku = const <DanmuItem>[];
 
@@ -266,13 +266,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     var ok = false;
     for (final url in candidates) {
       if (!mounted || token != _loadToken) return;
-      final controller = VideoPlayerController.networkUrl(
-        Uri.parse(url),
-        httpHeaders:
-            info.headers.isEmpty ? const <String, String>{} : info.headers,
-      );
+      final controller = FxPlayer.create();
       try {
-        await controller.initialize();
+        await controller.open(url, headers: info.headers);
         if (!mounted || token != _loadToken) {
           await controller.dispose();
           return;
@@ -280,7 +276,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         controller.addListener(_onVideoValue);
         await controller.setLooping(false);
         if (_rate != 1.0) {
-          await controller.setPlaybackSpeed(_rate);
+          await controller.setRate(_rate);
         }
         final durationMs = controller.value.duration.inMilliseconds;
         var resume = saved;
@@ -501,14 +497,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
     _rateBeforeHold = _rate;
-    c.setPlaybackSpeed(2.0);
+    c.setRate(2.0);
     setState(() => _holding2x = true);
     _showControls();
   }
 
   void _endHold2x() {
     if (!_holding2x) return;
-    _controller?.setPlaybackSpeed(_rateBeforeHold);
+    _controller?.setRate(_rateBeforeHold);
     if (!mounted) return;
     setState(() => _holding2x = false);
     _touch();
@@ -516,7 +512,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   void _setRate(double rate) {
     _rate = rate;
-    _controller?.setPlaybackSpeed(rate);
+    _controller?.setRate(rate);
     _touch();
   }
 
@@ -647,7 +643,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                                 fontSize: 13.5,
                                 fontWeight: FontWeight.w600,
                                 color: Fx.ink)),
-                        subtitle: Text('video_player · HLS / MP4 自适应',
+                        subtitle: Text('media_kit · libmpv · HLS / 加密 / 多编码',
                             style: TextStyle(fontSize: 10.5, color: Fx.sub)),
                       ),
                     ],
@@ -749,7 +745,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 child: AspectRatio(
                   aspectRatio:
                       c.value.aspectRatio > 0 ? c.value.aspectRatio : 16 / 9,
-                  child: VideoPlayer(c),
+                  child: c.buildVideo(),
                 ),
               ),
             if (c != null)
@@ -961,7 +957,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     widget.onSourceFailed?.call();
   }
 
-  Widget _buildControls(VideoPlayerController? c) {
+  Widget _buildControls(FxPlayer? c) {
     return Stack(
       fit: StackFit.expand,
       children: [

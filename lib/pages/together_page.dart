@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:video_player/video_player.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/fx_player.dart';
 import '../theme.dart';
 import '../widgets/together_chat.dart';
 import '../widgets/together_client.dart';
@@ -84,7 +84,7 @@ class _TogetherPageState extends State<TogetherPage> {
   final List<TogetherChatMessage> _messages = <TogetherChatMessage>[];
 
   /* 播放 */
-  VideoPlayerController? _controller;
+  FxPlayer? _controller;
   String _videoId = '';
   int _ep = 1;
   String _videoLine = 'l1';
@@ -580,7 +580,7 @@ class _TogetherPageState extends State<TogetherPage> {
     _rate = rate;
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
-    controller.setPlaybackSpeed(rate).catchError((_) {});
+    controller.setRate(rate).catchError((_) {});
   }
 
   void _seekController(double seconds) {
@@ -811,13 +811,10 @@ class _TogetherPageState extends State<TogetherPage> {
 
       for (final url in urls) {
         if (!mounted || seq != _videoSeq) return;
-        VideoPlayerController? controller;
+        FxPlayer? controller;
         try {
-          controller = VideoPlayerController.networkUrl(
-            Uri.parse(url),
-            httpHeaders: play.headers,
-          );
-          await controller.initialize();
+          controller = FxPlayer.create();
+          await controller.open(url, headers: play.headers);
           if (!mounted || seq != _videoSeq) {
             await controller.dispose();
             return;
@@ -872,7 +869,7 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   Future<void> _seekAndMaybePlay(
-    VideoPlayerController controller,
+    FxPlayer controller,
     TogetherRoomState state,
   ) async {
     final target = _targetPosition(state);
@@ -1851,7 +1848,7 @@ class _TogetherPageState extends State<TogetherPage> {
                         aspectRatio: controller.value.aspectRatio > 0
                             ? controller.value.aspectRatio
                             : 16 / 9,
-                        child: VideoPlayer(controller),
+                        child: controller.buildVideo(),
                       ),
                     )
                   else
@@ -1912,7 +1909,7 @@ class _TogetherPageState extends State<TogetherPage> {
     );
   }
 
-  Widget _buildCenterIcon(VideoPlayerController controller) {
+  Widget _buildCenterIcon(FxPlayer controller) {
     final playing = controller.value.isPlaying;
     return Container(
       width: 42,
@@ -1932,7 +1929,7 @@ class _TogetherPageState extends State<TogetherPage> {
     );
   }
 
-  Widget _buildProgress(VideoPlayerController controller) {
+  Widget _buildProgress(FxPlayer controller) {
     final total = controller.value.duration.inMilliseconds / 1000.0;
     final position = _displayPosition();
     return Column(

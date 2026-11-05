@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'api.dart';
 import 'auth.dart';
@@ -17,6 +18,7 @@ import 'pages/player_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
   await Api.init();
   await Auth.instance.init();
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);

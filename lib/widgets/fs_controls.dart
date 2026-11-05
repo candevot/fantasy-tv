@@ -77,7 +77,7 @@ class FsTextAction extends StatelessWidget {
 
 /// 网速占位胶囊。
 ///
-/// 说明：video_player 不暴露实时下载码率，项目也没有引入测速插件，
+/// 说明：media_kit 未暴露实时下载码率，项目也没有引入测速插件，
 /// 这里只显示不带数字的「网速 --」，不再展示写死的假电量。
 class FsNetSpeedPill extends StatelessWidget {
   const FsNetSpeedPill({super.key, this.size = 1});
@@ -113,7 +113,7 @@ class FsNetSpeedPill extends StatelessWidget {
   }
 }
 
-/// 真实分辨率胶囊（取自 VideoPlayerValue.size，如 1280x720）
+/// 真实分辨率胶囊（取自 media_kit videoParams，如 1280x720）
 class FsResolutionPill extends StatelessWidget {
   const FsResolutionPill({
     super.key,

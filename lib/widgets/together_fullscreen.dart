@@ -3,8 +3,8 @@ import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
 
+import '../services/fx_player.dart';
 import '../theme.dart';
 import 'together_chat.dart';
 import 'together_ui.dart';
@@ -33,7 +33,7 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.onShowMembers,
   });
 
-  final VideoPlayerController? controller;
+  final FxPlayer? controller;
   final List<TogetherChatMessage> messages;
   final List<TogetherMember> members;
   final String roomCode;
@@ -115,7 +115,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 aspectRatio: controller.value.aspectRatio > 0
                     ? controller.value.aspectRatio
                     : 16 / 9,
-                child: VideoPlayer(controller),
+                child: controller.buildVideo(),
               ),
             )
           else
@@ -175,7 +175,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
   Widget _buildControls(
     BuildContext context,
-    VideoPlayerController? controller,
+    FxPlayer? controller,
     bool ready,
   ) {
     return Stack(
@@ -330,7 +330,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     );
   }
 
-  Widget _buildPlayButton(VideoPlayerController? controller, bool ready) {
+  Widget _buildPlayButton(FxPlayer? controller, bool ready) {
     if (!ready) return const SizedBox.shrink();
     final playing = controller?.value.isPlaying == true;
     return GestureDetector(
