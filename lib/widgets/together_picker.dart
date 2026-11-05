@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'fx_cards.dart';
 import 'player_theme.dart';
 import 'together_ui.dart';
 
@@ -48,95 +49,156 @@ class _TogetherVideoPicker extends StatefulWidget {
   State<_TogetherVideoPicker> createState() => _TogetherVideoPickerState();
 }
 
+enum _PickerStatus { loading, ready, empty, error }
+
 class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
+  static const Duration _debounceDelay = Duration(milliseconds: 300);
+
   final TextEditingController _query = TextEditingController();
   Timer? _debounce;
   List<VideoCard> _items = const [];
-  bool _loading = true;
-  bool _error = false;
+  _PickerStatus _status = _PickerStatus.loading;
   String _activeQuery = '';
+  String _errorDetail = '';
+  int _requestId = 0;
 
   @override
   void initState() {
     super.initState();
-    _loadHot();
+    _loadInitial();
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
+    _requestId++;
     _query.dispose();
     super.dispose();
   }
 
-  Future<void> _loadHot() async {
-    if (!mounted) return;
-    setState(() {
-      _loading = true;
-      _error = false;
-      _activeQuery = '';
-    });
-
-    List<VideoCard> items = const [];
+  /// 初始列表：`GET /api/home?channel=recommend` 的
+  /// `data.sections[].items[]`，跨分区按 id 去重。
+  /// 推荐区为空时退回「最新剧集」；两者都失败才展示错误态。
+  Future<void> _loadInitial() async {
+    final request = ++_requestId;
+    if (mounted) {
+      setState(() {
+        _status = _PickerStatus.loading;
+        _items = const [];
+        _activeQuery = '';
+        _errorDetail = '';
+      });
+    }
     try {
-      items = await Api.rank('hot').timeout(const Duration(seconds: 7));
-    } catch (_) {
-      // 排行榜不可用时再从首页热门里取。
-    }
-    if (!mounted) return;
-    if (items.isEmpty) {
-      try {
-        final home = await Api.home('recommend').timeout(const Duration(seconds: 7));
-        items = [for (final section in home.sections) ...section.items];
-      } catch (_) {
-        // 服务器不可用时保持空列表，不做本地假数据兜底。
+      final home = await Api.home('recommend');
+      var items = _sanitize(<VideoCard>[
+        for (final section in home.sections) ...section.items,
+      ]);
+      if (items.isEmpty) {
+        try {
+          items = _sanitize(
+            await Api.category(type: 'juji', sort: 'latest', page: 1),
+          );
+        } catch (_) {
+          // 推荐为空、兜底接口也不可用时按空结果处理。
+        }
       }
+      if (!mounted || request != _requestId) return;
+      setState(() {
+        _items = items;
+        _status = items.isEmpty ? _PickerStatus.empty : _PickerStatus.ready;
+      });
+    } catch (e) {
+      if (!mounted || request != _requestId) return;
+      setState(() {
+        _items = const [];
+        _status = _PickerStatus.error;
+        _errorDetail = _messageOf(e);
+      });
     }
-    if (!mounted) return;
+  }
 
+  /// 搜索：`GET /api/search?q=<kw>&page=1` 的 `data.items[]`，
+  /// 与初始列表同样按 id 去重、跳过脏条目。
+  Future<void> _search(String q) async {
+    final keyword = q.trim();
+    if (keyword.isEmpty) {
+      await _loadInitial();
+      return;
+    }
+    final request = ++_requestId;
+    if (mounted) {
+      setState(() {
+        _status = _PickerStatus.loading;
+        _items = const [];
+        _activeQuery = keyword;
+        _errorDetail = '';
+      });
+    }
+    try {
+      final items = _sanitize(await Api.search(keyword, 1));
+      if (!mounted ||
+          request != _requestId ||
+          _query.text.trim() != keyword) {
+        return;
+      }
+      setState(() {
+        _items = items;
+        _status = items.isEmpty ? _PickerStatus.empty : _PickerStatus.ready;
+      });
+    } catch (e) {
+      if (!mounted ||
+          request != _requestId ||
+          _query.text.trim() != keyword) {
+        return;
+      }
+      setState(() {
+        _items = const [];
+        _status = _PickerStatus.error;
+        _errorDetail = _messageOf(e);
+      });
+    }
+  }
+
+  List<VideoCard> _sanitize(Iterable<VideoCard> raw) {
     final seen = <String>{};
-    items = items.where((e) => e.id.isNotEmpty && seen.add(e.id)).toList();
-    setState(() {
-      _loading = false;
-      _items = items;
-      _error = items.isEmpty;
-    });
+    final items = <VideoCard>[];
+    for (final card in raw) {
+      final id = card.id.trim();
+      if (id.isEmpty || card.title.trim().isEmpty) continue;
+      if (!seen.add(id)) continue;
+      items.add(card);
+    }
+    return items;
+  }
+
+  String _messageOf(Object error) {
+    if (error is ApiException) return error.message;
+    return '网络请求失败，请稍后重试';
   }
 
   void _onQueryChanged(String value) {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 420), () {
+    final q = value.trim();
+    // 只刷新输入框右侧的清除按钮，不等请求。
+    setState(() {});
+    _debounce = Timer(_debounceDelay, () {
       if (!mounted) return;
-      final q = value.trim();
       if (q.isEmpty) {
-        _loadHot();
+        _loadInitial();
       } else {
         _search(q);
       }
     });
   }
 
-  Future<void> _search(String q) async {
-    setState(() {
-      _loading = true;
-      _error = false;
-      _activeQuery = q;
-    });
-    try {
-      final items = await Api.search(q, 1).timeout(const Duration(seconds: 8));
-      if (!mounted || _activeQuery != q) return;
-      setState(() {
-        _loading = false;
-        _items = items;
-        _error = false;
-      });
-    } catch (_) {
-      if (!mounted || _activeQuery != q) return;
-      setState(() {
-        _loading = false;
-        _items = const [];
-        _error = true;
-      });
+  void _retry() {
+    _debounce?.cancel();
+    final q = _query.text.trim();
+    if (q.isEmpty) {
+      _loadInitial();
+    } else {
+      _search(q);
     }
   }
 
@@ -221,7 +283,11 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                       onSubmitted: (v) {
                         _debounce?.cancel();
                         final q = v.trim();
-                        if (q.isNotEmpty) _search(q);
+                        if (q.isEmpty) {
+                          _loadInitial();
+                        } else {
+                          _search(q);
+                        }
                       },
                       style: const TextStyle(fontSize: 13, color: Fx.ink),
                       decoration: InputDecoration(
@@ -241,8 +307,10 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                             ? null
                             : GestureDetector(
                                 onTap: () {
+                                  _debounce?.cancel();
                                   _query.clear();
-                                  _loadHot();
+                                  setState(() {});
+                                  _loadInitial();
                                 },
                                 child: Icon(
                                   Icons.cancel_rounded,
@@ -266,85 +334,129 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
   }
 
   Widget _buildBody() {
-    if (_loading) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(
-              width: 22,
-              height: 22,
-              child: CircularProgressIndicator(strokeWidth: 2.2),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              '正在加载影片…',
-              style: TextStyle(fontSize: 11, color: Fx.sub.withOpacity(.8)),
-            ),
-          ],
-        ),
-      );
+    switch (_status) {
+      case _PickerStatus.loading:
+        return const _TogetherPickerSkeleton();
+      case _PickerStatus.error:
+        return _buildError();
+      case _PickerStatus.empty:
+        return _buildEmpty();
+      case _PickerStatus.ready:
+        return _buildGrid();
     }
-    if (_error) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.wifi_off_rounded,
-              size: 34,
-              color: Fx.sub.withOpacity(.4),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              '暂无内容，请稍后重试',
-              style: TextStyle(fontSize: 12, color: Fx.sub.withOpacity(.9)),
-            ),
-            const SizedBox(height: 14),
-            GestureDetector(
-              onTap: _activeQuery.isEmpty
-                  ? _loadHot
-                  : () => _search(_activeQuery),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+  }
+
+  /// 失败态：文案 + 可点重试，不再停留在 loading。
+  Widget _buildError() {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _retry,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 56,
+                height: 56,
                 decoration: BoxDecoration(
-                  gradient: Fx.brand,
-                  borderRadius: BorderRadius.circular(18),
+                  color: Fx.accent.withOpacity(.10),
+                  shape: BoxShape.circle,
                 ),
-                child: const Text(
-                  '重新加载',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
+                child: const Icon(
+                  Icons.cloud_off_rounded,
+                  size: 27,
+                  color: Fx.accent,
                 ),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              const Text(
+                '加载失败，点击重试',
+                style: TextStyle(
+                  fontSize: 14.5,
+                  fontWeight: FontWeight.w700,
+                  color: Fx.ink,
+                ),
+              ),
+              if (_errorDetail.isNotEmpty) ...[
+                const SizedBox(height: 5),
+                Text(
+                  _errorDetail,
+                  maxLines: 2,
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    height: 1.4,
+                    color: Fx.sub.withOpacity(.9),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              SizedBox(
+                width: 132,
+                child: GradButton(
+                  text: '重试',
+                  icon: Icons.refresh_rounded,
+                  height: 40,
+                  onTap: _retry,
+                ),
+              ),
+            ],
+          ),
         ),
-      );
-    }
-    if (_items.isEmpty) {
-      return Center(
+      ),
+    );
+  }
+
+  /// 空态：搜索无结果与初始推荐为空统一文案。
+  Widget _buildEmpty() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.search_off_rounded,
-              size: 34,
-              color: Fx.sub.withOpacity(.4),
+            Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                color: Fx.accent.withOpacity(.08),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.search_off_rounded,
+                size: 27,
+                color: Fx.accent.withOpacity(.75),
+              ),
             ),
-            const SizedBox(height: 10),
-            Text(
-              _activeQuery.isEmpty ? '暂无内容，请稍后重试' : '没有找到「$_activeQuery」',
-              style: TextStyle(fontSize: 12, color: Fx.sub.withOpacity(.9)),
+            const SizedBox(height: 12),
+            const Text(
+              '没有找到相关影片',
+              style: TextStyle(
+                fontSize: 14.5,
+                fontWeight: FontWeight.w700,
+                color: Fx.ink,
+              ),
             ),
+            if (_activeQuery.isNotEmpty) ...[
+              const SizedBox(height: 5),
+              Text(
+                '换个关键词试试',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: Fx.sub.withOpacity(.85),
+                ),
+              ),
+            ],
           ],
         ),
-      );
-    }
+      ),
+    );
+  }
+
+  Widget _buildGrid() {
     return GridView.builder(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
       itemCount: _items.length,
@@ -357,6 +469,41 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
       itemBuilder: (context, i) => _VideoTile(
         card: _items[i],
         onTap: () => Navigator.of(context).pop(_items[i]),
+      ),
+    );
+  }
+}
+
+/// 选片列表加载骨架：3 列 × 5 行，和正式海报网格同尺寸。
+class _TogetherPickerSkeleton extends StatelessWidget {
+  const _TogetherPickerSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return FxSkeletonPulse(
+      child: GridView.builder(
+        physics: const NeverScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+        itemCount: 15,
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3,
+          childAspectRatio: .56,
+          mainAxisSpacing: 14,
+          crossAxisSpacing: 11,
+        ),
+        itemBuilder: (context, i) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Expanded(child: FxSkeletonBox(radius: 13)),
+            const SizedBox(height: 6),
+            const FxSkeletonBox(height: 11, radius: 4),
+            const SizedBox(height: 4),
+            FractionallySizedBox(
+              widthFactor: .56,
+              child: const FxSkeletonBox(height: 9, radius: 4),
+            ),
+          ],
+        ),
       ),
     );
   }
