@@ -1083,7 +1083,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _startHideTimer() {
     _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 3), () {
+    _hideTimer = Timer(kPlayerControlsAutoHide, () {
       if (!mounted) return;
       if (_locked ||
           _panelOpen ||
@@ -1122,10 +1122,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _closePanels();
       return;
     }
-    if (_loading || _error) {
-      _wake();
-      return;
-    }
+    if (_error) return;
+    // 加载 / 切集期间也允许显隐控件，控件点击不再被整层 IgnorePointer 吞掉。
     if (_controls) {
       _hideControls();
     } else {
@@ -1159,7 +1157,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 锁定后解锁钮只亮 3 秒；点屏幕可重新唤出。
   void _startUnlockTimer() {
     _unlockTimer?.cancel();
-    _unlockTimer = Timer(const Duration(seconds: 3), () {
+    _unlockTimer = Timer(kPlayerUnlockAutoHide, () {
       if (!mounted || !_locked) return;
       setState(() => _unlockVisible = false);
     });
@@ -1250,11 +1248,16 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         !c.value.isInitialized) {
       return;
     }
-    if (_rate >= 2.0) return;
     _rateBeforeHold = _rate;
-    unawaited(_applyRate(2.0));
-    setState(() => _holding2x = true);
-    _wake();
+    unawaited(_applyRate(kPlayerHoldRate));
+    _hideTimer?.cancel();
+    setState(() {
+      _holding2x = true;
+      // 参考：长按进入快进时收起控件，只在顶部留「3.0倍速快进中」胶囊。
+      _controls = false;
+      _showSpeed = false;
+      _showQuality = false;
+    });
   }
 
   void _endHold2x() {
@@ -1262,7 +1265,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     unawaited(_applyRate(_rateBeforeHold));
     if (!mounted) return;
     setState(() => _holding2x = false);
-    _wake();
   }
 
   void _toggleSpeed() {
@@ -1459,12 +1461,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             fit: StackFit.expand,
             children: [
               Positioned.fill(child: _buildVideoSurface(c)),
-              // 手势层：双击暂停 / 横扫调进度 / 竖扫亮度音量 / 长按 2x。
+              // 手势层：单击显隐控件 / 双击暂停 / 横扫调进度 / 竖扫亮度音量 /
+              // 长按 3.0x。加载与切清晰度时仍保留手势（按钮的 no-op 由页面自己判）。
               if (!_locked && c != null)
                 Positioned.fill(
                   child: FxPlayerGestures(
                     player: c,
-                    enabled: !_loading && !_error && !_switching,
+                    enabled: !_error,
                     onTap: _onSurfaceTap,
                     onDoubleTap: _togglePlay,
                     onSeek: _seekTo,
@@ -1482,18 +1485,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     child: const SizedBox.expand(),
                   ),
                 ),
-              if (!_locked)
-                Positioned.fill(
-                  child: IgnorePointer(
-                    ignoring: !_controls || _loading || _switching,
-                    child: AnimatedOpacity(
-                      opacity: _controls ? 1 : 0,
-                      duration: const Duration(milliseconds: 200),
-                      child: _buildControls(c, keyboard, pad),
-                    ),
-                  ),
-                ),
               // 播放中的缓冲：玻璃圆环 + libmpv 真实缓存百分比。
+              // 加载/缓冲层在视频之上、控件层之下，不能压住底部按钮。
               if (!_loading && !_error && c != null)
                 Positioned.fill(
                   child: AnimatedBuilder(
@@ -1517,6 +1510,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                   ),
                 ),
               if (_loading && !_error) _buildLoading(),
+              // 控件层必须在 loading/缓冲层之上：切集 8s 窗口里也能退出全屏、
+              // 选集、点下一集；只按「控件是否显示」禁用指针。
+              if (!_locked)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    ignoring: !_controls,
+                    child: AnimatedOpacity(
+                      opacity: _controls ? 1 : 0,
+                      duration: const Duration(milliseconds: 200),
+                      child: _buildControls(c, keyboard, pad),
+                    ),
+                  ),
+                ),
               if (_error) _buildError(),
               // 锁屏：所有控件隐藏，只留一个 3 秒后自动隐藏的解锁钮；
               // 点屏幕重新唤出并提示如何解锁。
@@ -1546,7 +1552,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                   top: pad.top + 10,
                   left: 0,
                   right: 0,
-                  child: const Center(child: _FsBadge(text: '2.0x 倍速播放中')),
+                  child: const Center(child: _FsBadge(text: '3.0倍速快进中')),
                 ),
             ],
           ),
@@ -1701,19 +1707,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             onSeekBy: _seekBy,
           ),
         ),
-        if (c != null)
-          Center(
-            child: AnimatedBuilder(
-              animation: c,
-              builder: (context, _) {
-                final playing = c.value.isInitialized && c.value.isPlaying;
-                return FsCenterControls(
-                  playing: playing,
-                  onTogglePlay: _togglePlay,
-                );
-              },
-            ),
-          ),
         Positioned(
           left: 0,
           right: 0,

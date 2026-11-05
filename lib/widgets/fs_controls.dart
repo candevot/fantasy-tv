@@ -278,30 +278,6 @@ class FsTopBar extends StatelessWidget {
   }
 }
 
-/// 中部：只保留播放/暂停一个圆钮（下一集在底部控制栏）
-class FsCenterControls extends StatelessWidget {
-  const FsCenterControls({
-    super.key,
-    required this.playing,
-    required this.onTogglePlay,
-  });
-
-  final bool playing;
-  final VoidCallback onTogglePlay;
-
-  @override
-  Widget build(BuildContext context) {
-    return PGlassIcon(
-      icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-      size: 58,
-      iconSize: 34,
-      tint: .18,
-      tooltip: playing ? '暂停' : '播放',
-      onTap: onTogglePlay,
-    );
-  }
-}
-
 /// 左右侧控件：左中锁屏，右中 +10s / -10s
 class FsSideControls extends StatelessWidget {
   const FsSideControls({

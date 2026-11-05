@@ -10,11 +10,11 @@ import 'player_theme.dart';
 
 /// 播放器手势层（竖屏内嵌 / 全屏横屏共用）。
 ///
-/// - 单击：显隐控件（交给 [onTap]）
-/// - 双击：播放 / 暂停
-/// - 左右滑：调进度，浮层显示「+15s」与目标时间，**松手才 seek**
-/// - 上下滑：左半屏亮度 / 右半屏音量，带图标与百分比提示
-/// - 长按：2 倍速（由页面负责恢复，来电/切后台时页面也会复位）
+/// - 单击：立即显隐控件（交给 [onTap]）
+/// - 双击：播放 / 暂停（300ms 窗口自判，不让单击等系统双击超时）
+/// - 左右滑：调进度，满屏高 ≈ 240s，单次手势最多 ±120s，**松手才 seek**
+/// - 上下滑：左半屏亮度 / 右半屏音量，满屏高 = 100%，带图标与百分比提示
+/// - 长按：3.0 倍速（由页面负责恢复，来电/切后台时页面也会复位）
 ///
 /// 该组件铺满播放器区域，放在视频层之上、控件层之下：
 /// 控件可见时由控件自己消费点击，不会误触手势。
@@ -30,7 +30,6 @@ class FxPlayerGestures extends StatefulWidget {
     this.onGestureStart,
     this.enabled = true,
     this.enableVertical = true,
-    this.seekSecondsPerScreen = 90,
     this.resetBrightnessOnDispose = true,
   });
 
@@ -45,11 +44,8 @@ class FxPlayerGestures extends StatefulWidget {
   final VoidCallback? onGestureStart;
   final bool enabled;
 
-  /// 是否启用左半屏亮度 / 右半屏音量上下滑；只在全屏开启，竖屏内嵌关闭。
+  /// 是否启用左半屏亮度 / 右半屏音量上下滑。
   final bool enableVertical;
-
-  /// 横扫满屏对应的秒数（默认 90s，即 1/6 屏 ≈ 15s）。
-  final int seekSecondsPerScreen;
 
   /// 退出页面时是否把应用亮度恢复成系统亮度。
   /// 全屏退出、竖屏离开播放页时都要恢复。
@@ -87,6 +83,9 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
   int _seekDeltaSeconds = 0;
   double _seekAccum = 0;
   bool _seekChanged = false;
+
+  // 自判双击（参考 300ms 窗口），单击立即生效，不等系统双击超时。
+  DateTime? _lastTapAt;
 
   // 纵向亮度 / 音量
   double _brightness = .5;
@@ -190,12 +189,14 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
 
   void _onHorizontalUpdate(DragUpdateDetails details) {
     if (_mode != _GestureMode.seek) return;
-    final width = context.size?.width ?? MediaQuery.sizeOf(context).width;
-    if (width <= 0) return;
+    // 参考：步长 = 播放器区高度/120，每步 2s → 满高约 240s；
+    // 单次手势最多 60 步，即 ±120s（OooO0o.java:118-125, 192-197）。
+    final height = context.size?.height ?? MediaQuery.sizeOf(context).height;
+    if (height <= 0) return;
     _seekAccum += details.delta.dx;
-    // 满屏 90 秒，量化到 5 秒，浮层读起来稳定（常见 +15s / -30s）。
-    final raw = (_seekAccum / width) * widget.seekSecondsPerScreen;
-    final delta = (raw / 5).round() * 5;
+    final step = height / 120;
+    final raw = (_seekAccum / step) * 2;
+    final delta = raw.round().clamp(-120, 120).toInt();
     final total = widget.player.value.duration;
     var target = _seekStart + Duration(seconds: delta);
     if (target < Duration.zero) target = Duration.zero;
@@ -243,9 +244,9 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
     final height = context.size?.height ?? MediaQuery.sizeOf(context).height;
     if (height <= 0) return;
     _dragAccum += -details.delta.dy;
-    final value = (_dragStartValue + _dragAccum / (height * .78))
-        .clamp(0.0, 1.0)
-        .toDouble();
+    // 参考：拖拽像素 / 屏高，满屏高 = 100%（OooO00o.java:93-101）。
+    final value =
+        (_dragStartValue + _dragAccum / height).clamp(0.0, 1.0).toDouble();
     if (_mode == _GestureMode.brightness) {
       _brightness = value;
     } else {
@@ -314,18 +315,29 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
 
   /* -------------------------------------------------------------------- UI */
 
+  /// 单击立即显隐控件；300ms 内的第二次点击视为双击（播放/暂停）。
+  ///
+  /// 用自判代替 GestureDetector 的 onDoubleTap：后者会把单击推迟到
+  /// 双击窗口结束才触发，参考实现里单击是即时的。
+  void _handleTapUp(TapUpDetails details) {
+    final now = DateTime.now();
+    final last = _lastTapAt;
+    if (last != null && now.difference(last) < kPlayerDoubleTapWindow) {
+      _lastTapAt = null;
+      widget.onDoubleTap();
+      _flash(_playing ? Icons.pause_rounded : Icons.play_arrow_rounded);
+      return;
+    }
+    _lastTapAt = now;
+    widget.onTap();
+  }
+
   @override
   Widget build(BuildContext context) {
     final hud = _hud;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: widget.enabled ? widget.onTap : null,
-      onDoubleTap: widget.enabled
-          ? () {
-              widget.onDoubleTap();
-              _flash(_playing ? Icons.pause_rounded : Icons.play_arrow_rounded);
-            }
-          : null,
+      onTapUp: widget.enabled ? _handleTapUp : null,
       onLongPressStart:
           widget.enabled ? (_) => widget.onLongPressStart() : null,
       onLongPressEnd: widget.enabled ? (_) => widget.onLongPressEnd() : null,

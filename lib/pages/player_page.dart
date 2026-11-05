@@ -23,7 +23,7 @@ enum SourceIssue { parse, empty, error }
 /// 左上 返回 + 片名/集数
 /// 右上 投屏 / 设置
 /// 底部 播放暂停 · 当前时间 · 细进度条 · 总时长 · 下一集 · 全屏
-/// 3 秒无操作自动隐藏；点画面唤出/隐藏；长按 2x；双击暂停。
+/// 5 秒无操作自动隐藏；点画面唤出/隐藏；长按 3.0x；双击暂停。
 class PlayerView extends StatefulWidget {
   const PlayerView({
     super.key,
@@ -101,6 +101,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   bool _controls = true;
   Timer? _hideTimer;
+
+  /// 竖屏锁屏：锁住后手势层与控件层全部隐藏，只留 3 秒解锁钮。
+  bool _locked = false;
+  bool _unlockVisible = false;
+  Timer? _unlockTimer;
 
   /// 正在切换线路（防止重复点击并发 open）。
   bool _switchingLine = false;
@@ -408,7 +413,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 下拉通知栏 / 截屏 / 多任务预览都只到 inactive：不暂停。
         return;
       case AppLifecycleState.paused:
-        // 来电 / 切后台：长按 2x 必须复位；先记进度，3 秒内回前台就不暂停。
+        // 来电 / 切后台：长按 3.0x 必须复位；先记进度，3 秒内回前台就不暂停。
         _backgrounded = true;
         _endHold2x();
         unawaited(_saveProgress());
@@ -450,6 +455,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    _unlockTimer?.cancel();
     _progressTimer?.cancel();
     _backgroundTimer?.cancel();
     _watchdogTimer?.cancel();
@@ -982,20 +988,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   // ---------------------------------------------------------------- controls
 
   void _showControls() {
-    if (!mounted) return;
+    if (!mounted || _locked) return;
     setState(() => _controls = true);
     _startHideTimer();
   }
 
   void _startHideTimer() {
     _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 3), () {
+    _hideTimer = Timer(kPlayerControlsAutoHide, () {
       if (!mounted) return;
       if (_holding2x || _openingFullscreen) {
         _startHideTimer();
         return;
       }
-      if (_loading || _error || _switchingLine) return;
+      if (_locked || _loading || _error || _switchingLine) return;
       setState(() => _controls = false);
     });
   }
@@ -1011,12 +1017,52 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   void _onSurfaceTap() {
-    if (_loading || _error || _switchingLine) return;
+    if (_locked || _error) return;
+    // 加载 / 切集期间也能显隐控件，不因为 loading 把整层点击吞掉。
     if (_controls) {
       _hideControls();
     } else {
       _showControls();
     }
+  }
+
+  /* -------------------------------------------------------------- 竖屏锁屏 */
+
+  void _lock() {
+    if (!mounted) return;
+    _hideTimer?.cancel();
+    setState(() {
+      _locked = true;
+      _controls = false;
+      _unlockVisible = true;
+    });
+    _startUnlockTimer();
+  }
+
+  /// 锁定后解锁钮只亮 3 秒；点屏幕可重新唤出（参考 LayoutLockVolume）。
+  void _startUnlockTimer() {
+    _unlockTimer?.cancel();
+    _unlockTimer = Timer(kPlayerUnlockAutoHide, () {
+      if (!mounted || !_locked) return;
+      setState(() => _unlockVisible = false);
+    });
+  }
+
+  void _onLockedTap() {
+    if (!mounted) return;
+    if (!_unlockVisible) setState(() => _unlockVisible = true);
+    _startUnlockTimer();
+  }
+
+  void _unlock() {
+    if (!mounted) return;
+    _unlockTimer?.cancel();
+    setState(() {
+      _locked = false;
+      _unlockVisible = false;
+      _controls = true;
+    });
+    _startHideTimer();
   }
 
   void _togglePlay() {
@@ -1051,9 +1097,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return;
     }
     _rateBeforeHold = _rate;
-    c.setRate(2.0);
-    setState(() => _holding2x = true);
-    _showControls();
+    c.setRate(kPlayerHoldRate);
+    _hideTimer?.cancel();
+    setState(() {
+      _holding2x = true;
+      // 参考：按住快进时收起控件，只在顶部留「3.0倍速快进中」胶囊。
+      _controls = false;
+    });
   }
 
   void _endHold2x() {
@@ -1061,7 +1111,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _controller?.setRate(_rateBeforeHold);
     if (!mounted) return;
     setState(() => _holding2x = false);
-    _touch();
   }
 
   void _setRate(double rate) {
@@ -1267,26 +1316,23 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   subtitleBottom: fxSubtitleMinBottom,
                 ),
               ),
-            // 手势层：双击暂停 / 横扫调进度 / 上下滑亮度音量只在全屏生效。
-            if (c != null)
+            // 手势层：单击显隐控件 / 双击暂停；竖屏也支持上下滑亮度音量。
+            if (c != null && !_locked)
               Positioned.fill(
                 child: FxPlayerGestures(
                   player: c,
-                  enabled: !_loading && !_error && !_switchingLine,
-                  enableVertical: false,
+                  enabled: !_error,
+                  enableVertical: true,
                   onTap: _onSurfaceTap,
-                  onDoubleTap: () {
-                    _togglePlay();
-                    _showControls();
-                  },
+                  onDoubleTap: _togglePlay,
                   onSeek: _seek,
                   onLongPressStart: _startHold2x,
                   onLongPressEnd: _endHold2x,
                   onGestureStart: _hideControls,
                 ),
               ),
-            if (_error) _buildError(),
             // 播放中的缓冲：玻璃圆环 + 真实缓存百分比。
+            // 缓冲 / 加载层在视频之上，但必须在控件层之下。
             if (!_loading && !_error && c != null)
               Positioned.fill(
                 child: AnimatedBuilder(
@@ -1309,12 +1355,28 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   },
                 ),
               ),
-            if (_controls && !_error)
-              IgnorePointer(
-                ignoring: _loading || _switchingLine,
-                child: _buildControls(c),
-              ),
             if (_loading && !_error) _buildLoading(),
+            // 控件层压在 loading / 缓冲之上：切集 8s 窗口里也能退出全屏、
+            // 选集、下一集；只按控件显隐禁用指针，不因 loading 整层失效。
+            if (_controls && !_error && !_locked) _buildControls(c),
+            if (_error) _buildError(),
+            // 锁屏：吞掉所有触摸，只留 3 秒后自动隐藏的解锁钮。
+            if (_locked)
+              Positioned.fill(
+                child: SafeArea(
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _onLockedTap,
+                        child: const SizedBox.expand(),
+                      ),
+                      if (_unlockVisible) FsUnlockButton(onUnlock: _unlock),
+                    ],
+                  ),
+                ),
+              ),
             if (_holding2x)
               Positioned(
                 top: 14,
@@ -1330,7 +1392,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                       border: Border.all(color: Colors.white.withOpacity(.25)),
                     ),
                     child: const Text(
-                      '⏩ 2.0x 倍速播放中',
+                      '3.0倍速快进中',
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 11,
@@ -1534,6 +1596,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 ),
                 const SizedBox(width: 6),
                 PGlassIcon(
+                  icon: Icons.lock_outline_rounded,
+                  size: 31,
+                  iconSize: 18,
+                  tooltip: '锁定屏幕',
+                  onTap: _lock,
+                ),
+                const SizedBox(width: 6),
+                PGlassIcon(
                   icon: Icons.more_horiz_rounded,
                   size: 31,
                   iconSize: 20,
@@ -1544,25 +1614,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             ),
           ),
         ),
-        if (c != null)
-          AnimatedBuilder(
-            animation: c,
-            builder: (context, _) {
-              final v = c.value;
-              if (!v.isInitialized || v.isPlaying) {
-                return const SizedBox.shrink();
-              }
-              return Center(
-                child: PGlassIcon(
-                  icon: Icons.play_arrow_rounded,
-                  size: 54,
-                  iconSize: 32,
-                  tint: .18,
-                  onTap: _togglePlay,
-                ),
-              );
-            },
-          ),
         Positioned(
           left: 0,
           right: 0,

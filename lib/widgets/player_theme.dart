@@ -17,6 +17,19 @@ String fxPad2(int n) => n.toString().padLeft(2, '0');
 /// 短暂离开不打断播放。
 const Duration fxBackgroundPauseDelay = Duration(seconds: 3);
 
+/// 控件无操作后自动隐藏：参考实现 5000ms（PlayerControllerImpl）。
+const Duration kPlayerControlsAutoHide = Duration(seconds: 5);
+
+/// 双击判定窗口：参考 300ms。与 Flutter 内置的 kDoubleTapTimeout 一致，
+/// 播放器手势层按这个窗口自判，避免单击显隐被系统双击识别拖慢。
+const Duration kPlayerDoubleTapWindow = Duration(milliseconds: 300);
+
+/// 锁定屏幕后解锁钮自动隐藏时长：参考 3000ms（LayoutLockVolume）。
+const Duration kPlayerUnlockAutoHide = Duration(seconds: 3);
+
+/// 长按临时倍速：libmpv 内核按参考实现取 3.0x（IJK / 阿里内核才是 2.0x）。
+const double kPlayerHoldRate = 3.0;
+
 /// 预告 / 花絮 / 拉片 / 解说这类片段单独占一集，但不是正片。
 const List<String> fxExtraEpisodeKeys = <String>['预告', '花絮', '拉片', '解说'];
 
