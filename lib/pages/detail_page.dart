@@ -16,6 +16,7 @@ import 'category_page.dart'
     show FxEmptyView, FxErrorView, FxPosterCard, fxErrorText, fxInt;
 import 'history_page.dart' show FxStore;
 import 'player_page.dart';
+import 'together_page.dart' show TogetherExitResult;
 
 /// 详情播放页：顶部内嵌 PlayerView（自动播放当前线路当前集），
 /// 下方「视频 / 评论」双 Tab、公告、简介、5 圆钮、线路、选集、相关推荐。
@@ -302,11 +303,16 @@ class _DetailPageState extends State<DetailPage>
   Future<void> _loadFavState() async {
     var fav = false;
     try {
+      // 收藏列表是唯一事实源：收藏页删除后这里必须立刻变回未收藏，
+      // 不能再用 fav_ 标记抢先返回 true。读到结果后顺手修正旧标记。
+      final list = await FxStore.read(FxStore.favoriteKey);
+      fav = list.any(
+        (m) =>
+            '${m['id']}' == widget.id && '${m['kind'] ?? 'video'}' == 'video',
+      );
       final sp = await SharedPreferences.getInstance();
-      fav = sp.getBool('fav_${widget.id}') ?? false;
-      if (!fav) {
-        final list = await FxStore.read(FxStore.favoriteKey);
-        fav = list.any((m) => '${m['id']}' == widget.id);
+      if ((sp.getBool('fav_${widget.id}') ?? false) != fav) {
+        await sp.setBool('fav_${widget.id}', fav);
       }
     } catch (_) {}
     if (!mounted) return;
@@ -667,7 +673,7 @@ class _DetailPageState extends State<DetailPage>
       final playing = state?.currentPlaying ?? false;
       await state?.pauseAndReleaseForTogether();
       if (!mounted) return;
-      await Nav.together(
+      final TogetherExitResult? result = await Nav.together(
         context,
         videoId: widget.id,
         ep: ep,
@@ -676,7 +682,36 @@ class _DetailPageState extends State<DetailPage>
         playing: playing,
       );
       if (!mounted) return;
-      await _playerKey.currentState?.resumeAfterTogether();
+      final player = _playerKey.currentState;
+      if (result == null) {
+        // 没真正进房间（入口页直接返回）：按进房前的状态恢复。
+        await player?.resumeAfterTogether();
+        return;
+      }
+      if (result.videoId.isNotEmpty && result.videoId != widget.id) {
+        // 房间已换到另一部片：不能拿旧片的集数/进度重播。
+        fxToast(context, '房间已切换到其他影片');
+        player?.showSourceError('房间已切换到其他影片');
+        return;
+      }
+      final targetEp = result.ep > 0 ? result.ep : ep;
+      final targetLine =
+          result.lineId.trim().isNotEmpty ? result.lineId.trim() : line;
+      final ok = await player?.resumeAfterTogether(
+            ep: targetEp,
+            line: targetLine,
+            position: result.position,
+            play: result.playing,
+          ) ??
+          false;
+      if (!mounted || !ok) return;
+      // 播放器内部已切到房间的集/线，详情页同步刷新，
+      // 否则下一次 rebuild 会用旧集把它们又切回去。
+      setState(() {
+        _ep = targetEp;
+        if (targetLine.isNotEmpty) _lineId = targetLine;
+      });
+      _saveHistory();
     } finally {
       _openingTogether = false;
     }

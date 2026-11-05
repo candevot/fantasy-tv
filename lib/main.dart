@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'api.dart';
 import 'auth.dart';
+import 'fx_globals.dart';
 import 'theme.dart';
 import 'pages/home_page.dart';
 import 'pages/category_page.dart';
@@ -161,6 +162,8 @@ class FantasyApp extends StatelessWidget {
       title: '幻想影视',
       debugShowCheckedModeBanner: false,
       theme: FxTheme.data,
+      // 全局提示入口：网络 401 这类没有 BuildContext 的地方也能弹 SnackBar。
+      scaffoldMessengerKey: fxMessengerKey,
       // 深色模式下也固定浅色主题：自绘玻璃卡片是按浅色校准的，
       // 跟随系统切到深色会出现低对比度 / 白底白字。
       darkTheme: FxTheme.data,
@@ -543,7 +546,7 @@ class Nav {
   static Future<void> search(BuildContext c) => Navigator.of(c)
       .push(MaterialPageRoute(builder: (_) => const SearchPage()));
 
-  static Future<void> together(
+  static Future<TogetherExitResult?> together(
     BuildContext c, {
     String? videoId,
     int? ep,
@@ -551,7 +554,7 @@ class Nav {
     double position = 0,
     bool playing = false,
   }) =>
-      Navigator.of(c).push(MaterialPageRoute(
+      Navigator.of(c).push<TogetherExitResult>(MaterialPageRoute(
           builder: (_) => TogetherPage(
                 videoId: videoId,
                 ep: ep ?? 1,

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models.dart';
 import '../theme.dart';
@@ -122,9 +123,24 @@ class _FavoritePageState extends State<FavoritePage> {
   }
 
   Future<void> _delete(FavRecord r) async {
-    setState(() => _items.removeWhere((e) => e.id == r.id));
+    setState(
+      () => _items.removeWhere((e) => e.id == r.id && e.kind == r.kind),
+    );
     await _persist();
+    // 收藏列表是唯一事实源：详情页还缓存了 fav_ / fav_live_ 标记，
+    // 不同步清掉的话再进详情页会显示「已收藏」。
+    await _clearFavFlags(<FavRecord>[r]);
     _toast('已取消收藏');
+  }
+
+  /// 清掉详情页写的收藏缓存标记（剧集 fav_<id> / 直播 fav_live_<id>）。
+  Future<void> _clearFavFlags(Iterable<FavRecord> records) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      for (final r in records) {
+        await sp.remove(r.isLive ? 'fav_live_${r.id}' : 'fav_${r.id}');
+      }
+    } catch (_) {}
   }
 
   Future<void> _confirmClear() async {
@@ -150,8 +166,10 @@ class _FavoritePageState extends State<FavoritePage> {
       ),
     );
     if (ok != true || !mounted) return;
+    final removed = _items;
     setState(() => _items = []);
     await _persist();
+    await _clearFavFlags(removed);
     _toast('收藏已清空');
   }
 

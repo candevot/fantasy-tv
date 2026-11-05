@@ -236,6 +236,7 @@ class TogetherClient {
     required this.onSystem,
     required this.onError,
     required this.onClosed,
+    this.onAuthFailed,
   });
 
   final void Function(TogetherMember me) onOpen;
@@ -246,6 +247,9 @@ class TogetherClient {
   final void Function(String text) onSystem;
   final void Function(String code, String message) onError;
   final void Function(String reason) onClosed;
+
+  /// 重连前探测确认 token 已过期（HTTP 401）时回调；回调后不再重连。
+  final void Function()? onAuthFailed;
 
   static const Duration _pingPeriod = Duration(seconds: 10);
   static const Duration _clockRefreshPeriod = Duration(seconds: 30);
@@ -267,6 +271,12 @@ class TogetherClient {
   /// 断线重连退避：3s / 6s / 12s / 24s，上限 30s。
   int _retryAttempt = 0;
   int _retryDelaySec = 0;
+
+  /// 正在用 HTTP 探测 token 是否过期，避免并发探测 / 探测期间又排重连。
+  bool _authChecking = false;
+
+  /// 已确认 token 过期：停止一切自动重连，等用户重新登录。
+  bool _authFailed = false;
 
   /// 最近一次收到 pong 的本地时间；连续 2 个 ping 周期没有 pong 就主动重连。
   int _lastPongAt = 0;
@@ -330,7 +340,7 @@ class TogetherClient {
   /* ------------------------------------------------------------ 连接 */
 
   void connect() {
-    if (_closed || _connected || _connecting) return;
+    if (_closed || _authFailed || _connected || _connecting) return;
     _retry?.cancel();
     _retry = null;
     _connecting = true;
@@ -396,13 +406,50 @@ class TogetherClient {
   }
 
   void _scheduleRetry() {
-    if (_closed) return;
+    if (_closed || _authFailed || _authChecking) return;
     _retry?.cancel();
+    _retry = null;
+    // token 过期时服务端通常直接关闭握手，表现和「网络不好」完全一样；
+    // 连续失败 2 次后用一次 HTTP 探测确认 401，是过期就停止无限重连。
+    if (Api.token.isNotEmpty && _retryAttempt >= 2) {
+      _authChecking = true;
+      unawaited(_probeAuthThenRetry());
+      return;
+    }
+    _startRetryTimer();
+  }
+
+  void _startRetryTimer() {
+    if (_closed || _authFailed) return;
     // 3 / 6 / 12 / 24 / 30 / 30…
     final seconds = math.min(30, 3 * (1 << math.min(_retryAttempt, 4)));
     _retryAttempt = math.min(_retryAttempt + 1, 8);
     _retryDelaySec = seconds;
     _retry = Timer(Duration(seconds: seconds), connect);
+  }
+
+  /// 重连前的 401 探测：网络本身不通时继续按退避重连，
+  /// 确认 token 过期则回调 [onAuthFailed] 并彻底停止重连。
+  Future<void> _probeAuthThenRetry() async {
+    var expired = false;
+    try {
+      await Api.me();
+    } on ApiException catch (e) {
+      expired = e.code == 401;
+    } catch (_) {
+      // 超时 / 断网都不代表 token 失效，继续重连。
+    }
+    _authChecking = false;
+    if (_closed) return;
+    if (expired) {
+      _authFailed = true;
+      _retryDelaySec = 0;
+      _retry?.cancel();
+      _retry = null;
+      onAuthFailed?.call();
+      return;
+    }
+    _startRetryTimer();
   }
 
   void _startPing() {

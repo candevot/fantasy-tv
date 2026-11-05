@@ -8,12 +8,16 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'fx_globals.dart';
 import 'models.dart';
 
 /// 登录态：token 持久化在 SharedPreferences，所有 API 请求由 [Api.token]
 /// 自动带 `Authorization: Bearer <token>`。
 class Auth extends ChangeNotifier {
-  Auth._();
+  Auth._() {
+    // 所有 HTTP 401 统一走这里：清 session + 全局提示，页面不用各自处理。
+    Api.onUnauthorized = _onUnauthorized;
+  }
   static final Auth instance = Auth._();
 
   static const String _kToken = 'fx_auth_token_v1';
@@ -24,6 +28,7 @@ class Auth extends ChangeNotifier {
   String _token = '';
   String _avatarPath = '';
   bool _refreshing = false;
+  bool _loggingOut = false;
 
   AuthUser? get user => _user;
   bool get loggedIn => _user != null && _token.isNotEmpty;
@@ -194,12 +199,31 @@ class Auth extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    _loggingOut = true;
     try {
       await Api.logout();
     } catch (_) {
       // 离线也允许退出本地账号。
     }
     await _clearSession();
+    _loggingOut = false;
+  }
+
+  void _onUnauthorized() {
+    // 用户主动退出时 token 可能已经过期，不要误报「登录已过期」。
+    if (_loggingOut) return;
+    unawaited(expire());
+  }
+
+  /// token 已失效：清掉本地登录态并全局提示一次。
+  ///
+  /// 返回是否由本次调用真正处理（已经处理过时静默，避免同时收到
+  /// HTTP 401 与一起去重连探测 401 时重复弹窗）。
+  Future<bool> expire() async {
+    if (_token.isEmpty && _user == null) return false;
+    await _clearSession();
+    fxGlobalToast('登录已过期，请重新登录');
+    return true;
   }
 
   Future<void> _clearSession() async {

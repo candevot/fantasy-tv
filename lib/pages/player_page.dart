@@ -667,10 +667,28 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     });
   }
 
-  /// 从一起看房间返回后调用：重新加载播放器并恢复进度。
-  Future<void> resumeAfterTogether() async {
-    if (!mounted) return;
-    await _bootstrap(seekToSaved: true, saveOld: false);
+  /// 从一起看房间返回后调用：按房间快照重新加载播放器并恢复进度。
+  ///
+  /// 房间内可能切集 / 换线路，[ep] / [line] 是退出时房间的当前状态，
+  /// 不能沿用进房前的旧集；[position] 是房间进度（秒），[play] 沿用
+  /// 房间的播放 / 暂停态（暂停退出就不要自己播起来）。
+  Future<bool> resumeAfterTogether({
+    int? ep,
+    String? line,
+    double? position,
+    bool? play,
+  }) async {
+    if (!mounted) return false;
+    final targetLine = (line ?? _line).trim();
+    return _bootstrap(
+      seekToSaved: position == null,
+      saveOld: false,
+      lineOverride: targetLine.isEmpty ? null : targetLine,
+      epOverride: ep,
+      resumeSeconds: position,
+      playOverride: play,
+      commitLine: true,
+    );
   }
 
   Future<bool> _bootstrap({

@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../api.dart';
+import '../auth.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
@@ -29,6 +30,36 @@ import '../widgets/together_ui.dart';
 /* ========================================================================== */
 
 enum _TogetherStage { entry, entering, room }
+
+/// 退出房间时回传给详情页的快照。
+///
+/// 房间内可能切集 / 换剧 / 换线，详情页不能拿进房前的旧集恢复播放，
+/// 必须按这份快照刷新当前集与线路后再 seek。
+class TogetherExitResult {
+  const TogetherExitResult({
+    required this.videoId,
+    required this.ep,
+    required this.lineId,
+    required this.position,
+    required this.playing,
+    required this.kind,
+  });
+
+  final String videoId;
+  final int ep;
+  final String lineId;
+
+  /// 房间当前播放位置（秒）。
+  final double position;
+
+  /// 退出时是否处于播放态；false 时详情页恢复后保持暂停。
+  final bool playing;
+
+  /// `live` = 直播房；其余为普通剧集房。
+  final String kind;
+
+  bool get isLive => kind == 'live';
+}
 
 class TogetherPage extends StatefulWidget {
   const TogetherPage({
@@ -97,6 +128,9 @@ class _TogetherPageState extends State<TogetherPage>
   bool _exiting = false;
   bool _leaving = false;
   bool _fullscreen = false;
+
+  /// token 已过期：只处理一次，停止重连并引导重新登录。
+  bool _authExpired = false;
 
   bool _online = false;
   bool _isHost = false;
@@ -204,6 +238,7 @@ class _TogetherPageState extends State<TogetherPage>
       onSystem: _onSystem,
       onError: _onError,
       onClosed: _onClosed,
+      onAuthFailed: _onAuthFailed,
     );
     WidgetsBinding.instance.addObserver(this);
     _startTimers();
@@ -610,6 +645,34 @@ class _TogetherPageState extends State<TogetherPage>
     togetherToast(context, text);
   }
 
+  /// token 过期：客户端已停止自动重连。清本地登录态、退房间回详情页，
+  /// 不能让用户停在一个永远「正在自动重连…」的房间里。
+  void _onAuthFailed() {
+    if (!mounted || _authExpired || _leaving) return;
+    _authExpired = true;
+    unawaited(_handleAuthExpired());
+  }
+
+  Future<void> _handleAuthExpired() async {
+    // Auth 清本地登录态并弹「登录已过期，请重新登录」；
+    // 已经因 HTTP 401 处理过时会静默，避免重复提示。
+    await Auth.instance.expire();
+    if (!mounted) return;
+    final inRoom = _stage == _TogetherStage.room;
+    // 登录已失效时不要让详情页自动播起来，退出后保持暂停等用户处理账号。
+    final result = inRoom ? _exitResult(forcePaused: true) : null;
+    if (_fullscreen) await _exitFullscreen();
+    if (!mounted) return;
+    _leaving = true;
+    _client.leave();
+    _videoSeq++;
+    await _disposeController();
+    if (!mounted) return;
+    _clearRoom();
+    // 客户端已停止重连，房间不可用：直接退回详情页，不再无限重连。
+    Navigator.of(context).pop(result);
+  }
+
   /* ------------------------------------------------------------ 建房 / 加入 */
 
   /* ------------------------------------------------------------ 直播房 */
@@ -940,13 +1003,37 @@ class _TogetherPageState extends State<TogetherPage>
     _leaving = true;
     await _saveRoomProgress();
     if (!mounted) return;
+    // 释放播放器之前取快照：房间内切集 / 换剧 / 换线后，
+    // 详情页必须按房间当前状态恢复，而不是重播进房前的旧集。
+    final result = _exitResult();
     if (_fullscreen) await _exitFullscreen();
     if (!mounted) return;
     _client.leave();
     _videoSeq++;
     await _disposeController();
     if (!mounted) return;
-    Navigator.of(context).pop();
+    Navigator.of(context).pop(result);
+  }
+
+  /// 退出房间时回传给详情页的快照。
+  ///
+  /// [forcePaused] 用于 token 过期这类异常退出：详情页恢复后保持暂停，
+  /// 不让画面在登录失效后自己播起来。
+  TogetherExitResult _exitResult({bool forcePaused = false}) {
+    final controller = _controller;
+    final initialized = controller != null && controller.value.isInitialized;
+    final position = initialized
+        ? controller.value.position.inMilliseconds / 1000.0
+        : _displayPosition();
+    return TogetherExitResult(
+      videoId: _videoId,
+      ep: _ep < 1 ? 1 : _ep,
+      lineId: _isLive ? _liveLineId : _videoLine,
+      position: position.isFinite && position > 0 ? position : 0,
+      playing: !forcePaused &&
+          (controller?.value.isPlaying ?? _remote?.playing ?? false),
+      kind: _isLive ? 'live' : 'video',
+    );
   }
 
   Future<void> _saveRoomProgress() async {
@@ -1915,6 +2002,8 @@ class _TogetherPageState extends State<TogetherPage>
     _loadingKey = key;
     final seq = ++_videoSeq;
     _endedSent = false;
+    // 本次拉流是否已作废（页面销毁 / 被换线、重连的新请求取代）。
+    bool stale() => !mounted || seq != _videoSeq;
 
     final previous = _controller;
     _controller = null;
@@ -1927,7 +2016,7 @@ class _TogetherPageState extends State<TogetherPage>
       });
     }
     if (previous != null) await _releasePlayer(previous);
-    if (!mounted || seq != _videoSeq) return;
+    if (stale()) return;
 
     // 房主建房时还没有 room_state，按播放处理；之后跟随权威状态，
     // 房主暂停时切线路也不会突然自己播起来。
@@ -1936,13 +2025,16 @@ class _TogetherPageState extends State<TogetherPage>
     try {
       controller = FxPlayer.create(readyTimeout: const Duration(seconds: 20));
       await controller.open(line.url, play: shouldPlay);
-      if (!mounted || seq != _videoSeq) {
-        await _releasePlayer(controller);
+      if (stale()) {
+        await _dropLivePlayer(controller);
         return;
       }
       await controller.setLooping(false).catchError((_) {});
       await controller.setRate(1).catchError((_) {});
-      if (seq != _videoSeq) return;
+      if (stale()) {
+        await _dropLivePlayer(controller);
+        return;
+      }
 
       final old = _controller;
       old?.removeListener(_onVideoValue);
@@ -1955,7 +2047,10 @@ class _TogetherPageState extends State<TogetherPage>
         await Future<void>.delayed(const Duration(milliseconds: 60));
         await controller.pause().catchError((_) {});
       }
-      if (!mounted || seq != _videoSeq) return;
+      if (stale()) {
+        await _dropLivePlayer(controller);
+        return;
+      }
       _loadedKey = key;
       _loadingKey = '';
       _liveLastPosMs = -1;
@@ -1969,12 +2064,10 @@ class _TogetherPageState extends State<TogetherPage>
       if (_isHost) _sendLiveState(controller.value.isPlaying);
       _applyLiveRemote(_remote ?? _emptyLiveState(), _remote);
     } catch (_) {
-      if (!mounted || seq != _videoSeq) return;
-      try {
-        controller?.removeListener(_onVideoValue);
-        if (identical(_controller, controller)) _controller = null;
-        if (controller != null) await _releasePlayer(controller);
-      } catch (_) {}
+      // 失败也要先把本次创建（可能已挂到 _controller）的实例释放掉，
+      // 再决定是否展示错误，避免卡顿重连叠加时遗留孤儿播放器。
+      if (controller != null) await _dropLivePlayer(controller);
+      if (stale()) return;
       _loadingKey = '';
       _loadedKey = '';
       setState(() {
@@ -1982,6 +2075,16 @@ class _TogetherPageState extends State<TogetherPage>
         _videoError = '直播源加载失败，请重试';
       });
     }
+  }
+
+  /// 直播拉流作废时释放本次创建的播放器。
+  ///
+  /// 此时它可能还没挂到 `_controller`（换线在 open 途中被打断），也可能
+  /// 已经挂上（挂上后才被新的请求取代）；两种都要摘掉监听并释放。
+  Future<void> _dropLivePlayer(FxPlayer player) async {
+    player.removeListener(_onVideoValue);
+    if (identical(_controller, player)) _controller = null;
+    await _releasePlayer(player);
   }
 
   /// 成员刚进房还没收到 state 时的兜底：按播放处理。

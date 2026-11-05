@@ -46,6 +46,14 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   bool _controls = true;
   bool _fav = false;
   bool _openingTogether = false;
+
+  /// 进一起看时播放器所有权已交给房间：期间不允许本页重新拉流，
+  /// 否则房间里会多出一路同频道直播。
+  bool _releasedForTogether = false;
+
+  /// 切线路进行中：线路卡禁用，避免并发 open 出两个播放器。
+  bool _switchingLine = false;
+
   int _openSeq = 0;
   String _lastPlayerKey = '';
   Timer? _hideTimer;
@@ -126,13 +134,13 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     if (id.isEmpty) return;
     var fav = false;
     try {
+      // 收藏列表是唯一事实源：收藏页删除后这里必须立刻变回未收藏，
+      // 不能再用 fav_live_ 标记抢先返回 true。读到结果后顺手修正旧标记。
+      final list = await FxStore.read(FxStore.favoriteKey);
+      fav = list.any((e) => '${e['id']}' == id && '${e['kind']}' == 'live');
       final sp = await SharedPreferences.getInstance();
-      fav = sp.getBool('fav_live_$id') ?? false;
-      if (!fav) {
-        final list = await FxStore.read(FxStore.favoriteKey);
-        fav = list.any(
-          (e) => '${e['id']}' == id && '${e['kind']}' == 'live',
-        );
+      if ((sp.getBool('fav_live_$id') ?? false) != fav) {
+        await sp.setBool('fav_live_$id', fav);
       }
     } catch (_) {}
     if (!mounted) return;
@@ -151,7 +159,18 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     } catch (_) {}
   }
 
+  /// 释放并摘掉 `_open` 本次新建的播放器。
+  ///
+  /// 所有提前返回（页面已退出 / 被更新的 open 取代 / open 抛异常）都必须
+  /// 走这里：否则这个实例没有任何引用方，会一直出声到进程结束。
+  Future<void> _dropPlayer(FxPlayer player) async {
+    player.removeListener(_onPlayer);
+    if (identical(_player, player)) _player = null;
+    await _release(player);
+  }
+
   Future<FxPlayer?> _open(String lineId) async {
+    if (_releasedForTogether) return null;
     final line = _lineFor(lineId);
     if (line == null || line.url.trim().isEmpty) {
       if (mounted) {
@@ -176,16 +195,32 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     }
     if (old != null) await _release(old);
 
+    // 释放旧播放器期间页面可能已经退出，或又有新的 open 抢先发起：
+    // 此时绝不能再创建播放器，否则它会成为没人释放、一直在响的孤儿。
+    if (!mounted || seq != _openSeq) return null;
+
     final player = FxPlayer.create(readyTimeout: const Duration(seconds: 20));
-    player.addListener(_onPlayer);
-    _player = player;
     try {
+      player.addListener(_onPlayer);
       await player.open(line.url, play: true);
-      if (!mounted || seq != _openSeq) return null;
+      if (!mounted || seq != _openSeq) {
+        await _dropPlayer(player);
+        return null;
+      }
       await player.setLooping(false).catchError((_) {});
-      if (!mounted || seq != _openSeq) return null;
+      if (!mounted || seq != _openSeq) {
+        await _dropPlayer(player);
+        return null;
+      }
       await player.play().catchError((_) {});
-      if (!mounted || seq != _openSeq) return null;
+      if (!mounted || seq != _openSeq) {
+        await _dropPlayer(player);
+        return null;
+      }
+      // 只有 open 成功、且仍是最新一次请求时才挂到 _player：
+      // 并发时后发者不会被先发者覆盖，先发者在上面的分支里已被释放。
+      _player = player;
+      _lastPlayerKey = '';
       setState(() {
         _loading = false;
         _error = null;
@@ -193,10 +228,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       _startHideTimer();
       return player;
     } catch (_) {
+      await _dropPlayer(player);
       if (!mounted || seq != _openSeq) return null;
-      _player = null;
-      player.removeListener(_onPlayer);
-      unawaited(_release(player));
       setState(() {
         _loading = false;
         _error = '直播源加载失败，请重试或切换线路';
@@ -213,6 +246,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   }
 
   Future<void> _reopenCurrent() async {
+    if (_releasedForTogether) return;
     final line = _line;
     if (line == null) return;
     await _open(line.id);
@@ -270,9 +304,24 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   }
 
   Future<void> _switchLine(String lineId) async {
-    if (lineId == _lineId) return;
-    await _open(lineId);
-    _touch();
+    // 并发锁：加载中连点线路会同时发起多次 open，先发起者被覆盖后
+    // 容易漏释放，最坏两路直播同时出声。这里直接忽略重复请求。
+    if (_switchingLine) {
+      if (mounted) fxToast(context, '正在切换线路，请稍候');
+      return;
+    }
+    if (lineId == _lineId && _error == null) return;
+    _switchingLine = true;
+    if (mounted) setState(() {});
+    try {
+      await _open(lineId);
+    } finally {
+      _switchingLine = false;
+      if (mounted) {
+        setState(() {});
+        _touch();
+      }
+    }
   }
 
   Future<void> _openFullscreen() async {
@@ -361,11 +410,14 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       return;
     }
     _openingTogether = true;
+    _releasedForTogether = true;
     _hideTimer?.cancel();
     try {
-      await player.pause().catchError((_) {});
+      // 房间里只能有一个播放器：进房前彻底释放本页播放器（不能只 pause，
+      // 否则同一路直播会同时开两台解码器、两条流，一旦 pause 失败就是双声）。
+      await _dropPlayer(player);
       if (!mounted) return;
-      await Navigator.of(context).push(
+      final result = await Navigator.of(context).push<TogetherExitResult>(
         MaterialPageRoute(
           builder: (_) => TogetherPage.live(
             liveChannel: _channel,
@@ -374,10 +426,19 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         ),
       );
       if (!mounted) return;
-      await _player?.play().catchError((_) {});
+      // 房间内可能换了线路：回来自动重建，回到直播边缘。
+      if (result != null &&
+          result.videoId == _channel.id &&
+          result.lineId.trim().isNotEmpty) {
+        _lineId = result.lineId.trim();
+      }
     } finally {
+      _releasedForTogether = false;
       _openingTogether = false;
-      if (mounted) _touch();
+      if (mounted) {
+        await _reopenCurrent();
+        if (mounted) _touch();
+      }
     }
   }
 
@@ -711,7 +772,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
                   subtitle: line.subtitle(i),
                   width: 94,
                   active: line.id == _lineId,
-                  onTap: () => unawaited(_switchLine(line.id)),
+                  onTap: _switchingLine
+                      ? null
+                      : () => unawaited(_switchLine(line.id)),
                 );
               },
             ),

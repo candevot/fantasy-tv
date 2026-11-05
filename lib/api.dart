@@ -19,6 +19,24 @@ class Api {
   /// 登录 token（由 Auth 维护）；存在时所有请求都带 Bearer。
   static String token = '';
 
+  /// token 失效（HTTP 401）时的全局回调，由 [Auth] 注册：
+  /// 统一清本地登录态并提示，页面不需要各自处理。
+  static void Function()? onUnauthorized;
+
+  /// 401 通知去重：同一批并发请求只处理一次。
+  static int _unauthorizedAt = 0;
+
+  static void _notifyUnauthorized() {
+    // 登录接口本身也可能回 401（账号密码错误），没带 token 时不算会话过期。
+    if (token.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _unauthorizedAt < 3000) return;
+    _unauthorizedAt = now;
+    try {
+      onUnauthorized?.call();
+    } catch (_) {}
+  }
+
   static Future<void> init() async {
     final sp = await SharedPreferences.getInstance();
     base = sp.getString('apiBase') ?? base;
@@ -69,6 +87,7 @@ class Api {
           failure = ApiException.server(r.statusCode);
           continue;
         }
+        if (r.statusCode == 401) _notifyUnauthorized();
         return r;
       } on TimeoutException {
         failure = ApiException.timeout();
@@ -100,8 +119,11 @@ class Api {
     final code = j['code'];
     final ok = code == 0 || code == '0';
     if (!ok) {
-      throw ApiException('${j['msg'] ?? '请求失败'}',
-          code: code is num ? code.toInt() : r.statusCode);
+      final codeValue = code is num ? code.toInt() : r.statusCode;
+      // 服务端也可能用业务 code 返回 401；_send 已通知过状态码 401 的情况，
+      // _notifyUnauthorized 内部按时间窗口去重。
+      if (codeValue == 401) _notifyUnauthorized();
+      throw ApiException('${j['msg'] ?? '请求失败'}', code: codeValue);
     }
     final d = j['data'];
     return d is Map<String, dynamic> ? d : <String, dynamic>{'data': d};
