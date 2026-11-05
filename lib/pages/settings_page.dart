@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
+import '../auth.dart';
 import '../theme.dart';
 import 'category_page.dart';
+import 'change_password_page.dart';
+import 'login_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -18,6 +21,28 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _cacheBytes = PaintingBinding.instance.imageCache.currentSizeBytes;
+    Auth.instance.addListener(_onAuth);
+  }
+
+  @override
+  void dispose() {
+    Auth.instance.removeListener(_onAuth);
+    super.dispose();
+  }
+
+  void _onAuth() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _openChangePassword() async {
+    if (Auth.instance.user == null) {
+      await Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const LoginPage()));
+      if (!mounted || Auth.instance.user == null) return;
+    }
+    if (!mounted) return;
+    await Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const ChangePasswordPage()));
   }
 
   void _toast(String msg) {
@@ -259,6 +284,30 @@ class _SettingsPageState extends State<SettingsPage> {
                   onTap: _checkUpdate,
                 ),
               ],
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(4, 22, 4, 8),
+            child: Text('账号与安全',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Fx.sub)),
+          ),
+          GlassCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            radius: 20,
+            child: _row(
+              icon: Icons.password_rounded,
+              color: const Color(0xFFE08A3C),
+              title: '修改密码',
+              subtitle: Auth.instance.user == null
+                  ? '登录后可修改登录密码'
+                  : '旧密码验证，定期更换更安全',
+              trailing: Text(
+                  Auth.instance.user == null ? '去登录' : '修改',
+                  style: const TextStyle(fontSize: 10.5, color: Color(0xFFA6B1C2))),
+              onTap: _openChangePassword,
             ),
           ),
           const Padding(

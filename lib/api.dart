@@ -71,13 +71,14 @@ class Api {
     return _decode(r);
   }
 
+  /// [timeout] 只给上传头像这类大 body 用，普通接口沿用 [_timeout]。
   static Future<Map<String, dynamic>> _post(String path,
-      [Map<String, dynamic>? body]) async {
+      [Map<String, dynamic>? body, Duration? timeout]) async {
     final r = await http
         .post(_u(path),
             headers: _headers(json: true),
             body: jsonEncode(body ?? const <String, dynamic>{}))
-        .timeout(_timeout);
+        .timeout(timeout ?? _timeout);
     return _decode(r);
   }
 
@@ -272,6 +273,32 @@ class Api {
     final raw = d['user'];
     if (raw is Map) return AuthUser.fromJson(Map<String, dynamic>.from(raw));
     return AuthUser.fromJson(d);
+  }
+
+  /// `POST /api/user/avatar`：`{dataBase64}` → 服务器落盘后返回绝对头像地址。
+  /// 只接受 jpg/png，解码后 ≤ 2MB（客户端上传前已压缩到 200KB 以内）。
+  static Future<String> uploadAvatar(String dataBase64) async {
+    final d = await _post(
+      '/user/avatar',
+      <String, dynamic>{'dataBase64': dataBase64},
+      // 200KB 图片转 base64 后约 270KB，弱网下 10s 不够。
+      const Duration(seconds: 30),
+    );
+    final url = '${d['avatar'] ?? d['url'] ?? ''}'.trim();
+    if (url.isEmpty) throw ApiException('服务器未返回头像地址');
+    return abs(url);
+  }
+
+  /// `POST /api/user/password`：`{oldPassword,newPassword}` → `{ok}`。
+  /// POST 契约下旧 token 继续有效，不需要重新登录。
+  static Future<void> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    await _post('/user/password', <String, dynamic>{
+      'oldPassword': oldPassword,
+      'newPassword': newPassword,
+    });
   }
 
   static Future<void> logout() async {

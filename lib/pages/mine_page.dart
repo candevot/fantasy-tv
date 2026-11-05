@@ -4,9 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../api.dart';
 import '../auth.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'change_password_page.dart';
 import 'downloads_page.dart';
 import 'favorite_page.dart';
 import 'history_page.dart';
@@ -34,6 +36,7 @@ class _MinePageState extends State<MinePage> {
   int _favorite = 0;
   int _download = 0;
   bool _avatarBusy = false;
+  bool _statsReady = false;
 
   @override
   void initState() {
@@ -63,6 +66,7 @@ class _MinePageState extends State<MinePage> {
       _history = res[0];
       _favorite = res[1];
       _download = res[2];
+      _statsReady = true;
     });
   }
 
@@ -111,12 +115,15 @@ class _MinePageState extends State<MinePage> {
       if (picked == null) return;
       if (!mounted) return;
       setState(() => _avatarBusy = true);
+      // 读取原图 → 压缩 → base64 → POST /user/avatar → 更新本地用户。
       final raw = await picked.readAsBytes();
-      await Auth.instance.saveAvatar(raw);
+      await Auth.instance.uploadAvatar(raw);
       if (!mounted) return;
       _toast('头像已更新');
     } on PlatformException catch (e) {
       if (mounted) _toast('无法打开相册：${e.message ?? '请检查权限'}');
+    } on ApiException catch (e) {
+      if (mounted) _toast(e.message);
     } catch (e) {
       if (mounted) {
         _toast(e is Exception ? e.toString() : '头像处理失败，请重试');
@@ -124,6 +131,15 @@ class _MinePageState extends State<MinePage> {
     } finally {
       if (mounted) setState(() => _avatarBusy = false);
     }
+  }
+
+  Future<void> _openChangePassword() async {
+    if (Auth.instance.user == null) {
+      await _openLogin();
+      if (Auth.instance.user == null) return;
+    }
+    if (!mounted) return;
+    await _open(const ChangePasswordPage());
   }
 
   Future<void> _editNickname() async {
@@ -243,6 +259,8 @@ class _MinePageState extends State<MinePage> {
             _sectionHeader('我的功能'),
             const SizedBox(height: 10),
             _entryGrid(),
+            const SizedBox(height: 12),
+            _accountEntry(),
             const SizedBox(height: 28),
             const Center(
               child: Text(
@@ -523,11 +541,11 @@ class _MinePageState extends State<MinePage> {
       radius: 20,
       child: Row(
         children: [
-          _stat('$_history', '观看记录'),
+          _stat(_statsReady ? '$_history' : '—', '观看记录'),
           _divider(),
-          _stat('$_favorite', '我的收藏'),
+          _stat(_statsReady ? '$_favorite' : '—', '我的收藏'),
           _divider(),
-          _stat('$_download', '离线缓存'),
+          _stat(_statsReady ? '$_download' : '—', '离线缓存'),
         ],
       ),
     );
@@ -628,6 +646,60 @@ class _MinePageState extends State<MinePage> {
                   height: 1.2,
                   fontWeight: FontWeight.w400,
                   color: Fx.sub)),
+        ],
+      ),
+    );
+  }
+
+  Widget _accountEntry() {
+    final logged = Auth.instance.user != null;
+    return GlassCard(
+      padding: const EdgeInsets.all(14),
+      radius: 18,
+      opacity: .62,
+      onTap: _openChangePassword,
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: Fx.accent2.withOpacity(.11),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(Icons.lock_reset_rounded,
+                size: 19, color: Fx.accent2),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('修改密码',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 14,
+                        height: 1.2,
+                        fontWeight: FontWeight.w500,
+                        color: Fx.ink)),
+                const SizedBox(height: 4),
+                Text(
+                  logged ? '验证原密码后更换登录密码' : '登录后可修改登录密码',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 11.5,
+                      height: 1.2,
+                      fontWeight: FontWeight.w400,
+                      color: Fx.sub),
+                ),
+              ],
+            ),
+          ),
+          const Icon(Icons.chevron_right_rounded,
+              size: 18, color: Color(0xFFB3BECD)),
         ],
       ),
     );

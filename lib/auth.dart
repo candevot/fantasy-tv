@@ -134,10 +134,41 @@ class Auth extends ChangeNotifier {
   }
 
   /// 相册选图后：居中裁方、缩到 256×256、JPEG 压缩到 200KB 以内，
-  /// 存到应用私有目录并把路径记进 SharedPreferences。
-  Future<String> saveAvatar(Uint8List raw) async {
+  /// 转成 base64 调 `POST /api/user/avatar`，成功后更新本地用户，
+  /// 同时在应用私有目录缓存一份，弱网 / 离线时头像也能立即显示。
+  Future<void> uploadAvatar(Uint8List raw) async {
     final user = _user;
     if (user == null) throw ApiException('请先登录');
+    final bytes = _compressAvatar(raw);
+    final avatarUrl = await Api.uploadAvatar(base64Encode(bytes));
+
+    // 本地缓存读写失败不影响线上头像生效，静默降级。
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final file = File('${dir.path}/fx_avatar_${user.id}.jpg');
+      await file.writeAsBytes(bytes, flush: true);
+      _avatarPath = file.path;
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString('$_kAvatarPrefix${user.id}', file.path);
+    } catch (_) {
+      _avatarPath = '';
+    }
+
+    final latest = _user;
+    if (latest == null || latest.id != user.id) return;
+    _user = latest.copyWith(avatar: avatarUrl);
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString(_kUser, jsonEncode(_user!.toJson()));
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  /// 兼容旧调用：头像上传统一走 [uploadAvatar]。
+  Future<void> saveAvatar(Uint8List raw) => uploadAvatar(raw);
+
+  /// 居中裁方 + 压缩到 200KB 以内，返回 JPEG 字节。
+  Uint8List _compressAvatar(Uint8List raw) {
     final decoded = img.decodeImage(raw);
     if (decoded == null) throw ApiException('无法识别这张图片');
 
@@ -159,15 +190,7 @@ class Auth extends ChangeNotifier {
     if (bytes.length > 200 * 1024) {
       throw ApiException('图片压缩后仍超过 200KB，请换一张');
     }
-
-    final dir = await getApplicationSupportDirectory();
-    final file = File('${dir.path}/fx_avatar_${user.id}.jpg');
-    await file.writeAsBytes(bytes, flush: true);
-    _avatarPath = file.path;
-    final sp = await SharedPreferences.getInstance();
-    await sp.setString('$_kAvatarPrefix${user.id}', file.path);
-    notifyListeners();
-    return file.path;
+    return bytes;
   }
 
   Future<void> logout() async {
