@@ -74,9 +74,17 @@ class _TogetherChatListState extends State<TogetherChatList>
   @override
   void didUpdateWidget(covariant TogetherChatList oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.messages.length != widget.messages.length) {
+    if (_signature(widget.messages) != _signature(oldWidget.messages)) {
       _scrollToBottom();
     }
+  }
+
+  String _signature(List<TogetherChatMessage> messages) {
+    if (messages.isEmpty) return '';
+    final last = messages.last;
+    // 消息上限会裁掉最旧一条：长度不变但最后一条变了也要贴底。
+    return '${messages.length}|${last.time.microsecondsSinceEpoch}|'
+        '${last.user}|${last.text}|${last.system}';
   }
 
   @override
@@ -274,11 +282,15 @@ class TogetherComposer extends StatefulWidget {
     super.key,
     required this.onSend,
     this.enabled = true,
+    this.hint,
   });
 
   /// 返回 true 表示已发出 / 已本地展示，输入框才清空。
   final bool Function(String text) onSend;
   final bool enabled;
+
+  /// 自定义输入提示（重连 / 在线文案不同）。
+  final String? hint;
 
   @override
   State<TogetherComposer> createState() => _TogetherComposerState();
@@ -294,6 +306,8 @@ class _TogetherComposerState extends State<TogetherComposer> {
   final TextEditingController _text = TextEditingController();
   final FocusNode _focus = FocusNode();
   bool _emojiOpen = false;
+  bool _failed = false;
+  String _failedText = '';
 
   @override
   void initState() {
@@ -310,7 +324,12 @@ class _TogetherComposerState extends State<TogetherComposer> {
   }
 
   void _onTextChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    if (_failed && _text.text.trim() != _failedText) {
+      setState(() => _failed = false);
+      return;
+    }
+    setState(() {});
   }
 
   void _toggleEmoji() {
@@ -336,9 +355,21 @@ class _TogetherComposerState extends State<TogetherComposer> {
     final text = _text.text.trim();
     if (text.isEmpty) return;
     final accepted = widget.onSend(text);
+    if (!mounted) return;
     if (accepted) {
       _text.clear();
-      if (mounted) setState(() => _emojiOpen = false);
+      setState(() {
+        _emojiOpen = false;
+        _failed = false;
+        _failedText = '';
+      });
+    } else {
+      // 发送失败：输入内容原样保留，按钮变成「重试」。
+      setState(() {
+        _failed = true;
+        _failedText = text;
+        _emojiOpen = false;
+      });
     }
   }
 
@@ -427,8 +458,8 @@ class _TogetherComposerState extends State<TogetherComposer> {
                   decoration: InputDecoration(
                     isDense: true,
                     counterText: '',
-                    hintText:
-                        widget.enabled ? '随便说点啥吧...' : '正在重连，稍后可以聊天',
+                    hintText: widget.hint ??
+                        (widget.enabled ? '随便说点啥吧...' : '正在重连，稍后可以聊天'),
                     hintStyle: TextStyle(
                       fontSize: 13,
                       color: Fx.sub.withOpacity(.7),
@@ -439,18 +470,56 @@ class _TogetherComposerState extends State<TogetherComposer> {
                   ),
                 ),
               ),
+              if (_failed) ...[
+                const SizedBox(width: 4),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _submit,
+                  child: Container(
+                    height: 38,
+                    padding: const EdgeInsets.symmetric(horizontal: 9),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: Fx.accent.withOpacity(.12),
+                      borderRadius: BorderRadius.circular(19),
+                      border: Border.all(color: Fx.accent.withOpacity(.22)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.refresh_rounded,
+                          size: 15,
+                          color: Fx.accent,
+                        ),
+                        const SizedBox(width: 3),
+                        const Text(
+                          '重试',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: Fx.accent,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(width: 4),
               GestureDetector(
-                onTap: canSend ? _submit : null,
+                onTap: (_failed || canSend) ? _submit : null,
                 child: Container(
                   width: 38,
                   height: 38,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    gradient: canSend ? Fx.brand : null,
-                    color: canSend ? null : Colors.white.withOpacity(.55),
+                    gradient: (_failed || canSend) ? Fx.brand : null,
+                    color: (_failed || canSend)
+                        ? null
+                        : Colors.white.withOpacity(.55),
                     shape: BoxShape.circle,
-                    boxShadow: canSend
+                    boxShadow: (_failed || canSend)
                         ? [
                             BoxShadow(
                               color: Fx.accent.withOpacity(.3),
@@ -461,9 +530,13 @@ class _TogetherComposerState extends State<TogetherComposer> {
                         : null,
                   ),
                   child: Icon(
-                    Icons.arrow_upward_rounded,
+                    _failed
+                        ? Icons.refresh_rounded
+                        : Icons.arrow_upward_rounded,
                     size: 21,
-                    color: canSend ? Colors.white : Fx.sub.withOpacity(.5),
+                    color: (_failed || canSend)
+                        ? Colors.white
+                        : Fx.sub.withOpacity(.5),
                   ),
                 ),
               ),

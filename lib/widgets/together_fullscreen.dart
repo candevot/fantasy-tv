@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 
 import '../services/fx_player.dart';
@@ -17,7 +18,7 @@ class TogetherFullscreenView extends StatefulWidget {
   const TogetherFullscreenView({
     super.key,
     required this.controller,
-    required this.messages,
+    required this.chat,
     required this.members,
     required this.roomCode,
     required this.title,
@@ -31,23 +32,29 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.onSeek,
     required this.onHostOnly,
     required this.onShowMembers,
+    required this.onSendChat,
   });
 
   final FxPlayer? controller;
-  final List<TogetherChatMessage> messages;
+
+  /// 聊天消息只在有新消息时更新，避免整页跟着进度刷新。
+  final ValueListenable<List<TogetherChatMessage>> chat;
   final List<TogetherMember> members;
   final String roomCode;
   final String title;
   final int ep;
   final bool isHost;
   final bool online;
-  final double position;
+  final ValueListenable<double> position;
   final double duration;
   final VoidCallback onExit;
   final VoidCallback onTogglePlay;
   final ValueChanged<double> onSeek;
   final VoidCallback onHostOnly;
   final VoidCallback onShowMembers;
+
+  /// 返回 false 表示发送失败，输入框会保留文字。
+  final bool Function(String text) onSendChat;
 
   @override
   State<TogetherFullscreenView> createState() => _TogetherFullscreenViewState();
@@ -136,13 +143,33 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             ),
           ),
           Positioned.fill(
-            child: TogetherFloatingChat(
-              messages: widget.messages,
-              members: widget.members,
-              online: widget.online,
+            child: ValueListenableBuilder<List<TogetherChatMessage>>(
+              valueListenable: widget.chat,
+              builder: (context, messages, _) => TogetherFloatingChat(
+                messages: messages,
+                members: widget.members,
+                online: widget.online,
+              ),
             ),
           ),
+          _buildComposer(context),
         ],
+      ),
+    );
+  }
+
+  Widget _buildComposer(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final bottom = media.viewInsets.bottom + media.padding.bottom + 44;
+    return Positioned(
+      left: media.padding.left + 16,
+      right: media.padding.right + 16,
+      bottom: bottom,
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: _TogetherFullscreenComposer(onSend: widget.onSendChat),
+        ),
       ),
     );
   }
@@ -209,7 +236,11 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                     child: _buildPlayButton(controller, ready),
                   ),
                 ),
-                _buildBottomBar(),
+                ValueListenableBuilder<double>(
+                  valueListenable: widget.position,
+                  builder: (context, position, _) =>
+                      _buildBottomBar(position),
+                ),
               ],
             ),
           ),
@@ -296,7 +327,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   }
 
   Widget _buildMembersChip() {
-    final count = widget.members.isEmpty ? 1 : widget.members.length;
+    final count = widget.members.length;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: () => _act(widget.onShowMembers),
@@ -361,9 +392,9 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     );
   }
 
-  Widget _buildBottomBar() {
+  Widget _buildBottomBar(double position) {
     final duration = widget.duration > 0 ? widget.duration : 0.0;
-    final shown = (_dragPosition ?? widget.position)
+    final shown = (_dragPosition ?? position)
         .clamp(0.0, duration <= 0 ? 0.0 : duration)
         .toDouble();
     return Column(
@@ -506,11 +537,20 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
       return;
     }
     if (message.mine) {
-      _scrollToBottom();
+      if (!_collapsed) _scrollToBottom();
       return;
     }
-    _showHint(message, countUnread: _collapsed);
-    _scrollToBottom();
+    final wasNearBottom = _nearBottom;
+    _showHint(message, countUnread: _collapsed || !wasNearBottom);
+    if (!_collapsed && wasNearBottom) _scrollToBottom();
+  }
+
+  /// 当前是否贴着底部；用户在翻旧消息时不抢滚动。
+  bool get _nearBottom {
+    if (!_scroll.hasClients) return true;
+    final position = _scroll.position;
+    if (!position.hasContentDimensions) return true;
+    return position.maxScrollExtent - position.pixels < 36;
   }
 
   @override
@@ -584,9 +624,10 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
         final minLeft = pad.left + 10;
         final minTop = pad.top + 10;
         final maxLeft = math.max(minLeft, size.width - pad.right - width - 10);
+        // 底部给聊天浮动输入条 / 进度条留出空间。
         final maxTop = math.max(
           minTop,
-          size.height - pad.bottom - keyboard - height - 68,
+          size.height - pad.bottom - keyboard - height - 108,
         );
 
         var offset = _offset ?? Offset(maxLeft, maxTop);
@@ -747,7 +788,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
               ),
               const SizedBox(width: 5),
               Text(
-                '${widget.members.isEmpty ? 1 : widget.members.length}人',
+                '${widget.members.length}人',
                 style: TextStyle(
                   fontSize: 9,
                   color: Colors.white.withOpacity(.58),
@@ -985,6 +1026,180 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 全屏聊天输入浮动条：输入失败保留文字，右侧出现「重试」。
+class _TogetherFullscreenComposer extends StatefulWidget {
+  const _TogetherFullscreenComposer({required this.onSend});
+
+  final bool Function(String text) onSend;
+
+  @override
+  State<_TogetherFullscreenComposer> createState() =>
+      _TogetherFullscreenComposerState();
+}
+
+class _TogetherFullscreenComposerState
+    extends State<_TogetherFullscreenComposer> {
+  final TextEditingController _text = TextEditingController();
+  final FocusNode _focus = FocusNode();
+  bool _failed = false;
+  String _failedText = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _text.addListener(_onTextChanged);
+  }
+
+  @override
+  void dispose() {
+    _text.removeListener(_onTextChanged);
+    _text.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _onTextChanged() {
+    if (!mounted) return;
+    if (_failed && _text.text.trim() != _failedText) {
+      setState(() => _failed = false);
+      return;
+    }
+    setState(() {});
+  }
+
+  void _submit() {
+    final text = _text.text.trim();
+    if (text.isEmpty) return;
+    final accepted = widget.onSend(text);
+    if (!mounted) return;
+    if (accepted) {
+      _text.clear();
+      setState(() => _failed = false);
+    } else {
+      setState(() {
+        _failed = true;
+        _failedText = text;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasText = _text.text.trim().isNotEmpty;
+    final canSend = _failed || hasText;
+    return Container(
+      height: 44,
+      padding: const EdgeInsets.fromLTRB(6, 3, 6, 3),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(.52),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: Colors.white.withOpacity(.22)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.30),
+            blurRadius: 18,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          const SizedBox(width: 6),
+          Icon(
+            Icons.chat_bubble_outline_rounded,
+            size: 16,
+            color: Colors.white.withOpacity(.66),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: TextField(
+              controller: _text,
+              focusNode: _focus,
+              minLines: 1,
+              maxLines: 1,
+              maxLength: 300,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _submit(),
+              buildCounter: (
+                _, {
+                required currentLength,
+                required isFocused,
+                maxLength,
+              }) =>
+                  null,
+              style: const TextStyle(fontSize: 12.5, color: Colors.white),
+              cursorColor: Colors.white,
+              decoration: InputDecoration(
+                isDense: true,
+                counterText: '',
+                hintText: '发条弹幕和房主聊聊…',
+                hintStyle: TextStyle(
+                  fontSize: 12,
+                  color: Colors.white.withOpacity(.44),
+                ),
+                border: InputBorder.none,
+                contentPadding: const EdgeInsets.symmetric(vertical: 10),
+              ),
+            ),
+          ),
+          if (_failed)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _submit,
+              child: Container(
+                height: 30,
+                padding: const EdgeInsets.symmetric(horizontal: 9),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(.14),
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.refresh_rounded,
+                      size: 14,
+                      color: Colors.white,
+                    ),
+                    const SizedBox(width: 3),
+                    const Text(
+                      '重试',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          const SizedBox(width: 4),
+          GestureDetector(
+            onTap: canSend ? _submit : null,
+            child: Container(
+              width: 32,
+              height: 32,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                gradient: canSend ? Fx.brand : null,
+                color: canSend ? null : Colors.white.withOpacity(.13),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                _failed ? Icons.refresh_rounded : Icons.arrow_upward_rounded,
+                size: 17,
+                color: canSend ? Colors.white : Colors.white.withOpacity(.42),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

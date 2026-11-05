@@ -1,7 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../api.dart';
 import '../theme.dart';
+
+/// 封面地址归一：服务器可能返回相对地址（/api/proxy?u=…），
+/// data URI 和已是绝对地址的保持原样。
+String togetherCoverUrl(String cover) {
+  final raw = cover.trim();
+  if (raw.isEmpty) return '';
+  if (raw.startsWith('data:') ||
+      raw.startsWith('http://') ||
+      raw.startsWith('https://')) {
+    return raw;
+  }
+  return Api.abs(raw);
+}
 
 /// 一起看 · 通用数据与小部件。
 ///
@@ -219,7 +233,8 @@ class TogetherAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = togetherColor(name);
-    final initial = name.isEmpty ? '影' : name.substring(0, 1);
+    final trimmed = name.trim();
+    final initial = trimmed.isEmpty ? '影' : trimmed.characters.first;
     final image = avatar.startsWith('http://') || avatar.startsWith('https://')
         ? Image.network(
             avatar,
@@ -319,10 +334,11 @@ class TogetherCover extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isHttp = cover.startsWith('http://') || cover.startsWith('https://');
+    final url = togetherCoverUrl(cover);
+    final isHttp = url.startsWith('http://') || url.startsWith('https://');
     final child = isHttp
         ? Image.network(
-            cover,
+            url,
             width: width,
             height: height,
             fit: BoxFit.cover,
@@ -366,7 +382,7 @@ class TogetherCover extends StatelessWidget {
           ),
           Center(
             child: Text(
-              title.isEmpty ? '影' : title.substring(0, 1),
+              title.trim().isEmpty ? '影' : title.trim().characters.first,
               style: TextStyle(
                 color: Colors.white.withOpacity(.92),
                 fontSize: (height == null || height! <= 0) ? 30 : height! * .3,
@@ -397,7 +413,12 @@ class TogetherCover extends StatelessWidget {
 }
 
 /// 统一 toast（白玻璃 App 里用深色浮动条，保证在亮色背景上可读）。
-void togetherToast(BuildContext context, String text) {
+void togetherToast(
+  BuildContext context,
+  String text, {
+  String? actionLabel,
+  VoidCallback? onAction,
+}) {
   final messenger = ScaffoldMessenger.maybeOf(context);
   if (messenger == null) return;
   messenger.hideCurrentSnackBar();
@@ -416,7 +437,14 @@ void togetherToast(BuildContext context, String text) {
       margin: const EdgeInsets.fromLTRB(22, 0, 22, 18),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-      duration: const Duration(milliseconds: 1800),
+      duration: Duration(milliseconds: actionLabel == null ? 1800 : 4000),
+      action: actionLabel == null || onAction == null
+          ? null
+          : SnackBarAction(
+              label: actionLabel,
+              textColor: const Color(0xFF9FC4FF),
+              onPressed: onAction,
+            ),
     ),
   );
 }

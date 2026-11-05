@@ -32,7 +32,8 @@ class TogetherPage extends StatefulWidget {
   State<TogetherPage> createState() => _TogetherPageState();
 }
 
-class _TogetherPageState extends State<TogetherPage> {
+class _TogetherPageState extends State<TogetherPage>
+    with WidgetsBindingObserver {
   static const Color _videoBg = Color(0xFF101722);
   static const List<DeviceOrientation> _landscape = <DeviceOrientation>[
     DeviceOrientation.landscapeLeft,
@@ -83,6 +84,10 @@ class _TogetherPageState extends State<TogetherPage> {
 
   final List<TogetherChatMessage> _messages = <TogetherChatMessage>[];
 
+  /// 聊天列表单独通知：只有新消息才刷新，进度跳动不再重建整页。
+  final ValueNotifier<List<TogetherChatMessage>> _chat =
+      ValueNotifier<List<TogetherChatMessage>>(const []);
+
   /* 播放 */
   FxPlayer? _controller;
   String _videoId = '';
@@ -104,10 +109,14 @@ class _TogetherPageState extends State<TogetherPage> {
   bool _resumePlaying = false;
   String _resumeKey = '';
 
+  /// 播放进度单独通知：ticker 只改这个值，不再整页 setState。
+  final ValueNotifier<double> _position = ValueNotifier<double>(0);
+
   Timer? _ticker;
   Timer? _heartbeat;
   Timer? _enterTimer;
   bool _downReported = false;
+  bool _foreground = true;
 
   @override
   void initState() {
@@ -122,9 +131,8 @@ class _TogetherPageState extends State<TogetherPage> {
       onError: _onError,
       onClosed: _onClosed,
     );
-    _ticker = Timer.periodic(const Duration(milliseconds: 500), (_) => _tick());
-    _heartbeat =
-        Timer.periodic(const Duration(seconds: 9), (_) => _hostHeartbeat());
+    WidgetsBinding.instance.addObserver(this);
+    _startTimers();
     final videoId = (widget.videoId ?? '').trim();
     if (videoId.isNotEmpty) {
       _videoId = videoId;
@@ -135,25 +143,90 @@ class _TogetherPageState extends State<TogetherPage> {
 
   @override
   void dispose() {
-    _ticker?.cancel();
-    _heartbeat?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _stopTimers();
     _enterTimer?.cancel();
     _joinCtrl.dispose();
-    _ticker = null;
-    _heartbeat = null;
     _enterTimer = null;
     if (_fullscreen) {
       _fullscreen = false;
       unawaited(_restoreSystemUi());
     }
+    _videoSeq++;
     final controller = _controller;
     _controller = null;
     if (controller != null) {
       controller.removeListener(_onVideoValue);
-      controller.dispose().catchError((_) {});
+      unawaited(_releasePlayer(controller));
     }
+    _client.leave();
     _client.dispose();
+    _chat.dispose();
+    _position.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+    final active = state == AppLifecycleState.resumed;
+    if (active == _foreground) return;
+    _foreground = active;
+    if (active) {
+      _startTimers();
+      _client.resumeHeartbeat();
+      if (_client.connected) {
+        // 回到前台先要一次服务端权威状态，再按服务器时间重算进度。
+        _client.refreshRoom();
+      } else {
+        _client.connect();
+      }
+      _resyncAfterResume();
+    } else {
+      _stopTimers();
+      _client.pauseHeartbeat();
+    }
+  }
+
+  void _startTimers() {
+    _ticker ??=
+        Timer.periodic(const Duration(milliseconds: 500), (_) => _tick());
+    _heartbeat ??=
+        Timer.periodic(const Duration(seconds: 9), (_) => _hostHeartbeat());
+  }
+
+  void _stopTimers() {
+    _ticker?.cancel();
+    _heartbeat?.cancel();
+    _ticker = null;
+    _heartbeat = null;
+  }
+
+  void _resyncAfterResume() {
+    final state = _remote;
+    if (_stage != _TogetherStage.room || state == null) return;
+    if (_isHost) {
+      // 房主回前台：把本地真实播放状态/进度重新写回服务器，
+      // 期间若系统暂停了播放，其他人也会跟着暂停而不是继续空跑。
+      final controller = _controller;
+      if (controller != null && controller.value.isInitialized) {
+        final position = controller.value.position.inMilliseconds / 1000.0;
+        final playing = controller.value.isPlaying;
+        if (_online) {
+          _client.sendState(
+            playing ? 'play' : 'pause',
+            position,
+            videoId: _videoId,
+            ep: _ep,
+            line: _videoLine,
+          );
+        }
+        _markRemote(playing ? 'play' : 'pause', position);
+      }
+    } else {
+      _applyRemotePlayback(state);
+    }
+    _tick(force: true);
   }
 
   /* ------------------------------------------------------------ 网络回调 */
@@ -163,10 +236,9 @@ class _TogetherPageState extends State<TogetherPage> {
     final first = _myId.isEmpty;
     setState(() {
       _online = true;
-      _downReported = false;
       if (me.id.isNotEmpty) _myId = me.id;
-      if (!first && _entered) _addSystem('已重新连接服务器');
     });
+    if (!first && _entered) _appendSystem('已重新连接服务器');
   }
 
   void _onDown() {
@@ -180,8 +252,8 @@ class _TogetherPageState extends State<TogetherPage> {
     }
     if (wasOnline && _entered && !_downReported) {
       _downReported = true;
-      setState(() => _addSystem('连接断开，3 秒后自动重连…'));
-      togetherToast(context, '连接断开，正在重连…');
+      _appendSystem('连接断开，正在自动重连…');
+      togetherToast(context, '连接断开，正在自动重连…');
     }
   }
 
@@ -204,14 +276,17 @@ class _TogetherPageState extends State<TogetherPage> {
       if (info.videoId.isNotEmpty) _videoId = info.videoId;
       if (info.ep > 0) _ep = info.ep;
       if (info.line.isNotEmpty) _videoLine = info.line;
-      if (info.members.isNotEmpty) _members = info.members;
+      // 成员列表无条件采用服务端快照（哪怕为空），避免最后一人退出后人数残留。
+      _members = info.members;
       _remote = null;
       _lastRev = -1;
       _lastRevCode = '';
-      _addSystem('房间: ${info.code}');
     });
+    _downReported = false;
+    _appendSystem('房间: ${info.code}');
     _loadDetail(_videoId);
     _syncVideo();
+    _position.value = _displayPosition();
   }
 
   void _onState(TogetherRoomState state) {
@@ -247,18 +322,21 @@ class _TogetherPageState extends State<TogetherPage> {
       _online = true;
       if (state.code.isNotEmpty) _roomCode = state.code;
       if (state.title.isNotEmpty) _roomTitle = state.title;
-      if (state.members.isNotEmpty) _members = state.members;
+      // 无条件覆盖：成员离开后服务端快照可能变短甚至为空。
+      _members = state.members;
       if (state.videoId.isNotEmpty) _videoId = state.videoId;
       if (state.ep > 0) _ep = state.ep;
       if (state.line.isNotEmpty) _videoLine = state.line;
-      if (firstEnter) _addSystem('房间: ${state.code}');
-      if (changedVideo && !firstEnter && !_isHost) {
-        _addSystem('房主换了一部影片');
-      }
     });
+    _downReported = false;
+    if (firstEnter) _appendSystem('房间: ${state.code}');
+    if (changedVideo && !firstEnter && !_isHost) {
+      _appendSystem('房主换了一部影片');
+    }
     if (changedVideo) _loadDetail(_videoId);
     _syncVideo();
     _applyRemotePlayback(state);
+    _position.value = _displayPosition();
     if (_restoreAfterResume && _isHost) {
       _restoreAfterResume = false;
       final controller = _controller;
@@ -281,22 +359,18 @@ class _TogetherPageState extends State<TogetherPage> {
 
   void _onChat(TogetherChatIncoming chat) {
     if (!mounted || chat.text.isEmpty) return;
-    setState(() {
-      _messages.add(TogetherChatMessage(
-        text: chat.text,
-        time: DateTime.now(),
-        user: chat.name,
-        avatar: chat.avatar,
-        mine: chat.userId.isNotEmpty && chat.userId == _myId,
-      ));
-      _trimMessages();
-    });
+    _appendMessage(TogetherChatMessage(
+      text: chat.text,
+      time: DateTime.now(),
+      user: chat.name,
+      avatar: chat.avatar,
+      mine: chat.userId.isNotEmpty && chat.userId == _myId,
+    ));
   }
 
   void _onSystem(String text) {
     if (!mounted || text.isEmpty) return;
-    final line = text.replaceAll('加入了房间', '进入房间');
-    setState(() => _addSystem(line));
+    _appendSystem(text.replaceAll('加入了房间', '进入房间'));
   }
 
   void _onError(String code, String message) {
@@ -306,16 +380,65 @@ class _TogetherPageState extends State<TogetherPage> {
       _bounceToAuthority();
       return;
     }
-    if (code == 'not_found' || code == 'room_full') {
-      togetherToast(context, message.isEmpty ? '房间不存在或已解散' : message);
+    if (code == 'bad_code') {
+      togetherToast(context, message.isEmpty ? '房间号必须是 6 位数字' : message);
+      return;
+    }
+    if (code == 'not_in_room') {
+      // 取消进入时补发的 leave 可能落在服务器已经清理之后，静默处理。
+      return;
+    }
+    if (_isPasswordErrorCode(code)) {
+      final text = code == 'password_required' ? '房间需要密码' : '房间密码错误，请重新输入';
       if (_stage == _TogetherStage.entering) {
+        togetherToast(context, text);
         _backToEntry();
       } else if (_stage == _TogetherStage.room) {
-        _onClosed(message.isEmpty ? '房间已解散' : message);
+        _onClosed(text);
+      } else {
+        togetherToast(context, text);
+      }
+      return;
+    }
+    if (code == 'not_found') {
+      // 房间不存在 / 已解散 / 创建时作品失效，分别给明确文案。
+      if (_stage == _TogetherStage.entering) {
+        togetherToast(
+          context,
+          _enteringAsHost
+              ? (message.isEmpty ? '创建房间失败，请稍后重试' : message)
+              : '房间不存在，请检查房间号',
+        );
+        _backToEntry();
+      } else if (_stage == _TogetherStage.room) {
+        // 房间仍然有效时（例如 state 带了失效的 videoId）只提示，不退出。
+        if (_client.code.isEmpty) {
+          _onClosed('房间已解散');
+        } else if (message.isNotEmpty) {
+          togetherToast(context, message);
+        }
+      }
+      return;
+    }
+    if (code == 'room_full') {
+      if (_stage == _TogetherStage.entering) {
+        togetherToast(context, '房间已满，请稍后再试');
+        _backToEntry();
+      } else if (_stage == _TogetherStage.room) {
+        _onClosed('房间已满');
+      } else {
+        togetherToast(context, '房间已满，请稍后再试');
       }
       return;
     }
     if (message.isNotEmpty) togetherToast(context, message);
+  }
+
+  bool _isPasswordErrorCode(String code) {
+    final lower = code.toLowerCase();
+    return lower.contains('password') ||
+        lower.contains('passwd') ||
+        lower.contains('pwd');
   }
 
   void _onClosed(String reason) {
@@ -331,7 +454,7 @@ class _TogetherPageState extends State<TogetherPage> {
       _roomCode = '';
       _remote = null;
       _members = const <TogetherMember>[];
-      _messages.clear();
+      _clearMessages();
       _videoId = '';
       _videoTitle = '';
       _videoCover = '';
@@ -348,15 +471,17 @@ class _TogetherPageState extends State<TogetherPage> {
     _resumePos = null;
     _resumeKey = '';
     _restoreAfterResume = false;
+    _downReported = false;
+    _position.value = 0;
     _videoSeq++;
-    _disposeController();
+    unawaited(_disposeController());
     togetherToast(context, text);
   }
 
   /* ------------------------------------------------------------ 建房 / 加入 */
 
   void _startCreate(String videoId, int ep) {
-    _messages.clear();
+    _clearMessages();
     _wantsRoom = true;
     _enteringAsHost = true;
     _entered = false;
@@ -386,8 +511,12 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   void _join(String code) {
+    if (!TogetherClient.validCode(code)) {
+      togetherToast(context, '房间号必须是 6 位数字');
+      return;
+    }
     _joinCtrl.clear();
-    _messages.clear();
+    _clearMessages();
     _wantsRoom = true;
     _enteringAsHost = false;
     _entered = false;
@@ -406,7 +535,10 @@ class _TogetherPageState extends State<TogetherPage> {
     _loadedKey = '';
     _videoError = '';
     _online = _client.connected;
-    _client.joinRoom(code);
+    if (!_client.joinRoom(code)) {
+      _backToEntry();
+      return;
+    }
     _client.connect();
     _armEnterTimer();
     if (mounted) setState(() {});
@@ -429,8 +561,10 @@ class _TogetherPageState extends State<TogetherPage> {
     _resumePos = null;
     _resumeKey = '';
     _restoreAfterResume = false;
+    _downReported = false;
+    _position.value = 0;
     _videoSeq++;
-    _disposeController();
+    unawaited(_disposeController());
     if (!mounted) return;
     setState(() {
       _stage = _TogetherStage.entry;
@@ -441,7 +575,7 @@ class _TogetherPageState extends State<TogetherPage> {
       _roomTitle = '';
       _remote = null;
       _members = const <TogetherMember>[];
-      _messages.clear();
+      _clearMessages();
       _videoId = '';
       _videoTitle = '';
       _videoCover = '';
@@ -457,7 +591,7 @@ class _TogetherPageState extends State<TogetherPage> {
   }
 
   Future<void> _confirmExit() async {
-    if (!mounted || _exiting) return;
+    if (!mounted || _exiting || _leaving) return;
     if (_fullscreen) {
       await _exitFullscreen();
       return;
@@ -470,6 +604,9 @@ class _TogetherPageState extends State<TogetherPage> {
       if (_enteringAsHost) {
         _leaving = true;
         _client.leave();
+        _videoSeq++;
+        await _disposeController();
+        if (!mounted) return;
         Navigator.of(context).pop();
       } else {
         _backToEntry();
@@ -489,6 +626,9 @@ class _TogetherPageState extends State<TogetherPage> {
     if (!ok || !mounted) return;
     _leaving = true;
     _client.leave();
+    _videoSeq++;
+    await _disposeController();
+    if (!mounted) return;
     Navigator.of(context).pop();
   }
 
@@ -509,7 +649,10 @@ class _TogetherPageState extends State<TogetherPage> {
 
   Future<void> _exitFullscreen() async {
     if (!_fullscreen) return;
-    if (mounted) setState(() => _fullscreen = false);
+    if (mounted) {
+      FocusScope.of(context).unfocus();
+      setState(() => _fullscreen = false);
+    }
     await _restoreSystemUi();
   }
 
@@ -547,8 +690,8 @@ class _TogetherPageState extends State<TogetherPage> {
     return 0;
   }
 
-  void _tick() {
-    if (!mounted || _stage != _TogetherStage.room) return;
+  void _tick({bool force = false}) {
+    if (!mounted || !_foreground || _stage != _TogetherStage.room) return;
     final controller = _controller;
     final state = _remote;
     if (controller != null &&
@@ -572,7 +715,11 @@ class _TogetherPageState extends State<TogetherPage> {
         _applyRate(1);
       }
     }
-    setState(() {});
+    // 只更新进度 ValueNotifier，不再每 500ms 重建整页。
+    final value = _displayPosition();
+    if (force || (value - _position.value).abs() >= .05) {
+      _position.value = value;
+    }
   }
 
   void _applyRate(double rate) {
@@ -615,14 +762,17 @@ class _TogetherPageState extends State<TogetherPage> {
   void _markRemote(String playback, double position) {
     final state = _remote;
     if (state == null) return;
-    setState(() {
-      _remote = state.copyWith(
-        playing: playback == 'play',
-        ended: playback == 'ended',
-        position: position,
-        at: _client.nowServerMs(),
-      );
-    });
+    final playing = playback == 'play';
+    final ended = playback == 'ended';
+    final changed = state.playing != playing || state.ended != ended;
+    _remote = state.copyWith(
+      playing: playing,
+      ended: ended,
+      position: position,
+      at: _client.nowServerMs(),
+    );
+    // 位置由 ValueNotifier 驱动；只有播放/结束状态变了才需要重建页面。
+    if (changed) setState(() {});
   }
 
   void _togglePlay() {
@@ -752,6 +902,7 @@ class _TogetherPageState extends State<TogetherPage> {
     }
     await _disposeController();
     if (!mounted || seq != _videoSeq) return;
+    _position.value = 0;
     setState(() {
       _videoLoading = true;
       _videoError = '';
@@ -771,7 +922,7 @@ class _TogetherPageState extends State<TogetherPage> {
         if (_videoId == videoId) {
           setState(() {
             if (detail.title.isNotEmpty) _videoTitle = detail.title;
-            _videoCover = detail.cover;
+            _videoCover = togetherCoverUrl(detail.cover);
             _episodes = detail.allEpisodes;
           });
         }
@@ -816,19 +967,19 @@ class _TogetherPageState extends State<TogetherPage> {
           controller = FxPlayer.create();
           await controller.open(url, headers: play.headers);
           if (!mounted || seq != _videoSeq) {
-            await controller.dispose();
+            await _releasePlayer(controller);
             return;
           }
           await controller.setLooping(false);
           if (!mounted || seq != _videoSeq) {
-            await controller.dispose();
+            await _releasePlayer(controller);
             return;
           }
           final state = _remote;
           if (!_isHost && state != null) {
             await _seekAndMaybePlay(controller, state);
             if (!mounted || seq != _videoSeq) {
-              await controller.dispose();
+              await _releasePlayer(controller);
               return;
             }
           } else if (_isHost && _resumePos != null) {
@@ -837,13 +988,13 @@ class _TogetherPageState extends State<TogetherPage> {
               Duration(milliseconds: (position * 1000).round()),
             );
             if (!mounted || seq != _videoSeq) {
-              await controller.dispose();
+              await _releasePlayer(controller);
               return;
             }
             if (_resumePlaying) {
               await controller.play();
               if (!mounted || seq != _videoSeq) {
-                await controller.dispose();
+                await _releasePlayer(controller);
                 return;
               }
             }
@@ -861,7 +1012,7 @@ class _TogetherPageState extends State<TogetherPage> {
           }
           // 所有 await 都结束且页面/序号仍有效，才把实例交给页面。
           if (!mounted || seq != _videoSeq) {
-            await controller.dispose();
+            await _releasePlayer(controller);
             return;
           }
           _controller = controller;
@@ -877,7 +1028,7 @@ class _TogetherPageState extends State<TogetherPage> {
             if (controller != null) {
               controller.removeListener(_onVideoValue);
               if (identical(_controller, controller)) _controller = null;
-              await controller.dispose();
+              await _releasePlayer(controller);
             }
           } catch (_) {}
         }
@@ -908,6 +1059,17 @@ class _TogetherPageState extends State<TogetherPage> {
     _controller = null;
     if (controller == null) return;
     controller.removeListener(_onVideoValue);
+    await _releasePlayer(controller);
+  }
+
+  /// 释放播放器：先暂停、再 stop，最后 dispose（离开房间时不能只静音）。
+  Future<void> _releasePlayer(FxPlayer controller) async {
+    try {
+      await controller.pause();
+    } catch (_) {}
+    try {
+      await controller.player.stop();
+    } catch (_) {}
     try {
       await controller.dispose();
     } catch (_) {}
@@ -929,7 +1091,7 @@ class _TogetherPageState extends State<TogetherPage> {
         _linesVideoId = videoId;
         _videoLines = detail.lines;
         if (detail.title.isNotEmpty) _videoTitle = detail.title;
-        _videoCover = detail.cover;
+        _videoCover = togetherCoverUrl(detail.cover);
         _episodes = detail.allEpisodes;
       });
     } catch (_) {
@@ -991,14 +1153,14 @@ class _TogetherPageState extends State<TogetherPage> {
       final card = await showTogetherVideoPicker(context);
       if (!mounted || card == null) return;
       _videoTitle = card.title;
-      _videoCover = card.cover;
+      _videoCover = togetherCoverUrl(card.cover);
       _episodes = const <Episode>[];
       if (!_online) {
         togetherToast(context, '未连接服务器，请稍后重试');
         return;
       }
       _client.sendState('pause', 0, videoId: card.id, ep: 1, line: 'l1');
-      setState(() => _addSystem('房主换成了《${card.title}》'));
+      _appendSystem('房主换成了《${card.title}》');
       return;
     }
     if (choice == 'episode') {
@@ -1086,10 +1248,16 @@ class _TogetherPageState extends State<TogetherPage> {
 
   /* ------------------------------------------------------------ 消息 */
 
-  void _addSystem(String text) {
-    if (text.isEmpty) return;
-    _messages.add(TogetherChatMessage.system(text));
+  void _appendMessage(TogetherChatMessage message) {
+    if (!mounted) return;
+    _messages.add(message);
     _trimMessages();
+    _publishChat();
+  }
+
+  void _appendSystem(String text) {
+    if (text.isEmpty) return;
+    _appendMessage(TogetherChatMessage.system(text));
   }
 
   void _trimMessages() {
@@ -1098,13 +1266,28 @@ class _TogetherPageState extends State<TogetherPage> {
     }
   }
 
+  void _publishChat() {
+    if (!mounted) return;
+    _chat.value = _messages.isEmpty
+        ? const <TogetherChatMessage>[]
+        : List<TogetherChatMessage>.unmodifiable(_messages);
+  }
+
+  void _clearMessages() {
+    _messages.clear();
+    _publishChat();
+  }
+
   bool _sendChat(String text) {
     if (!_client.connected) {
-      togetherToast(context, '正在重连，消息暂未发出');
+      togetherToast(context, '正在重连，消息发送失败，请点重试');
       return false;
     }
     // 服务器会把消息广播回所有人（包括自己），无需本地回显。
-    _client.sendChat(text);
+    if (!_client.sendChat(text)) {
+      togetherToast(context, '发送失败，请点重试');
+      return false;
+    }
     return true;
   }
 
@@ -1114,7 +1297,6 @@ class _TogetherPageState extends State<TogetherPage> {
 
   void _showMembers() {
     final members = _members;
-    if (members.isEmpty) return;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -1153,57 +1335,68 @@ class _TogetherPageState extends State<TogetherPage> {
               ),
               const SizedBox(height: 8),
               Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: [
-                    for (final member in members)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 5),
-                        child: Row(
-                          children: [
-                            TogetherAvatar(
-                              name: member.name,
-                              avatar: member.avatar,
-                              size: 30,
-                              host: member.host,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                member.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w600,
-                                  color: Fx.ink,
-                                ),
-                              ),
-                            ),
-                            if (member.host)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 7,
-                                  vertical: 2,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Fx.gold.withOpacity(.16),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: const Text(
-                                  '房主',
-                                  style: TextStyle(
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.w700,
-                                    color: Color(0xFF9A6A00),
-                                  ),
-                                ),
-                              ),
-                          ],
+                child: members.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 26),
+                        child: Text(
+                          '暂无成员',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Fx.sub.withOpacity(.75),
+                          ),
                         ),
+                      )
+                    : ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final member in members)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 5),
+                              child: Row(
+                                children: [
+                                  TogetherAvatar(
+                                    name: member.name,
+                                    avatar: member.avatar,
+                                    size: 30,
+                                    host: member.host,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      member.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w600,
+                                        color: Fx.ink,
+                                      ),
+                                    ),
+                                  ),
+                                  if (member.host)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 7,
+                                        vertical: 2,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: Fx.gold.withOpacity(.16),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: const Text(
+                                        '房主',
+                                        style: TextStyle(
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.w700,
+                                          color: Color(0xFF9A6A00),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                        ],
                       ),
-                  ],
-                ),
               ),
               const SizedBox(height: 4),
               GestureDetector(
@@ -1238,7 +1431,7 @@ class _TogetherPageState extends State<TogetherPage> {
     final card = await showTogetherVideoPicker(context);
     if (!mounted || card == null) return;
     _videoTitle = card.title;
-    _videoCover = card.cover;
+    _videoCover = togetherCoverUrl(card.cover);
     _episodes = const <Episode>[];
     _startCreate(card.id, 1);
   }
@@ -1297,25 +1490,26 @@ class _TogetherPageState extends State<TogetherPage> {
         : (_roomTitle.isNotEmpty ? _roomTitle : '一起看');
     return TogetherFullscreenView(
       controller: controller,
-      messages: List<TogetherChatMessage>.of(_messages),
+      chat: _chat,
       members: _members,
       roomCode: _roomCode,
       title: title,
       ep: _ep,
       isHost: _isHost,
       online: _online,
-      position: _displayPosition(),
+      position: _position,
       duration: duration,
       onExit: _exitFullscreen,
       onTogglePlay: _togglePlay,
       onSeek: _seekTo,
       onHostOnly: _hostOnlyToast,
       onShowMembers: _showMembers,
+      onSendChat: _sendChat,
     );
   }
 
   String get _roomSubtitle {
-    final count = _members.isEmpty ? 1 : _members.length;
+    final count = _members.length;
     final net = _online ? '已连接' : '未连接';
     final role = _isHost ? '房主' : '跟随房主';
     return '$count 人 · $net · $role';
@@ -1789,9 +1983,9 @@ class _TogetherPageState extends State<TogetherPage> {
                 height: 44,
                 onTap: () async {
                   await Clipboard.setData(ClipboardData(text: invite));
-                  if (!ctx.mounted) return;
+                  if (!mounted || !ctx.mounted) return;
                   setLocal(() => copied = true);
-                  togetherToast(context, '邀请文案已复制');
+                  togetherToast(ctx, '邀请文案已复制');
                 },
               ),
             ],
@@ -1818,6 +2012,7 @@ class _TogetherPageState extends State<TogetherPage> {
   Widget _buildVideo() {
     final controller = _controller;
     final ready = controller != null && controller.value.isInitialized;
+    final hasCover = togetherCoverUrl(_videoCover).startsWith('http');
     // 屏幕较矮时按高度收缩，避免视频区把聊天/输入框挤出屏幕。
     final maxVideoHeight = MediaQuery.sizeOf(context).height * .32;
     return Padding(
@@ -1833,7 +2028,7 @@ class _TogetherPageState extends State<TogetherPage> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (!ready && _videoCover.startsWith('http'))
+                  if (!ready && hasCover)
                     Positioned.fill(
                       child: IgnorePointer(
                         child: Opacity(
@@ -1847,7 +2042,7 @@ class _TogetherPageState extends State<TogetherPage> {
                         ),
                       ),
                     ),
-                  if (!ready && _videoCover.startsWith('http'))
+                  if (!ready && hasCover)
                     Positioned.fill(
                       child: IgnorePointer(
                         child: DecoratedBox(
@@ -1953,34 +2148,38 @@ class _TogetherPageState extends State<TogetherPage> {
 
   Widget _buildProgress(FxPlayer controller) {
     final total = controller.value.duration.inMilliseconds / 1000.0;
-    final position = _displayPosition();
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        TogetherSeekBar(
-          position: position,
-          duration: total,
-          enabled: _isHost,
-          onSeek: _seekTo,
-          onBlocked: _hostOnlyToast,
-        ),
-        const SizedBox(height: 1),
-        Row(
-          children: [
-            Text(togetherFmt(position), style: _timeStyle),
-            const Spacer(),
-            if (!_isHost && _remote?.playing == true) ...[
-              Text(
-                '跟随房主',
-                style:
-                    _timeStyle.copyWith(color: Colors.white.withOpacity(.75)),
-              ),
-              const SizedBox(width: 8),
+    // 进度每 500ms 只重建这一小块，不重建整页。
+    return ValueListenableBuilder<double>(
+      valueListenable: _position,
+      builder: (context, position, _) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TogetherSeekBar(
+            position: position,
+            duration: total,
+            enabled: _isHost,
+            onSeek: _seekTo,
+            onBlocked: _hostOnlyToast,
+          ),
+          const SizedBox(height: 1),
+          Row(
+            children: [
+              Text(togetherFmt(position), style: _timeStyle),
+              const Spacer(),
+              if (!_isHost && _remote?.playing == true) ...[
+                Text(
+                  '跟随房主',
+                  style: _timeStyle.copyWith(
+                    color: Colors.white.withOpacity(.75),
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+              Text(togetherFmt(total), style: _timeStyle),
             ],
-            Text(togetherFmt(total), style: _timeStyle),
-          ],
-        ),
-      ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -2147,7 +2346,7 @@ class _TogetherPageState extends State<TogetherPage> {
                   ),
                   const SizedBox(width: 4),
                   Text(
-                    '${_members.isEmpty ? 1 : _members.length} 人',
+                    '${_members.length} 人',
                     style: TextStyle(
                       fontSize: 9.5,
                       fontWeight: FontWeight.w600,
@@ -2201,8 +2400,11 @@ class _TogetherPageState extends State<TogetherPage> {
       child: Container(
         decoration: togetherGlass(radius: 20, opacity: .58),
         clipBehavior: Clip.antiAlias,
-        child: TogetherChatList(
-          messages: List<TogetherChatMessage>.of(_messages),
+        // 只监听新消息，网络状态变化不重建聊天列表。
+        child: ValueListenableBuilder<List<TogetherChatMessage>>(
+          valueListenable: _chat,
+          builder: (context, messages, _) =>
+              TogetherChatList(messages: messages),
         ),
       ),
     );
@@ -2212,7 +2414,9 @@ class _TogetherPageState extends State<TogetherPage> {
     return SafeArea(
       top: false,
       child: TogetherComposer(
-        enabled: _online,
+        // 断开时也允许输入：发送失败会保留文字并给重试按钮。
+        enabled: true,
+        hint: _online ? '随便说点啥吧...' : '正在重连，消息会保留可重试',
         onSend: _sendChat,
       ),
     );

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -178,6 +179,9 @@ class TogetherClient {
   final void Function(String code, String message) onError;
   final void Function(String reason) onClosed;
 
+  static const Duration _pingPeriod = Duration(seconds: 10);
+  static final RegExp _codePattern = RegExp(r'^\d{6}$');
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
   Timer? _retry;
@@ -187,7 +191,19 @@ class TogetherClient {
   bool _connecting = false;
   bool _connected = false;
 
-  /// 当前房间号 / 是否房主。断线重连后据此 rejoin（房主则重建）。
+  /// 断线重连退避：3s / 6s / 12s / 24s，上限 30s。
+  int _retryAttempt = 0;
+  int _retryDelaySec = 0;
+
+  /// 最近一次收到 pong 的本地时间；连续 2 个 ping 周期没有 pong 就主动重连。
+  int _lastPongAt = 0;
+
+  /// 刚发出 join（重连 / 回前台同步）在等房间回应：
+  /// 只有这种 not_found 才代表原房间没了，房主才重建；
+  /// 普通操作（如 state 带了不存在的 videoId）的 not_found 不能换房。
+  bool _rejoining = false;
+
+  /// 当前房间号 / 是否房主。断线重连先 rejoin 原房间，只有 not_found 才重建。
   String code = '';
   bool host = false;
 
@@ -216,6 +232,12 @@ class TogetherClient {
 
   /// 最近一次 RTT（毫秒）。
   int get rtt => _rtt;
+
+  /// 下一次自动重连的等待秒数（0 表示未在重连）。
+  int get retryDelaySeconds => _retryDelaySec;
+
+  /// 房间号是否合法：只接受 6 位数字。
+  static bool validCode(String code) => _codePattern.hasMatch(code.trim());
 
   int nowServerMs() => DateTime.now().millisecondsSinceEpoch + _offset;
 
@@ -255,9 +277,17 @@ class TogetherClient {
 
   void _fail() {
     if (_closed) return;
+    // onError / onDone / openTimeout 可能连着触发，只处理第一次。
+    if (!_connected &&
+        !_connecting &&
+        _channel == null &&
+        (_retry?.isActive ?? false)) {
+      return;
+    }
     final had = _connected;
     _connected = false;
     _connecting = false;
+    _lastPongAt = 0;
     _openTimeout?.cancel();
     _openTimeout = null;
     _ping?.cancel();
@@ -280,19 +310,54 @@ class TogetherClient {
   void _scheduleRetry() {
     if (_closed) return;
     _retry?.cancel();
-    _retry = Timer(const Duration(seconds: 3), connect);
+    // 3 / 6 / 12 / 24 / 30 / 30…
+    final seconds = math.min(30, 3 * (1 << math.min(_retryAttempt, 4)));
+    _retryAttempt = math.min(_retryAttempt + 1, 8);
+    _retryDelaySec = seconds;
+    _retry = Timer(Duration(seconds: seconds), connect);
   }
 
   void _startPing() {
     _ping?.cancel();
     ping();
-    _ping = Timer.periodic(const Duration(seconds: 10), (_) => ping());
+    _ping = Timer.periodic(_pingPeriod, (_) => _pingTick());
+  }
+
+  /// 切后台时暂停心跳，回前台再恢复，省电也避免后台误判超时。
+  void pauseHeartbeat() {
+    _ping?.cancel();
+    _ping = null;
+  }
+
+  void resumeHeartbeat() {
+    if (_closed || !_connected) return;
+    _lastPongAt = DateTime.now().millisecondsSinceEpoch;
+    _startPing();
+  }
+
+  void _pingTick() {
+    if (_closed || !_connected) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_lastPongAt > 0 && now - _lastPongAt >= _pingPeriod.inMilliseconds * 2) {
+      // 两个 ping 周期都没有 pong：连接已经死了（半开 TCP），主动重连。
+      _fail();
+      return;
+    }
+    ping();
   }
 
   void ping() {
+    if (_closed || !_connected) return;
     final t = DateTime.now().millisecondsSinceEpoch;
     _lastPingAt = t;
     _send({'action': 'ping', 't': t});
+  }
+
+  /// 回到前台时主动要一次权威状态（服务器对已在房间的连接会直接回 room_state）。
+  void refreshRoom() {
+    if (!_connected || code.isEmpty) return;
+    _rejoining = true;
+    _send({'action': 'join', 'code': code});
   }
 
   bool _send(Map<String, dynamic> payload) {
@@ -320,6 +385,7 @@ class TogetherClient {
     _hostTitle = title;
     host = true;
     code = '';
+    _rejoining = false;
     _pendingCreate = _createPayload();
     if (_connected) {
       _send(_pendingCreate!);
@@ -334,13 +400,20 @@ class TogetherClient {
         if (_hostTitle.isNotEmpty) 'title': _hostTitle,
       };
 
-  void joinRoom(String roomCode) {
-    code = roomCode;
+  bool joinRoom(String roomCode) {
+    final value = roomCode.trim();
+    if (!validCode(value)) {
+      onError('bad_code', '房间号必须是 6 位数字');
+      return false;
+    }
+    code = value;
     host = false;
     _pendingCreate = null;
+    _rejoining = true;
     if (_connected) {
-      _send({'action': 'join', 'code': roomCode});
+      _send({'action': 'join', 'code': value});
     }
+    return true;
   }
 
   /// 房主：写入权威状态（播放 / 暂停 / 切片）。
@@ -370,9 +443,11 @@ class TogetherClient {
     _send({'action': 'seek', 'position': position < 0 ? 0 : position});
   }
 
-  void sendChat(String text) {
-    if (text.trim().isEmpty) return;
-    _send({'action': 'chat', 'text': text.trim()});
+  /// 返回 false 表示没有发出去（未连接 / socket 写入失败），调用方保留输入。
+  bool sendChat(String text) {
+    final value = text.trim();
+    if (value.isEmpty) return false;
+    return _send({'action': 'chat', 'text': value});
   }
 
   /// 房主：切集 / 换线路（服务器会重置进度并广播）。
@@ -391,6 +466,7 @@ class TogetherClient {
     code = '';
     host = false;
     _pendingCreate = null;
+    _rejoining = false;
   }
 
   void dispose() {
@@ -434,9 +510,11 @@ class TogetherClient {
         code = info.code;
         host = true;
         _pendingCreate = null;
+        _rejoining = false;
         onRoom(info);
         break;
       case 'room_state':
+        _rejoining = false;
         onState(TogetherRoomState.fromJson(msg));
         break;
       case 'chat':
@@ -456,8 +534,11 @@ class TogetherClient {
         final errMsg = '${msg['msg'] ?? ''}';
         // 重连时先 join 旧房间号：房主只有在收到 not_found（原房间已解散）
         // 才重新 create；收到前保持原房号不变。
+        final rejoinFailed = _rejoining;
+        _rejoining = false;
         if (errCode == 'not_found' &&
             host &&
+            rejoinFailed &&
             code.isNotEmpty &&
             _pendingCreate == null) {
           final payload = _createPayload();
@@ -466,7 +547,17 @@ class TogetherClient {
           _send(payload);
           break;
         }
-        if (errCode == 'not_found' || errCode == 'room_full') {
+        if (errCode == 'not_found') {
+          // create 本身失败（作品不存在）时不能再无限重发。
+          final createFailed = _pendingCreate != null;
+          _pendingCreate = null;
+          // 只有 join / create 的 not_found 才代表房间没了；
+          // state 带错 videoId 的 not_found 不能把房主踢出仍然存在的房间。
+          if (rejoinFailed || createFailed) {
+            code = '';
+            host = false;
+          }
+        } else if (errCode == 'room_full' || _isPasswordError(errCode)) {
           code = '';
           host = false;
           _pendingCreate = null;
@@ -477,6 +568,7 @@ class TogetherClient {
         code = '';
         host = false;
         _pendingCreate = null;
+        _rejoining = false;
         onClosed('${msg['reason'] ?? '房间已解散'}');
         break;
       case 'pong':
@@ -488,6 +580,9 @@ class TogetherClient {
   void _onHello(Map<String, dynamic> msg) {
     _connected = true;
     _connecting = false;
+    _retryAttempt = 0;
+    _retryDelaySec = 0;
+    _lastPongAt = DateTime.now().millisecondsSinceEpoch;
     _openTimeout?.cancel();
     _openTimeout = null;
     final user = togetherMap(msg['user']);
@@ -501,6 +596,7 @@ class TogetherClient {
     if (pending != null) {
       _send(pending);
     } else if (code.isNotEmpty) {
+      _rejoining = true;
       _send({'action': 'join', 'code': code});
     }
     onOpen(TogetherMember(
@@ -510,8 +606,16 @@ class TogetherClient {
     ));
   }
 
+  bool _isPasswordError(String code) {
+    final lower = code.toLowerCase();
+    return lower.contains('password') ||
+        lower.contains('passwd') ||
+        lower.contains('pwd');
+  }
+
   void _onPong(Map<String, dynamic> msg) {
     final recv = DateTime.now().millisecondsSinceEpoch;
+    _lastPongAt = recv;
     final sent = togetherInt(msg['t'], _lastPingAt);
     final serverAt = togetherInt(msg['serverAt']);
     if (serverAt <= 0 || sent <= 0) return;
