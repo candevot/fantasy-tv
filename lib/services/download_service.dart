@@ -543,7 +543,7 @@ class DownloadService extends ChangeNotifier {
       if ((type == 'parse' || type == 'unresolved' || type == 'iframe') &&
           !looksHls &&
           !looksMp4) {
-        throw const _CacheException('该线路需解析，暂不支持离线缓存，请切换直链线路');
+        throw const _CacheException('该线路暂不支持离线缓存，请切换线路');
       }
       if (play.lineName.trim().isNotEmpty) {
         task.lineName = play.lineName.trim();

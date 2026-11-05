@@ -29,6 +29,7 @@ class FxPlayerGestures extends StatefulWidget {
     required this.onLongPressEnd,
     this.onGestureStart,
     this.enabled = true,
+    this.enableVertical = true,
     this.seekSecondsPerScreen = 90,
     this.resetBrightnessOnDispose = true,
   });
@@ -44,12 +45,14 @@ class FxPlayerGestures extends StatefulWidget {
   final VoidCallback? onGestureStart;
   final bool enabled;
 
+  /// 是否启用左半屏亮度 / 右半屏音量上下滑；只在全屏开启，竖屏内嵌关闭。
+  final bool enableVertical;
+
   /// 横扫满屏对应的秒数（默认 90s，即 1/6 屏 ≈ 15s）。
   final int seekSecondsPerScreen;
 
   /// 退出页面时是否把应用亮度恢复成系统亮度。
-  /// 全屏只是竖屏之上的一个页面，传 false，避免退出全屏把亮度重置；
-  /// 竖屏播放器销毁（离开播放页）时才真正恢复。
+  /// 全屏退出、竖屏离开播放页时都要恢复。
   final bool resetBrightnessOnDispose;
 
   /// 跨竖屏/全屏共享：任一播放器改过亮度，离开播放页时都要恢复。
@@ -156,7 +159,7 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
 
   void _hideHudSoon() {
     _hudTimer?.cancel();
-    _hudTimer = Timer(const Duration(milliseconds: 620), () {
+    _hudTimer = Timer(const Duration(seconds: 1), () {
       if (!mounted) return;
       setState(() => _hud = null);
     });
@@ -336,10 +339,13 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
               _hideHudSoon();
             }
           : null,
-      onVerticalDragStart: widget.enabled ? _onVerticalStart : null,
-      onVerticalDragUpdate: widget.enabled ? _onVerticalUpdate : null,
-      onVerticalDragEnd: widget.enabled ? _onVerticalEnd : null,
-      onVerticalDragCancel: widget.enabled
+      onVerticalDragStart:
+          widget.enabled && widget.enableVertical ? _onVerticalStart : null,
+      onVerticalDragUpdate:
+          widget.enabled && widget.enableVertical ? _onVerticalUpdate : null,
+      onVerticalDragEnd:
+          widget.enabled && widget.enableVertical ? _onVerticalEnd : null,
+      onVerticalDragCancel: widget.enabled && widget.enableVertical
           ? () {
               _mode = _GestureMode.none;
               _hideHudSoon();

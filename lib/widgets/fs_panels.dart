@@ -53,7 +53,7 @@ class FsGlassCard extends StatelessWidget {
 }
 
 /// 底部控制栏
-/// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 片头/尾 · 倍速 ·
+/// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 倍速 ·
 /// 清晰度 · 选集 · 全屏（退出）
 class FsBottomBar extends StatelessWidget {
   const FsBottomBar({
@@ -68,7 +68,6 @@ class FsBottomBar extends StatelessWidget {
     required this.onSeek,
     required this.onTogglePlay,
     required this.onNext,
-    required this.onJump,
     required this.onSpeed,
     required this.onQuality,
     required this.onEpisodes,
@@ -91,7 +90,6 @@ class FsBottomBar extends StatelessWidget {
   final ValueChanged<Duration> onSeek;
   final VoidCallback onTogglePlay;
   final VoidCallback onNext;
-  final VoidCallback onJump;
   final VoidCallback onSpeed;
   final VoidCallback onQuality;
   final VoidCallback onEpisodes;
@@ -148,8 +146,6 @@ class FsBottomBar extends StatelessWidget {
               ),
               const Spacer(),
               const SizedBox(width: 10),
-              FsTextAction(text: '片头/尾', size: s, onTap: onJump),
-              const SizedBox(width: 8),
               FsTextAction(
                 text: '倍速',
                 size: s,

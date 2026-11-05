@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../api.dart';
 import '../models.dart';
@@ -10,6 +14,7 @@ import '../theme.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
+import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
 import 'history_page.dart' show FxStore;
 
@@ -160,7 +165,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _backgrounded = false;
   bool _pausedByBackground = false;
   bool _locked = false;
-  bool _rotationLocked = false;
 
   /// 锁屏后解锁钮是否可见：出现 3 秒后自动隐藏，点屏幕再出现。
   bool _unlockVisible = false;
@@ -168,8 +172,17 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   // 弹层
   bool _showSpeed = false;
-  bool _showJump = false;
   bool _showQuality = false;
+
+  /// 循环模式默认列表（播完自动下一集）；关闭 / 单集由「更多」面板切换。
+  FxLoopMode _loopMode = FxLoopMode.list;
+
+  /// 跳过片头片尾默认关，只记住开关，不自动跳（产品硬性要求）。
+  bool _skipIntroOutro = false;
+  Timer? _sleepTimer;
+
+  /// 全屏截图：截取整个播放器层（含控制条）。
+  final GlobalKey _captureKey = GlobalKey();
 
   /// 切清晰度期间：禁止重复点击，避免并发 open。
   bool _switching = false;
@@ -209,7 +222,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   bool _exiting = false;
 
-  bool get _panelOpen => _showSpeed || _showJump || _showQuality;
+  bool get _panelOpen => _showSpeed || _showQuality;
 
   bool get _playing => _controller?.value.isPlaying ?? false;
 
@@ -276,30 +289,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return name.isEmpty ? q.key : name;
   }
 
-  /// 分辨率通俗标签：4K / 1080P / 720P / 标清（未就绪时为空串）。
-  String get _resolutionText {
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) return '';
-    // 优先用解码后的原始宽度，其次用显示宽度。
-    return fxResolutionLabel(c.value.videoWidth ?? c.value.width);
-  }
-
-  /// 当前画质名称：纯信息展示（原画 / 接口返回的真实码率名）。
-  String get _currentQualityText {
-    final info = _info;
-    if (info == null) return '';
-    final key = _qualityKey;
-    if (key != null) {
-      for (final q in info.quality) {
-        if (q.key == key) {
-          final name = q.name.trim();
-          return name.isEmpty ? q.key : name;
-        }
-      }
-    }
-    return '原画';
-  }
-
   String get _epLabel => _epLabelFor(_ep);
 
   String get _lineName {
@@ -359,6 +348,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _progressTimer?.cancel();
     _backgroundTimer?.cancel();
     _watchdogTimer?.cancel();
+    _sleepTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
     // 播放器实例属于竖屏页面，退出全屏只移除监听，不能 dispose。
@@ -532,7 +522,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (start > 0) {
           await c.seekTo(Duration(milliseconds: (start * 1000).round()));
         }
-        await c.setLooping(false);
+        await c.setLooping(_loopMode == FxLoopMode.single);
         try {
           await c.setRate(_rate);
         } catch (_) {}
@@ -596,7 +586,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         target = Duration.zero;
       }
       if (target > Duration.zero) await c.seekTo(target);
-      await c.setLooping(false);
+      await c.setLooping(_loopMode == FxLoopMode.single);
       try {
         await c.setRate(_rate);
       } catch (_) {}
@@ -701,7 +691,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       setState(() {
         _showQuality = false;
         _showSpeed = false;
-        _showJump = false;
         _loading = true;
         _loadingHint = '正在切换清晰度';
         _error = false;
@@ -1008,6 +997,21 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<void> _handleEnded() async {
     await _saveProgress(ended: true);
     if (!mounted) return;
+    if (_loopMode == FxLoopMode.single) {
+      final c = _controller;
+      if (c != null) {
+        try {
+          await c.seekTo(Duration.zero);
+          await c.play();
+        } catch (_) {}
+      }
+      return;
+    }
+    if (_loopMode == FxLoopMode.off) {
+      _wake();
+      fxToast(context, '已播放结束');
+      return;
+    }
     final next = _nextEpNumber();
     if (next != null) {
       await _switchEp(next, auto: true);
@@ -1092,7 +1096,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() {
       _controls = false;
       _showSpeed = false;
-      _showJump = false;
       _showQuality = false;
     });
   }
@@ -1118,7 +1121,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!_panelOpen) return;
     setState(() {
       _showSpeed = false;
-      _showJump = false;
       _showQuality = false;
     });
     _wake();
@@ -1131,7 +1133,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _controls = false;
       _unlockVisible = true;
       _showSpeed = false;
-      _showJump = false;
       _showQuality = false;
     });
     _hideTimer?.cancel();
@@ -1163,16 +1164,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _unlockVisible = false;
       _controls = true;
     });
-    _wake();
-  }
-
-  void _toggleRotation() {
-    setState(() => _rotationLocked = !_rotationLocked);
-    // Flutter 无法读取当前横屏的左右朝向，这里保留状态位（接入平台插件后可真正锁定）
-    fxToast(
-      context,
-      _rotationLocked ? '已锁定横屏方向，旋转手机不再翻转画面' : '已解除旋转锁定',
-    );
     _wake();
   }
 
@@ -1262,22 +1253,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _hideTimer?.cancel();
     setState(() {
       _showSpeed = !_showSpeed;
-      _showJump = false;
       _showQuality = false;
       _controls = true;
     });
     if (!_showSpeed) _wake();
-  }
-
-  void _toggleJump() {
-    _hideTimer?.cancel();
-    setState(() {
-      _showJump = !_showJump;
-      _showSpeed = false;
-      _showQuality = false;
-      _controls = true;
-    });
-    if (!_showJump) _wake();
   }
 
   Future<void> _openEpisodeSheet() async {
@@ -1313,175 +1292,93 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() {
       _showQuality = !_showQuality;
       _showSpeed = false;
-      _showJump = false;
       _controls = true;
     });
     if (!_showQuality) _wake();
   }
 
-  void _jumpIntro() {
-    final c = _controller;
-    if (c == null || _loading || _switching || !c.value.isInitialized) return;
-    const target = Duration(seconds: 90);
-    final total = c.value.duration;
-    unawaited(c.seekTo(target > total ? Duration.zero : target));
-    _showSeekHint('已跳过片头');
-    _wake();
-  }
-
-  void _jumpOutro() {
-    final c = _controller;
-    if (c == null || _loading || _switching || !c.value.isInitialized) return;
-    final total = c.value.duration;
-    final target = total - const Duration(seconds: 90);
-    unawaited(c.seekTo(target < Duration.zero ? Duration.zero : target));
-    _showSeekHint('已跳到片尾');
-    _wake();
-  }
-
-  Future<void> _openPlayerSettings() async {
-    if (_loading || _switching) return;
+  Future<void> _openMorePanel() async {
     _hideTimer?.cancel();
-    _closePanels();
     if (mounted) setState(() => _controls = true);
-
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (sheetContext) {
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            final quality = _info?.quality ?? const <QualityItem>[];
-            final lineName = _info?.lineName ?? widget.lineName;
-            final maxHeight = MediaQuery.of(context).size.height * .88;
-            return Container(
-              constraints: BoxConstraints(maxHeight: maxHeight),
-              padding: EdgeInsets.fromLTRB(
-                20,
-                14,
-                20,
-                16 + MediaQuery.of(context).padding.bottom,
-              ),
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-              ),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.settings_rounded,
-                            size: 19, color: Fx.accent),
-                        const SizedBox(width: 7),
-                        const Text('播放设置',
-                            style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w800,
-                                color: Fx.ink)),
-                        const Spacer(),
-                        IconButton(
-                          onPressed: () => Navigator.of(sheetContext).pop(),
-                          icon: const Icon(Icons.close_rounded,
-                              color: Fx.sub, size: 22),
-                        ),
-                      ],
-                    ),
-                    if (lineName.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Text('当前线路：$lineName',
-                            style:
-                                const TextStyle(fontSize: 11.5, color: Fx.sub)),
-                      ),
-                    if (_resolutionText.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Text('当前分辨率：$_resolutionText',
-                            style:
-                                const TextStyle(fontSize: 11.5, color: Fx.sub)),
-                      ),
-                    const Text('播放速度',
-                        style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                            color: Fx.sub)),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        for (final item in FsSpeedPanel.options)
-                          ChipTag(
-                            fxRateLabel(item),
-                            active: (_rate - item).abs() < .001,
-                            onTap: () {
-                              _setRate(item);
-                              setSheetState(() {});
-                            },
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 14),
-                    if (quality.length >= 2) ...[
-                      const SizedBox(height: 14),
-                      const Text('清晰度',
-                          style: TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w700,
-                              color: Fx.sub)),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          if (_showSourceTier)
-                            ChipTag(
-                              '原画',
-                              active: _qualityKey == null,
-                              onTap: () {
-                                Navigator.of(sheetContext).pop();
-                                unawaited(_selectQuality(null));
-                              },
-                            ),
-                          for (final q in quality)
-                            ChipTag(
-                              _qualityName(q),
-                              active: _qualityKey == q.key,
-                              onTap: () {
-                                Navigator.of(sheetContext).pop();
-                                unawaited(_selectQuality(q.key));
-                              },
-                            ),
-                        ],
-                      ),
-                    ],
-                    const ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      leading: Icon(Icons.info_outline_rounded,
-                          size: 20, color: Fx.sub),
-                      title: Text('播放内核',
-                          style: TextStyle(
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w600,
-                              color: Fx.ink)),
-                      subtitle: Text('media_kit · libmpv · HLS / 加密 / 多编码',
-                          style: TextStyle(fontSize: 10.5, color: Fx.sub)),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
+    await showFxMorePanel(
+      context,
+      loopMode: _loopMode,
+      skipIntroOutro: _skipIntroOutro,
+      onLoopChanged: (mode) {
+        if (!mounted) return;
+        setState(() => _loopMode = mode);
+        unawaited(
+          _controller?.setLooping(mode == FxLoopMode.single) ??
+              Future<void>.value(),
         );
+        fxToast(context, '循环播放：${mode.label}');
       },
+      onSkipChanged: (on) {
+        if (!mounted) return;
+        setState(() => _skipIntroOutro = on);
+        fxToast(context, on ? '已开启跳过片头片尾' : '已关闭跳过片头片尾');
+      },
+      onPip: () => fxToast(context, '画中画：当前版本暂不支持'),
+      onSleepTimer: () => unawaited(_openSleepTimerPicker()),
+      onDownload: () => fxToast(context, '请到详情页下载本集'),
+      onSpeed: () => unawaited(_openSpeedPicker()),
+      onBackground: () => fxToast(context, '后台播放已开启'),
+      onFeedback: () => fxToast(context, '问题反馈：请到「我的-意见反馈」提交'),
     );
     if (!mounted) return;
     _wake();
+  }
+
+  Future<void> _openSpeedPicker() async {
+    final rate = await showFxSpeedSheet(context, _rate);
+    if (!mounted || rate == null) return;
+    _setRate(rate);
+  }
+
+  Future<void> _openSleepTimerPicker() async {
+    final minutes = await showFxSleepTimerSheet(context);
+    if (!mounted || minutes == null) return;
+    _setSleepTimer(minutes);
+  }
+
+  void _setSleepTimer(int minutes) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (minutes <= 0) {
+      fxToast(context, '已取消定时关闭');
+      return;
+    }
+    _sleepTimer = Timer(Duration(minutes: minutes), () {
+      _sleepTimer = null;
+      if (!mounted) return;
+      unawaited(_controller?.pause());
+      fxToast(context, '定时关闭：已暂停播放');
+    });
+    fxToast(context, '将在 $minutes 分钟后暂停播放');
+  }
+
+  Future<void> _screenshot() async {
+    final boundary = _captureKey.currentContext?.findRenderObject();
+    if (boundary is! RenderRepaintBoundary) {
+      fxToast(context, '截图失败，请稍后重试');
+      return;
+    }
+    try {
+      final image = await boundary.toImage(pixelRatio: 2);
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      if (data == null) throw StateError('empty image');
+      final dir = await getTemporaryDirectory();
+      final file = File(
+        '${dir.path}/fx_shot_${DateTime.now().millisecondsSinceEpoch}.png',
+      );
+      await file.writeAsBytes(data.buffer.asUint8List());
+      if (!mounted) return;
+      fxToast(context, '截图已保存');
+    } catch (_) {
+      if (!mounted) return;
+      fxToast(context, '截图失败，请稍后重试');
+    }
   }
 
   Future<void> _exit({bool requestLineChange = false}) async {
@@ -1531,100 +1428,103 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       child: Scaffold(
         backgroundColor: Colors.black,
         resizeToAvoidBottomInset: false,
-        body: Stack(
-          fit: StackFit.expand,
-          children: [
-            Positioned.fill(child: _buildVideoSurface(c)),
-            // 手势层：双击暂停 / 横扫调进度 / 竖扫亮度音量 / 长按 2x。
-            if (!_locked && c != null)
-              Positioned.fill(
-                child: FxPlayerGestures(
-                  player: c,
-                  enabled: !_loading && !_error && !_switching,
-                  onTap: _onSurfaceTap,
-                  onDoubleTap: _togglePlay,
-                  onSeek: _seekTo,
-                  onLongPressStart: _startHold2x,
-                  onLongPressEnd: _endHold2x,
-                  onGestureStart: _hideControls,
-                  resetBrightnessOnDispose: false,
-                ),
-              ),
-            if (_panelOpen)
-              Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: _closePanels,
-                  child: const SizedBox.expand(),
-                ),
-              ),
-            if (!_locked)
-              Positioned.fill(
-                child: IgnorePointer(
-                  ignoring: !_controls || _loading || _switching,
-                  child: AnimatedOpacity(
-                    opacity: _controls ? 1 : 0,
-                    duration: const Duration(milliseconds: 200),
-                    child: _buildControls(c, keyboard, pad),
+        body: RepaintBoundary(
+          key: _captureKey,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned.fill(child: _buildVideoSurface(c)),
+              // 手势层：双击暂停 / 横扫调进度 / 竖扫亮度音量 / 长按 2x。
+              if (!_locked && c != null)
+                Positioned.fill(
+                  child: FxPlayerGestures(
+                    player: c,
+                    enabled: !_loading && !_error && !_switching,
+                    onTap: _onSurfaceTap,
+                    onDoubleTap: _togglePlay,
+                    onSeek: _seekTo,
+                    onLongPressStart: _startHold2x,
+                    onLongPressEnd: _endHold2x,
+                    onGestureStart: _hideControls,
+                    resetBrightnessOnDispose: true,
                   ),
                 ),
-              ),
-            // 播放中的缓冲：玻璃圆环 + libmpv 真实缓存百分比。
-            if (!_loading && !_error && c != null)
-              Positioned.fill(
-                child: AnimatedBuilder(
-                  animation: c,
-                  builder: (context, _) {
-                    final v = c.value;
-                    if (!v.isInitialized || !v.isBuffering) {
-                      return const SizedBox.shrink();
-                    }
-                    final raw = v.bufferingPercentage.isFinite
-                        ? v.bufferingPercentage
-                        : 0.0;
-                    final percent = raw.clamp(0.0, 100.0).toDouble();
-                    return FxLoadingOverlay(
-                      title: '缓冲中 ${percent.round()}%',
-                      percent: percent,
-                      dim: false,
-                      compact: true,
-                    );
-                  },
-                ),
-              ),
-            if (_loading && !_error) _buildLoading(),
-            if (_error) _buildError(),
-            // 锁屏：所有控件隐藏，只留一个 3 秒后自动隐藏的解锁钮；
-            // 点屏幕重新唤出并提示如何解锁。
-            if (_locked)
-              Positioned.fill(
-                child: SafeArea(
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: _onLockedTap,
-                        child: const SizedBox.expand(),
-                      ),
-                      if (_unlockVisible) FsUnlockButton(onUnlock: _unlock),
-                    ],
+              if (_panelOpen)
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _closePanels,
+                    child: const SizedBox.expand(),
                   ),
                 ),
-              ),
-            if (_seekHint != null)
-              Align(
-                alignment: const Alignment(0, .56),
-                child: _FsBadge(text: _seekHint!),
-              ),
-            if (_holding2x)
-              Positioned(
-                top: pad.top + 10,
-                left: 0,
-                right: 0,
-                child: const Center(child: _FsBadge(text: '2.0x 倍速播放中')),
-              ),
-          ],
+              if (!_locked)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    ignoring: !_controls || _loading || _switching,
+                    child: AnimatedOpacity(
+                      opacity: _controls ? 1 : 0,
+                      duration: const Duration(milliseconds: 200),
+                      child: _buildControls(c, keyboard, pad),
+                    ),
+                  ),
+                ),
+              // 播放中的缓冲：玻璃圆环 + libmpv 真实缓存百分比。
+              if (!_loading && !_error && c != null)
+                Positioned.fill(
+                  child: AnimatedBuilder(
+                    animation: c,
+                    builder: (context, _) {
+                      final v = c.value;
+                      if (!v.isInitialized || !v.isBuffering) {
+                        return const SizedBox.shrink();
+                      }
+                      final raw = v.bufferingPercentage.isFinite
+                          ? v.bufferingPercentage
+                          : 0.0;
+                      final percent = raw.clamp(0.0, 100.0).toDouble();
+                      return FxLoadingOverlay(
+                        title: '缓冲中 ${percent.round()}%',
+                        percent: percent,
+                        dim: false,
+                        compact: true,
+                      );
+                    },
+                  ),
+                ),
+              if (_loading && !_error) _buildLoading(),
+              if (_error) _buildError(),
+              // 锁屏：所有控件隐藏，只留一个 3 秒后自动隐藏的解锁钮；
+              // 点屏幕重新唤出并提示如何解锁。
+              if (_locked)
+                Positioned.fill(
+                  child: SafeArea(
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _onLockedTap,
+                          child: const SizedBox.expand(),
+                        ),
+                        if (_unlockVisible) FsUnlockButton(onUnlock: _unlock),
+                      ],
+                    ),
+                  ),
+                ),
+              if (_seekHint != null)
+                Align(
+                  alignment: const Alignment(0, .56),
+                  child: _FsBadge(text: _seekHint!),
+                ),
+              if (_holding2x)
+                Positioned(
+                  top: pad.top + 10,
+                  left: 0,
+                  right: 0,
+                  child: const Center(child: _FsBadge(text: '2.0x 倍速播放中')),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -1753,15 +1653,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: FsTopBar(
             title: _title,
             epLabel: _epLabel,
-            resolution: _resolutionText,
-            quality: _currentQualityText,
             compact: compact,
-            rotationLocked: _rotationLocked,
             onBack: () => unawaited(_exit()),
-            onRotate: _toggleRotation,
-            onPip: () => fxToast(context, '画中画：正在准备…'),
-            onCast: () => fxToast(context, '正在搜索附近投屏设备…'),
-            onSettings: () => unawaited(_openPlayerSettings()),
+            onCast: () => fxToast(context, '投屏：暂无可用设备'),
+            onScreenshot: () => unawaited(_screenshot()),
+            onMore: () => unawaited(_openMorePanel()),
           ),
         ),
         Positioned.fill(
@@ -1818,23 +1714,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     ),
                   ),
                 ),
-              if (_showJump)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: FsJumpPanel(
-                      onIntro: () {
-                        _closePanels();
-                        _jumpIntro();
-                      },
-                      onOutro: () {
-                        _closePanels();
-                        _jumpOutro();
-                      },
-                    ),
-                  ),
-                ),
               if (c == null)
                 SizedBox(height: 68 + bottomInset)
               else
@@ -1855,7 +1734,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       onSeek: _seekTo,
                       onTogglePlay: _togglePlay,
                       onNext: () => unawaited(_next()),
-                      onJump: _toggleJump,
                       onSpeed: _toggleSpeed,
                       onQuality: _toggleQuality,
                       onEpisodes: () => unawaited(_openEpisodeSheet()),

@@ -213,40 +213,27 @@ class _FsClockPillState extends State<FsClockPill> {
   }
 }
 
-/// 顶部控制条：返回 · 片名/第xx集 —— 分辨率 · 时间 · 旋转锁定 · 画中画 · 投屏 · 设置
+/// 顶部控制条（对齐腾讯）：返回 · 片名/第xx集 · 投屏 · 截图 · 更多。
 ///
-/// 不再展示「网速 --」占位：media_kit 没有暴露实时网络码率，
-/// 宁可不显示也不留假数据。
+/// 不再展示分辨率 / 假网速 / 画质胶囊等冗余信息，顶部只留核心操作。
 class FsTopBar extends StatelessWidget {
   const FsTopBar({
     super.key,
     required this.title,
     required this.epLabel,
     required this.onBack,
-    required this.onRotate,
-    required this.rotationLocked,
-    required this.onPip,
     required this.onCast,
-    required this.onSettings,
-    this.resolution = '',
-    this.quality = '',
+    required this.onScreenshot,
+    required this.onMore,
     this.compact = false,
   });
 
   final String title;
   final String epLabel;
-
-  /// 分辨率通俗标签（4K / 1080P / 720P / 标清），空串则不显示
-  final String resolution;
-
-  /// 当前画质名称（纯信息展示），空串则不显示
-  final String quality;
   final VoidCallback onBack;
-  final VoidCallback onRotate;
-  final bool rotationLocked;
-  final VoidCallback onPip;
   final VoidCallback onCast;
-  final VoidCallback onSettings;
+  final VoidCallback onScreenshot;
+  final VoidCallback onMore;
   final bool compact;
 
   @override
@@ -310,39 +297,6 @@ class FsTopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          if (resolution.isNotEmpty) ...[
-            FsResolutionPill(resolution: resolution, size: s),
-            gap,
-          ],
-          if (quality.isNotEmpty) ...[
-            FsQualityPill(
-              quality: quality,
-              size: s,
-              maxWidth: compact ? 132 : 190,
-            ),
-            gap,
-          ],
-          FsClockPill(size: s),
-          const SizedBox(width: 8),
-          PGlassIcon(
-            icon: rotationLocked
-                ? Icons.screen_lock_rotation_rounded
-                : Icons.screen_rotation_rounded,
-            size: 32 * s,
-            iconSize: 17 * s,
-            active: rotationLocked,
-            tooltip: rotationLocked ? '解除旋转锁定' : '锁定屏幕旋转',
-            onTap: onRotate,
-          ),
-          gap,
-          PGlassIcon(
-            icon: Icons.picture_in_picture_alt_rounded,
-            size: 32 * s,
-            iconSize: 17 * s,
-            tooltip: '画中画',
-            onTap: onPip,
-          ),
-          gap,
           PGlassIcon(
             icon: Icons.tv_rounded,
             size: 32 * s,
@@ -352,11 +306,19 @@ class FsTopBar extends StatelessWidget {
           ),
           gap,
           PGlassIcon(
-            icon: Icons.settings_rounded,
+            icon: Icons.photo_camera_outlined,
             size: 32 * s,
             iconSize: 17 * s,
-            tooltip: '播放设置',
-            onTap: onSettings,
+            tooltip: '截图',
+            onTap: onScreenshot,
+          ),
+          gap,
+          PGlassIcon(
+            icon: Icons.more_horiz_rounded,
+            size: 32 * s,
+            iconSize: 19 * s,
+            tooltip: '更多',
+            onTap: onMore,
           ),
         ],
       ),

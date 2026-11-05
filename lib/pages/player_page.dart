@@ -7,7 +7,9 @@ import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
 import '../widgets/fs_controls.dart';
+import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
+import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
 import 'history_page.dart' show FxStore;
@@ -100,11 +102,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   bool _controls = true;
   Timer? _hideTimer;
 
-  // 锁屏
-  bool _locked = false;
-  bool _unlockVisible = false;
-  Timer? _unlockTimer;
-
   /// 正在切换线路（防止重复点击并发 open）。
   bool _switchingLine = false;
   int? _pendingEp;
@@ -135,6 +132,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   bool _holding2x = false;
   double _rate = 1.0;
   double _rateBeforeHold = 1.0;
+
+  /// 循环模式默认列表（播完自动下一集）；关闭 / 单集由「更多」面板切换。
+  FxLoopMode _loopMode = FxLoopMode.list;
+
+  /// 跳过片头片尾默认关，只记住开关，不自动跳（产品硬性要求）。
+  bool _skipIntroOutro = false;
+
+  Timer? _sleepTimer;
 
   bool _openingFullscreen = false;
   bool _fullscreenActive = false;
@@ -169,29 +174,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (e.n == n) return fxEpisodeLabel(e.n, e.name);
     }
     return fxEpisodeLabel(n);
-  }
-
-  /// 当前画质名称（信息标签用）：原画 / 接口返回的真实码率名。
-  String get _qualityInfoLabel {
-    final info = _info;
-    if (info == null) return '';
-    final key = _qualityKey;
-    if (key != null) {
-      for (final q in info.quality) {
-        if (q.key == key) {
-          final name = q.name.trim();
-          return name.isEmpty ? q.key : name;
-        }
-      }
-    }
-    return '原画';
-  }
-
-  /// 分辨率通俗标签：4K / 1080P / 720P / 标清。
-  String get _resolutionLabel {
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) return '';
-    return fxResolutionLabel(c.value.videoWidth ?? c.value.width);
   }
 
   /// 当前线路名：优先用接口返回的线路名，其次从详情线路表里按 id 查。
@@ -452,10 +434,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
-    _unlockTimer?.cancel();
     _progressTimer?.cancel();
     _backgroundTimer?.cancel();
     _watchdogTimer?.cancel();
+    _sleepTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
     _controller?.removeListener(_onVideoValue);
@@ -652,7 +634,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           await controller.dispose();
           return false;
         }
-        await controller.setLooping(false);
+        await controller.setLooping(_loopMode == FxLoopMode.single);
         try {
           await controller.setRate(_rate);
         } catch (_) {}
@@ -885,6 +867,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Future<void> _handleEnded() async {
     await _saveProgress(ended: true);
     if (!mounted) return;
+    if (_loopMode == FxLoopMode.single) {
+      final c = _controller;
+      if (c != null) {
+        try {
+          await c.seekTo(Duration.zero);
+          await c.play();
+        } catch (_) {}
+      }
+      return;
+    }
+    if (_loopMode == FxLoopMode.off) {
+      setState(() => _controls = true);
+      _startHideTimer();
+      fxToast(context, '已播放结束');
+      return;
+    }
     final next = _nextEpNumber();
     if (next != null) {
       await _switchEpisode(next, auto: true);
@@ -968,7 +966,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   // ---------------------------------------------------------------- controls
 
   void _showControls() {
-    if (!mounted || _locked) return;
+    if (!mounted) return;
     setState(() => _controls = true);
     _startHideTimer();
   }
@@ -981,7 +979,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _startHideTimer();
         return;
       }
-      if (_locked || _loading || _error || _switchingLine) return;
+      if (_loading || _error || _switchingLine) return;
       setState(() => _controls = false);
     });
   }
@@ -993,12 +991,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   void _touch() {
-    if (_locked) return;
     if (_controls) _startHideTimer();
   }
 
   void _onSurfaceTap() {
-    if (_locked || _loading || _error || _switchingLine) return;
+    if (_loading || _error || _switchingLine) return;
     if (_controls) {
       _hideControls();
     } else {
@@ -1006,51 +1003,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
   }
 
-  /* -------------------------------------------------------------- 锁屏 */
-
-  void _lock() {
-    _unlockTimer?.cancel();
-    if (!mounted) return;
-    setState(() {
-      _locked = true;
-      _controls = false;
-      _unlockVisible = true;
-    });
-    _hideTimer?.cancel();
-    _startUnlockTimer();
-    fxToast(context, '已锁定，点击屏幕显示解锁按钮');
-  }
-
-  void _startUnlockTimer() {
-    _unlockTimer?.cancel();
-    _unlockTimer = Timer(const Duration(seconds: 3), () {
-      if (!mounted || !_locked) return;
-      setState(() => _unlockVisible = false);
-    });
-  }
-
-  void _onLockedTap() {
-    if (!mounted) return;
-    if (!_unlockVisible) setState(() => _unlockVisible = true);
-    _startUnlockTimer();
-    fxToast(context, '已锁定，点锁图标解锁');
-  }
-
-  void _unlock() {
-    if (!mounted) return;
-    _unlockTimer?.cancel();
-    setState(() {
-      _locked = false;
-      _unlockVisible = false;
-      _controls = true;
-    });
-    _showControls();
-  }
-
   void _togglePlay() {
     final c = _controller;
-    if (_locked ||
-        _switchingLine ||
+    if (_switchingLine ||
         c == null ||
         _loading ||
         _error ||
@@ -1072,8 +1027,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   void _startHold2x() {
     final c = _controller;
-    if (_locked ||
-        _switchingLine ||
+    if (_switchingLine ||
         c == null ||
         _loading ||
         _error ||
@@ -1100,106 +1054,77 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _touch();
   }
 
-  Future<void> _openPlayerSettings() async {
+  Future<void> _openMorePanel() async {
     _hideTimer?.cancel();
     if (mounted) setState(() => _controls = true);
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (sheetContext) {
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            return Container(
-              padding: EdgeInsets.fromLTRB(
-                18,
-                14,
-                18,
-                18 + MediaQuery.of(context).padding.bottom,
-              ),
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Text('播放设置',
-                          style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                              color: Fx.ink)),
-                      const Spacer(),
-                      IconButton(
-                        onPressed: () => Navigator.of(sheetContext).pop(),
-                        icon: const Icon(Icons.close_rounded,
-                            color: Fx.sub, size: 22),
-                      ),
-                    ],
-                  ),
-                  if (_qualityInfoLabel.isNotEmpty ||
-                      _resolutionLabel.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        if (_qualityInfoLabel.isNotEmpty)
-                          ChipTag('画质 $_qualityInfoLabel', active: true),
-                        if (_resolutionLabel.isNotEmpty)
-                          ChipTag(_resolutionLabel),
-                      ],
-                    ),
-                  ],
-                  const SizedBox(height: 8),
-                  const Text('播放速度',
-                      style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w700,
-                          color: Fx.sub)),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final item in const [0.75, 1.0, 1.25, 1.5, 2.0])
-                        ChipTag(
-                          item == 1.0
-                              ? '1.0x'
-                              : '${item.toStringAsFixed(2).replaceFirst(RegExp(r'0$'), '')}x',
-                          active: _rate == item,
-                          onTap: () {
-                            _setRate(item);
-                            setSheetState(() {});
-                          },
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  const ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: Icon(Icons.info_outline_rounded,
-                        size: 20, color: Fx.sub),
-                    title: Text('播放内核',
-                        style: TextStyle(
-                            fontSize: 13.5,
-                            fontWeight: FontWeight.w600,
-                            color: Fx.ink)),
-                    subtitle: Text('media_kit · libmpv · HLS / 加密 / 多编码',
-                        style: TextStyle(fontSize: 10.5, color: Fx.sub)),
-                  ),
-                ],
-              ),
-            );
-          },
+    await showFxMorePanel(
+      context,
+      loopMode: _loopMode,
+      skipIntroOutro: _skipIntroOutro,
+      onLoopChanged: (mode) {
+        if (!mounted) return;
+        setState(() => _loopMode = mode);
+        unawaited(
+          _controller?.setLooping(mode == FxLoopMode.single) ??
+              Future<void>.value(),
         );
+        fxToast(context, '循环播放：${mode.label}');
       },
+      onSkipChanged: (on) {
+        if (!mounted) return;
+        setState(() => _skipIntroOutro = on);
+        fxToast(context, on ? '已开启跳过片头片尾' : '已关闭跳过片头片尾');
+      },
+      onPip: () => fxToast(context, '画中画：当前版本暂不支持'),
+      onSleepTimer: () => unawaited(_openSleepTimerPicker()),
+      onDownload: () => fxToast(context, '请到详情页下载本集'),
+      onSpeed: () => unawaited(_openSpeedPicker()),
+      onBackground: () => fxToast(context, '后台播放已开启'),
+      onFeedback: () => fxToast(context, '问题反馈：请到「我的-意见反馈」提交'),
     );
     if (!mounted) return;
     _startHideTimer();
+  }
+
+  Future<void> _openSpeedPicker() async {
+    final rate = await showFxSpeedSheet(context, _rate);
+    if (!mounted || rate == null) return;
+    _setRate(rate);
+  }
+
+  Future<void> _openSleepTimerPicker() async {
+    final minutes = await showFxSleepTimerSheet(context);
+    if (!mounted || minutes == null) return;
+    _setSleepTimer(minutes);
+  }
+
+  void _setSleepTimer(int minutes) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (minutes <= 0) {
+      fxToast(context, '已取消定时关闭');
+      return;
+    }
+    _sleepTimer = Timer(Duration(minutes: minutes), () {
+      _sleepTimer = null;
+      if (!mounted) return;
+      unawaited(_controller?.pause());
+      fxToast(context, '定时关闭：已暂停播放');
+    });
+    fxToast(context, '将在 $minutes 分钟后暂停播放');
+  }
+
+  Future<void> _openEpisodeSheet() async {
+    if (_switchingLine) return;
+    final episodes = _episodeList;
+    if (episodes.isEmpty) {
+      fxToast(context, '暂无剧集信息');
+      return;
+    }
+    final picked =
+        await showFsEpisodeSheet(context, episodes: episodes, current: _ep);
+    if (!mounted || picked == null || picked == _ep) return;
+    await _switchEpisode(picked);
   }
 
   Future<void> _openFullscreen() async {
@@ -1207,7 +1132,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (c == null ||
         _openingFullscreen ||
         _holding2x ||
-        _locked ||
         _switchingLine ||
         _loading ||
         _error ||
@@ -1316,12 +1240,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               SizedBox.expand(
                 child: c.buildVideo(fit: BoxFit.contain),
               ),
-            // 手势层：双击暂停 / 横扫调进度 / 竖扫亮度音量 / 长按 2x。
-            if (!_locked && c != null)
+            // 手势层：双击暂停 / 横扫调进度 / 上下滑亮度音量只在全屏生效。
+            if (c != null)
               Positioned.fill(
                 child: FxPlayerGestures(
                   player: c,
                   enabled: !_loading && !_error && !_switchingLine,
+                  enableVertical: false,
                   onTap: _onSurfaceTap,
                   onDoubleTap: () {
                     _togglePlay();
@@ -1357,28 +1282,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   },
                 ),
               ),
-            if (_locked)
-              Positioned.fill(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _onLockedTap,
-                      child: const SizedBox.expand(),
-                    ),
-                    if (_unlockVisible)
-                      SafeArea(
-                        child: FsUnlockButton(
-                          alignment: Alignment.topRight,
-                          size: 36,
-                          onUnlock: _unlock,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            if (_controls && !_error && !_locked)
+            if (_controls && !_error)
               IgnorePointer(
                 ignoring: _loading || _switchingLine,
                 child: _buildControls(c),
@@ -1591,18 +1495,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 ),
                 const SizedBox(width: 6),
                 PGlassIcon(
-                  icon: Icons.lock_outline_rounded,
+                  icon: Icons.more_horiz_rounded,
                   size: 31,
-                  iconSize: 18,
-                  tooltip: '锁定屏幕',
-                  onTap: _lock,
-                ),
-                const SizedBox(width: 6),
-                PGlassIcon(
-                  icon: Icons.settings_rounded,
-                  size: 31,
-                  iconSize: 18,
-                  onTap: _openPlayerSettings,
+                  iconSize: 20,
+                  tooltip: '更多',
+                  onTap: _openMorePanel,
                 ),
               ],
             ),
@@ -1690,12 +1587,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                             tooltip: '下一集',
                             onTap: () => unawaited(_next()),
                           ),
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 6),
+                          FsTextAction(
+                            text: _episodeList.isEmpty ? '选集' : '第$_ep集',
+                            size: .88,
+                            onTap: () => unawaited(_openEpisodeSheet()),
+                          ),
+                          const SizedBox(width: 5),
                           PGlassIcon(
                             icon: Icons.fullscreen_rounded,
                             size: 30,
                             iconSize: 20,
                             tint: .13,
+                            tooltip: '全屏',
                             onTap: _openFullscreen,
                           ),
                         ],

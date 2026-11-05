@@ -17,7 +17,7 @@ import 'history_page.dart' show FxStore;
 import 'player_page.dart';
 
 /// 详情播放页：顶部内嵌 PlayerView（自动播放当前线路当前集），
-/// 下方「视频 / 评论」双 Tab、公告、简介、5 圆钮、线路、选集、猜你喜欢。
+/// 下方「视频 / 评论」双 Tab、公告、简介、5 圆钮、线路、选集、相关推荐。
 class DetailPage extends StatefulWidget {
   const DetailPage({
     super.key,
@@ -53,6 +53,9 @@ class _DetailPageState extends State<DetailPage>
   bool _openingRelated = false;
   int _autoLineTries = 0;
   int _relatedOffset = 0;
+
+  /// 选集分组下标（正片 / 花絮 …）；切换分组只影响下方横滑列表。
+  int _groupIndex = 0;
 
   /// 播放器正在切线路：禁用线路卡片，避免重复点击并发 open。
   bool _playerSwitchingLine = false;
@@ -229,6 +232,19 @@ class _DetailPageState extends State<DetailPage>
   List<Episode> get _episodes {
     final d = _detail;
     return d == null ? const <Episode>[] : _episodesOf(d);
+  }
+
+  /// 正片 / 花絮等分组；接口没给分组时整段当「正片」。
+  List<EpisodeGroup> get _episodeGroups {
+    final d = _detail;
+    if (d == null) return const <EpisodeGroup>[];
+    if (d.groups.isNotEmpty) return d.groups;
+    final all = _episodes;
+    return all.isEmpty
+        ? const <EpisodeGroup>[]
+        : <EpisodeGroup>[
+            EpisodeGroup('正片', all),
+          ];
   }
 
   String get _lineName {
@@ -629,12 +645,6 @@ class _DetailPageState extends State<DetailPage>
     }
   }
 
-  Future<void> _feedback() async {
-    final reason = await showDetailFeedbackSheet(context);
-    if (!mounted || reason == null) return;
-    fxToast(context, '已收到反馈：$reason，感谢支持');
-  }
-
   Future<void> _together() async {
     if (_openingTogether) return;
     _openingTogether = true;
@@ -867,6 +877,14 @@ class _DetailPageState extends State<DetailPage>
 
   Widget _videoTab(VideoDetail d) {
     final episodes = _episodes;
+    final groups = _episodeGroups;
+    final groupIndex =
+        groups.isEmpty ? 0 : _groupIndex.clamp(0, groups.length - 1);
+    final visibleEpisodes =
+        groups.isEmpty ? episodes : groups[groupIndex].episodes;
+    final totalAll = d.episodes > 0
+        ? d.episodes
+        : (episodes.isNotEmpty ? fxMainEpisodeCount(episodes) : 0);
     final total =
         episodes.isNotEmpty ? fxMainEpisodeCount(episodes) : d.episodes;
     final related = _relatedList;
@@ -887,7 +905,7 @@ class _DetailPageState extends State<DetailPage>
               separatorBuilder: (context, i) => const SizedBox(width: 8),
               itemBuilder: (context, i) {
                 final line = d.lines[i];
-                // 所有线路统一展示，不再显示「需解析」角标。
+                // 所有线路统一展示，不显示额外角标。
                 return SizedBox(
                   width: 102,
                   height: 60,
@@ -908,12 +926,16 @@ class _DetailPageState extends State<DetailPage>
           const SizedBox(height: 16),
           _noLinesHint(),
         ],
-        if (episodes.isNotEmpty) ...[
+        if (visibleEpisodes.isNotEmpty) ...[
           const SizedBox(height: 22),
-          _episodeHeader(total),
+          _episodeHeader(totalAll, available: visibleEpisodes.length),
+          if (groups.length > 1) ...[
+            const SizedBox(height: 9),
+            _episodeGroupTabs(groups, groupIndex),
+          ],
           const SizedBox(height: 10),
           DetailEpisodeStrip(
-            episodes: episodes,
+            episodes: visibleEpisodes,
             current: _ep,
             onSelect: _selectEpisode,
           ),
@@ -923,7 +945,7 @@ class _DetailPageState extends State<DetailPage>
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: DetailSectionTitle(
-              title: '猜你喜欢',
+              title: '相关推荐',
               trailing: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: () => setState(() => _relatedOffset += 3),
@@ -980,6 +1002,10 @@ class _DetailPageState extends State<DetailPage>
                         ),
                       ),
                     ),
+                    if (d.rating > 0) ...[
+                      const SizedBox(width: 6),
+                      _scoreTag(d.rating),
+                    ],
                     if (status.isNotEmpty) ...[
                       const SizedBox(width: 7),
                       _statusTag(status),
@@ -1033,6 +1059,34 @@ class _DetailPageState extends State<DetailPage>
     );
   }
 
+  Widget _scoreTag(num score) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFFFFB74D), Color(0xFFFF8A3D)],
+        ),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.star_rounded, size: 11, color: Colors.white),
+          const SizedBox(width: 2),
+          Text(
+            score.toStringAsFixed(1),
+            style: const TextStyle(
+              fontSize: 10,
+              height: 1.1,
+              fontWeight: FontWeight.w800,
+              color: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _statusTag(String text) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
@@ -1079,18 +1133,10 @@ class _DetailPageState extends State<DetailPage>
           ),
           Expanded(
             child: DetailActionButton(
-              icon: Icons.sync_rounded,
-              label: '刷新',
-              color: const Color(0xFFFF6B6B),
-              onTap: _refreshPlayer,
-            ),
-          ),
-          Expanded(
-            child: DetailActionButton(
-              icon: Icons.edit_rounded,
-              label: '反馈',
-              color: const Color(0xFFE45D8E),
-              onTap: _feedback,
+              icon: Icons.tv_rounded,
+              label: '投屏',
+              color: const Color(0xFF5B8DEF),
+              onTap: _cast,
             ),
           ),
           Expanded(
@@ -1101,9 +1147,21 @@ class _DetailPageState extends State<DetailPage>
               onTap: _together,
             ),
           ),
+          Expanded(
+            child: DetailActionButton(
+              icon: Icons.sync_rounded,
+              label: '刷新',
+              color: const Color(0xFFFF6B6B),
+              onTap: _refreshPlayer,
+            ),
+          ),
         ],
       ),
     );
+  }
+
+  void _cast() {
+    fxToast(context, '投屏：暂无可用设备');
   }
 
   Widget _sourceHint() {
@@ -1160,14 +1218,58 @@ class _DetailPageState extends State<DetailPage>
     );
   }
 
-  Widget _episodeHeader(int total) {
+  Widget _episodeGroupTabs(List<EpisodeGroup> groups, int current) {
+    return SizedBox(
+      height: 32,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        itemCount: groups.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, i) {
+          final active = i == current;
+          final raw = groups[i].name.trim();
+          final name = raw.isEmpty ? (i == 0 ? '正片' : '花絮') : raw;
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _groupIndex = i),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              decoration: BoxDecoration(
+                color: active
+                    ? Fx.accent.withOpacity(.12)
+                    : Colors.white.withOpacity(.72),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: active ? Fx.accent : Colors.white,
+                ),
+              ),
+              child: Text(
+                name,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  color: active ? Fx.accent : Fx.sub,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _episodeHeader(int total, {int available = 0}) {
+    final avail = available > 0 ? available : total;
+    final title = total > 0 ? '更新至 $avail 集 · 全 $total 集' : '选集';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
           Expanded(
             child: Text(
-              total > 0 ? '更新至 $total 集' : '选集',
+              title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
