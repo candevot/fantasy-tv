@@ -56,11 +56,25 @@ class HomeData {
 class LineInfo {
   final String id, name, type;
   final int priority;
-  LineInfo(this.id, this.name, this.type, this.priority);
+
+  /// 来源站名（如「红牛」）与原始 vod_play_from（如「hnm3u8」），旧接口可能为空。
+  final String? source, from;
+  LineInfo(this.id, this.name, this.type, this.priority,
+      {this.source, this.from});
   factory LineInfo.fromJson(Map<String, dynamic> j) => LineInfo('${j['id']}',
-      '${j['name']}', '${j['type'] ?? 'hls'}', (j['priority'] ?? 0) as int);
+      '${j['name']}', '${j['type'] ?? 'hls'}', (j['priority'] ?? 0) as int,
+      source: _lineOptStr(j['source']), from: _lineOptStr(j['from']));
 
   bool get needsParse => type.trim().toLowerCase() == 'parse';
+
+  /// 卡片文案：只显示线路名，name 为空时才退回来源站名。
+  String get displayName => name.isNotEmpty ? name : (source?.trim() ?? '');
+}
+
+String? _lineOptStr(Object? v) {
+  if (v == null) return null;
+  final s = '$v'.trim();
+  return s.isEmpty ? null : s;
 }
 
 /// 线路名去掉「·高清」「-线路2」这类后缀后的基础名。
@@ -81,16 +95,19 @@ bool _lineNamesMatch(String a, String b) {
 
 /// 合并「高清线路」「高清线路·线路2」这类同源线路：
 /// 只保留一条可播放线路（优先非 parse），剧集仍按整部剧合并展示。
+/// 不同 source 的线路即使名称前缀相同也不合并。
 List<LineInfo> mergeLines(List<LineInfo> lines) {
   final groups = <List<LineInfo>>[];
   final bases = <String>[];
+  final sources = <String>[];
 
   for (final line in lines) {
     final base = _lineBaseName(line.name);
+    final source = line.source?.trim() ?? '';
     var hit = -1;
     if (base.isNotEmpty) {
       for (var i = 0; i < groups.length; i++) {
-        if (_lineNamesMatch(bases[i], base)) {
+        if (sources[i] == source && _lineNamesMatch(bases[i], base)) {
           hit = i;
           break;
         }
@@ -99,6 +116,7 @@ List<LineInfo> mergeLines(List<LineInfo> lines) {
     if (hit < 0) {
       groups.add(<LineInfo>[line]);
       bases.add(base);
+      sources.add(source);
     } else {
       groups[hit].add(line);
       if (base.length < bases[hit].length) bases[hit] = base;
