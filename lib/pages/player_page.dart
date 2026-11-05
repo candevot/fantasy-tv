@@ -407,11 +407,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         unawaited(_saveProgress());
         return;
       case AppLifecycleState.resumed:
+        final wasBackgrounded = _backgrounded;
         _backgrounded = false;
         _cancelFocusLossPause();
         _resetWatchdogClock();
         _resumeAfterFocusLoss();
-        _remountVideoLayer();
+        // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
+        if (wasBackgrounded) _remountVideoLayer();
         return;
       case AppLifecycleState.detached:
         return;
@@ -420,7 +422,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   void _armFocusLossPause() {
     _cancelFocusLossPause();
-    _focusLossTimer = Timer(const Duration(milliseconds: 1200), () {
+    _focusLossTimer = Timer(fxAudioFocusLossGrace, () {
       _focusLossTimer = null;
       if (!mounted || _backgrounded || _fullscreenActive) return;
       final c = _controller;
@@ -441,7 +443,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _pausedByFocusLoss = false;
     if (!mounted || _loading || _error || _covered) return;
     final c = _controller;
-    if (c == null || !c.value.isInitialized || c.value.isPlaying) return;
+    if (c == null ||
+        !c.value.isInitialized ||
+        c.value.isPlaying ||
+        c.value.isCompleted) {
+      return;
+    }
     unawaited(c.play());
   }
 

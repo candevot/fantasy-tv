@@ -13,6 +13,10 @@ import '../theme.dart';
 /// 播放器通用小工具：时间格式、进度持久化、白玻璃控件。
 String fxPad2(int n) => n.toString().padLeft(2, '0');
 
+/// 音频焦点丢失的宽限时间：来电 / 被其它应用遮挡超过这个时长才暂停，
+/// 下拉通知栏、截屏等短暂 inactive 不打断播放。
+const Duration fxAudioFocusLossGrace = Duration(milliseconds: 1200);
+
 /// 控件无操作后自动隐藏：参考实现 5000ms（PlayerControllerImpl）。
 const Duration kPlayerControlsAutoHide = Duration(seconds: 5);
 

@@ -710,7 +710,10 @@ class _TogetherPageState extends State<TogetherPage>
     if (!mounted || _stage != _TogetherStage.room) return;
     final controller = _controller;
     final state = _remote;
+    // 后台不与服务器做 seek / 变速对齐：那时心跳和网络都可能被系统限流，
+    // 强行追进度会造成声音断层；回前台拿到最新 room_state 再对齐。
     if (!_isHost &&
+        _foreground &&
         controller != null &&
         controller.value.isInitialized &&
         state != null) {
