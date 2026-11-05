@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -19,7 +21,7 @@ extension DownloadStatusText on DownloadStatus {
         DownloadStatus.queued => '排队中',
         DownloadStatus.downloading => '下载中',
         DownloadStatus.paused => '已暂停',
-        DownloadStatus.completed => '已缓存',
+        DownloadStatus.completed => '已下载',
         DownloadStatus.failed => '下载失败',
       };
 }
@@ -35,6 +37,8 @@ class DownloadRequest {
     required this.epName,
     required this.line,
     required this.lineName,
+    this.year = 0,
+    this.isMovie = false,
   });
 
   final String id;
@@ -44,6 +48,13 @@ class DownloadRequest {
   final String epName;
   final String line;
   final String lineName;
+
+  /// 年份，用于目录 `剧名 (年份)` 与电影文件名。
+  final int year;
+
+  /// 电影使用 `剧名.年份.1080P.mp4`，剧集使用
+  /// `剧名.SxxExx.第N集.mp4`。
+  final bool isMovie;
 }
 
 /// 单集缓存任务（可变状态由 [DownloadService] 统一维护）。
@@ -57,6 +68,8 @@ class DownloadTask {
     required this.line,
     required this.lineName,
     required this.createdAt,
+    this.year = 0,
+    this.isMovie = false,
     this.status = DownloadStatus.queued,
   }) : updatedAt = createdAt;
 
@@ -68,6 +81,8 @@ class DownloadTask {
   String line;
   String lineName;
   final int createdAt;
+  final int year;
+  final bool isMovie;
 
   DownloadStatus status;
   double progress = 0;
@@ -75,11 +90,18 @@ class DownloadTask {
   int totalBytes = 0;
   int doneSegments = 0;
   int totalSegments = 0;
-  String ext = 'ts';
+  String ext = 'mp4';
   String signature = '';
   String? filePath;
   String? error;
   int updatedAt;
+
+  /// 瞬时下载速度（字节/秒），只用于 UI，不持久化。
+  int speed = 0;
+
+  /// 速度采样的内部状态，不持久化。
+  int _speedBytes = 0;
+  int _speedAt = 0;
 
   String get key => '$id#$ep';
 
@@ -106,17 +128,49 @@ class DownloadTask {
     return '${value.toStringAsFixed(digits)} ${units[unit]}';
   }
 
-  /// 下载中的副标题：HLS 显示片数，MP4 显示已下载/总大小。
+  String get speedLabel => status == DownloadStatus.downloading && speed > 0
+      ? formatDownloadSpeed(speed)
+      : '';
+
+  /// 下载中的副标题：HLS 显示「已完成/总片数 · 速度」，MP4 显示
+  /// 「已下载/总大小 · 速度」。
   String get progressDetail {
     if (status == DownloadStatus.completed) return sizeLabel;
+    final rate = speedLabel;
     if (totalSegments > 0) {
       final done = doneSegments.clamp(0, totalSegments);
-      return '$done/$totalSegments 片 · ${sizeLabel}';
+      return rate.isEmpty
+          ? '$done/$totalSegments 片 · ${sizeLabel}'
+          : '$done/$totalSegments 片 · $rate';
     }
     if (totalBytes > 0) {
-      return '${sizeLabel} / ${_fmtBytes(totalBytes)}';
+      final base = '${sizeLabel} / ${_fmtBytes(totalBytes)}';
+      return rate.isEmpty ? base : '$base · $rate';
     }
-    return sizeLabel;
+    return rate.isEmpty ? sizeLabel : '$sizeLabel · $rate';
+  }
+
+  /// 开始下载 / 恢复下载时重置速度采样，避免沿用上一次的字节数。
+  void resetSpeed() {
+    speed = 0;
+    _speedBytes = bytes;
+    _speedAt = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  /// 按时间窗口从 [bytes] 的增量计算速度；由下载 worker 高频调用。
+  void sampleSpeed() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_speedAt <= 0) {
+      _speedAt = now;
+      _speedBytes = bytes;
+      return;
+    }
+    final dt = now - _speedAt;
+    if (dt < 400) return;
+    final delta = bytes - _speedBytes;
+    speed = delta > 0 ? (delta * 1000 / dt).round() : 0;
+    _speedBytes = bytes;
+    _speedAt = now;
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
@@ -129,6 +183,8 @@ class DownloadTask {
         'lineName': lineName,
         'createdAt': createdAt,
         'updatedAt': updatedAt,
+        'year': year,
+        'isMovie': isMovie,
         'status': status.name,
         'progress': progress,
         'bytes': bytes,
@@ -157,6 +213,8 @@ class DownloadTask {
       line: '${j['line'] ?? ''}',
       lineName: '${j['lineName'] ?? ''}',
       createdAt: _asInt(j['createdAt'], now),
+      year: _asInt(j['year']),
+      isMovie: j['isMovie'] == true,
       status: status,
     )
       ..updatedAt = _asInt(j['updatedAt'], now)
@@ -165,7 +223,7 @@ class DownloadTask {
       ..totalBytes = _asInt(j['totalBytes'])
       ..doneSegments = _asInt(j['doneSegments'])
       ..totalSegments = _asInt(j['totalSegments'])
-      ..ext = '${j['ext'] ?? 'ts'}'
+      ..ext = '${j['ext'] ?? 'mp4'}'
       ..signature = '${j['signature'] ?? ''}'
       ..filePath = j['filePath'] == null ? null : '${j['filePath']}'
       ..error = j['error'] == null ? null : '${j['error']}';
@@ -198,6 +256,40 @@ String _fmtBytes(int bytes) {
   return '${value.toStringAsFixed(unit == 0 ? 0 : (unit == 1 ? 0 : 1))} ${units[unit]}';
 }
 
+/// 下载速度文案，例如 `3.2MB/s`。
+String formatDownloadSpeed(int bytesPerSecond) {
+  if (bytesPerSecond <= 0) return '0 B/s';
+  const units = <String>['B', 'KB', 'MB', 'GB'];
+  var value = bytesPerSecond.toDouble();
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  final digits = unit == 0 || value >= 100 ? 0 : 1;
+  return '${value.toStringAsFixed(digits)}${units[unit]}/s';
+}
+
+/// 清洗文件名 / 目录名里的非法字符。
+///
+/// Android 与桌面文件管理器都不允许 `/ \ : * ? " < > |` 和控制字符；
+/// 尾部空格 / 点会让部分文件系统拒绝创建，一并清掉。
+String sanitizeDownloadName(String raw, {String fallback = '未命名'}) {
+  var name = raw
+      .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
+      .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  name = name.replaceFirst(RegExp(r'^[. ]+'), '');
+  name = name.replaceFirst(RegExp(r'[. ]+$'), '');
+  if (name.isEmpty) name = fallback;
+  if (name.length > 80) {
+    name = name.substring(0, 80).replaceFirst(RegExp(r'[. ]+$'), '');
+  }
+  if (name.isEmpty || name == '.' || name == '..') return fallback;
+  return name;
+}
+
 String _safeSegment(String value) {
   final cleaned = value.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
   return cleaned.isEmpty ? 'video' : cleaned;
@@ -214,6 +306,11 @@ String _safeSegment(String value) {
 /// `/storage/emulated/0/Download/幻想影视`；Android 分区存储不允许直接
 /// 写入时自动退回 `getExternalStorageDirectory()`，也可在设置里切换到
 /// 应用私有目录。任何情况下都不再使用 systemTemp 存放新缓存。
+///
+/// 线程模型：多集之间严格串行（[_pump] 一次只跑一个任务），单集内部由
+/// [AppSettings.downloadConcurrency] 控制并发（2–8，默认 6）。因此全局
+/// 下载连接数不会超过 8，既能把单集带宽打满，也不会并发请求多集把源站
+/// 打限速。
 class DownloadService extends ChangeNotifier {
   DownloadService._();
 
@@ -223,7 +320,13 @@ class DownloadService extends ChangeNotifier {
   static const String legacyPrefsKey = 'fx_downloads_v1';
 
   static const Duration _requestTimeout = Duration(seconds: 30);
+  static const Duration _streamTimeout = Duration(seconds: 60);
   static const Duration _notifyGap = Duration(milliseconds: 220);
+  static const Duration _retryBackoff = Duration(milliseconds: 300);
+  static const int _retryCount = 2;
+
+  /// 校验时认为「不可能是完整视频」的阈值；ffprobe 可用时以时长为准。
+  static const int _minValidBytes = 1024 * 1024;
 
   final List<DownloadTask> _tasks = <DownloadTask>[];
   final http.Client _client = http.Client();
@@ -232,15 +335,20 @@ class DownloadService extends ChangeNotifier {
   bool _pumping = false;
   bool _persisting = false;
   bool _persistAgain = false;
+  bool _disposed = false;
   Future<void>? _initFuture;
   Timer? _persistTimer;
   DateTime _lastNotify = DateTime.fromMillisecondsSinceEpoch(0);
+  AppLifecycleState? _lifecycle;
 
   DownloadLocation _location = DownloadLocation.phone;
   DownloadStorageInfo? _storageInfo;
   Directory? _rootDirCache;
   int _usedBytes = 0;
   bool _usageLoading = false;
+
+  /// ffprobe 是否存在。Android 上没有 ffprobe 时只做大小校验。
+  static bool _ffprobeUnavailable = false;
 
   /// 服务是否已从 SharedPreferences 恢复完成。
   bool get ready => _ready;
@@ -265,10 +373,15 @@ class DownloadService extends ChangeNotifier {
 
   bool get usageLoading => _usageLoading;
 
+  /// 最近一次 App 生命周期状态（下载在主 isolate 中，不随前后台暂停）。
+  AppLifecycleState? get lifecycle => _lifecycle;
+
   /// 只读任务列表（按加入时间排序，与持久化顺序一致）。
   List<DownloadTask> get tasks => List<DownloadTask>.unmodifiable(_tasks);
 
   /// 启动恢复：加载队列；未完成的标记为暂停；已完成但文件丢失的标记失败。
+  ///
+  /// 幂等：App 启动、下载页、设置页、详情页都会调用，只执行一次。
   Future<void> init() => _initFuture ??= _load();
 
   Future<void> _load() async {
@@ -312,6 +425,43 @@ class DownloadService extends ChangeNotifier {
     }
   }
 
+  /// App 生命周期只做记录：下载跑在主 isolate 里，切后台不会主动暂停。
+  ///
+  /// 没有引入 WorkManager / 前台服务：WorkManager 的周期任务无法承载一条
+  /// 持续数十分钟的 HTTP 下载流，前台服务则需要额外的 Android 原生插件与
+  /// 通知权限。当前实现依赖「App 进程在后台仍然存活」这一 Android 默认
+  /// 行为；若系统回收进程，已完成分片会保留在 `.hls_parts` / `.mp4_parts`
+  /// 目录，下次启动按暂停恢复（见 [_reconcile]），用户点继续即可接着下。
+  void handleLifecycle(AppLifecycleState state) {
+    _lifecycle = state;
+    if (state == AppLifecycleState.detached) {
+      _persistSoon();
+    }
+  }
+
+  /// 释放服务：取消持久化定时器、关闭 HTTP 连接，避免测试 / 热重载后
+  /// 残留后台任务。真正的下载循环通过 [_shouldStop] 感知并退出。
+  @override
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final task in _tasks) {
+      if (task.status == DownloadStatus.downloading ||
+          task.status == DownloadStatus.queued) {
+        task
+          ..status = DownloadStatus.paused
+          ..speed = 0
+          ..updatedAt = now;
+      }
+    }
+    _client.close();
+    unawaited(_persist());
+    super.dispose();
+  }
+
   /// 切换下载目录。已经在下载的任务会继续写入原目录，新任务使用新目录；
   /// 已完成的文件按绝对路径记录，切换后依旧可以播放。
   Future<void> setLocation(DownloadLocation value) async {
@@ -349,6 +499,7 @@ class DownloadService extends ChangeNotifier {
   Future<void> _reconcile() async {
     final now = DateTime.now().millisecondsSinceEpoch;
     for (final task in _tasks) {
+      task.resetSpeed();
       if (task.status == DownloadStatus.queued ||
           task.status == DownloadStatus.downloading) {
         // App 重启后不自动续传，统一恢复成「已暂停」由用户决定。
@@ -359,28 +510,68 @@ class DownloadService extends ChangeNotifier {
       if (task.status == DownloadStatus.completed) {
         final file = await _existingFile(task);
         if (file == null) {
-          task.status = DownloadStatus.failed;
-          task.error = '缓存文件已被系统清理，请重新下载';
-          task.filePath = null;
-          task.updatedAt = now;
+          task
+            ..status = DownloadStatus.failed
+            ..error = '缓存文件已被系统清理，请重新下载'
+            ..filePath = null
+            ..speed = 0
+            ..updatedAt = now;
         } else {
-          task.filePath = file.path;
-          task.bytes = await file.length();
-          task.progress = 1;
+          final length = await file.length();
+          if (length <= 0) {
+            await _deleteQuietly(file);
+            task
+              ..status = DownloadStatus.failed
+              ..error = '缓存文件为空，请重新下载'
+              ..filePath = null
+              ..speed = 0
+              ..updatedAt = now;
+          } else {
+            task
+              ..filePath = file.path
+              ..bytes = length
+              ..progress = 1
+              ..speed = 0;
+          }
         }
       }
     }
   }
 
-  /// 已缓存的集（同剧同集不区分线路）。
-  bool isCached(String id, int ep) => _tasks.any(
-      (t) => t.id == id && t.ep == ep && t.status == DownloadStatus.completed);
+  /// 已缓存的集（同剧同集不区分线路）。同时确认本地文件真的还在，
+  /// 避免外部清理后详情页仍显示「已下载」。
+  bool isCached(String id, int ep) {
+    for (final task in _tasks) {
+      if (task.id != id || task.ep != ep) continue;
+      if (task.status != DownloadStatus.completed) return false;
+      final path = task.filePath;
+      if (path == null || path.isEmpty) return false;
+      try {
+        return File(path).existsSync();
+      } catch (_) {
+        return false;
+      }
+    }
+    return false;
+  }
 
   DownloadTask? taskFor(String id, int ep) {
     for (final t in _tasks) {
       if (t.id == id && t.ep == ep) return t;
     }
     return null;
+  }
+
+  /// 同一部剧的全部任务（用于「删除整剧」与系列目录清理）。
+  List<DownloadTask> tasksForSeries(String id) =>
+      _tasks.where((t) => t.id == id).toList(growable: false);
+
+  /// 解析任务对应的真实本地文件；文件已被清理时返回 null。
+  Future<File?> fileFor(DownloadTask task) async {
+    if (task.status != DownloadStatus.completed) return null;
+    final file = await _existingFile(task);
+    if (file != null) task.filePath = file.path;
+    return file;
   }
 
   List<DownloadTask> get activeTasks => _tasks
@@ -402,7 +593,7 @@ class DownloadService extends ChangeNotifier {
   /// 已缓存、排队中、下载中、已暂停的同集会被跳过；失败任务会被重置重试。
   Future<int> enqueue(List<DownloadRequest> requests) async {
     await init();
-    if (requests.isEmpty) return 0;
+    if (requests.isEmpty || _disposed) return 0;
     final now = DateTime.now().millisecondsSinceEpoch;
     var added = 0;
     for (final req in requests) {
@@ -423,7 +614,9 @@ class DownloadService extends ChangeNotifier {
           ..signature = ''
           ..filePath = null
           ..error = null
+          ..speed = 0
           ..updatedAt = now;
+        existing.resetSpeed();
         added++;
         continue;
       }
@@ -436,6 +629,8 @@ class DownloadService extends ChangeNotifier {
         line: req.line,
         lineName: req.lineName,
         createdAt: now,
+        year: req.year,
+        isMovie: req.isMovie,
       ));
       added++;
     }
@@ -454,8 +649,10 @@ class DownloadService extends ChangeNotifier {
         task.status != DownloadStatus.queued) {
       return;
     }
-    task.status = DownloadStatus.paused;
-    task.updatedAt = DateTime.now().millisecondsSinceEpoch;
+    task
+      ..status = DownloadStatus.paused
+      ..speed = 0
+      ..updatedAt = DateTime.now().millisecondsSinceEpoch;
     _notifyNow();
     await _persist();
   }
@@ -469,7 +666,9 @@ class DownloadService extends ChangeNotifier {
     task
       ..status = DownloadStatus.queued
       ..error = null
+      ..speed = 0
       ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+    task.resetSpeed();
     _notifyNow();
     await _persist();
     _kick();
@@ -485,6 +684,7 @@ class DownloadService extends ChangeNotifier {
           task.status == DownloadStatus.queued) {
         task
           ..status = DownloadStatus.paused
+          ..speed = 0
           ..updatedAt = now;
         changed = true;
       }
@@ -502,7 +702,9 @@ class DownloadService extends ChangeNotifier {
         task
           ..status = DownloadStatus.queued
           ..error = null
+          ..speed = 0
           ..updatedAt = now;
+        task.resetSpeed();
         changed = true;
       }
     }
@@ -514,23 +716,71 @@ class DownloadService extends ChangeNotifier {
 
   /// 删除单集记录并清理缓存文件。
   Future<void> remove(DownloadTask task) async {
+    final wasActive = task.status == DownloadStatus.downloading ||
+        task.status == DownloadStatus.queued;
     _tasks.remove(task);
     _notifyNow();
     await _persist();
+    // 下载中的 worker 还在写临时分片：稍微等它看到任务已被移除，
+    // 再删目录，避免删完又被写回一个残留文件。
+    if (wasActive) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
     await _deleteTaskFiles(task);
     await refreshUsage();
   }
 
+  /// 删除整部剧：清理该 id 下所有任务记录与本地文件。
+  Future<int> removeSeries(String id) async {
+    final removed = _tasks.where((t) => t.id == id).toList(growable: false);
+    if (removed.isEmpty) return 0;
+    final wasActive = removed.any((t) =>
+        t.status == DownloadStatus.downloading ||
+        t.status == DownloadStatus.queued);
+    _tasks.removeWhere((t) => t.id == id);
+    _notifyNow();
+    await _persist();
+    if (wasActive) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    for (final task in removed) {
+      await _deleteTaskFiles(task);
+    }
+    // 整剧删除：把系列目录里的孤儿分片 / 旧临时文件也一并清掉。
+    final seriesDirs = <String>{};
+    for (final task in removed) {
+      try {
+        seriesDirs.add((await _seriesDirectory(task)).path);
+      } catch (_) {}
+    }
+    for (final path in seriesDirs) {
+      await _deleteDirQuietly(Directory(path));
+    }
+    await refreshUsage();
+    return removed.length;
+  }
+
   /// 清空全部任务与缓存文件。
   Future<void> clearAll() async {
+    for (final task in _tasks) {
+      if (task.status == DownloadStatus.downloading ||
+          task.status == DownloadStatus.queued) {
+        task
+          ..status = DownloadStatus.paused
+          ..speed = 0;
+      }
+    }
     final old = List<DownloadTask>.from(_tasks);
     _tasks.clear();
     _notifyNow();
     await _persist();
+    if (old.any((t) => t.progress > 0 && t.progress < 1)) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
     for (final task in old) {
       await _deleteTaskFiles(task);
     }
-    // 删除所有已知缓存目录里的残留（包括下载中断留下的 .part）。
+    // 删除所有已知缓存目录里的残留（包括下载中断留下的分片目录）。
     await DownloadStorage.clearAllCaches();
     _rootDirCache = null;
     _storageInfo = await DownloadStorage.resolve(_location);
@@ -541,17 +791,17 @@ class DownloadService extends ChangeNotifier {
   /* -------------------------------------------------------------- worker */
 
   void _kick() {
-    if (!_ready) return;
+    if (!_ready || _disposed) return;
     unawaited(_pump());
   }
 
   Future<void> _pump() async {
-    if (_pumping || !_ready) return;
+    if (_pumping || !_ready || _disposed) return;
     _pumping = true;
     try {
       String? abortKey;
       var abortStreak = 0;
-      while (true) {
+      while (!_disposed) {
         DownloadTask? next;
         for (final task in _tasks) {
           if (task.status == DownloadStatus.queued) {
@@ -578,6 +828,7 @@ class DownloadService extends ChangeNotifier {
           if (_tasks.contains(next) && next.status == DownloadStatus.queued) {
             next
               ..status = DownloadStatus.failed
+              ..speed = 0
               ..error = '下载多次中断，请点击重试'
               ..updatedAt = DateTime.now().millisecondsSinceEpoch;
             _notifyNow();
@@ -589,7 +840,7 @@ class DownloadService extends ChangeNotifier {
       }
     } finally {
       _pumping = false;
-      if (_tasks.any((t) => t.status == DownloadStatus.queued)) {
+      if (!_disposed && _tasks.any((t) => t.status == DownloadStatus.queued)) {
         unawaited(_pump());
       }
     }
@@ -629,7 +880,9 @@ class DownloadService extends ChangeNotifier {
       task
         ..status = DownloadStatus.downloading
         ..error = null
+        ..speed = 0
         ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+      task.resetSpeed();
       _notifyNow();
       await _persist();
 
@@ -650,21 +903,26 @@ class DownloadService extends ChangeNotifier {
               task.status == DownloadStatus.queued)) {
         task
           ..status = DownloadStatus.failed
+          ..speed = 0
           ..error = _friendlyError(e)
           ..updatedAt = DateTime.now().millisecondsSinceEpoch;
         await _persist();
       }
     } finally {
+      task.speed = 0;
       _notifyNow();
       unawaited(refreshUsage());
     }
     return aborted;
   }
 
-  /// 只有任务被删除或被暂停才中断下载；排队（queued）不算停止，
-  /// 否则刚拿到播放地址就会误 abort，任务永远原地重排。
+  /// 只有任务被删除、暂停、服务释放或 App 退出才中断下载；排队（queued）
+  /// 不算停止，否则刚拿到播放地址就会误 abort，任务永远原地重排。
   bool _shouldStop(DownloadTask task) =>
-      !_tasks.contains(task) || task.status == DownloadStatus.paused;
+      _disposed ||
+      !_tasks.contains(task) ||
+      task.status == DownloadStatus.paused ||
+      task.status == DownloadStatus.failed;
 
   /// 下载前检查真实网络类型：仅 Wi-Fi 开关打开时，移动网络直接失败并
   /// 给出可读原因，连上 Wi-Fi 后可点重试。
@@ -696,6 +954,12 @@ class DownloadService extends ChangeNotifier {
     } catch (_) {}
   }
 
+  Future<void> _deleteDirQuietly(Directory dir) async {
+    try {
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (_) {}
+  }
+
   Uri _ensureAuthorized(Uri? uri) {
     // 合规：只缓存接口给出的 http/https 直链，拒绝 file:/data:/其他协议。
     if (uri == null ||
@@ -705,6 +969,11 @@ class DownloadService extends ChangeNotifier {
     }
     return uri;
   }
+
+  int get _concurrency => AppSettings.instance.downloadConcurrency
+      .clamp(AppSettings.minDownloadConcurrency,
+          AppSettings.maxDownloadConcurrency)
+      .toInt();
 
   /* ------------------------------------------------------------- hls dl */
 
@@ -760,96 +1029,177 @@ class DownloadService extends ChangeNotifier {
       ...segments,
     ];
     final total = steps.length;
-    final ext = mapUri == null ? 'ts' : 'mp4';
     final signature = _signature(segments);
+    final target = await _targetFile(task);
+    final partsDir = Directory('${target.path}.hls_parts');
 
-    final dir = await _taskDir(task);
-    // 分片按类型分名：HLS 与 MP4 的字节格式不同，不能共用同一个 .part。
-    final part = File('${dir.path}/ep_${task.ep}.hls.part');
-    final target = File('${dir.path}/ep_${task.ep}.$ext');
-    // 类型不一致（上次是 MP4 直链）或旧版命名：删掉重下，避免拼接损坏。
-    await _deleteQuietly(File('${dir.path}/ep_${task.ep}.mp4.part'));
-    await _deleteQuietly(File('${dir.path}/ep_${task.ep}.part'));
+    // 新任务 / 失败重试：上一次可能留下损坏的成品或其它格式的临时目录。
+    await _deleteQuietly(target);
+    await _deleteDirQuietly(Directory('${target.path}.mp4_parts'));
+    await _deleteDirQuietly(Directory('${target.path}.stream_parts'));
+    await _deleteQuietly(File('${target.path}.stream_parts.part'));
 
-    var start = 0;
-    if (task.ext == ext &&
-        task.totalSegments == total &&
-        task.signature == signature &&
-        task.doneSegments > 0 &&
-        task.doneSegments <= total &&
-        await part.exists() &&
-        await part.length() == task.bytes) {
-      // 断点续传：.part 里只会有完整分片，跳过已写入的部分。
-      start = task.doneSegments;
-    } else {
-      if (await part.exists()) {
-        try {
-          await part.delete();
-        } catch (_) {}
+    final reuse = await _hlsPartsMatch(partsDir, signature, total);
+    if (!reuse) {
+      await _deleteDirQuietly(partsDir);
+      await partsDir.create(recursive: true);
+      await File('${partsDir.path}/manifest.json').writeAsString(jsonEncode(
+        <String, dynamic>{
+          'version': 1,
+          'signature': signature,
+          'total': total,
+        },
+      ));
+    }
+
+    final done = <int>{};
+    var bytes = 0;
+    for (var i = 0; i < total; i++) {
+      final file = File(_hlsSegmentPath(partsDir, i));
+      if (!await file.exists()) continue;
+      final length = await file.length();
+      if (length <= 0) {
+        await _deleteQuietly(file);
+        continue;
       }
-      start = 0;
+      done.add(i);
+      bytes += length;
     }
 
     task
-      ..ext = ext
+      ..ext = 'mp4'
       ..signature = signature
       ..totalSegments = total
-      ..doneSegments = start
+      ..doneSegments = done.length
       ..totalBytes = 0
-      ..progress = total <= 0 ? 0 : start / total
-      ..bytes = start == 0 ? 0 : task.bytes
+      ..bytes = bytes
+      ..progress = total <= 0 ? 0 : done.length / total
       ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+    task.resetSpeed();
     _notifyNow();
     _persistSoon();
 
-    IOSink? sink;
+    await _downloadHlsSegments(
+      task,
+      steps,
+      headers,
+      partsDir,
+      done,
+      total,
+    );
+
+    if (_shouldStop(task)) throw const _AbortDownload();
+    final missing = total - done.length;
+    if (missing > 0) {
+      throw _CacheException('还有 $missing 个分片未下载完成，请重试');
+    }
+
+    final part = File('${target.path}.part');
+    await _deleteQuietly(part);
+    final sink = part.openWrite();
     try {
-      sink = part.openWrite(
-        mode: start > 0 ? FileMode.append : FileMode.write,
-      );
-      for (var i = start; i < total; i++) {
+      for (var i = 0; i < total; i++) {
         if (_shouldStop(task)) throw const _AbortDownload();
-        final chunk = await _fetchBytes(steps[i], headers);
-        sink.add(chunk);
-        task
-          ..doneSegments = i + 1
-          ..bytes += chunk.length
-          ..progress = (i + 1) / total
-          ..updatedAt = DateTime.now().millisecondsSinceEpoch;
-        _notifyProgress();
-        _persistSoon();
+        final segment = File(_hlsSegmentPath(partsDir, i));
+        if (!await segment.exists() || await segment.length() <= 0) {
+          throw _CacheException('分片 $i 缺失，请重试');
+        }
+        await sink.addStream(segment.openRead());
       }
-      if (_shouldStop(task)) throw const _AbortDownload();
       await sink.flush();
       await sink.close();
-      sink = null;
-
-      if (_shouldStop(task)) throw const _AbortDownload();
-      if (await target.exists()) {
-        try {
-          await target.delete();
-        } catch (_) {}
-      }
-      final file = await part.rename(target.path);
-      task
-        ..filePath = file.path
-        ..status = DownloadStatus.completed
-        ..progress = 1
-        ..bytes = await file.length()
-        ..error = null
-        ..updatedAt = DateTime.now().millisecondsSinceEpoch;
-      _notifyNow();
-      await _persist();
-      unawaited(refreshUsage());
     } finally {
-      if (sink != null) {
+      try {
+        await sink.close();
+      } catch (_) {}
+    }
+
+    if (_shouldStop(task)) {
+      await _deleteQuietly(part);
+      throw const _AbortDownload();
+    }
+    await _finalize(
+      task,
+      part,
+      target,
+      cleanup: () => _deleteDirQuietly(partsDir),
+    );
+    await _deleteDirQuietly(partsDir);
+  }
+
+  Future<bool> _hlsPartsMatch(
+    Directory dir,
+    String signature,
+    int total,
+  ) async {
+    final manifest = File('${dir.path}/manifest.json');
+    if (!await manifest.exists()) return false;
+    try {
+      final decoded = jsonDecode(await manifest.readAsString());
+      if (decoded is! Map) return false;
+      return '${decoded['signature']}' == signature &&
+          _asInt(decoded['total']) == total;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String _hlsSegmentPath(Directory dir, int index) =>
+      '${dir.path}/seg_${index.toString().padLeft(5, '0')}.bin';
+
+  Future<void> _downloadHlsSegments(
+    DownloadTask task,
+    List<Uri> steps,
+    Map<String, String> headers,
+    Directory partsDir,
+    Set<int> done,
+    int total,
+  ) async {
+    final missing = <int>[
+      for (var i = 0; i < total; i++)
+        if (!done.contains(i)) i,
+    ];
+    if (missing.isEmpty) return;
+
+    final workers = math.min(_concurrency, missing.length);
+    var cursor = 0;
+    var failed = false;
+    Object? firstError;
+
+    Future<void> worker() async {
+      while (true) {
+        if (failed || _shouldStop(task)) return;
+        final index = cursor++;
+        if (index >= missing.length) return;
+        final i = missing[index];
         try {
-          await sink.flush();
-        } catch (_) {}
-        try {
-          await sink.close();
-        } catch (_) {}
+          final chunk = await _fetchSegmentWithRetry(steps[i], headers);
+          if (!_tasks.contains(task)) return;
+          final file = File(_hlsSegmentPath(partsDir, i));
+          await file.writeAsBytes(chunk, flush: true);
+          done.add(i);
+          task
+            ..doneSegments = done.length
+            ..bytes += chunk.length
+            ..progress = total <= 0 ? 0 : done.length / total
+            ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+          task.sampleSpeed();
+          _notifyProgress();
+          _persistSoon();
+          if (_shouldStop(task)) return;
+        } catch (e) {
+          failed = true;
+          firstError ??= e;
+          return;
+        }
       }
+    }
+
+    await Future.wait<void>([
+      for (var i = 0; i < workers; i++) worker(),
+    ]);
+    if (failed && firstError != null) {
+      throw firstError!;
     }
   }
 
@@ -860,107 +1210,324 @@ class DownloadService extends ChangeNotifier {
     Uri uri,
     Map<String, String> headers,
   ) async {
-    final dir = await _taskDir(task);
-    final part = File('${dir.path}/ep_${task.ep}.mp4.part');
-    final target = File('${dir.path}/ep_${task.ep}.mp4');
+    final target = await _targetFile(task);
+    await _deleteQuietly(target);
+    await _deleteDirQuietly(Directory('${target.path}.hls_parts'));
+    await _deleteDirQuietly(Directory('${target.path}.stream_parts'));
+    await _deleteQuietly(File('${target.path}.stream_parts.part'));
 
-    // 类型不一致（上次是 HLS 或旧版命名）的 .part 必须删除重下，
-    // 否则会把 TS 分片与 MP4 Range 响应拼成一个损坏文件。
-    await _deleteQuietly(File('${dir.path}/ep_${task.ep}.hls.part'));
-    await _deleteQuietly(File('${dir.path}/ep_${task.ep}.part'));
+    final remote = await _probeRemote(uri, headers);
+    if (remote.supportsRanges && remote.totalBytes > 0) {
+      await _downloadMp4Chunks(task, uri, headers, target, remote);
+      return;
+    }
+    await _downloadMp4Stream(task, uri, headers, target, remote);
+  }
 
-    // 以本地 .part 的真实长度作为断点，避免上次异常退出时 task.bytes
-    // 比实际写入多，Range 跳过尚未落盘的数据导致文件损坏。
-    var received = 0;
-    if (task.ext.toLowerCase() == 'mp4' && await part.exists()) {
-      received = await part.length();
-    } else if (await part.exists()) {
-      await _deleteQuietly(part);
+  Future<_RemoteFileInfo> _probeRemote(
+    Uri uri,
+    Map<String, String> headers,
+  ) async {
+    final request = http.Request('GET', uri)
+      ..headers.addAll(_headersFor(headers))
+      ..headers['Range'] = 'bytes=0-0';
+    final response = await _client.send(request).timeout(_requestTimeout);
+    final status = response.statusCode;
+    final etag = response.headers['etag'] ?? '';
+    final lastModified = response.headers['last-modified'] ?? '';
+    try {
+      if (status == 206) {
+        final total = _totalFromContentRange(
+          response.headers['content-range'] ?? '',
+        );
+        return _RemoteFileInfo(
+          totalBytes: total,
+          supportsRanges: total > 0,
+          etag: etag,
+          lastModified: lastModified,
+        );
+      }
+      if (status == 200) {
+        return _RemoteFileInfo(
+          totalBytes: response.contentLength ?? 0,
+          supportsRanges: false,
+          etag: etag,
+          lastModified: lastModified,
+        );
+      }
+      if (status == 416) {
+        throw const _CacheException('片源返回 HTTP 416，链接可能已失效');
+      }
+      throw _CacheException(
+        '片源返回 HTTP $status，链接可能已失效或未授权',
+      );
+    } finally {
+      await _discardResponse(response);
+    }
+  }
+
+  Future<void> _discardResponse(http.StreamedResponse response) async {
+    try {
+      final subscription = response.stream.listen(null);
+      await subscription.cancel();
+    } catch (_) {}
+  }
+
+  int _totalFromContentRange(String value) {
+    final match = RegExp(r'bytes\s+\d+-\d+/(\d+)').firstMatch(value);
+    return int.tryParse(match?.group(1) ?? '') ?? 0;
+  }
+
+  Future<void> _downloadMp4Chunks(
+    DownloadTask task,
+    Uri uri,
+    Map<String, String> headers,
+    File target,
+    _RemoteFileInfo remote,
+  ) async {
+    final total = remote.totalBytes;
+    final partsDir = Directory('${target.path}.mp4_parts');
+    final signature = '$total|${remote.etag}|${remote.lastModified}';
+    final chunkCount = math.min(_concurrency, total);
+    final chunkSize = (total / chunkCount).ceil();
+    final chunks = <_Mp4Chunk>[];
+    for (var start = 0, i = 0; start < total; start += chunkSize, i++) {
+      final end = math.min(start + chunkSize, total) - 1;
+      chunks.add(_Mp4Chunk(i, start, end));
+    }
+
+    final manifest = File('${partsDir.path}/manifest.json');
+    var reuse = false;
+    if (await manifest.exists()) {
+      try {
+        final decoded = jsonDecode(await manifest.readAsString());
+        reuse = decoded is Map &&
+            '${decoded['signature']}' == signature &&
+            _asInt(decoded['total']) == total;
+      } catch (_) {
+        reuse = false;
+      }
+    }
+    if (!reuse) {
+      await _deleteDirQuietly(partsDir);
+      await partsDir.create(recursive: true);
+      await manifest.writeAsString(jsonEncode(<String, dynamic>{
+        'version': 1,
+        'signature': signature,
+        'total': total,
+        'chunkSize': chunkSize,
+      }));
+    }
+
+    var bytes = 0;
+    final missing = <_Mp4Chunk>[];
+    for (final chunk in chunks) {
+      final file = File(_mp4ChunkPath(partsDir, chunk));
+      if (!await file.exists()) {
+        missing.add(chunk);
+        continue;
+      }
+      final length = await file.length();
+      if (length > chunk.length) {
+        await _deleteQuietly(file);
+        missing.add(chunk);
+        continue;
+      }
+      bytes += length;
+      if (length < chunk.length) missing.add(chunk);
     }
 
     task
       ..ext = 'mp4'
+      ..signature = signature
       ..totalSegments = 0
-      ..doneSegments = 0
-      ..bytes = received
-      ..totalBytes = 0
-      ..progress = 0
+      ..doneSegments = chunks.length - missing.length
+      ..totalBytes = total
+      ..bytes = bytes
+      ..progress = total <= 0 ? 0 : bytes / total
       ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+    task.resetSpeed();
     _notifyNow();
+    _persistSoon();
 
-    final request = http.Request('GET', uri);
-    request.headers.addAll(_headersFor(headers));
-    if (received > 0) {
-      request.headers['Range'] = 'bytes=$received-';
+    if (missing.isNotEmpty) {
+      final workers = math.min(_concurrency, missing.length);
+      var cursor = 0;
+      var failed = false;
+      Object? firstError;
+
+      Future<void> worker() async {
+        while (true) {
+          if (failed || _shouldStop(task)) return;
+          final index = cursor++;
+          if (index >= missing.length) return;
+          try {
+            await _downloadMp4ChunkWithRetry(
+              task,
+              uri,
+              headers,
+              partsDir,
+              missing[index],
+            );
+            if (_shouldStop(task)) return;
+          } catch (e) {
+            failed = true;
+            firstError ??= e;
+            return;
+          }
+        }
+      }
+
+      await Future.wait<void>([
+        for (var i = 0; i < workers; i++) worker(),
+      ]);
+      if (failed && firstError != null) throw firstError!;
+    }
+
+    if (_shouldStop(task)) throw const _AbortDownload();
+
+    // 校验每个分块长度与总大小，任何一块缺失都保留已下分块供重试。
+    var verifiedBytes = 0;
+    for (final chunk in chunks) {
+      final file = File(_mp4ChunkPath(partsDir, chunk));
+      if (!await file.exists()) {
+        throw _CacheException('分块 ${chunk.index + 1} 缺失，请重试');
+      }
+      final length = await file.length();
+      if (length != chunk.length) {
+        throw _CacheException('分块 ${chunk.index + 1} 大小不符，请重试');
+      }
+      verifiedBytes += length;
+    }
+    if (verifiedBytes != total) {
+      throw _CacheException('分块总大小校验失败，请重试');
+    }
+
+    final part = File('${target.path}.part');
+    await _deleteQuietly(part);
+    final sink = part.openWrite();
+    try {
+      for (final chunk in chunks) {
+        if (_shouldStop(task)) throw const _AbortDownload();
+        await sink.addStream(File(_mp4ChunkPath(partsDir, chunk)).openRead());
+      }
+      await sink.flush();
+      await sink.close();
+    } finally {
+      try {
+        await sink.close();
+      } catch (_) {}
+    }
+
+    if (await part.length() != total) {
+      await _deleteQuietly(part);
+      throw _CacheException('拼接后文件大小校验失败，请重试');
+    }
+    if (_shouldStop(task)) {
+      await _deleteQuietly(part);
+      throw const _AbortDownload();
+    }
+    await _finalize(
+      task,
+      part,
+      target,
+      cleanup: () => _deleteDirQuietly(partsDir),
+    );
+    await _deleteDirQuietly(partsDir);
+  }
+
+  String _mp4ChunkPath(Directory dir, _Mp4Chunk chunk) =>
+      '${dir.path}/chunk_${chunk.index.toString().padLeft(3, '0')}.bin';
+
+  Future<void> _downloadMp4ChunkWithRetry(
+    DownloadTask task,
+    Uri uri,
+    Map<String, String> headers,
+    Directory partsDir,
+    _Mp4Chunk chunk,
+  ) async {
+    Object? last;
+    for (var attempt = 0; attempt <= _retryCount; attempt++) {
+      try {
+        await _downloadMp4ChunkOnce(
+          task,
+          uri,
+          headers,
+          partsDir,
+          chunk,
+        );
+        return;
+      } on _AbortDownload {
+        rethrow;
+      } catch (e) {
+        if (_shouldStop(task)) rethrow;
+        last = e;
+        if (attempt < _retryCount) {
+          await Future<void>.delayed(_retryBackoff);
+        }
+      }
+    }
+    throw _RetriesExhausted(last ?? const _CacheException('分块下载失败'));
+  }
+
+  Future<void> _downloadMp4ChunkOnce(
+    DownloadTask task,
+    Uri uri,
+    Map<String, String> headers,
+    Directory partsDir,
+    _Mp4Chunk chunk,
+  ) async {
+    final file = File(_mp4ChunkPath(partsDir, chunk));
+    var existing = await file.exists() ? await file.length() : 0;
+    if (existing > chunk.length) {
+      await _deleteQuietly(file);
+      existing = 0;
+    }
+    if (existing == chunk.length) return;
+
+    final start = chunk.start + existing;
+    final request = http.Request('GET', uri)
+      ..headers.addAll(_headersFor(headers))
+      ..headers['Range'] = 'bytes=$start-${chunk.end}';
+    final response = await _client.send(request).timeout(_requestTimeout);
+    if (response.statusCode == 416 && existing == chunk.length) {
+      await _discardResponse(response);
+      return;
+    }
+    if (response.statusCode != 206) {
+      final code = response.statusCode;
+      await _discardResponse(response);
+      throw _CacheException('服务器不支持分块下载（HTTP $code）');
+    }
+    final rangeStart = RegExp(r'bytes\s+(\d+)-').firstMatch(
+      response.headers['content-range'] ?? '',
+    );
+    if (rangeStart != null && int.tryParse(rangeStart.group(1)!) != start) {
+      await _discardResponse(response);
+      throw const _CacheException('服务器返回的分块范围不一致');
     }
 
     IOSink? sink;
     try {
-      final response = await _client.send(request).timeout(_requestTimeout);
-      if (response.statusCode == 416) {
-        // 断点已失效：清掉本地分片，让用户下次从头下载。
-        if (await part.exists()) {
-          try {
-            await part.delete();
-          } catch (_) {}
-        }
-        task
-          ..bytes = 0
-          ..totalBytes = 0
-          ..progress = 0;
-        throw const _CacheException('本地断点已失效，请重新下载');
-      }
-      if (response.statusCode != 200 && response.statusCode != 206) {
-        throw _CacheException('片源返回 HTTP ${response.statusCode}，链接可能已失效');
-      }
-
-      final append = response.statusCode == 206 && received > 0;
-      if (!append) {
-        received = 0;
-        task.bytes = 0;
-        if (await part.exists()) {
-          try {
-            await part.delete();
-          } catch (_) {}
-        }
-      }
-      final length = response.contentLength ?? 0;
-      task.totalBytes = length > 0 ? received + length : 0;
-      _notifyNow();
-
-      sink = part.openWrite(mode: append ? FileMode.append : FileMode.write);
-      await for (final chunk in response.stream) {
+      sink = file.openWrite(
+        mode: existing > 0 ? FileMode.append : FileMode.write,
+      );
+      await for (final bytes in response.stream.timeout(_streamTimeout)) {
         if (_shouldStop(task)) throw const _AbortDownload();
-        sink.add(chunk);
-        received += chunk.length;
+        sink.add(bytes);
         task
-          ..bytes = received
-          ..progress = task.totalBytes > 0 ? received / task.totalBytes : 0
+          ..bytes += bytes.length
+          ..progress = task.totalBytes > 0
+              ? (task.bytes / task.totalBytes).clamp(0.0, 1.0).toDouble()
+              : 0
           ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+        task.sampleSpeed();
         _notifyProgress();
         _persistSoon();
       }
       await sink.flush();
       await sink.close();
       sink = null;
-
-      if (_shouldStop(task)) throw const _AbortDownload();
-      if (await target.exists()) {
-        try {
-          await target.delete();
-        } catch (_) {}
-      }
-      final file = await part.rename(target.path);
-      task
-        ..filePath = file.path
-        ..status = DownloadStatus.completed
-        ..progress = 1
-        ..bytes = await file.length()
-        ..error = null
-        ..updatedAt = DateTime.now().millisecondsSinceEpoch;
-      _notifyNow();
-      await _persist();
-      unawaited(refreshUsage());
     } finally {
       if (sink != null) {
         try {
@@ -971,29 +1538,229 @@ class DownloadService extends ChangeNotifier {
         } catch (_) {}
       }
     }
+    final length = await file.length();
+    if (length != chunk.length) {
+      // 保留已写入的部分，下次从断点继续；这里只报告本次未完成。
+      if (length < chunk.length) {
+        throw _CacheException('分块下载不完整（${chunk.index + 1}）');
+      }
+      await _deleteQuietly(file);
+      throw _CacheException('分块大小异常（${chunk.index + 1}）');
+    }
+  }
+
+  /// 不支持 Range 的服务端兜底：单连接整文件下载，无法断点续传。
+  Future<void> _downloadMp4Stream(
+    DownloadTask task,
+    Uri uri,
+    Map<String, String> headers,
+    File target,
+    _RemoteFileInfo remote,
+  ) async {
+    final part = File('${target.path}.stream_parts.part');
+    await _deleteQuietly(part);
+    final request = http.Request('GET', uri);
+    request.headers.addAll(_headersFor(headers));
+    final response = await _client.send(request).timeout(_requestTimeout);
+    if (response.statusCode != 200) {
+      final code = response.statusCode;
+      await _discardResponse(response);
+      throw _CacheException('片源返回 HTTP $code，链接可能已失效');
+    }
+    final total = response.contentLength ?? remote.totalBytes;
+    task
+      ..ext = 'mp4'
+      ..signature = 'stream|$total'
+      ..totalSegments = 0
+      ..doneSegments = 0
+      ..totalBytes = total
+      ..bytes = 0
+      ..progress = 0
+      ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+    task.resetSpeed();
+    _notifyNow();
+
+    IOSink? sink;
+    try {
+      sink = part.openWrite();
+      await for (final bytes in response.stream.timeout(_streamTimeout)) {
+        if (_shouldStop(task)) throw const _AbortDownload();
+        sink.add(bytes);
+        task
+          ..bytes += bytes.length
+          ..progress =
+              total > 0 ? (task.bytes / total).clamp(0.0, 1.0).toDouble() : 0
+          ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+        task.sampleSpeed();
+        _notifyProgress();
+        _persistSoon();
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+    } finally {
+      if (sink != null) {
+        try {
+          await sink.flush();
+        } catch (_) {}
+        try {
+          await sink.close();
+        } catch (_) {}
+      }
+    }
+    if (_shouldStop(task)) throw const _AbortDownload();
+    if (total > 0 && await part.length() != total) {
+      await _deleteQuietly(part);
+      throw _CacheException('文件大小校验失败，请重试');
+    }
+    await _finalize(task, part, target);
+  }
+
+  /* --------------------------------------------------------- finalize */
+
+  /// 把临时文件改名为成品并校验；校验失败删除损坏文件并抛
+  /// [_CorruptFileException]。调用方会把任务标为失败。
+  Future<void> _finalize(
+    DownloadTask task,
+    File part,
+    File target, {
+    Future<void> Function()? cleanup,
+  }) async {
+    if (_shouldStop(task)) {
+      await _deleteQuietly(part);
+      throw const _AbortDownload();
+    }
+    await _deleteQuietly(target);
+    final file = await part.rename(target.path);
+    final error = await _validateMediaFile(file);
+    if (error != null) {
+      await _deleteQuietly(file);
+      if (cleanup != null) await cleanup();
+      task
+        ..filePath = null
+        ..bytes = 0
+        ..totalBytes = 0
+        ..doneSegments = 0
+        ..totalSegments = 0
+        ..progress = 0
+        ..speed = 0
+        ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+      throw _CorruptFileException('缓存校验失败：$error');
+    }
+    task
+      ..filePath = file.path
+      ..status = DownloadStatus.completed
+      ..progress = 1
+      ..bytes = await file.length()
+      ..speed = 0
+      ..error = null
+      ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+    _notifyNow();
+    await _persist();
+    unawaited(refreshUsage());
+  }
+
+  /// 下载完成校验：文件必须 >0；ffprobe 可用时以时长 >0 为准，否则
+  /// 至少要求大于 1MB（避免把错误页 / 空分片拼成的文件当成功）。
+  Future<String?> _validateMediaFile(File file) async {
+    if (!await file.exists()) return '文件不存在';
+    final length = await file.length();
+    if (length <= 0) return '文件为空';
+    final probe = await _probeDuration(file);
+    if (probe.available) {
+      final duration = probe.duration;
+      if (duration != null && duration > Duration.zero) return null;
+      return '无法解析视频时长，文件可能已损坏';
+    }
+    if (length > _minValidBytes) return null;
+    return '文件仅 ${_fmtBytes(length)}，可能未下载完整';
+  }
+
+  Future<_ProbeResult> _probeDuration(File file) async {
+    if (_ffprobeUnavailable) {
+      return const _ProbeResult(available: false, duration: null);
+    }
+    try {
+      final result = await Process.run(
+        'ffprobe',
+        <String>[
+          '-v',
+          'error',
+          '-select_streams',
+          'v:0',
+          '-show_entries',
+          'format=duration',
+          '-of',
+          'default=noprint_wrappers=1:nokey=1',
+          file.path,
+        ],
+      ).timeout(const Duration(seconds: 8));
+      if (result.exitCode != 0) {
+        return const _ProbeResult(available: true, duration: null);
+      }
+      final text = '${result.stdout}'.trim();
+      final seconds = double.tryParse(text);
+      return _ProbeResult(
+        available: true,
+        duration: seconds == null || seconds <= 0
+            ? null
+            : Duration(milliseconds: (seconds * 1000).round()),
+      );
+    } on ProcessException {
+      _ffprobeUnavailable = true;
+      debugPrint('DownloadService: ffprobe 不可用，退化为文件大小校验');
+      return const _ProbeResult(available: false, duration: null);
+    } on TimeoutException {
+      // 探测超时不代表文件损坏，交给大小校验兜底。
+      return const _ProbeResult(available: false, duration: null);
+    } catch (e) {
+      debugPrint('DownloadService: ffprobe failed: $e');
+      return const _ProbeResult(available: false, duration: null);
+    }
   }
 
   /* ------------------------------------------------------------- fetch */
 
-  Future<List<int>> _fetchBytes(Uri uri, Map<String, String> headers) {
-    return _withRetry(() async {
-      final response = await http
-          .get(uri, headers: _headersFor(headers))
-          .timeout(_requestTimeout);
-      if (response.statusCode == 200 || response.statusCode == 206) {
-        final bytes = response.bodyBytes;
-        if (bytes.isEmpty) {
-          throw const _CacheException('片源返回空分片');
+  Future<List<int>> _fetchSegmentWithRetry(
+    Uri uri,
+    Map<String, String> headers,
+  ) async {
+    Object? last;
+    for (var attempt = 0; attempt <= _retryCount; attempt++) {
+      try {
+        return await _fetchBytesOnce(uri, headers);
+      } catch (e) {
+        // 每个分片最多重试 2 次，固定 300ms 退避；4xx 也重试一次，
+        // 部分 CDN 会在限流时短暂返回 403。
+        last = e;
+        if (attempt < _retryCount) {
+          await Future<void>.delayed(_retryBackoff);
         }
-        return bytes;
       }
-      if (response.statusCode >= 500) {
-        throw http.ClientException('HTTP ${response.statusCode}', uri);
+    }
+    throw _RetriesExhausted(last ?? const _CacheException('分片下载失败'));
+  }
+
+  Future<List<int>> _fetchBytesOnce(
+    Uri uri,
+    Map<String, String> headers,
+  ) async {
+    final response = await _client
+        .get(uri, headers: _headersFor(headers))
+        .timeout(_requestTimeout);
+    if (response.statusCode == 200 || response.statusCode == 206) {
+      final bytes = response.bodyBytes;
+      if (bytes.isEmpty) {
+        throw const _CacheException('片源返回空分片');
       }
-      throw _CacheException(
-        '片源返回 HTTP ${response.statusCode}，链接可能已失效或未授权',
-      );
-    });
+      return bytes;
+    }
+    if (response.statusCode >= 500) {
+      throw http.ClientException('HTTP ${response.statusCode}', uri);
+    }
+    throw _CacheException(
+      '片源返回 HTTP ${response.statusCode}，链接可能已失效或未授权',
+    );
   }
 
   Future<_PlaylistData> _fetchPlaylist(
@@ -1001,7 +1768,7 @@ class DownloadService extends ChangeNotifier {
     Map<String, String> headers,
   ) async {
     final response = await _withRetry(() async {
-      final res = await http
+      final res = await _client
           .get(uri, headers: _headersFor(headers))
           .timeout(_requestTimeout);
       if (res.statusCode == 200 || res.statusCode == 206) {
@@ -1029,15 +1796,14 @@ class DownloadService extends ChangeNotifier {
 
   Future<T> _withRetry<T>(Future<T> Function() action) async {
     Object? last;
-    for (var attempt = 0; attempt <= 2; attempt++) {
+    for (var attempt = 0; attempt <= _retryCount; attempt++) {
       try {
         return await action();
       } catch (e) {
         if (e is _CacheException) rethrow;
         last = e;
-        if (attempt < 2) {
-          await Future<void>.delayed(
-              Duration(milliseconds: 400 * (attempt + 1)));
+        if (attempt < _retryCount) {
+          await Future<void>.delayed(_retryBackoff);
         }
       }
     }
@@ -1119,26 +1885,63 @@ class DownloadService extends ChangeNotifier {
     return dir;
   }
 
-  String _taskDirName(DownloadTask task) =>
-      '${_safeSegment(task.id)}_${task.ep}';
+  /// 目录名：`剧名 (年份)`；没有年份时退化为 `剧名`。
+  String seriesFolderName(DownloadTask task) {
+    final title = sanitizeDownloadName(task.title, fallback: '未命名影片');
+    return task.year > 0 ? '$title (${task.year})' : title;
+  }
 
-  Future<Directory> _taskDir(DownloadTask task) async {
+  /// 文件名：电影 `剧名.年份.1080P.mp4`；
+  /// 剧集 `剧名.SxxExx.第N集.mp4`（S01 为默认季）。
+  String episodeFileName(DownloadTask task) {
+    final title = sanitizeDownloadName(task.title, fallback: '未命名影片');
+    if (task.isMovie) {
+      final year = task.year > 0 ? '.${task.year}' : '';
+      return '$title$year.1080P.mp4';
+    }
+    final ep = task.ep < 1 ? 1 : task.ep;
+    final episode = ep.toString().padLeft(2, '0');
+    return '$title.S01E$episode.第$ep集.mp4';
+  }
+
+  Future<Directory> _seriesDirectory(DownloadTask task) async {
     final root = await _rootDir();
-    final dir = Directory('${root.path}/${_taskDirName(task)}');
+    return Directory('${root.path}/${seriesFolderName(task)}');
+  }
+
+  Future<Directory> _seriesDir(DownloadTask task) async {
+    final dir = await _seriesDirectory(task);
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
     return dir;
   }
 
-  Future<File?> _existingFile(DownloadTask task) async {
-    if (task.filePath != null) {
-      final file = File(task.filePath!);
+  /// 按当前目录规则计算成品路径；不创建目录，可用于只读检查 / 删除。
+  Future<File> _expectedTarget(DownloadTask task) async {
+    final root = await _rootDir();
+    return File(
+      '${root.path}/${seriesFolderName(task)}/${episodeFileName(task)}',
+    );
+  }
+
+  /// 任务的成品路径；优先使用已记录的绝对路径（兼容换目录 / 旧版本）。
+  Future<File> _targetFile(DownloadTask task) async {
+    final recorded = task.filePath;
+    if (recorded != null && recorded.isNotEmpty) {
+      final file = File(recorded);
       if (await file.exists()) return file;
     }
-    final root = await _rootDir();
-    final roots = <String>{root.path};
-    // 切换目录或升级前下载的文件可能留在旧目录里，逐个位置找回来。
+    await _seriesDir(task);
+    return _expectedTarget(task);
+  }
+
+  /// 旧版本每个任务一个 `<id>_<ep>` 目录，读取时兼容一下。
+  Future<File?> _legacyFile(DownloadTask task) async {
+    final roots = <String>{};
+    try {
+      roots.add((await _rootDir()).path);
+    } catch (_) {}
     try {
       roots.addAll(await DownloadStorage.knownRootPaths());
     } catch (_) {}
@@ -1148,7 +1951,7 @@ class DownloadService extends ChangeNotifier {
       'mp4',
     ];
     for (final rootPath in roots) {
-      final dir = Directory('$rootPath/${_taskDirName(task)}');
+      final dir = Directory('$rootPath/${_safeSegment(task.id)}_${task.ep}');
       for (final ext in exts.toSet()) {
         final file = File('${dir.path}/ep_${task.ep}.$ext');
         if (await file.exists()) return file;
@@ -1157,38 +1960,72 @@ class DownloadService extends ChangeNotifier {
     return null;
   }
 
+  Future<File?> _existingFile(DownloadTask task) async {
+    final path = task.filePath;
+    if (path != null && path.isNotEmpty) {
+      final file = File(path);
+      if (await file.exists()) return file;
+    }
+    try {
+      final expected = await _expectedTarget(task);
+      if (await expected.exists()) return expected;
+    } catch (_) {}
+    return _legacyFile(task);
+  }
+
   Future<void> _deleteTaskFiles(DownloadTask task) async {
-    final dirs = <Directory>{};
+    final target = await _expectedTarget(task);
+    await _deleteQuietly(target);
+    await _deleteQuietly(File('${target.path}.part'));
+    await _deleteDirQuietly(Directory('${target.path}.hls_parts'));
+    await _deleteDirQuietly(Directory('${target.path}.mp4_parts'));
+    await _deleteQuietly(File('${target.path}.stream_parts.part'));
+
+    final filePath = task.filePath;
+    if (filePath != null && filePath.isNotEmpty) {
+      final file = File(filePath);
+      await _deleteQuietly(file);
+      await _deleteQuietly(File('${file.path}.part'));
+      await _deleteDirQuietly(Directory('${file.path}.hls_parts'));
+      await _deleteDirQuietly(Directory('${file.path}.mp4_parts'));
+      await _deleteQuietly(File('${file.path}.stream_parts.part'));
+    }
+
+    // 旧版每集一个目录：整个目录可以安全删除。
     try {
       final root = await _rootDir();
-      dirs.add(Directory('${root.path}/${_taskDirName(task)}'));
+      await _deleteDirQuietly(
+        Directory('${root.path}/${_safeSegment(task.id)}_${task.ep}'),
+      );
     } catch (_) {}
     try {
       for (final rootPath in await DownloadStorage.knownRootPaths()) {
-        dirs.add(Directory('$rootPath/${_taskDirName(task)}'));
+        await _deleteDirQuietly(
+          Directory('$rootPath/${_safeSegment(task.id)}_${task.ep}'),
+        );
       }
     } catch (_) {}
-    final filePath = task.filePath;
-    if (filePath != null && filePath.isNotEmpty) {
-      dirs.add(File(filePath).parent);
-    }
-    for (final dir in dirs) {
-      try {
-        if (await dir.exists()) await dir.delete(recursive: true);
-      } catch (e) {
-        debugPrint('DownloadService: delete ${dir.path} failed: $e');
+
+    // 系列目录只有在空了以后才删除，不能误删同剧其它集。
+    try {
+      final dir = await _seriesDirectory(task);
+      if (await dir.exists()) {
+        final left = await dir.list(followLinks: false).isEmpty;
+        if (left) await dir.delete();
       }
-    }
+    } catch (_) {}
   }
 
   /* --------------------------------------------------------- persistence */
 
   void _notifyNow() {
+    if (_disposed) return;
     _lastNotify = DateTime.now();
     notifyListeners();
   }
 
   void _notifyProgress() {
+    if (_disposed) return;
     final now = DateTime.now();
     if (now.difference(_lastNotify) < _notifyGap) return;
     _lastNotify = now;
@@ -1196,6 +2033,7 @@ class DownloadService extends ChangeNotifier {
   }
 
   void _persistSoon() {
+    if (_disposed) return;
     _persistTimer ??= Timer(const Duration(milliseconds: 900), () {
       _persistTimer = null;
       unawaited(_persist());
@@ -1241,7 +2079,7 @@ class DownloadService extends ChangeNotifier {
         'epName': task.epName,
         'size': task.bytes,
         'status':
-            task.status == DownloadStatus.completed ? '已缓存' : task.status.label,
+            task.status == DownloadStatus.completed ? '已下载' : task.status.label,
         'line': task.lineName,
         'updatedAt': task.updatedAt,
       };
@@ -1278,12 +2116,50 @@ class _PlaylistData {
   final Uri uri;
 }
 
+class _RemoteFileInfo {
+  const _RemoteFileInfo({
+    required this.totalBytes,
+    required this.supportsRanges,
+    required this.etag,
+    required this.lastModified,
+  });
+
+  final int totalBytes;
+  final bool supportsRanges;
+  final String etag;
+  final String lastModified;
+}
+
+class _Mp4Chunk {
+  const _Mp4Chunk(this.index, this.start, this.end);
+
+  final int index;
+  final int start;
+  final int end;
+
+  int get length => end - start + 1;
+}
+
+class _ProbeResult {
+  const _ProbeResult({required this.available, required this.duration});
+
+  /// ffprobe 是否存在：false 表示环境里没有 ffprobe，需要退回大小校验。
+  final bool available;
+
+  /// ffprobe 解析出的时长；available 为 true 但这里为 null 表示文件损坏。
+  final Duration? duration;
+}
+
 class _CacheException implements Exception {
   const _CacheException(this.message);
   final String message;
 
   @override
   String toString() => message;
+}
+
+class _CorruptFileException extends _CacheException {
+  const _CorruptFileException(super.message);
 }
 
 class _RetriesExhausted implements Exception {

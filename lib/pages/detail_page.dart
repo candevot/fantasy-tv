@@ -15,6 +15,7 @@ import '../widgets/player_theme.dart';
 import 'category_page.dart'
     show FxEmptyView, FxErrorView, FxPosterCard, fxErrorText, fxInt;
 import 'history_page.dart' show FxStore;
+import 'offline_player_page.dart';
 import 'player_page.dart';
 import 'together_page.dart' show TogetherExitResult;
 
@@ -84,6 +85,9 @@ class _DetailPageState extends State<DetailPage>
   int _commentPage = 0;
   String? _commentError;
 
+  /// 下载队列变化时刷新选集上的「已下载」标记。
+  final DownloadService _downloads = DownloadService.instance;
+
   @override
   void initState() {
     super.initState();
@@ -93,7 +97,13 @@ class _DetailPageState extends State<DetailPage>
       duration: const Duration(milliseconds: 260),
       value: 1,
     );
+    _downloads.addListener(_onDownloadsChanged);
+    unawaited(_downloads.init());
     _init();
+  }
+
+  void _onDownloadsChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _init() async {
@@ -129,6 +139,7 @@ class _DetailPageState extends State<DetailPage>
 
   @override
   void dispose() {
+    _downloads.removeListener(_onDownloadsChanged);
     _stableTimer?.cancel();
     _scroll.dispose();
     _fade.dispose();
@@ -545,6 +556,15 @@ class _DetailPageState extends State<DetailPage>
   }
 
   void _selectEpisode(int n) {
+    // 已下载的集优先播本地文件，不再走在线线路。
+    if (_downloads.isCached(widget.id, n)) {
+      unawaited(_playOffline(n));
+      return;
+    }
+    _selectOnlineEpisode(n);
+  }
+
+  void _selectOnlineEpisode(int n) {
     if (n == _ep) {
       _scrollToPlayer();
       return;
@@ -552,6 +572,32 @@ class _DetailPageState extends State<DetailPage>
     setState(() => _ep = n);
     _saveHistory();
     _scrollToPlayer();
+  }
+
+  /// 播本地缓存：先暂停内嵌播放器，退出离线页后按原状态恢复。
+  Future<void> _playOffline(int n) async {
+    final task = _downloads.taskFor(widget.id, n);
+    final file = task == null ? null : await _downloads.fileFor(task);
+    if (!mounted) return;
+    if (task == null || file == null) {
+      fxToast(context, '本地缓存文件已丢失，改为在线播放');
+      _selectOnlineEpisode(n);
+      return;
+    }
+    final player = _playerKey.currentState;
+    final wasPlaying = await player?.pauseAndSave() ?? false;
+    if (!mounted) return;
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => OfflinePlayerPage(task: task, file: file),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        await player?.resumeAfterCover(play: wasPlaying);
+      }
+    }
   }
 
   void _scrollToPlayer() {
@@ -575,6 +621,7 @@ class _DetailPageState extends State<DetailPage>
       context,
       episodes: eps,
       current: _ep,
+      isCached: (ep) => _downloads.isCached(widget.id, ep),
     );
     if (!mounted || n == null) return;
     _selectEpisode(n);
@@ -645,6 +692,8 @@ class _DetailPageState extends State<DetailPage>
         lineName: _lineName,
         episodes: episodes,
         currentEp: _ep,
+        year: d.year,
+        isMovie: d.category.contains('电影'),
       );
       if (!mounted || count == null) return;
       if (count == 0) {
@@ -983,6 +1032,7 @@ class _DetailPageState extends State<DetailPage>
             episodes: visibleEpisodes,
             current: _ep,
             onSelect: _selectEpisode,
+            isCached: (ep) => _downloads.isCached(widget.id, ep),
           ),
         ],
         if (related.isNotEmpty) ...[

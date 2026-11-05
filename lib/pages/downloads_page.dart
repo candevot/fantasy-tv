@@ -1,12 +1,9 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:video_player/video_player.dart';
 
 import '../services/download_service.dart';
 import '../theme.dart';
-import '../widgets/player_theme.dart' show fxTime;
 import 'category_page.dart';
+import 'offline_player_page.dart';
 
 /* ========================================================================== */
 /*  离线缓存                                                                   */
@@ -132,16 +129,54 @@ class _DownloadsPageState extends State<DownloadsPage> {
     _toast('已删除「${task.epLabel}」');
   }
 
-  Future<void> _play(DownloadTask task) async {
-    final path = task.filePath;
-    final exists = path != null && await File(path).exists();
+  Future<void> _deleteSeries(DownloadTask task) async {
+    final count = _service.tasksForSeries(task.id).length;
+    if (count <= 1) {
+      await _delete(task);
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        title: Text('删除「${task.title}」整部缓存？',
+            style:
+                const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
+        content: Text(
+          '将删除全部 $count 集的本地文件与任务记录，不影响其它剧集。',
+          style: const TextStyle(fontSize: 12.5, height: 1.5, color: Fx.sub),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消', style: TextStyle(color: Fx.sub)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child:
+                const Text('删除整剧', style: TextStyle(color: Color(0xFFE45C5C))),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final removed = await _service.removeSeries(task.id);
     if (!mounted) return;
-    if (!exists) {
+    _toast('已删除「${task.title}」$removed 集缓存');
+  }
+
+  Future<void> _play(DownloadTask task) async {
+    final file = await _service.fileFor(task);
+    if (!mounted) return;
+    if (file == null) {
       _toast('缓存文件不存在，请删除后重新下载');
       return;
     }
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => OfflinePlayerPage(task: task)),
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => OfflinePlayerPage(task: task, file: file),
+      ),
     );
   }
 
@@ -515,6 +550,15 @@ class _DownloadsPageState extends State<DownloadsPage> {
                           onTap: () => _service.retry(task),
                         ),
                       const SizedBox(width: 6),
+                      if (_service.tasksForSeries(task.id).length > 1) ...[
+                        _action(
+                          icon: Icons.delete_sweep_outlined,
+                          label: '整剧',
+                          color: const Color(0xFFD68A00),
+                          onTap: () => _deleteSeries(task),
+                        ),
+                        const SizedBox(width: 6),
+                      ],
                       _action(
                         icon: Icons.delete_outline_rounded,
                         label: '删除',
@@ -598,329 +642,6 @@ class _DownloadsPageState extends State<DownloadsPage> {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-/* ========================================================================== */
-/*  离线播放（本地文件，简化播放器）                                            */
-/* ========================================================================== */
-
-class OfflinePlayerPage extends StatefulWidget {
-  const OfflinePlayerPage({super.key, required this.task});
-
-  final DownloadTask task;
-
-  @override
-  State<OfflinePlayerPage> createState() => _OfflinePlayerPageState();
-}
-
-class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
-  VideoPlayerController? _controller;
-  bool _initializing = true;
-  String? _error;
-
-  /// 初始化序号：dispose 后让 await 中的旧任务作废，避免退出后继续播放。
-  int _openSeq = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _open();
-  }
-
-  Future<void> _open() async {
-    final seq = ++_openSeq;
-    final path = widget.task.filePath;
-    if (path == null) {
-      if (mounted) {
-        setState(() {
-          _initializing = false;
-          _error = '缓存文件路径缺失';
-        });
-      }
-      return;
-    }
-    VideoPlayerController? controller;
-    try {
-      final file = File(path);
-      if (!await file.exists()) {
-        throw const FileSystemException('缓存文件已被清理');
-      }
-      if (!mounted || seq != _openSeq) return;
-      controller = VideoPlayerController.file(file);
-      await controller.initialize();
-      if (!mounted || seq != _openSeq) {
-        await controller.dispose();
-        return;
-      }
-      await controller.setLooping(false);
-      if (!mounted || seq != _openSeq) {
-        await controller.dispose();
-        return;
-      }
-      controller.addListener(_onTick);
-      await controller.play();
-      if (!mounted || seq != _openSeq) {
-        controller.removeListener(_onTick);
-        await controller.dispose();
-        return;
-      }
-      _controller = controller;
-      controller = null;
-      setState(() {
-        _initializing = false;
-        _error = null;
-      });
-    } catch (e) {
-      if (controller != null) {
-        controller.removeListener(_onTick);
-        try {
-          await controller.dispose();
-        } catch (_) {}
-      }
-      if (!mounted || seq != _openSeq) return;
-      setState(() {
-        _initializing = false;
-        _error = '离线播放失败：${_short(e)}';
-      });
-    }
-  }
-
-  String _short(Object e) {
-    final s = '$e';
-    return s.length > 90 ? '${s.substring(0, 90)}…' : s;
-  }
-
-  void _onTick() {
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void dispose() {
-    _openSeq++;
-    _controller?.removeListener(_onTick);
-    _controller?.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Center(child: _video()),
-            Positioned(
-              left: 0,
-              right: 0,
-              top: 0,
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(8, 6, 12, 18),
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Color(0xB3000000), Color(0x00000000)],
-                  ),
-                ),
-                child: Row(
-                  children: [
-                    IconButton(
-                      onPressed: () => Navigator.of(context).maybePop(),
-                      icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                          size: 19, color: Colors.white),
-                    ),
-                    const SizedBox(width: 2),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            widget.task.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Row(
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 5, vertical: 1),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(.16),
-                                  borderRadius: BorderRadius.circular(5),
-                                ),
-                                child: const Text(
-                                  '离线缓存',
-                                  style: TextStyle(
-                                      fontSize: 8.5, color: Colors.white70),
-                                ),
-                              ),
-                              const SizedBox(width: 5),
-                              Flexible(
-                                child: Text(
-                                  widget.task.epLabel,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontSize: 10, color: Colors.white70),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            if (!_initializing && _error == null && _controller != null)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: _controls(_controller!),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _video() {
-    if (_initializing) {
-      return const SizedBox(
-        width: 28,
-        height: 28,
-        child: CircularProgressIndicator(
-          strokeWidth: 2.4,
-          color: Colors.white70,
-        ),
-      );
-    }
-    final error = _error;
-    if (error != null) {
-      return Padding(
-        padding: const EdgeInsets.all(28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline_rounded,
-                size: 34, color: Colors.white54),
-            const SizedBox(height: 12),
-            Text(
-              error,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Colors.white70,
-                fontSize: 12,
-                height: 1.5,
-              ),
-            ),
-            const SizedBox(height: 14),
-            TextButton(
-              onPressed: () => Navigator.of(context).maybePop(),
-              child: const Text('返回列表', style: TextStyle(color: Colors.white)),
-            ),
-          ],
-        ),
-      );
-    }
-    final controller = _controller!;
-    final value = controller.value;
-    final ratio = value.aspectRatio <= 0 ? 16 / 9 : value.aspectRatio;
-    return AspectRatio(
-      aspectRatio: ratio,
-      child: VideoPlayer(controller),
-    );
-  }
-
-  Widget _controls(VideoPlayerController controller) {
-    final value = controller.value;
-    final duration = value.duration.inMilliseconds;
-    final position =
-        value.position.inMilliseconds.clamp(0, duration > 0 ? duration : 0);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 26, 14, 12),
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0x00000000), Color(0xB3000000)],
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 2,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-              activeTrackColor: Fx.accent,
-              inactiveTrackColor: Colors.white24,
-              thumbColor: Colors.white,
-            ),
-            child: Slider(
-              value: position.toDouble(),
-              max: duration > 0 ? duration.toDouble() : 1,
-              onChanged: duration > 0
-                  ? (v) => controller.seekTo(Duration(milliseconds: v.round()))
-                  : null,
-            ),
-          ),
-          Row(
-            children: [
-              IconButton(
-                onPressed: () {
-                  if (controller.value.isPlaying) {
-                    controller.pause();
-                  } else {
-                    final position = controller.value.position;
-                    final duration = controller.value.duration;
-                    if (duration > Duration.zero && position >= duration) {
-                      controller.seekTo(Duration.zero);
-                    }
-                    controller.play();
-                  }
-                },
-                icon: Icon(
-                  value.isPlaying
-                      ? Icons.pause_rounded
-                      : Icons.play_arrow_rounded,
-                  color: Colors.white,
-                  size: 28,
-                ),
-              ),
-              Text(
-                '${fxTime(value.position)} / ${fxTime(value.duration)}',
-                style: const TextStyle(
-                  color: Colors.white70,
-                  fontSize: 10.5,
-                  fontFeatures: [FontFeature.tabularFigures()],
-                ),
-              ),
-              const Spacer(),
-              const Icon(Icons.offline_pin_rounded,
-                  size: 12, color: Colors.white54),
-              const SizedBox(width: 3),
-              const Text(
-                '本地播放',
-                style: TextStyle(fontSize: 9.5, color: Colors.white54),
-              ),
-            ],
-          ),
-        ],
       ),
     );
   }

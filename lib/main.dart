@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'api.dart';
 import 'auth.dart';
 import 'fx_globals.dart';
+import 'services/download_service.dart';
 import 'theme.dart';
 import 'pages/home_page.dart';
 import 'pages/category_page.dart';
@@ -71,6 +72,16 @@ class Boot {
     } catch (e, st) {
       AppLog.write('boot.media_kit', e, st);
     }
+
+    // 下载服务启动即恢复队列（幂等）：暂停中的任务保持暂停，不自动跑。
+    // 放在首帧之后，不阻塞启动；失败只记日志，不影响进入主界面。
+    unawaited(
+      DownloadService.instance.init().catchError(
+        (Object error, StackTrace stack) {
+          AppLog.write('boot.downloads', error, stack);
+        },
+      ),
+    );
 
     try {
       await Api.init().timeout(const Duration(seconds: 5));
@@ -153,8 +164,31 @@ class AppLog {
   }
 }
 
-class FantasyApp extends StatelessWidget {
+class FantasyApp extends StatefulWidget {
   const FantasyApp({super.key});
+
+  @override
+  State<FantasyApp> createState() => _FantasyAppState();
+}
+
+class _FantasyAppState extends State<FantasyApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 下载任务跑在主 isolate 里；切后台只记录状态，不暂停、不取消任务。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    DownloadService.instance.handleLifecycle(state);
+  }
 
   @override
   Widget build(BuildContext context) {

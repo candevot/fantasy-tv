@@ -451,11 +451,15 @@ class DetailEpisodeChip extends StatelessWidget {
     super.key,
     required this.label,
     required this.active,
+    this.cached = false,
     this.onTap,
   });
 
   final String label;
   final bool active;
+
+  /// 该集已有本地缓存；点击会优先播放本地文件。
+  final bool cached;
   final VoidCallback? onTap;
 
   @override
@@ -479,25 +483,42 @@ class DetailEpisodeChip extends StatelessWidget {
             width: active ? 1.4 : 1,
           ),
         ),
-        child: Row(
+        child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (active) ...[
-              const Icon(Icons.graphic_eq_rounded, size: 13, color: Fx.accent),
-              const SizedBox(width: 3),
-            ],
-            Flexible(
-              child: Text(
-                label,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (active) ...[
+                  const Icon(Icons.graphic_eq_rounded,
+                      size: 13, color: Fx.accent),
+                  const SizedBox(width: 3),
+                ],
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                      color: active ? Fx.accent : Fx.sub,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            if (cached)
+              Text(
+                '已下载',
                 maxLines: 1,
-                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                  color: active ? Fx.accent : Fx.sub,
+                  fontSize: 8,
+                  height: 1.15,
+                  fontWeight: FontWeight.w600,
+                  color: const Color(0xFF2FA985).withOpacity(.92),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -512,11 +533,15 @@ class DetailEpisodeStrip extends StatefulWidget {
     required this.episodes,
     required this.current,
     required this.onSelect,
+    this.isCached,
   });
 
   final List<Episode> episodes;
   final int current;
   final ValueChanged<int> onSelect;
+
+  /// 判断某集是否已下载；用于在剧集胶囊上显示已下载角标。
+  final bool Function(int ep)? isCached;
 
   @override
   State<DetailEpisodeStrip> createState() => _DetailEpisodeStripState();
@@ -576,6 +601,7 @@ class _DetailEpisodeStripState extends State<DetailEpisodeStrip> {
           return DetailEpisodeChip(
             label: detailEpisodeLabel(e),
             active: e.n == widget.current,
+            cached: widget.isCached?.call(e.n) ?? false,
             onTap: () => widget.onSelect(e.n),
           );
         },
@@ -934,6 +960,7 @@ Future<int?> showDetailEpisodeSheet(
   required List<Episode> episodes,
   required int current,
   int pageSize = 30,
+  bool Function(int ep)? isCached,
 }) {
   if (episodes.isEmpty) return Future<int?>.value();
   return showModalBottomSheet<int>(
@@ -945,6 +972,7 @@ Future<int?> showDetailEpisodeSheet(
       episodes: episodes,
       current: current,
       pageSize: pageSize,
+      isCached: isCached,
     ),
   );
 }
@@ -1014,11 +1042,13 @@ class _DetailEpisodeSheet extends StatefulWidget {
     required this.episodes,
     required this.current,
     required this.pageSize,
+    this.isCached,
   });
 
   final List<Episode> episodes;
   final int current;
   final int pageSize;
+  final bool Function(int ep)? isCached;
 
   @override
   State<_DetailEpisodeSheet> createState() => _DetailEpisodeSheetState();
@@ -1122,6 +1152,7 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                   itemBuilder: (context, i) {
                     final ep = widget.episodes[s + i];
                     final active = ep.n == widget.current;
+                    final cached = widget.isCached?.call(ep.n) ?? false;
                     return GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: () => Navigator.of(context).pop(ep.n),
@@ -1147,17 +1178,37 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                             ),
                           ],
                         ),
-                        child: Text(
-                          detailEpisodeLabel(ep),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight:
-                                active ? FontWeight.w700 : FontWeight.w500,
-                            color: active ? Colors.white : Fx.ink,
-                          ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              detailEpisodeLabel(ep),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight:
+                                    active ? FontWeight.w700 : FontWeight.w500,
+                                color: active ? Colors.white : Fx.ink,
+                              ),
+                            ),
+                            if (cached) ...[
+                              const SizedBox(height: 1),
+                              Text(
+                                '已下载',
+                                maxLines: 1,
+                                style: TextStyle(
+                                  fontSize: 8,
+                                  height: 1.1,
+                                  fontWeight: FontWeight.w600,
+                                  color: active
+                                      ? Colors.white.withOpacity(.86)
+                                      : const Color(0xFF2FA985),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                       ),
                     );

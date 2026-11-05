@@ -96,6 +96,69 @@ class _DownloadSettingsPageState extends State<DownloadSettingsPage> {
     _toast('已重新统计：${fxBytes(_downloads.usedBytes)}');
   }
 
+  Future<void> _pickConcurrency() async {
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => Container(
+        padding: EdgeInsets.fromLTRB(
+            20, 16, 20, 22 + MediaQuery.of(ctx).padding.bottom),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '同时下载连接数',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w800,
+                color: Fx.ink,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '只影响单集内部的并发；多集之间仍按队列顺序下载，'
+              '总连接数不会超过 8。',
+              style: TextStyle(fontSize: 11.5, height: 1.5, color: Fx.sub),
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (var n = AppSettings.minDownloadConcurrency;
+                    n <= AppSettings.maxDownloadConcurrency;
+                    n++)
+                  ChoiceChip(
+                    label: Text('$n 路'),
+                    selected: n == _settings.downloadConcurrency,
+                    selectedColor: Fx.accent,
+                    labelStyle: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: n == _settings.downloadConcurrency
+                          ? Colors.white
+                          : Fx.ink,
+                    ),
+                    onSelected: (_) => Navigator.of(ctx).pop(n),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    if (selected == _settings.downloadConcurrency) return;
+    await _settings.setDownloadConcurrency(selected);
+    if (mounted) _toast('已设置为 $selected 路并发下载');
+  }
+
   Future<void> _clearAll() async {
     final before = _downloads.usedBytes;
     final ok = await showDialog<bool>(
@@ -307,6 +370,22 @@ class _DownloadSettingsPageState extends State<DownloadSettingsPage> {
                             ),
                           ],
                         ),
+                      ),
+                      _divider(),
+                      _row(
+                        icon: Icons.speed_rounded,
+                        color: Fx.accent,
+                        title: '同时下载连接数',
+                        subtitle: '默认 6 路，可调 2–8；多集按顺序下载',
+                        trailing: Text(
+                          '${_settings.downloadConcurrency} 路',
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                            color: Fx.ink,
+                          ),
+                        ),
+                        onTap: _pickConcurrency,
                       ),
                       _divider(),
                       Padding(

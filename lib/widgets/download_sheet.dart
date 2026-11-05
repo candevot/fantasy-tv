@@ -17,6 +17,8 @@ Future<int?> showDownloadSheet(
   required String lineName,
   required List<Episode> episodes,
   int currentEp = 1,
+  int year = 0,
+  bool isMovie = false,
 }) {
   if (episodes.isEmpty) return Future<int?>.value();
   return showModalBottomSheet<int>(
@@ -32,6 +34,8 @@ Future<int?> showDownloadSheet(
       lineName: lineName,
       episodes: episodes,
       currentEp: currentEp,
+      year: year,
+      isMovie: isMovie,
     ),
   );
 }
@@ -46,6 +50,8 @@ class DownloadSheet extends StatefulWidget {
     required this.lineName,
     required this.episodes,
     required this.currentEp,
+    this.year = 0,
+    this.isMovie = false,
   });
 
   final String videoId;
@@ -55,6 +61,8 @@ class DownloadSheet extends StatefulWidget {
   final String lineName;
   final List<Episode> episodes;
   final int currentEp;
+  final int year;
+  final bool isMovie;
 
   @override
   State<DownloadSheet> createState() => _DownloadSheetState();
@@ -118,8 +126,8 @@ class _DownloadSheetState extends State<DownloadSheet> {
       state == _EpState.available || state == _EpState.failed;
 
   String _stateLabel(_EpState state) => switch (state) {
-        _EpState.cached => '已缓存',
-        _EpState.busy => '缓存中',
+        _EpState.cached => '已下载',
+        _EpState.busy => '下载中',
         _EpState.paused => '已暂停',
         _EpState.failed => '重试',
         _EpState.available => '',
@@ -175,6 +183,8 @@ class _DownloadSheetState extends State<DownloadSheet> {
           epName: detailEpisodeLabel(e),
           line: widget.lineId,
           lineName: widget.lineName,
+          year: widget.year,
+          isMovie: widget.isMovie,
         ),
     ];
     final added = await _service.enqueue(requests);
@@ -291,7 +301,7 @@ class _DownloadSheetState extends State<DownloadSheet> {
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
-                    '已缓存的集不可重复选择',
+                    '已下载的集不可重复选择',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 10, color: Fx.sub),

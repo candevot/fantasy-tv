@@ -25,6 +25,8 @@ class AppSettings extends ChangeNotifier {
   static const String _kSkipIntroOutro = 'fx_settings_skip_intro_outro';
   static const String _kWifiOnlyDownload = 'fx_settings_wifi_only_download';
   static const String _kDownloadLocation = 'fx_settings_download_location';
+  static const String _kDownloadConcurrency =
+      'fx_settings_download_concurrency';
 
   static const String defaultQualityKey = 'auto';
   static const bool defaultAutoNext = true;
@@ -32,6 +34,12 @@ class AppSettings extends ChangeNotifier {
   /// 产品硬性要求：跳过片头片尾默认关。
   static const bool defaultSkipIntroOutro = false;
   static const bool defaultWifiOnlyDownload = false;
+
+  /// 下载并发数：HLS 分片 / MP4 Range 分块同时下载的路数。
+  /// 产品范围 2–8，默认 6；多集之间仍然是串行队列，避免把源站打满。
+  static const int minDownloadConcurrency = 2;
+  static const int maxDownloadConcurrency = 8;
+  static const int defaultDownloadConcurrency = 6;
 
   static const List<FxQualityOption> qualityOptions = <FxQualityOption>[
     FxQualityOption('auto', '自动', '跟随片源默认清晰度'),
@@ -46,6 +54,7 @@ class AppSettings extends ChangeNotifier {
   bool _skipIntroOutro = defaultSkipIntroOutro;
   bool _wifiOnlyDownload = defaultWifiOnlyDownload;
   DownloadLocation _downloadLocation = DownloadLocation.phone;
+  int _downloadConcurrency = defaultDownloadConcurrency;
 
   bool _ready = false;
   Future<void>? _initFuture;
@@ -56,6 +65,7 @@ class AppSettings extends ChangeNotifier {
   bool get skipIntroOutro => _skipIntroOutro;
   bool get wifiOnlyDownload => _wifiOnlyDownload;
   DownloadLocation get downloadLocation => _downloadLocation;
+  int get downloadConcurrency => _downloadConcurrency;
 
   String get defaultQualityLabel {
     for (final option in qualityOptions) {
@@ -78,6 +88,9 @@ class AppSettings extends ChangeNotifier {
       _downloadLocation = downloadLocationFromKey(
         sp.getString(_kDownloadLocation),
       );
+      _downloadConcurrency = _validConcurrency(
+        sp.getInt(_kDownloadConcurrency),
+      );
     } catch (e) {
       debugPrint('AppSettings: load failed: $e');
     } finally {
@@ -91,6 +104,11 @@ class AppSettings extends ChangeNotifier {
       if (option.key == value) return option.key;
     }
     return defaultQualityKey;
+  }
+
+  int _validConcurrency(int? value) {
+    if (value == null) return defaultDownloadConcurrency;
+    return value.clamp(minDownloadConcurrency, maxDownloadConcurrency).toInt();
   }
 
   Future<void> setDefaultQuality(String key) async {
@@ -129,6 +147,14 @@ class AppSettings extends ChangeNotifier {
     await _saveString(_kDownloadLocation, value.key);
   }
 
+  Future<void> setDownloadConcurrency(int value) async {
+    final valid = _validConcurrency(value);
+    if (_downloadConcurrency == valid) return;
+    _downloadConcurrency = valid;
+    notifyListeners();
+    await _saveInt(_kDownloadConcurrency, valid);
+  }
+
   Future<void> _saveBool(String key, bool value) async {
     try {
       final sp = await SharedPreferences.getInstance();
@@ -142,6 +168,15 @@ class AppSettings extends ChangeNotifier {
     try {
       final sp = await SharedPreferences.getInstance();
       await sp.setString(key, value);
+    } catch (e) {
+      debugPrint('AppSettings: save $key failed: $e');
+    }
+  }
+
+  Future<void> _saveInt(String key, int value) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setInt(key, value);
     } catch (e) {
       debugPrint('AppSettings: save $key failed: $e');
     }
