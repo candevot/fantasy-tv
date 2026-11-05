@@ -89,7 +89,7 @@ String fxPlayerQuality(FxPlayer? player) {
 /// 真实缓冲进度：`player.stream.buffer`（libmpv demuxer-cache-time，
 /// 已缓冲位置）÷ 总时长。
 ///
-/// - 时长未知时返回 null：调用方用不确定转圈 +「加载中…」，不猜进度；
+/// - 时长未知时返回 null：调用方用不确定转圈 +「缓冲中…」，不猜进度；
 /// - 百分比向下取整并锁在 99% 以内，绝不显示假的 100%。
 double? fxBufferedPercent(Duration buffered, Duration duration) {
   if (duration <= Duration.zero) return null;
@@ -298,12 +298,28 @@ class PGlassPill extends StatelessWidget {
   }
 }
 
-/// 播放器加载文案里的产品名（需求指定，切集/换线路加载时展示）。
+/// 一起看等拿不到线路信息的场景沿用的产品名（播放页已改用真实线路名）。
 const String fxPlayerBrand = '幻想腾讯4K';
 
-/// 「正在加载 幻想腾讯4K 第03集」
+/// 「正在加载 幻想腾讯4K 第03集」（仅一起看等无线路名场景使用）
 String fxLoadingEpisodeText(int ep) =>
     '正在加载 $fxPlayerBrand ${fxEpisodeLabel(ep)}';
+
+/// 播放器加载文案：线路名必须来自本次请求的 lineId，取不到时省略线路名。
+/// 「正在加载 幻想蓝光 · 第01集」/「正在加载 第01集」
+String fxLoadingLineText(int ep, String lineName) {
+  final name = lineName.trim();
+  final label = fxEpisodeLabel(ep);
+  return name.isEmpty ? '正在加载 $label' : '正在加载 $name · $label';
+}
+
+/// 按线路 id 从详情线路表里取线路名；查不到返回空串。
+String fxLineNameOf(List<LineInfo> lines, String lineId) {
+  for (final line in lines) {
+    if (line.id == lineId) return line.displayName.trim();
+  }
+  return '';
+}
 
 /// 播放器进度条。
 ///
@@ -642,28 +658,27 @@ class _FxSeekRowState extends State<FxSeekRow> {
 
 /// 播放器加载 / 缓冲浮层。
 ///
-/// - 切集、切线路、首帧未出：圆环 +「正在连接线路…」等文案；
+/// - 切集、切线路、首帧未出：圆环 + 单行「正在加载 线路名 · 第01集」；
 /// - 播放中缓冲：圆环 +「缓冲中 42%」（[fxBufferedPercent] 的真实进度）；
-/// - 时长未知：不确定圆环 +「加载中…」。
+/// - 时长未知：不确定圆环 +「缓冲中…」。
+///
+/// 只有一行文案：线路名已经拼在 [title] 里，不再单独叠副文案。
 class FxLoadingOverlay extends StatelessWidget {
   const FxLoadingOverlay({
     super.key,
     required this.title,
     this.percent,
-    this.subtitle,
     this.dim = true,
     this.compact = false,
   });
 
-  /// 主文案。
+  /// 主文案（加载页由 [fxLoadingLineText] 生成，含当前线路名）。
   final String title;
 
   /// 0–100；为 null 时圆环不确定进度。即使调用方传 100 也会锁到 99，
   /// 缓冲进度不能显示假的 100%（媒体缓存经常先到 duration 但仍在缓冲）。
   final double? percent;
 
-  /// 副文案，如线路名。
-  final String? subtitle;
   final bool dim;
   final bool compact;
 
@@ -748,33 +763,15 @@ class FxLoadingOverlay extends StatelessWidget {
                   ),
                 ],
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    title,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: compact ? 11.5 : 12.5,
-                      fontWeight: FontWeight.w700,
-                      height: 1.35,
-                    ),
-                  ),
-                  if (subtitle != null && subtitle!.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle!,
-                      textAlign: TextAlign.center,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(.72),
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ],
+              child: Text(
+                title,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: compact ? 11.5 : 12.5,
+                  fontWeight: FontWeight.w700,
+                  height: 1.35,
+                ),
               ),
             ),
           ],

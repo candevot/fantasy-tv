@@ -119,7 +119,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 切换期间锁住 UI 进度，避免新播放器 open 时进度归零。
   Duration? _uiPosition;
   Duration? _uiDuration;
-  String? _loadingHint;
+
+  /// 本次加载请求的线路 / 集数：加载文案只认这次请求，
+  /// 不能读上一次请求留下的 _info（换线路时会显示旧线路名）。
+  String _requestLine = '';
+  int _requestEp = 0;
 
   /// 每 10 秒把观看进度回写历史，App 被杀也能保留大致位置。
   Timer? _progressTimer;
@@ -179,17 +183,21 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   String get _lineName {
     final infoName = _info?.lineName.trim() ?? '';
     if (infoName.isNotEmpty) return infoName;
-    for (final line in widget.detail?.lines ?? const <LineInfo>[]) {
-      if (line.id == _line) return line.displayName;
-    }
-    return '';
+    return fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], _line);
   }
+
+  /// 本次加载请求的线路名：只按请求的 lineId 从详情线路表查，
+  /// 取不到返回空串（加载文案会省略线路名）。
+  String get _loadingLineName =>
+      fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], _requestLine);
 
   @override
   void initState() {
     super.initState();
     _ep = widget.ep;
     _line = widget.line;
+    _requestEp = widget.ep;
+    _requestLine = widget.line;
     WidgetsBinding.instance.addObserver(this);
     _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       // 全屏期间由全屏页保存，避免把全屏切换后的位置记到旧集。
@@ -242,7 +250,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _errorText = '';
       _ended = false;
       _sourceFailNotified = false;
-      _loadingHint = null;
+      _requestEp = next;
+      _requestLine = _line;
       _uiPosition = null;
       _uiDuration = null;
     });
@@ -287,7 +296,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _hideTimer?.cancel();
       setState(() {
         _loading = true;
-        _loadingHint = '正在切换线路，请稍候';
+        _requestLine = targetLine;
+        _requestEp = targetEp;
         _uiPosition = Duration(milliseconds: (resumeSeconds * 1000).round());
         _uiDuration = oldDuration;
         _error = false;
@@ -320,7 +330,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
       if (actualLine != null) {
         setState(() {
-          _loadingHint = null;
           _uiPosition = null;
           _uiDuration = null;
         });
@@ -339,7 +348,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _line = lastTried;
         setState(() {
           _loading = false;
-          _loadingHint = null;
           _loadedEp = null;
           _error = true;
           _errorText = '线路不可用，请重试或换线路';
@@ -587,6 +595,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     unawaited(_controller?.pause());
     setState(() {
       _loading = true;
+      _requestLine = line;
+      _requestEp = ep;
       _loadedEp = null;
       _qualityKey = null;
       _error = false;
@@ -602,7 +612,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (!mounted || token != _loadToken) return false;
       setState(() {
         _loading = false;
-        _loadingHint = null;
         if (reportFailure) {
           _error = true;
           _errorText = '获取播放地址失败，请检查网络后重试';
@@ -623,7 +632,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       } else {
         setState(() {
           _loading = false;
-          _loadingHint = null;
         });
       }
       return false;
@@ -644,7 +652,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       } else {
         setState(() {
           _loading = false;
-          _loadingHint = null;
         });
       }
       return false;
@@ -705,7 +712,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         unawaited(previous?.dispose());
         setState(() {
           _loading = false;
-          _loadingHint = null;
           _error = false;
           _errorText = '';
         });
@@ -726,7 +732,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (!mounted || token != _loadToken) return false;
       setState(() {
         _loading = false;
-        _loadingHint = null;
         if (reportFailure) {
           _error = true;
           _errorText = '播放失败：线路不可用，请重试或切换下方线路';
@@ -861,7 +866,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (next == null || next.isEmpty) {
       setState(() {
         _loading = false;
-        _loadingHint = null;
         _loadedEp = null;
         _error = true;
         _errorText = '播放中断，自动恢复失败，请重试或切换线路';
@@ -918,11 +922,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     setState(() {
       _ep = next;
       _loading = true;
+      _requestLine = _line;
+      _requestEp = next;
       _loadedEp = null;
       _qualityKey = null;
       _error = false;
       _controls = true;
-      _loadingHint = null;
       _uiPosition = null;
       _uiDuration = null;
     });
@@ -1079,6 +1084,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             title: _title,
             playInfo: _info,
             episodes: _episodeList,
+            lines: widget.detail?.lines ?? const <LineInfo>[],
             lineName: _info?.lineName ?? '',
             rate: realRate,
             qualityKey: _qualityKey,
@@ -1189,7 +1195,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     );
                     return FxLoadingOverlay(
                       title:
-                          percent == null ? '加载中…' : '缓冲中 ${percent.round()}%',
+                          percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
                       percent: percent,
                       dim: false,
                       compact: true,
@@ -1211,8 +1217,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Widget _buildLoading() {
     return Positioned.fill(
       child: FxLoadingOverlay(
-        title: fxLoadingEpisodeText(_ep),
-        subtitle: _loadingHint ?? _lineName,
+        // 单行文案：线路名按本次请求的 lineId 从详情线路表查，
+        // 不能用上一次请求的 _info.lineName，否则换线路后会串台。
+        title: fxLoadingLineText(_requestEp, _loadingLineName),
         compact: true,
       ),
     );

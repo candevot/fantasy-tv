@@ -79,6 +79,7 @@ class FullPlayerPage extends StatefulWidget {
     this.title = '',
     this.playInfo,
     this.episodes = const <Episode>[],
+    this.lines = const <LineInfo>[],
     this.lineName = '',
     this.rate = 1.0,
     this.qualityKey,
@@ -100,7 +101,10 @@ class FullPlayerPage extends StatefulWidget {
   /// 剧集列表（详情页带入）
   final List<Episode> episodes;
 
-  /// 线路名（仅用于设置面板展示）
+  /// 详情线路表：加载文案按当前 lineId 查线路名，不用上次请求的线路名。
+  final List<LineInfo> lines;
+
+  /// 竖屏当前线路名（仅用于进度回写历史，加载文案不读它）。
   final String lineName;
 
   /// 竖屏进入全屏时的真实倍速（来自 player.state.rate）
@@ -137,7 +141,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// media_kit 平台错误（解码 / 输出 / 网络）：作为 Video 层错误源。
   StreamSubscription<String>? _platformErrorSub;
 
-  /// 当前片源是否已经出过视频首帧；未出首帧时展示「正在连接线路…」。
+  /// 当前片源是否已经出过视频首帧；未出首帧时展示加载文案。
   bool _firstFrame = false;
 
   /// 切集 / 切清晰度 / 重连前抓下的最后一帧：盖在黑底和新画面之间，
@@ -179,6 +183,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   late String _line;
   late String _title;
   late List<Episode> _episodes;
+
+  /// 详情线路表：加载文案只按当前 lineId 查线路名。
+  late List<LineInfo> _lines;
 
   int _loadToken = 0;
 
@@ -341,10 +348,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   String get _epLabel => _epLabelFor(_ep);
 
-  String get _lineName {
-    final infoName = _info?.lineName.trim() ?? '';
-    return infoName.isNotEmpty ? infoName : widget.lineName;
-  }
+  /// 当前线路名：只按当前 lineId 从详情线路表查，不用上一次请求的 _info。
+  String get _lineName => fxLineNameOf(_lines, _line);
 
   String _epLabelFor(int n) {
     for (final e in _episodes) {
@@ -360,6 +365,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _line = widget.line;
     _title = widget.title.trim().isEmpty ? '正在播放' : widget.title.trim();
     _episodes = List<Episode>.from(widget.episodes);
+    _lines = List<LineInfo>.from(widget.lines);
 
     // 复用竖屏的播放器实例：不新建 player，也不重新 open。
     final c = widget.player;
@@ -522,6 +528,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (!mounted) return;
       setState(() {
         _episodes = detail.allEpisodes;
+        _lines = detail.lines;
         if (widget.title.trim().isEmpty && detail.title.isNotEmpty) {
           _title = detail.title;
         }
@@ -1760,7 +1767,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                 ),
               // 加载 / 首帧 / 缓冲层：在视频之上、控件层之下，不挡底部按钮。
               // 缓冲百分比来自 stream.buffer（真实已缓冲位置）÷ duration；
-              // 时长未知时用不确定转圈 + 「加载中…」，绝不显示假的 100%。
+              // 时长未知时用不确定转圈 + 「缓冲中…」，绝不显示假的 100%。
               if (!_error && c != null)
                 Positioned.fill(
                   child: AnimatedBuilder(
@@ -1868,18 +1875,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 首帧 / 加载 / 缓冲统一浮层。
   Widget _buildStatusOverlay(FxPlayer c) {
     final v = c.value;
-    // 首帧还没出来：明确告诉用户在连接线路，而不是一直黑屏转圈。
-    if (!_firstFrame) {
+    // 首帧未出 / 正在加载：只显示单行文案，线路名按当前 lineId 查，
+    // 不再叠一行旧线路名小字。
+    final loading = _loadingHint ?? fxLoadingLineText(_ep, _lineName);
+    if (!_firstFrame || _loading) {
       return FxLoadingOverlay(
-        title: _loadingHint ?? '正在连接线路…',
-        subtitle: _lineName,
-        dim: _frozenFrame == null,
-      );
-    }
-    if (_loading) {
-      return FxLoadingOverlay(
-        title: _loadingHint ?? fxLoadingEpisodeText(_ep),
-        subtitle: _lineName,
+        title: loading,
         dim: _frozenFrame == null,
       );
     }
@@ -1887,9 +1888,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // stream.buffer 是已缓冲位置（demuxer-cache-time），÷ 总时长即真实进度。
     final percent = fxBufferedPercent(v.buffered, v.duration);
     return FxLoadingOverlay(
-      title: percent == null ? '加载中…' : '缓冲中 ${percent.round()}%',
+      title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
       percent: percent,
-      subtitle: percent == null ? _lineName : null,
       dim: false,
       compact: true,
     );
