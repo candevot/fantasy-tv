@@ -156,6 +156,89 @@ class FxSourceLabel extends StatelessWidget {
   }
 }
 
+/// 已知来源站点：线路名常带「4K / 影视 / 线路2」等后缀，
+/// 统一归到站点前缀（幻想4K → 幻想、红牛影视 → 红牛、腾讯视频 → 腾讯）。
+const List<String> _fxSourceBrands = <String>[
+  '幻想',
+  '红牛',
+  '腾讯',
+  '爱奇艺',
+  '优酷',
+  '芒果',
+  '搜狐',
+  '哔哩',
+  '乐视',
+  '咪咕',
+  '暴风',
+  'PPTV',
+];
+
+/// 把线路名（lines[0].name）归并成来源前缀；认不出来时取名称首段。
+/// 纯技术串（ffm3u8 / hls / play_from）不是给人看的来源名，返回空串由 UI 隐藏。
+String fxSourceBrand(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return '';
+  final lower = s.toLowerCase();
+  for (final brand in _fxSourceBrands) {
+    if (lower.contains(brand.toLowerCase())) return brand;
+  }
+  var base = s.split(RegExp(r'[\s·・•|｜/\\_\-–—:：]+')).first.trim();
+  base = base
+      .replaceFirst(
+        RegExp(r'(?:4[kK]|8[kK]|1080[pP]|高清|超清|蓝光|影视|视频|影院|片库|线路\d*)+$'),
+        '',
+      )
+      .trim();
+  if (base.isEmpty) return '';
+  // 没有汉字的短串多半是 vod_play_from / 清晰度标记，不当来源展示。
+  if (!RegExp(r'[\u4e00-\u9fa5]').hasMatch(base)) {
+    if (base.length <= 3 ||
+        lower.contains('m3u8') ||
+        lower.contains('http') ||
+        lower.contains('parse')) {
+      return '';
+    }
+  }
+  return base;
+}
+
+/// 列表行第二行的进度文案：第N集 / 全N集 / 已完结。
+String fxListEpisodeText(VideoCard item) {
+  final badge = fxBadgeText(item);
+  if (badge != null && badge != '新') {
+    // 角标是「更新至12集」，列表行里写成更短的「第12集」。
+    if (badge.startsWith('更新至')) return '第${badge.substring(3)}';
+    return badge;
+  }
+  final direct = RegExp(r'第\s*(\d+)\s*集').firstMatch(item.status);
+  if (direct != null) return '第${direct.group(1)}集';
+  // 电影接口也会给 episodes=1，单集不是「全1集」，不占进度文案。
+  if (item.episodes > 1) return '全${item.episodes}集';
+  return '';
+}
+
+/// 列表行第二行：进度 · 年份 · 类型。
+String fxListMetaLine(VideoCard item) {
+  final episode = fxListEpisodeText(item);
+  final type = item.type.isNotEmpty ? item.type : fxCategoryName(item.category);
+  return <String>[
+    if (episode.isNotEmpty) episode,
+    if (item.year > 0) '${item.year}',
+    if (type.isNotEmpty) type,
+  ].join(' · ');
+}
+
+/// 右侧集数徽标文案；没有集数信息时返回 null，由 UI 改画箭头。
+String? fxListBadge(VideoCard item) {
+  final badge = fxBadgeText(item);
+  if (badge != null && badge != '新') {
+    if (badge.startsWith('更新至')) return badge.substring(3);
+    return badge;
+  }
+  if (item.episodes > 1) return '全${item.episodes}集';
+  return null;
+}
+
 /// 海报角标文案：新 / 更新至N集 / 全N集 / 已完结。
 /// 服务端 status 文案很杂（更新至10集 / 全29集 / 已完结 / HD / 第261104期），
 /// 只认这四类；认不出来的老片不显示角标，当年的新片显示「新」。
@@ -333,6 +416,126 @@ class FxPosterTile extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 搜索结果单列列表行：84×112 海报 + 两行片名 + 进度/年份/类型 + 来源小字，
+/// 右侧按有无集数信息显示徽标或箭头。行高由内容撑开，大字体不裁字。
+class FxSearchResultTile extends StatelessWidget {
+  const FxSearchResultTile({super.key, required this.item, this.onTap});
+
+  final VideoCard item;
+  final VoidCallback? onTap;
+
+  static const double _posterWidth = 84;
+  static const double _posterHeight = 112;
+
+  @override
+  Widget build(BuildContext context) {
+    final meta = fxListMetaLine(item);
+    final source = fxSourceBrand(item.sourceLabel);
+    final badge = fxListBadge(item);
+    return GlassCard(
+      padding: const EdgeInsets.all(8),
+      radius: 18,
+      opacity: .62,
+      onTap: onTap,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: _posterWidth,
+            height: _posterHeight,
+            child: FxCover(
+              url: item.cover,
+              title: item.title,
+              radius: 10,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    height: 1.25,
+                    fontWeight: FontWeight.w600,
+                    color: Fx.ink,
+                  ),
+                ),
+                if (meta.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    meta,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      height: 1.2,
+                      fontWeight: FontWeight.w400,
+                      color: Fx.sub,
+                    ),
+                  ),
+                ],
+                if (source.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    '来源：$source',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      height: 1.2,
+                      fontWeight: FontWeight.w400,
+                      color: Color(0xFF8A8FA3),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            height: _posterHeight,
+            child: Align(
+              alignment: Alignment.center,
+              child: badge != null
+                  ? Container(
+                      constraints: const BoxConstraints(maxWidth: 78),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Fx.accent.withOpacity(.10),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        badge,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 10.5,
+                          height: 1.2,
+                          fontWeight: FontWeight.w600,
+                          color: Fx.accent,
+                        ),
+                      ),
+                    )
+                  : const Icon(
+                      Icons.chevron_right_rounded,
+                      size: 20,
+                      color: Color(0xFFB3BECD),
+                    ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -642,6 +845,77 @@ class FxPosterRowSkeleton extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// 搜索结果单列列表骨架屏：与 FxSearchResultTile 同尺寸（84×112 海报）。
+class FxResultListSkeleton extends StatelessWidget {
+  const FxResultListSkeleton({
+    super.key,
+    this.count = 6,
+    this.padding = EdgeInsets.zero,
+  });
+
+  final int count;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: padding,
+      child: Column(
+        children: [
+          for (var i = 0; i < count; i++) ...[
+            if (i != 0) const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(.62),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: Colors.white.withOpacity(.9)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const FxSkeletonBox(width: 84, height: 112, radius: 10),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        FractionallySizedBox(
+                          alignment: Alignment.centerLeft,
+                          widthFactor: .82,
+                          child: const FxSkeletonBox(height: 15, radius: 4),
+                        ),
+                        const SizedBox(height: 6),
+                        FractionallySizedBox(
+                          alignment: Alignment.centerLeft,
+                          widthFactor: .54,
+                          child: const FxSkeletonBox(height: 15, radius: 4),
+                        ),
+                        const SizedBox(height: 9),
+                        FractionallySizedBox(
+                          alignment: Alignment.centerLeft,
+                          widthFactor: .70,
+                          child: const FxSkeletonBox(height: 12, radius: 4),
+                        ),
+                        const SizedBox(height: 6),
+                        FractionallySizedBox(
+                          alignment: Alignment.centerLeft,
+                          widthFactor: .42,
+                          child: const FxSkeletonBox(height: 11, radius: 4),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

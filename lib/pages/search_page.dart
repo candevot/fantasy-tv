@@ -421,7 +421,7 @@ class _SearchPageState extends State<SearchPage> {
     return _discover();
   }
 
-  /// 搜索中骨架屏：结果头 + 3 列海报占位，避免一片空白。
+  /// 搜索中骨架屏：结果头 + 单列列表占位，避免一片空白。
   Widget _loadingView() {
     return FxSkeletonPulse(
       child: ListView(
@@ -437,11 +437,7 @@ class _SearchPageState extends State<SearchPage> {
             ],
           ),
           const SizedBox(height: 14),
-          const FxPosterGridSkeleton(
-            crossAxisCount: 3,
-            itemCount: 9,
-            padding: EdgeInsets.zero,
-          ),
+          const FxResultListSkeleton(count: 5),
           const SizedBox(height: 16),
           Center(
             child: Text(
@@ -823,13 +819,11 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Widget _resultsView() {
-    final width = MediaQuery.of(context).size.width;
-    final itemWidth = (width - 32 - 16) / 3;
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
           child: Row(
             children: [
               Text(_mode == 'ai' ? 'AI 推荐' : '搜索结果',
@@ -869,22 +863,18 @@ class _SearchPageState extends State<SearchPage> {
             slivers: [
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-                sliver: SliverGrid(
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 3,
-                    crossAxisSpacing: 8,
-                    mainAxisSpacing: 8,
-                    mainAxisExtent: itemWidth * 1.5 +
-                        fxPosterMetaExtent(context,
-                            withSource: _results
-                                .any((e) => e.sourceLabel.trim().isNotEmpty)),
-                  ),
+                sliver: SliverList(
                   delegate: SliverChildBuilderDelegate(
                     (ctx, i) {
                       final item = _results[i];
-                      return FxPosterTile(
-                        item: item,
-                        onTap: () => _openDetail(item.id),
+                      return Padding(
+                        // 行间 10dp 间距；最后一行交给底部留白，不拖一条空缝。
+                        padding: EdgeInsets.only(
+                            bottom: i == _results.length - 1 ? 0 : 10),
+                        child: FxSearchResultTile(
+                          item: item,
+                          onTap: () => _openDetail(item.id),
+                        ),
                       );
                     },
                     childCount: _results.length,
