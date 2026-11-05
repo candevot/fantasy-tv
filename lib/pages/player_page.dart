@@ -1183,12 +1183,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     if (!v.isInitialized || !v.isBuffering) {
                       return const SizedBox.shrink();
                     }
-                    final raw = v.bufferingPercentage.isFinite
-                        ? v.bufferingPercentage
-                        : 0.0;
-                    final percent = raw.clamp(0.0, 100.0).toDouble();
+                    final percent = fxBufferedPercent(
+                      v.buffered,
+                      v.duration,
+                    );
                     return FxLoadingOverlay(
-                      title: '缓冲中 ${percent.round()}%',
+                      title:
+                          percent == null ? '加载中…' : '缓冲中 ${percent.round()}%',
                       percent: percent,
                       dim: false,
                       compact: true,

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -543,6 +542,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final token = ++_loadToken;
     _hideTimer?.cancel();
     _cancelFirstFrameTimer();
+    // 先抓最后一帧：同一个 player 实例换地址时纹理会被清空，用它垫住黑屏。
+    if (_firstFrame && _frozenFrame == null) await _captureFrozenFrame();
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return;
     unawaited(c.pause());
@@ -660,6 +661,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final c = _controller;
     if (c == null) return false;
     _cancelFirstFrameTimer();
+    if (_firstFrame && _frozenFrame == null) await _captureFrozenFrame();
     _firstFrame = false;
     try {
       await c.open(url, headers: headers).timeout(_openReadyTimeout);
@@ -1162,6 +1164,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _cancelFirstFrameTimer();
     // 失败即未加载成功：退出全屏时不能让竖屏把这一集记成「已加载」。
     _loadedEp = null;
+    _freezeClearTimer?.cancel();
+    _freezeClearTimer = null;
+    _frozenFrame = null;
+    _freezeOpaque = false;
     if (_registerFailure()) return;
     if (!mounted) return;
     setState(() {
@@ -1237,6 +1243,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _firstFrame = true;
       _failStreak = 0;
       _cancelFirstFrameTimer();
+      _fadeOutFrozenFrame();
       setState(() {});
     } else if (_firstFrame && _loading && !v.isInitialized) {
       // 重新 open 会重置播放器：画面层退回纯黑，避免残留红屏 / 黑屏。
@@ -1838,6 +1845,21 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
               subtitleBottom: controlsHeight + 12,
             ),
+          // 切集 / 切清晰度：最后一帧垫在黑底上，首帧就绪后淡出。
+          if (_frozenFrame != null)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: AnimatedOpacity(
+                  opacity: _freezeOpaque ? 1 : 0,
+                  duration: const Duration(milliseconds: 300),
+                  child: Image.memory(
+                    _frozenFrame!,
+                    fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+                    gaplessPlayback: true,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1851,12 +1873,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return FxLoadingOverlay(
         title: _loadingHint ?? '正在连接线路…',
         subtitle: _lineName,
+        dim: _frozenFrame == null,
       );
     }
     if (_loading) {
       return FxLoadingOverlay(
         title: _loadingHint ?? fxLoadingEpisodeText(_ep),
         subtitle: _lineName,
+        dim: _frozenFrame == null,
       );
     }
     if (!v.isBuffering) return const SizedBox.shrink();
