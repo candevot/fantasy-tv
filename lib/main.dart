@@ -6,6 +6,7 @@ import 'package:media_kit/media_kit.dart';
 
 import 'api.dart';
 import 'auth.dart';
+import 'services/screen_fit.dart';
 import 'theme.dart';
 import 'pages/home_page.dart';
 import 'pages/category_page.dart';
@@ -35,6 +36,8 @@ Future<void> main() async {
   } catch (e, st) {
     debugPrint('[boot] Auth.init failed: $e\n$st');
   }
+  // 预读画面模式，播放器首帧就用上次选择的档位，避免先充满再跳到适应。
+  await ScreenFitStore.ensureLoaded();
   try {
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(

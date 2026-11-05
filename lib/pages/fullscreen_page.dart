@@ -6,11 +6,13 @@ import 'package:flutter/services.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
+import '../services/screen_fit.dart';
 import '../theme.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_theme.dart';
+import '../widgets/screen_fit_selector.dart';
 import 'history_page.dart' show FxStore;
 
 /// 全屏播放退出时带回给竖屏播放器的结果。
@@ -52,16 +54,6 @@ class FullPlayerResult {
 
   /// 全屏错误页点了「换线路」：退出后由竖屏页负责切下一条线路。
   final bool requestLineChange;
-}
-
-/// 全屏画面适配档位。
-enum FsVideoFit {
-  contain('默认'),
-  cover('裁剪'),
-  stretch('拉伸');
-
-  const FsVideoFit(this.label);
-  final String label;
 }
 
 /// 全屏横屏播放页
@@ -191,9 +183,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 当前清晰度；null = 原画（使用 PlayInfo.url + backup）
   String? _qualityKey;
 
-  /// 画面适配：默认保持真实比例，裁剪铺满，拉伸铺满。
-  FsVideoFit _videoFit = FsVideoFit.contain;
-
   // 播放倍速
   double _rate = 1.0;
   double _rateBeforeHold = 1.0;
@@ -317,6 +306,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _line = widget.line;
     _title = widget.title.trim().isEmpty ? '正在播放' : widget.title.trim();
     _episodes = List<Episode>.from(widget.episodes);
+    // 与竖屏共用持久化档位，进出全屏保持一致。
+    unawaited(ScreenFitStore.ensureLoaded());
 
     // 复用竖屏的播放器实例：不新建 player，也不重新 open。
     final c = widget.player;
@@ -1274,27 +1265,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       ],
                     ),
                     const SizedBox(height: 14),
-                    const Text('画面比例',
-                        style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                            color: Fx.sub)),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        for (final fit in FsVideoFit.values)
-                          ChipTag(
-                            fit.label,
-                            active: _videoFit == fit,
-                            onTap: () {
-                              setState(() => _videoFit = fit);
-                              setSheetState(() {});
-                            },
-                          ),
-                      ],
-                    ),
+                    const ScreenFitSelector(),
                     if (quality.length >= 2) ...[
                       const SizedBox(height: 14),
                       const Text('清晰度',
@@ -1385,34 +1356,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /* ---------------------------------------------------------------- 布局 */
 
-  Rect _videoRect(Size size) {
-    // 裁剪 / 拉伸都是铺满整屏；默认模式按视频真实宽高比做 letterbox。
-    if (_videoFit != FsVideoFit.contain) return Offset.zero & size;
-    final video = _controller?.value;
-    var aspect = 16 / 9;
-    if (video != null && video.isInitialized) {
-      final s = video.size;
-      if (s.width > 0 && s.height > 0) {
-        aspect = s.width / s.height;
-      } else if (video.aspectRatio > 0) {
-        aspect = video.aspectRatio;
-      }
-    }
-    var w = size.width;
-    var h = w / aspect;
-    if (h > size.height) {
-      h = size.height;
-      w = h * aspect;
-    }
-    return Rect.fromLTWH((size.width - w) / 2, (size.height - h) / 2, w, h);
-  }
-
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.sizeOf(context);
     final pad = MediaQuery.paddingOf(context);
     final keyboard = MediaQuery.viewInsetsOf(context).bottom;
-    final rect = _videoRect(size);
     final c = _controller;
 
     return PopScope<FullPlayerResult>(
@@ -1427,7 +1374,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         body: Stack(
           fit: StackFit.expand,
           children: [
-            Positioned.fromRect(rect: rect, child: _buildVideoSurface(c)),
+            Positioned.fill(child: _buildVideoSurface(c)),
             // 手势层：双击暂停 / 横扫调进度 / 竖扫亮度音量 / 长按 2x。
             if (!_locked && c != null)
               Positioned.fill(
@@ -1486,7 +1433,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                 ),
               ),
             if (_loading && !_error) _buildLoading(),
-            if (_error) _buildError(rect),
+            if (_error) _buildError(),
             // 锁屏：所有控件隐藏，只留一个 3 秒后自动隐藏的解锁钮；
             // 点屏幕重新唤出并提示如何解锁。
             if (_locked)
@@ -1527,29 +1474,16 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null || !c.value.isInitialized) {
       return const ColoredBox(color: Colors.black);
     }
-    final size = c.value.size;
-    final width = size.width > 0 ? size.width : 16.0;
-    final height = size.height > 0 ? size.height : 9.0;
-    final aspect = width / height;
-    switch (_videoFit) {
-      case FsVideoFit.contain:
-        // _videoRect 已按真实比例算好，这里填满该矩形。
-        return Center(
-          child: AspectRatio(aspectRatio: aspect, child: c.buildVideo()),
-        );
-      case FsVideoFit.cover:
-        return ClipRect(
-          child: SizedBox.expand(
-            child: c.buildVideo(fit: BoxFit.cover),
-          ),
-        );
-      case FsVideoFit.stretch:
-        return ClipRect(
-          child: SizedBox.expand(
-            child: c.buildVideo(fit: BoxFit.fill),
-          ),
-        );
-    }
+    // 三种档位都让 Video 铺满整屏，只切换 fit；contain 的黑边由 Video 自己补，
+    // 不会重建 controller，也不会重新加载视频。
+    return ClipRect(
+      child: SizedBox.expand(
+        child: ValueListenableBuilder<ScreenFit>(
+          valueListenable: ScreenFitStore.notifier,
+          builder: (context, fit, _) => c.buildVideo(fit: fit.boxFit),
+        ),
+      ),
+    );
   }
 
   Widget _buildLoading() {
@@ -1561,9 +1495,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     );
   }
 
-  Widget _buildError(Rect rect) {
-    return Positioned.fromRect(
-      rect: rect,
+  Widget _buildError() {
+    return Positioned.fill(
       child: Center(
         child: Container(
           width: 330,

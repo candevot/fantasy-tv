@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
+import '../services/screen_fit.dart';
 import '../theme.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_theme.dart';
+import '../widgets/screen_fit_selector.dart';
 import 'fullscreen_page.dart';
 import 'history_page.dart' show FxStore;
 
@@ -184,6 +186,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     super.initState();
     _ep = widget.ep;
     _line = widget.line;
+    unawaited(ScreenFitStore.ensureLoaded());
     WidgetsBinding.instance.addObserver(this);
     _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       // 全屏期间由全屏页保存，避免把全屏切换后的位置记到旧集。
@@ -1037,6 +1040,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     ],
                   ),
                   const SizedBox(height: 8),
+                  const ScreenFitSelector(),
+                  const SizedBox(height: 8),
                   const ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: Icon(Icons.info_outline_rounded,
@@ -1171,11 +1176,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           fit: StackFit.expand,
           children: [
             if (c != null && c.value.isInitialized && !_fullscreenActive)
-              Center(
-                child: AspectRatio(
-                  aspectRatio:
-                      c.value.aspectRatio > 0 ? c.value.aspectRatio : 16 / 9,
-                  child: c.buildVideo(),
+              ValueListenableBuilder<ScreenFit>(
+                valueListenable: ScreenFitStore.notifier,
+                builder: (context, fit, _) => SizedBox.expand(
+                  child: c.buildVideo(fit: fit.boxFit),
                 ),
               ),
             // 手势层：双击暂停 / 横扫调进度 / 竖扫亮度音量 / 长按 2x。
