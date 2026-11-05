@@ -255,6 +255,16 @@ class FxPlayer implements Listenable {
 
   Future<void> pause() => _player.pause();
 
+  /// 播放 / 暂停切换：直接交给 media_kit 处理，
+  /// 页面不要用本地布尔自行改状态，避免和真实播放状态互相覆盖。
+  Future<void> playOrPause() => _player.playOrPause();
+
+  /// 播放器真实播放状态（libmpv 当前值），按钮图标以此为准。
+  bool get isPlaying => _player.state.playing;
+
+  /// 播放状态流；页面可用它驱动播放 / 暂停图标。
+  Stream<bool> get playingStream => _player.stream.playing;
+
   Future<void> seek(Duration position) => _player.seek(position);
 
   /// 兼容 video_player 命名。

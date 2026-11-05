@@ -6,7 +6,7 @@ import 'fs_controls.dart';
 import 'player_theme.dart';
 
 /* ========================================================================== */
-/*  全屏横屏播放器 · 底部控制条 / 弹幕输入 / 选集 / 倍速 / 片头尾弹层           */
+/*  全屏横屏播放器 · 底部控制条 / 选集 / 倍速 / 片头尾弹层                  */
 /* ========================================================================== */
 
 /// 倍速标签：1.0x / 2.0x 保留一位小数，0.75x、1.25x 原样输出
@@ -53,8 +53,8 @@ class FsGlassCard extends StatelessWidget {
 }
 
 /// 底部控制栏
-/// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 弹幕开关 · 弹幕设置 ·
-/// 弹幕输入框 · 片头/尾 · 倍速 · 清晰度 · 选集 · 全屏（退出）
+/// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 片头/尾 · 倍速 ·
+/// 清晰度 · 选集 · 全屏（退出）
 class FsBottomBar extends StatelessWidget {
   const FsBottomBar({
     super.key,
@@ -62,14 +62,10 @@ class FsBottomBar extends StatelessWidget {
     required this.duration,
     required this.playing,
     required this.rate,
-    required this.danmakuOn,
     required this.qualityLabel,
     required this.onSeek,
     required this.onTogglePlay,
     required this.onNext,
-    required this.onToggleDanmaku,
-    required this.onDanmakuSettings,
-    required this.onDanmakuInput,
     required this.onJump,
     required this.onSpeed,
     required this.onQuality,
@@ -83,16 +79,11 @@ class FsBottomBar extends StatelessWidget {
   final Duration duration;
   final bool playing;
   final double rate;
-  final bool danmakuOn;
-
   /// 当前清晰度（自动 / 真实码率名 / 原画）
   final String qualityLabel;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onTogglePlay;
   final VoidCallback onNext;
-  final VoidCallback onToggleDanmaku;
-  final VoidCallback onDanmakuSettings;
-  final VoidCallback onDanmakuInput;
   final VoidCallback onJump;
   final VoidCallback onSpeed;
   final VoidCallback onQuality;
@@ -137,55 +128,7 @@ class FsBottomBar extends StatelessWidget {
                 tooltip: '下一集',
                 onTap: onNext,
               ),
-              const SizedBox(width: 8),
-              PDanmakuToggle(
-                  on: danmakuOn, size: 34 * s, onTap: onToggleDanmaku),
-              const SizedBox(width: 8),
-              PGlassIcon(
-                icon: Icons.tune_rounded,
-                size: 34 * s,
-                iconSize: 18 * s,
-                tint: .16,
-                tooltip: '弹幕设置',
-                onTap: onDanmakuSettings,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: onDanmakuInput,
-                  child: Container(
-                    height: 34,
-                    padding: const EdgeInsets.symmetric(horizontal: 13),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.14),
-                      borderRadius: BorderRadius.circular(17),
-                      border: Border.all(color: Colors.white.withOpacity(.28)),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.chat_bubble_outline_rounded,
-                          size: 13 * s,
-                          color: Colors.white.withOpacity(.7),
-                        ),
-                        const SizedBox(width: 6),
-                        Flexible(
-                          child: Text(
-                            '发个友善的弹幕见证当下',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: Colors.white.withOpacity(.74),
-                              fontSize: 12 * s,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
+              const Spacer(),
               const SizedBox(width: 10),
               FsTextAction(text: '片头/尾', size: s, onTap: onJump),
               const SizedBox(width: 8),
@@ -216,212 +159,6 @@ class FsBottomBar extends StatelessWidget {
             ],
           ),
         ],
-      ),
-    );
-  }
-}
-
-/// 弹幕输入态：调色板 + 输入框「发送一条友善的弹幕吧」+ 发送 + × + 19 色圆点
-class FsDanmakuInputBar extends StatelessWidget {
-  const FsDanmakuInputBar({
-    super.key,
-    required this.controller,
-    required this.focusNode,
-    required this.color,
-    required this.onPickColor,
-    required this.onSend,
-    required this.onClose,
-    required this.showColors,
-    required this.onTogglePalette,
-    this.compact = false,
-    this.bottomInset = 0,
-  });
-
-  final TextEditingController controller;
-  final FocusNode focusNode;
-  final Color color;
-  final ValueChanged<Color> onPickColor;
-  final VoidCallback onSend;
-  final VoidCallback onClose;
-  final bool showColors;
-  final VoidCallback onTogglePalette;
-  final bool compact;
-  final double bottomInset;
-
-  @override
-  Widget build(BuildContext context) {
-    final s = compact ? .9 : 1.0;
-    return Container(
-      padding: EdgeInsets.fromLTRB(16, 22, 16, 8 + bottomInset),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Colors.black.withOpacity(0), Colors.black.withOpacity(.66)],
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: onTogglePalette,
-                child: Container(
-                  width: 34 * s,
-                  height: 34 * s,
-                  decoration: BoxDecoration(
-                    color: showColors
-                        ? Fx.accent.withOpacity(.86)
-                        : Colors.white.withOpacity(.14),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white.withOpacity(.32)),
-                  ),
-                  child: Icon(Icons.palette_rounded,
-                      size: 17 * s, color: Colors.white),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Container(
-                  height: 38,
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(.16),
-                    borderRadius: BorderRadius.circular(19),
-                    border: Border.all(color: Colors.white.withOpacity(.32)),
-                  ),
-                  child: TextField(
-                    controller: controller,
-                    focusNode: focusNode,
-                    autofocus: true,
-                    textAlignVertical: TextAlignVertical.center,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => onSend(),
-                    cursorColor: Colors.white,
-                    cursorWidth: 1.4,
-                    style: TextStyle(color: Colors.white, fontSize: 13 * s),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      border: InputBorder.none,
-                      hintText: '发送一条友善的弹幕吧',
-                      hintStyle: TextStyle(
-                        color: Colors.white.withOpacity(.66),
-                        fontSize: 13 * s,
-                      ),
-                      contentPadding: EdgeInsets.zero,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: onSend,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                  decoration: BoxDecoration(
-                    gradient: Fx.brand,
-                    borderRadius: BorderRadius.circular(18),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Fx.accent.withOpacity(.32),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: const Text(
-                    '发送',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: onClose,
-                child: Container(
-                  width: 32 * s,
-                  height: 32 * s,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(.14),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white.withOpacity(.30)),
-                  ),
-                  child: const Icon(Icons.close_rounded,
-                      size: 17, color: Colors.white),
-                ),
-              ),
-            ],
-          ),
-          if (showColors) ...[
-            const SizedBox(height: 9),
-            FsDanmakuColorDots(color: color, onPick: onPickColor),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-/// 19 色弹幕调色盘
-class FsDanmakuColorDots extends StatelessWidget {
-  const FsDanmakuColorDots(
-      {super.key, required this.color, required this.onPick});
-
-  final Color color;
-  final ValueChanged<Color> onPick;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 24,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: kDanmakuPalette.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (context, i) {
-          final c = kDanmakuPalette[i];
-          final active = c.value == color.value;
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => onPick(c),
-            child: Center(
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 140),
-                width: active ? 22 : 17,
-                height: active ? 22 : 17,
-                decoration: BoxDecoration(
-                  color: c,
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color:
-                        active ? Colors.white : Colors.white.withOpacity(.45),
-                    width: active ? 2 : 1,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(.20),
-                      blurRadius: 4,
-                      offset: const Offset(0, 1),
-                    ),
-                  ],
-                ),
-                child: active
-                    ? const Icon(Icons.check_rounded,
-                        size: 12, color: Colors.black54)
-                    : null,
-              ),
-            ),
-          );
-        },
       ),
     );
   }

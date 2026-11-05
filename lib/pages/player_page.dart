@@ -6,7 +6,6 @@ import '../api.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
-import '../widgets/danmaku_overlay.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
 
@@ -15,7 +14,6 @@ import 'fullscreen_page.dart';
 /// 控件布局：
 /// 左上 返回 + 片名/集数
 /// 右上 投屏 / TV / 设置
-/// 右侧中部 弹幕开关 / 弹幕设置
 /// 底部 播放暂停 · 当前时间 · 细进度条 · 总时长 · 下一集 · 全屏
 /// 3 秒无操作自动隐藏；点画面唤出/隐藏；长按 2x；双击暂停。
 class PlayerView extends StatefulWidget {
@@ -55,7 +53,6 @@ class PlayerView extends StatefulWidget {
 class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   FxPlayer? _controller;
   PlayInfo? _info;
-  List<DanmuItem> _danmaku = const <DanmuItem>[];
 
   late int _ep;
   late String _line;
@@ -75,7 +72,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   double _rateBeforeHold = 1.0;
 
   bool _openingFullscreen = false;
-  bool _wasPlayingBeforeFullscreen = false;
+  bool _fullscreenActive = false;
 
   int get _episodeCount {
     final d = widget.detail;
@@ -103,7 +100,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _ep = widget.ep;
     _line = widget.line;
     WidgetsBinding.instance.addObserver(this);
-    danmakuSettings.addListener(_onDanmakuChanged);
     _bootstrap(seekToSaved: true, saveOld: false);
   }
 
@@ -125,6 +121,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 全屏期间由全屏页负责保存进度与暂停，避免同一实例被重复处理。
+    if (_fullscreenActive) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       _saveProgress();
@@ -135,18 +133,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    danmakuSettings.removeListener(_onDanmakuChanged);
     _hideTimer?.cancel();
     _loadToken++;
     _saveProgress();
     _controller?.removeListener(_onVideoValue);
     _controller?.dispose();
     super.dispose();
-  }
-
-  void _onDanmakuChanged() {
-    if (!mounted) return;
-    setState(() {});
   }
 
   Future<void> _saveProgress() async {
@@ -330,9 +322,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return;
     }
 
-    final danmaku = await loadDanmakuSource(info.danmu);
-    if (!mounted || token != _loadToken) return;
-    setState(() => _danmaku = danmaku);
   }
 
   void _notifySourceFailed() {
@@ -344,6 +333,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
+    // 全屏期间由全屏页接管同一个播放器的事件（切集 / 结束 / 报错）。
+    if (_fullscreenActive) return;
     final v = c.value;
     if (v.hasError && !_error) {
       setState(() {
@@ -477,12 +468,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void _togglePlay() {
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
-    if (c.value.isPlaying) {
-      c.pause();
-      _saveProgress();
-    } else {
-      c.play();
-    }
+    // 以播放器真实状态为准：交给 media_kit 切换，按钮图标随后续
+    // player.stream.playing 事件刷新，不用本地布尔抢先改状态。
+    unawaited(c.playOrPause());
     _touch();
   }
 
@@ -516,18 +504,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _touch();
   }
 
-  Future<void> _openDanmakuSettings() async {
-    _hideTimer?.cancel();
-    if (mounted) setState(() => _controls = true);
-    await showDanmakuSettingsPanel(context);
-    if (!mounted) return;
-    _startHideTimer();
-  }
-
   Future<void> _openPlayerSettings() async {
     _hideTimer?.cancel();
     if (mounted) setState(() => _controls = true);
-    var openDanmaku = false;
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -535,160 +514,109 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       builder: (sheetContext) {
         return StatefulBuilder(
           builder: (context, setSheetState) {
-            return AnimatedBuilder(
-              animation: danmakuSettings,
-              builder: (context, _) {
-                return Container(
-                  padding: EdgeInsets.fromLTRB(
-                    18,
-                    14,
-                    18,
-                    18 + MediaQuery.of(context).padding.bottom,
-                  ),
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    borderRadius:
-                        BorderRadius.vertical(top: Radius.circular(24)),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
+            return Container(
+              padding: EdgeInsets.fromLTRB(
+                18,
+                14,
+                18,
+                18 + MediaQuery.of(context).padding.bottom,
+              ),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     children: [
-                      Row(
-                        children: [
-                          const Text('播放设置',
-                              style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w800,
-                                  color: Fx.ink)),
-                          const Spacer(),
-                          IconButton(
-                            onPressed: () => Navigator.of(sheetContext).pop(),
-                            icon: const Icon(Icons.close_rounded,
-                                color: Fx.sub, size: 22),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      const Text('播放速度',
+                      const Text('播放设置',
                           style: TextStyle(
-                              fontSize: 12.5,
-                              fontWeight: FontWeight.w700,
-                              color: Fx.sub)),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final item in const [0.75, 1.0, 1.25, 1.5, 2.0])
-                            ChipTag(
-                              item == 1.0
-                                  ? '1.0x'
-                                  : '${item.toStringAsFixed(2).replaceFirst(RegExp(r'0$'), '')}x',
-                              active: _rate == item,
-                              onTap: () {
-                                _setRate(item);
-                                setSheetState(() {});
-                              },
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          const Icon(Icons.subtitles_rounded,
-                              size: 20, color: Fx.accent),
-                          const SizedBox(width: 8),
-                          const Expanded(
-                            child: Text('显示弹幕',
-                                style: TextStyle(
-                                    fontSize: 13.5,
-                                    fontWeight: FontWeight.w600,
-                                    color: Fx.ink)),
-                          ),
-                          Switch(
-                            value: danmakuSettings.show,
-                            activeColor: Fx.accent,
-                            onChanged: (v) {
-                              danmakuSettings.setShow(v);
-                              setSheetState(() {});
-                            },
-                          ),
-                        ],
-                      ),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.tune_rounded,
-                            size: 20, color: Fx.accent),
-                        title: const Text('弹幕设置',
-                            style: TextStyle(
-                                fontSize: 13.5,
-                                fontWeight: FontWeight.w600,
-                                color: Fx.ink)),
-                        subtitle: const Text('字号 / 透明度 / 区域 / 滚动时间',
-                            style: TextStyle(fontSize: 10.5, color: Fx.sub)),
-                        trailing: const Icon(Icons.chevron_right_rounded,
-                            color: Fx.sub),
-                        onTap: () {
-                          openDanmaku = true;
-                          Navigator.of(sheetContext).pop();
-                        },
-                      ),
-                      const ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: Icon(Icons.info_outline_rounded,
-                            size: 20, color: Fx.sub),
-                        title: Text('播放内核',
-                            style: TextStyle(
-                                fontSize: 13.5,
-                                fontWeight: FontWeight.w600,
-                                color: Fx.ink)),
-                        subtitle: Text('media_kit · libmpv · HLS / 加密 / 多编码',
-                            style: TextStyle(fontSize: 10.5, color: Fx.sub)),
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                              color: Fx.ink)),
+                      const Spacer(),
+                      IconButton(
+                        onPressed: () => Navigator.of(sheetContext).pop(),
+                        icon: const Icon(Icons.close_rounded,
+                            color: Fx.sub, size: 22),
                       ),
                     ],
                   ),
-                );
-              },
+                  const SizedBox(height: 2),
+                  const Text('播放速度',
+                      style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: Fx.sub)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final item in const [0.75, 1.0, 1.25, 1.5, 2.0])
+                        ChipTag(
+                          item == 1.0
+                              ? '1.0x'
+                              : '${item.toStringAsFixed(2).replaceFirst(RegExp(r'0$'), '')}x',
+                          active: _rate == item,
+                          onTap: () {
+                            _setRate(item);
+                            setSheetState(() {});
+                          },
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading:
+                        Icon(Icons.info_outline_rounded, size: 20, color: Fx.sub),
+                    title: Text('播放内核',
+                        style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                            color: Fx.ink)),
+                    subtitle: Text('media_kit · libmpv · HLS / 加密 / 多编码',
+                        style: TextStyle(fontSize: 10.5, color: Fx.sub)),
+                  ),
+                ],
+              ),
             );
           },
         );
       },
     );
     if (!mounted) return;
-    if (openDanmaku) {
-      await _openDanmakuSettings();
-    } else {
-      _startHideTimer();
-    }
+    _startHideTimer();
   }
 
   Future<void> _openFullscreen() async {
     final c = _controller;
-    if (c == null || _openingFullscreen) return;
+    if (c == null || _openingFullscreen || !c.value.isInitialized) return;
     _openingFullscreen = true;
     _hideTimer?.cancel();
-    _wasPlayingBeforeFullscreen = c.value.isPlaying;
-    final start = c.value.position.inMilliseconds / 1000.0;
+    // 进入全屏时复用同一个 FxPlayer / Player 实例：不重新 open，
+    // 保持当前进度与播放/暂停状态；竖屏画面暂时让出视频输出。
     await _saveProgress();
-    await c.pause();
     if (!mounted) {
       _openingFullscreen = false;
       return;
     }
-    widget.onFullscreen?.call();
+    setState(() => _fullscreenActive = true);
+
     final result = await Navigator.of(context).push<FullPlayerResult>(
       PageRouteBuilder<FullPlayerResult>(
         transitionDuration: const Duration(milliseconds: 260),
         pageBuilder: (context, animation, secondaryAnimation) => FullPlayerPage(
+          player: c,
           videoId: widget.videoId,
           ep: _ep,
           line: _line,
           title: _title,
-          startPosition: start,
           playInfo: _info,
           episodes: widget.detail?.allEpisodes ?? const <Episode>[],
-          initialDanmaku: _danmaku,
           lineName: _info?.lineName ?? '',
         ),
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -698,33 +626,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     );
     _openingFullscreen = false;
     if (!mounted) return;
+    if (_fullscreenActive) setState(() => _fullscreenActive = false);
 
     if (result != null && result.ep != _ep) {
-      await _saveProgress();
-      if (!mounted) return;
-      setState(() {
-        _ep = result.ep;
-        _loading = true;
-        _error = false;
-      });
+      // 全屏里切了集：同一个播放器实例已经打开新集，这里只同步状态，不再重建。
+      _ep = result.ep;
+      _info = result.info ?? _info;
       widget.onEpChange?.call(result.ep);
-      await _bootstrap(seekToSaved: true, saveOld: false);
-      return;
-    }
-
-    final target =
-        result?.position ?? await fxLoadProgress(widget.videoId, _ep);
-    if (!mounted) return;
-    final current = _controller;
-    if (current != null && current.value.isInitialized) {
-      await current.seekTo(
-        Duration(milliseconds: (target * 1000).round()),
-      );
-      if (result?.playing ?? _wasPlayingBeforeFullscreen) {
-        await current.play();
-      } else {
-        await current.pause();
-      }
     }
     _showControls();
   }
@@ -740,28 +648,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            if (c != null && c.value.isInitialized)
+            if (c != null && c.value.isInitialized && !_fullscreenActive)
               Center(
                 child: AspectRatio(
                   aspectRatio:
                       c.value.aspectRatio > 0 ? c.value.aspectRatio : 16 / 9,
                   child: c.buildVideo(),
-                ),
-              ),
-            if (c != null)
-              Positioned.fill(
-                child: AnimatedBuilder(
-                  animation: c,
-                  builder: (context, _) {
-                    final v = c.value;
-                    if (!v.isInitialized) return const SizedBox.shrink();
-                    return DanmakuOverlay(
-                      items: _danmaku,
-                      position: v.position,
-                      playing: v.isPlaying,
-                      settings: danmakuSettings,
-                    );
-                  },
                 ),
               ),
             Positioned.fill(
@@ -1047,43 +939,24 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             ),
           ),
         ),
-        Positioned(
-          right: 10,
-          top: 0,
-          bottom: 0,
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                PDanmakuToggle(
-                  on: danmakuSettings.show,
-                  size: 34,
-                  onTap: () {
-                    danmakuSettings.setShow(!danmakuSettings.show);
-                    _touch();
-                  },
+        if (c != null)
+          AnimatedBuilder(
+            animation: c,
+            builder: (context, _) {
+              final v = c.value;
+              if (!v.isInitialized || v.isPlaying) {
+                return const SizedBox.shrink();
+              }
+              return Center(
+                child: PGlassIcon(
+                  icon: Icons.play_arrow_rounded,
+                  size: 54,
+                  iconSize: 32,
+                  tint: .18,
+                  onTap: _togglePlay,
                 ),
-                const SizedBox(height: 10),
-                PGlassIcon(
-                  icon: Icons.tune_rounded,
-                  size: 34,
-                  iconSize: 18,
-                  tooltip: '弹幕设置',
-                  onTap: _openDanmakuSettings,
-                ),
-              ],
-            ),
-          ),
-        ),
-        if (c != null && c.value.isInitialized && !c.value.isPlaying)
-          Center(
-            child: PGlassIcon(
-              icon: Icons.play_arrow_rounded,
-              size: 54,
-              iconSize: 32,
-              tint: .18,
-              onTap: _togglePlay,
-            ),
+              );
+            },
           ),
         Positioned(
           left: 0,

@@ -218,7 +218,7 @@ Map<String, String> _playHeaders(String url, Map raw) {
 }
 
 class PlayInfo {
-  final String url, type, danmu, parsePage, lineName;
+  final String url, type, parsePage, lineName;
   final List<QualityItem> quality;
   final List<String> backup;
   final Map<String, String> headers;
@@ -229,7 +229,6 @@ class PlayInfo {
     required this.quality,
     required this.backup,
     required this.headers,
-    required this.danmu,
     required this.parsePage,
     required this.lineName,
   });
@@ -240,7 +239,6 @@ class PlayInfo {
       url: url,
       type: '${j['type'] ?? 'hls'}',
       lineName: '${j['lineName'] ?? ''}',
-      danmu: '${j['danmu'] ?? ''}',
       parsePage: '${j['parsePage'] ?? ''}',
       quality: ((j['quality'] ?? []) as List)
           .map((e) => QualityItem('${e['key']}', '${e['name']}', '${e['url']}'))
@@ -249,18 +247,6 @@ class PlayInfo {
       headers: _playHeaders(url, (j['headers'] ?? {}) as Map),
     );
   }
-}
-
-class DanmuItem {
-  final double t;
-  final String text, color;
-  final int mode;
-  DanmuItem(this.t, this.text, this.color, this.mode);
-  factory DanmuItem.fromJson(Map<String, dynamic> j) => DanmuItem(
-      (j['t'] ?? 0).toDouble(),
-      '${j['text'] ?? ''}',
-      '${j['color'] ?? '#FFFFFF'}',
-      (j['mode'] ?? 1) as int);
 }
 
 class CommentItem {

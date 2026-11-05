@@ -21,34 +21,6 @@ String fxTime(Duration d) {
 
 String fxClock(DateTime t) => '${fxPad2(t.hour)}:${fxPad2(t.minute)}';
 
-/// 19 色弹幕调色板
-const List<Color> kDanmakuPalette = <Color>[
-  Color(0xFFFFFFFF),
-  Color(0xFF69F0AE),
-  Color(0xFFFF5252),
-  Color(0xFF80D8FF),
-  Color(0xFF18FFFF),
-  Color(0xFFB388FF),
-  Color(0xFFFFF176),
-  Color(0xFFFF80AB),
-  Color(0xFF448AFF),
-  Color(0xFFFF4081),
-  Color(0xFFFFAB40),
-  Color(0xFF1DE9B6),
-  Color(0xFFCDDC39),
-  Color(0xFF7C4DFF),
-  Color(0xFFFFD54F),
-  Color(0xFFFF8A80),
-  Color(0xFF81D4FA),
-  Color(0xFFB39DDB),
-  Color(0xFFB0BEC5),
-];
-
-String fxColorToHex(Color color) {
-  final v = color.value & 0xFFFFFF;
-  return '#${v.toRadixString(16).padLeft(6, '0').toUpperCase()}';
-}
-
 String fxProgressKey(String videoId, int ep) => 'pos_${videoId}_$ep';
 
 Future<double> fxLoadProgress(String videoId, int ep) async {
@@ -174,71 +146,6 @@ class PGlassPill extends StatelessWidget {
     );
     if (onTap == null) return box;
     return GestureDetector(onTap: onTap, behavior: HitTestBehavior.opaque, child: box);
-  }
-}
-
-/// 竖屏 / 全屏通用的「弹」开关（右上角小勾角标）
-class PDanmakuToggle extends StatelessWidget {
-  const PDanmakuToggle({
-    super.key,
-    required this.on,
-    required this.onTap,
-    this.size = 38,
-  });
-
-  final bool on;
-  final VoidCallback onTap;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.14),
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.white.withOpacity(.32)),
-        ),
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Center(
-              child: Text(
-                '弹',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: size * .37,
-                  fontWeight: FontWeight.w700,
-                  shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
-                ),
-              ),
-            ),
-            Positioned(
-              right: -1,
-              bottom: -1,
-              child: Container(
-                width: 14,
-                height: 14,
-                decoration: BoxDecoration(
-                  color: on ? Fx.accent : Colors.black.withOpacity(.55),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white.withOpacity(.9), width: 1),
-                ),
-                child: Icon(
-                  on ? Icons.check_rounded : Icons.close_rounded,
-                  size: 9,
-                  color: Colors.white,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }
 

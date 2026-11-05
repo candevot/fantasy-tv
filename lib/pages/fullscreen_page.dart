@@ -7,17 +7,19 @@ import '../api.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
-import '../widgets/danmaku_overlay.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_theme.dart';
 
-/// 全屏播放退出时带回给竖屏播放器的结果
+/// 全屏播放退出时带回给竖屏播放器的结果。
+///
+/// 退出时播放器实例由竖屏继续复用，这里只同步集数 / 进度 / 播放状态。
 class FullPlayerResult {
   const FullPlayerResult({
     required this.ep,
     required this.position,
     required this.playing,
+    this.info,
   });
 
   /// 退出时的集数
@@ -28,6 +30,9 @@ class FullPlayerResult {
 
   /// 退出时是否处于播放中
   final bool playing;
+
+  /// 退出时对应的播放信息（全屏内切集后用于同步竖屏）
+  final PlayInfo? info;
 }
 
 /// 全屏画面适配档位。
@@ -42,38 +47,36 @@ enum FsVideoFit {
 
 /// 全屏横屏播放页
 ///
+/// 直接复用竖屏传入的 [FxPlayer]（同一个 Player / VideoController）：
+/// 进入和退出全屏都不重新创建、不重新 open，进度与暂停状态自然保持。
 /// 进入即横屏 + 沉浸式，退出恢复竖屏；控件 3 秒自动隐藏，点击画面切换显隐；
 /// 锁屏后只剩解锁按钮，其它手势全部失效。
 class FullPlayerPage extends StatefulWidget {
   const FullPlayerPage({
     super.key,
+    required this.player,
     this.videoId = '',
     this.ep = 1,
     this.line = '',
     this.title = '',
-    this.startPosition = 0,
     this.playInfo,
     this.episodes = const <Episode>[],
-    this.initialDanmaku,
     this.lineName = '',
   });
+
+  /// 竖屏播放页正在使用的播放器实例（全屏直接复用）
+  final FxPlayer player;
 
   final String videoId;
   final int ep;
   final String line;
   final String title;
 
-  /// 竖屏播放器带入的当前进度（秒）
-  final double startPosition;
-
   /// 竖屏已经拿到的播放信息，可直接复用，省一次请求
   final PlayInfo? playInfo;
 
   /// 剧集列表（详情页带入）
   final List<Episode> episodes;
-
-  /// 竖屏已经加载好的弹幕
-  final List<DanmuItem>? initialDanmaku;
 
   /// 线路名（仅用于设置面板展示）
   final String lineName;
@@ -102,7 +105,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   FxPlayer? _controller;
   PlayInfo? _info;
-  List<DanmuItem> _danmaku = const <DanmuItem>[];
 
   late int _ep;
   late String _line;
@@ -110,7 +112,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   late List<Episode> _episodes;
 
   int _loadToken = 0;
-  bool _loading = true;
+  bool _loading = false;
   bool _error = false;
   String _errorText = '';
   bool _sourceFailNotified = false;
@@ -122,13 +124,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _locked = false;
   bool _rotationLocked = false;
 
-  // 弹层 / 输入态
-  bool _inputActive = false;
+  // 弹层
   bool _showSpeed = false;
   bool _showEpisodes = false;
   bool _showJump = false;
   bool _showQuality = false;
-  bool _showColors = true;
 
   /// 当前清晰度；null = 自动（使用 PlayInfo.url + backup）
   String? _qualityKey;
@@ -145,13 +145,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   String? _seekHint;
   Timer? _seekHintTimer;
 
-  double? _pendingStart;
   bool _exiting = false;
-
-  Color _danmakuColor = kDanmakuPalette.first;
-
-  final TextEditingController _danmakuCtrl = TextEditingController();
-  final FocusNode _danmakuFocus = FocusNode();
 
   bool get _panelOpen =>
       _showSpeed || _showEpisodes || _showJump || _showQuality;
@@ -200,15 +194,17 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _line = widget.line;
     _title = widget.title.trim().isEmpty ? '正在播放' : widget.title.trim();
     _episodes = List<Episode>.from(widget.episodes);
-    _pendingStart = widget.startPosition > 0 ? widget.startPosition : null;
+
+    // 复用竖屏的播放器实例：不新建 player，也不重新 open。
+    final c = widget.player;
+    _controller = c;
+    _info = widget.playInfo;
+    _loading = !c.value.isInitialized;
+    c.addListener(_onVideoValue);
 
     WidgetsBinding.instance.addObserver(this);
-    danmakuSettings.addListener(_onDanmakuChanged);
-    _danmakuFocus.addListener(_onDanmakuFocus);
-
     unawaited(_enterImmersive());
     _startHideTimer();
-    unawaited(_bootstrap(seekToSaved: true, saveOld: false, useProvided: true));
     if (widget.videoId.isNotEmpty && _episodes.isEmpty) {
       unawaited(_loadEpisodeMeta());
     }
@@ -217,16 +213,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    danmakuSettings.removeListener(_onDanmakuChanged);
-    _danmakuFocus.removeListener(_onDanmakuFocus);
     _hideTimer?.cancel();
     _seekHintTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
-    _danmakuCtrl.dispose();
-    _danmakuFocus.dispose();
+    // 播放器实例属于竖屏页面，退出全屏只移除监听，不能 dispose。
     _controller?.removeListener(_onVideoValue);
-    _controller?.dispose();
     unawaited(_restoreSystemUi());
     super.dispose();
   }
@@ -280,16 +272,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
   }
 
+  /// 重新加载当前集（重试 / 全屏内切集）：复用竖屏传入的同一个
+  /// [FxPlayer] 实例换播放地址，不新建播放器、不重建视频输出。
   Future<void> _bootstrap({
     required bool seekToSaved,
     bool saveOld = true,
-    bool useProvided = false,
   }) async {
+    final c = _controller;
+    if (c == null) return;
     final token = ++_loadToken;
     _hideTimer?.cancel();
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return;
-    _controller?.pause();
+    unawaited(c.pause());
     setState(() {
       _loading = true;
       _error = false;
@@ -299,28 +294,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _qualityKey = null;
     });
 
-    List<DanmuItem>? presetDanmaku;
     PlayInfo source;
-    final provided = widget.playInfo;
-    if (useProvided &&
-        provided != null &&
-        _ep == widget.ep &&
-        _line == widget.line) {
-      source = provided;
-      presetDanmaku = widget.initialDanmaku;
-    } else {
-      try {
-        source = await Api.play(widget.videoId, _ep, _line);
-      } catch (_) {
-        if (!mounted || token != _loadToken) return;
-        setState(() {
-          _loading = false;
-          _error = true;
-          _errorText = '获取播放地址失败，请检查网络后重试';
-        });
-        _notifySourceFailed();
-        return;
-      }
+    try {
+      source = await Api.play(widget.videoId, _ep, _line);
+    } catch (_) {
+      if (!mounted || token != _loadToken) return;
+      setState(() {
+        _loading = false;
+        _error = true;
+        _errorText = '获取播放地址失败，请检查网络后重试';
+      });
+      _notifySourceFailed();
+      return;
     }
     if (!mounted || token != _loadToken) return;
     _info = source;
@@ -346,47 +331,31 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
     var resume = 0.0;
     if (seekToSaved) {
-      final pending = _pendingStart;
-      _pendingStart = null;
-      resume = (pending != null && pending > 0)
-          ? pending
-          : await fxLoadProgress(widget.videoId, _ep);
+      resume = await fxLoadProgress(widget.videoId, _ep);
     }
     if (!mounted || token != _loadToken) return;
 
     var ok = false;
     for (final url in candidates) {
       if (!mounted || token != _loadToken) return;
-      final controller = FxPlayer.create();
       try {
-        await controller.open(url, headers: source.headers);
-        if (!mounted || token != _loadToken) {
-          await controller.dispose();
-          return;
-        }
-        final durationMs = controller.value.duration.inMilliseconds;
+        await c.open(url, headers: source.headers);
+        if (!mounted || token != _loadToken) return;
+        final durationMs = c.value.duration.inMilliseconds;
         var start = resume;
         if (durationMs > 0 && start >= durationMs / 1000.0 - 2) start = 0;
         if (start > 0) {
-          await controller
-              .seekTo(Duration(milliseconds: (start * 1000).round()));
+          await c.seekTo(Duration(milliseconds: (start * 1000).round()));
         }
-        await controller.setLooping(false);
+        await c.setLooping(false);
         if (_rate != 1.0) {
           try {
-            await controller.setRate(_rate);
+            await c.setRate(_rate);
           } catch (_) {}
         }
-        await controller.play();
-        if (!mounted || token != _loadToken) {
-          await controller.dispose();
-          return;
-        }
-        final old = _controller;
-        old?.removeListener(_onVideoValue);
-        _controller = controller;
-        controller.addListener(_onVideoValue);
-        if (old != null) unawaited(old.dispose());
+        if (!mounted || token != _loadToken) return;
+        await c.play();
+        if (!mounted || token != _loadToken) return;
         setState(() {
           _loading = false;
           _error = false;
@@ -397,10 +366,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _wake();
         break;
       } catch (_) {
-        try {
-          controller.removeListener(_onVideoValue);
-          await controller.dispose();
-        } catch (_) {}
+        // 换下一条备用地址继续尝试
       }
     }
 
@@ -412,17 +378,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _errorText = '播放失败：线路不可用，请重试或切换线路';
       });
       _notifySourceFailed();
-      return;
     }
-
-    List<DanmuItem> danmaku;
-    if (presetDanmaku != null && presetDanmaku.isNotEmpty) {
-      danmaku = presetDanmaku;
-    } else {
-      danmaku = await loadDanmakuSource(source.danmu);
-    }
-    if (!mounted || token != _loadToken) return;
-    setState(() => _danmaku = danmaku);
   }
 
   void _notifySourceFailed() {
@@ -479,23 +435,20 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return;
     }
 
-    final old = _controller;
-    if (old == null || !old.value.isInitialized) {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) {
       fxToast(context, '播放器尚未就绪，请稍后再试');
       return;
     }
-    final wasPlaying = old.value.isPlaying;
-    final resume = old.value.position;
-    unawaited(old.pause());
+    final wasPlaying = c.value.isPlaying;
+    final resume = c.value.position;
 
     _hideTimer?.cancel();
-    _danmakuFocus.unfocus();
     setState(() {
       _showQuality = false;
       _showSpeed = false;
       _showEpisodes = false;
       _showJump = false;
-      _inputActive = false;
       _loading = true;
       _error = false;
       _errorText = '';
@@ -504,53 +457,41 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     });
 
     final token = ++_loadToken;
-    FxPlayer? fresh;
+    var ok = false;
     for (final url in urls) {
       if (!mounted || token != _loadToken) return;
-      final controller = FxPlayer.create();
       try {
-        await controller.open(url, headers: info.headers);
-        if (!mounted || token != _loadToken) {
-          await controller.dispose();
-          return;
-        }
-        final duration = controller.value.duration;
+        // 复用同一个播放器实例，只换地址，切清晰度后仍可交回竖屏继续用。
+        await c.open(url, headers: info.headers);
+        if (!mounted || token != _loadToken) return;
+        final duration = c.value.duration;
         var target = resume;
         if (duration > Duration.zero &&
             target >= duration - const Duration(milliseconds: 1500)) {
           target = Duration.zero;
         }
-        if (target > Duration.zero) await controller.seekTo(target);
-        await controller.setLooping(false);
+        if (target > Duration.zero) await c.seekTo(target);
+        await c.setLooping(false);
         try {
-          await controller.setRate(_holding2x ? 2.0 : _rate);
+          await c.setRate(_holding2x ? 2.0 : _rate);
         } catch (_) {}
-        if (wasPlaying) await controller.play();
-        fresh = controller;
+        if (wasPlaying) await c.play();
+        ok = true;
         break;
       } catch (_) {
-        try {
-          await controller.dispose();
-        } catch (_) {}
+        // 换下一条地址继续尝试
       }
     }
 
-    if (!mounted || token != _loadToken) {
-      await fresh?.dispose();
-      return;
-    }
-    if (fresh == null) {
+    if (!mounted || token != _loadToken) return;
+    if (!ok) {
       setState(() => _loading = false);
-      if (wasPlaying) unawaited(old.play());
+      if (wasPlaying) unawaited(c.play());
       _wake();
       fxToast(context, '切换清晰度失败，请重试');
       return;
     }
 
-    old.removeListener(_onVideoValue);
-    fresh.addListener(_onVideoValue);
-    _controller = fresh;
-    unawaited(old.dispose());
     setState(() {
       _qualityKey = key;
       _loading = false;
@@ -582,6 +523,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final v = c.value;
     if (v.hasError && !_error) {
       setState(() {
+        _loading = false;
         _error = true;
         _errorText = '播放中断，请重试或切换线路';
       });
@@ -589,6 +531,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return;
     }
     if (!v.isInitialized) return;
+    if (_loading) setState(() => _loading = false);
     if (!v.isCompleted) {
       _ended = false;
       return;
@@ -628,7 +571,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() {
       _ep = next;
       _episodes = List<Episode>.from(_episodes);
-      _danmaku = const <DanmuItem>[];
       _showEpisodes = false;
       _showQuality = false;
       _controls = true;
@@ -653,28 +595,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /* ---------------------------------------------------------------- 控件 */
 
-  void _onDanmakuChanged() {
-    if (!mounted) return;
-    setState(() {});
-  }
-
-  void _onDanmakuFocus() {
-    if (!mounted || !_danmakuFocus.hasFocus) return;
-    _hideTimer?.cancel();
-    if (!_inputActive || !_controls) {
-      setState(() {
-        _inputActive = true;
-        _controls = true;
-      });
-    }
-  }
-
   void _startHideTimer() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 3), () {
       if (!mounted) return;
       if (_locked ||
-          _inputActive ||
           _panelOpen ||
           _holding2x ||
           _loading ||
@@ -696,11 +621,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _hideControls() {
     _hideTimer?.cancel();
-    _danmakuFocus.unfocus();
     if (!mounted) return;
     setState(() {
       _controls = false;
-      _inputActive = false;
       _showSpeed = false;
       _showEpisodes = false;
       _showJump = false;
@@ -712,10 +635,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (_locked) return;
     if (_panelOpen) {
       _closePanels();
-      return;
-    }
-    if (_inputActive) {
-      _closeInput();
       return;
     }
     if (_loading || _error) {
@@ -737,15 +656,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showJump = false;
       _showQuality = false;
     });
-    if (!_inputActive) _wake();
+    _wake();
   }
 
   void _lock() {
-    _danmakuFocus.unfocus();
     setState(() {
       _locked = true;
       _controls = false;
-      _inputActive = false;
       _showSpeed = false;
       _showEpisodes = false;
       _showJump = false;
@@ -774,12 +691,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void _togglePlay() {
     final c = _controller;
     if (c == null || !c.value.isInitialized) return;
-    if (c.value.isPlaying) {
-      unawaited(c.pause());
-      unawaited(_saveProgress());
-    } else {
-      unawaited(c.play());
-    }
+    // 直接让 media_kit 切换，图标由 player.stream.playing 驱动，避免本地态覆盖。
+    unawaited(c.playOrPause());
     _wake();
   }
 
@@ -845,80 +758,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _wake();
   }
 
-  void _toggleDanmaku() {
-    danmakuSettings.setShow(!danmakuSettings.show);
-    _wake();
-  }
-
-  Future<void> _openDanmakuSettings() async {
-    _closePanels();
-    _hideTimer?.cancel();
-    _danmakuFocus.unfocus();
-    if (!mounted) return;
-    setState(() {
-      _controls = true;
-      _inputActive = false;
-    });
-    await showDanmakuSettingsPanel(context);
-    if (!mounted) return;
-    _wake();
-  }
-
-  void _beginInput() {
-    _hideTimer?.cancel();
-    _closePanels();
-    setState(() {
-      _controls = true;
-      _inputActive = true;
-      _showColors = true;
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _danmakuFocus.requestFocus();
-    });
-  }
-
-  void _closeInput() {
-    _danmakuFocus.unfocus();
-    if (!mounted) return;
-    setState(() {
-      _inputActive = false;
-      _showColors = true;
-    });
-    _wake();
-  }
-
-  void _sendDanmaku() {
-    final text = _danmakuCtrl.text.trim();
-    if (text.isEmpty) {
-      fxToast(context, '弹幕内容不能为空');
-      return;
-    }
-    final c = _controller;
-    final at = c != null && c.value.isInitialized
-        ? c.value.position.inMilliseconds / 1000.0
-        : 0.0;
-    setState(() {
-      _danmaku = List<DanmuItem>.from(_danmaku)
-        ..add(DanmuItem(at, text, fxColorToHex(_danmakuColor), 1));
-    });
-    _danmakuCtrl.clear();
-    _showSeekHint('弹幕已发送');
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _danmakuFocus.requestFocus();
-    });
-  }
-
   void _toggleSpeed() {
     _hideTimer?.cancel();
-    _danmakuFocus.unfocus();
     setState(() {
       _showSpeed = !_showSpeed;
       _showJump = false;
       _showEpisodes = false;
       _showQuality = false;
-      _inputActive = false;
       _controls = true;
     });
     if (!_showSpeed) _wake();
@@ -926,13 +772,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _toggleJump() {
     _hideTimer?.cancel();
-    _danmakuFocus.unfocus();
     setState(() {
       _showJump = !_showJump;
       _showSpeed = false;
       _showEpisodes = false;
       _showQuality = false;
-      _inputActive = false;
       _controls = true;
     });
     if (!_showJump) _wake();
@@ -940,7 +784,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _toggleEpisodes() {
     _hideTimer?.cancel();
-    _danmakuFocus.unfocus();
     if (!_showEpisodes && _episodes.isEmpty) {
       fxToast(context, '暂无剧集信息');
       _wake();
@@ -951,7 +794,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showSpeed = false;
       _showJump = false;
       _showQuality = false;
-      _inputActive = false;
       _controls = true;
     });
     if (!_showEpisodes) _wake();
@@ -963,7 +805,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return;
     }
     _hideTimer?.cancel();
-    _danmakuFocus.unfocus();
     if (_qualityList.isEmpty) {
       fxToast(context, '当前线路仅提供原画');
       _wake();
@@ -974,7 +815,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showSpeed = false;
       _showJump = false;
       _showEpisodes = false;
-      _inputActive = false;
       _controls = true;
     });
     if (!_showQuality) _wake();
@@ -1003,10 +843,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<void> _openPlayerSettings() async {
     _hideTimer?.cancel();
     _closePanels();
-    _danmakuFocus.unfocus();
     if (mounted) setState(() => _controls = true);
 
-    final openDanmaku = await showModalBottomSheet<bool>(
+    await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
@@ -1046,7 +885,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                         const Spacer(),
                         IconButton(
                           onPressed: () =>
-                              Navigator.of(sheetContext).pop(false),
+                              Navigator.of(sheetContext).pop(),
                           icon: const Icon(Icons.close_rounded,
                               color: Fx.sub, size: 22),
                         ),
@@ -1125,7 +964,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                             '自动',
                             active: _qualityKey == null,
                             onTap: () {
-                              Navigator.of(sheetContext).pop(false);
+                              Navigator.of(sheetContext).pop();
                               unawaited(_selectQuality(null));
                             },
                           ),
@@ -1134,7 +973,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                               _qualityName(q),
                               active: _qualityKey == q.key,
                               onTap: () {
-                                Navigator.of(sheetContext).pop(false);
+                                Navigator.of(sheetContext).pop();
                                 unawaited(_selectQuality(q.key));
                               },
                             ),
@@ -1150,38 +989,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       const SizedBox(height: 8),
                       const ChipTag('原画', active: true),
                     ],
-                    const SizedBox(height: 6),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      value: danmakuSettings.show,
-                      activeColor: Fx.accent,
-                      title: const Text('显示弹幕',
-                          style: TextStyle(
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w600,
-                              color: Fx.ink)),
-                      onChanged: (v) {
-                        danmakuSettings.setShow(v);
-                        setSheetState(() {});
-                      },
-                    ),
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      leading: const Icon(Icons.tune_rounded,
-                          size: 20, color: Fx.accent),
-                      title: const Text('弹幕设置',
-                          style: TextStyle(
-                              fontSize: 13.5,
-                              fontWeight: FontWeight.w600,
-                              color: Fx.ink)),
-                      subtitle: const Text('字号 / 透明度 / 区域 / 滚动时间 / 类型',
-                          style: TextStyle(fontSize: 10.5, color: Fx.sub)),
-                      trailing: const Icon(Icons.chevron_right_rounded,
-                          color: Fx.sub),
-                      onTap: () => Navigator.of(sheetContext).pop(true),
-                    ),
                     const ListTile(
                       contentPadding: EdgeInsets.zero,
                       dense: true,
@@ -1204,26 +1011,25 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       },
     );
     if (!mounted) return;
-    if (openDanmaku == true) {
-      await _openDanmakuSettings();
-    } else {
-      _wake();
-    }
+    _wake();
   }
 
   Future<void> _exit() async {
     if (_exiting) return;
     _exiting = true;
     _hideTimer?.cancel();
-    _danmakuFocus.unfocus();
     final playing = _playing;
     final position = await _saveProgress();
-    final c = _controller;
-    if (c != null) unawaited(c.pause());
+    // 播放器交回竖屏继续使用：不 pause、不 dispose，保持进度与播放状态。
     await _restoreSystemUi();
     if (!mounted) return;
     Navigator.of(context).pop(
-      FullPlayerResult(ep: _ep, position: position, playing: playing),
+      FullPlayerResult(
+        ep: _ep,
+        position: position,
+        playing: playing,
+        info: _info,
+      ),
     );
   }
 
@@ -1272,11 +1078,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           fit: StackFit.expand,
           children: [
             Positioned.fromRect(rect: rect, child: _buildVideoSurface(c)),
-            if (c != null)
-              Positioned.fromRect(
-                rect: rect,
-                child: IgnorePointer(child: _buildDanmakuLayer(c)),
-              ),
             if (!_locked)
               Positioned.fill(
                 child: GestureDetector(
@@ -1355,22 +1156,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
   }
 
-  Widget _buildDanmakuLayer(FxPlayer c) {
-    return AnimatedBuilder(
-      animation: c,
-      builder: (context, _) {
-        final v = c.value;
-        if (!v.isInitialized) return const SizedBox.shrink();
-        return DanmakuOverlay(
-          items: _danmaku,
-          position: v.position,
-          playing: v.isPlaying,
-          settings: danmakuSettings,
-        );
-      },
-    );
-  }
-
   Widget _buildLoading(Rect rect) {
     return Positioned.fromRect(
       rect: rect,
@@ -1445,7 +1230,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     unawaited(_bootstrap(
                       seekToSaved: true,
                       saveOld: false,
-                      useProvided: true,
                     ));
                   }),
                   const SizedBox(width: 10),
@@ -1599,21 +1383,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     onClose: _closePanels,
                   ),
                 ),
-              if (_inputActive)
-                FsDanmakuInputBar(
-                  controller: _danmakuCtrl,
-                  focusNode: _danmakuFocus,
-                  color: _danmakuColor,
-                  showColors: _showColors,
-                  onPickColor: (color) => setState(() => _danmakuColor = color),
-                  onTogglePalette: () =>
-                      setState(() => _showColors = !_showColors),
-                  onSend: _sendDanmaku,
-                  onClose: _closeInput,
-                  compact: compact,
-                  bottomInset: bottomInset,
-                )
-              else if (c == null)
+              if (c == null)
                 SizedBox(height: 68 + bottomInset)
               else
                 AnimatedBuilder(
@@ -1625,17 +1395,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       duration: v.duration,
                       playing: v.isInitialized && v.isPlaying,
                       rate: _rate,
-                      danmakuOn: danmakuSettings.show,
                       qualityLabel: _qualityLabel,
                       compact: compact,
                       bottomInset: bottomInset,
                       onSeek: _seekTo,
                       onTogglePlay: _togglePlay,
                       onNext: () => unawaited(_next()),
-                      onToggleDanmaku: _toggleDanmaku,
-                      onDanmakuSettings: () =>
-                          unawaited(_openDanmakuSettings()),
-                      onDanmakuInput: _beginInput,
                       onJump: _toggleJump,
                       onSpeed: _toggleSpeed,
                       onQuality: _toggleQuality,
@@ -1652,7 +1417,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 }
 
-/// 居中提示小胶囊（±10s / 已发送弹幕 / 2x 提示）
+/// 居中提示小胶囊（±10s / 倍速提示）
 class _FsBadge extends StatelessWidget {
   const _FsBadge({required this.text});
 

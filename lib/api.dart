@@ -163,21 +163,6 @@ class Api {
     return PlayInfo.fromJson(d);
   }
 
-  static Future<List<DanmuItem>> danmu(String id, int ep) async {
-    try {
-      final r = await http
-          .get(_u('/danmu', {'id': id, 'ep': ep}), headers: _headers())
-          .timeout(_timeout);
-      final j = jsonDecode(utf8.decode(r.bodyBytes));
-      final list = j is Map ? (j['data'] ?? []) : j;
-      return (list as List)
-          .map((e) => DanmuItem.fromJson(Map<String, dynamic>.from(e)))
-          .toList();
-    } catch (_) {
-      return [];
-    }
-  }
-
   static Future<List<CommentItem>> comments(String id, int page) async {
     final d = await _get('/comment', {'id': id, 'page': page});
     final list = (d['items'] ?? d['data'] ?? []) as List;
