@@ -819,19 +819,34 @@ class _TogetherPageState extends State<TogetherPage> {
             await controller.dispose();
             return;
           }
-          controller.addListener(_onVideoValue);
           await controller.setLooping(false);
-          _controller = controller;
-          _rate = 1;
+          if (!mounted || seq != _videoSeq) {
+            await controller.dispose();
+            return;
+          }
           final state = _remote;
           if (!_isHost && state != null) {
             await _seekAndMaybePlay(controller, state);
+            if (!mounted || seq != _videoSeq) {
+              await controller.dispose();
+              return;
+            }
           } else if (_isHost && _resumePos != null) {
             final position = _resumePos!;
             await controller.seekTo(
               Duration(milliseconds: (position * 1000).round()),
             );
-            if (_resumePlaying) await controller.play();
+            if (!mounted || seq != _videoSeq) {
+              await controller.dispose();
+              return;
+            }
+            if (_resumePlaying) {
+              await controller.play();
+              if (!mounted || seq != _videoSeq) {
+                await controller.dispose();
+                return;
+              }
+            }
             if (_online) {
               _client.sendState(
                 _resumePlaying ? 'play' : 'pause',
@@ -844,7 +859,14 @@ class _TogetherPageState extends State<TogetherPage> {
             _resumePos = null;
             _resumeKey = '';
           }
-          if (!mounted || seq != _videoSeq) return;
+          // 所有 await 都结束且页面/序号仍有效，才把实例交给页面。
+          if (!mounted || seq != _videoSeq) {
+            await controller.dispose();
+            return;
+          }
+          _controller = controller;
+          controller.addListener(_onVideoValue);
+          _rate = 1;
           setState(() {
             _videoLoading = false;
             _videoError = '';

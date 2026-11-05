@@ -10,6 +10,7 @@ import '../theme.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_theme.dart';
+import 'history_page.dart' show FxStore;
 
 /// 全屏播放退出时带回给竖屏播放器的结果。
 ///
@@ -141,6 +142,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   // 控件显隐 / 锁屏
   bool _controls = true;
   Timer? _hideTimer;
+  Timer? _progressTimer;
   bool _locked = false;
   bool _rotationLocked = false;
 
@@ -200,11 +202,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return c.value.resolutionText;
   }
 
-  String get _epLabel {
+  String get _epLabel => _epLabelFor(_ep);
+
+  String _epLabelFor(int n) {
     for (final e in _episodes) {
-      if (e.n == _ep && e.name.isNotEmpty) return e.name;
+      if (e.n == n && e.name.isNotEmpty) return e.name;
     }
-    return fxEpisodeLabel(_ep);
+    return fxEpisodeLabel(n);
   }
 
   @override
@@ -230,6 +234,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
     WidgetsBinding.instance.addObserver(this);
     unawaited(_enterImmersive());
+    _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (!mounted) return;
+      unawaited(_saveProgress());
+    });
     _startHideTimer();
     if (widget.videoId.isNotEmpty && _episodes.isEmpty) {
       unawaited(_loadEpisodeMeta());
@@ -241,6 +249,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _seekHintTimer?.cancel();
+    _progressTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
     // 播放器实例属于竖屏页面，退出全屏只移除监听，不能 dispose。
@@ -598,13 +607,27 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final ep = _loadedEp;
     if (c == null || ep == null || !c.value.isInitialized) return 0;
     final v = c.value;
-    var seconds = ended ? 0.0 : v.position.inMilliseconds / 1000.0;
-    if (!ended &&
-        v.duration.inMilliseconds > 0 &&
-        v.position.inMilliseconds >= v.duration.inMilliseconds - 1500) {
+    final durationMs = v.duration.inMilliseconds;
+    final rawPosition = v.position.inMilliseconds;
+    final positionMs = durationMs > 0
+        ? (rawPosition < 0
+            ? 0
+            : (rawPosition > durationMs ? durationMs : rawPosition))
+        : (rawPosition < 0 ? 0 : rawPosition);
+    var seconds = ended ? 0.0 : positionMs / 1000.0;
+    if (!ended && durationMs > 0 && positionMs >= durationMs - 1500) {
       seconds = 0;
     }
     await fxSaveProgress(widget.videoId, ep, seconds);
+    await FxStore.updateProgress(
+      id: widget.videoId,
+      ep: ep,
+      epName: _epLabelFor(ep),
+      lineId: widget.line,
+      lineName: widget.lineName,
+      position: positionMs ~/ 1000,
+      duration: durationMs <= 0 ? 0 : durationMs ~/ 1000,
+    );
     return seconds;
   }
 

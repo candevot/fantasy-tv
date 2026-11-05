@@ -453,12 +453,25 @@ class TogetherClient {
         break;
       case 'error':
         final errCode = '${msg['code'] ?? 'error'}';
+        final errMsg = '${msg['msg'] ?? ''}';
+        // 重连时先 join 旧房间号：房主只有在收到 not_found（原房间已解散）
+        // 才重新 create；收到前保持原房号不变。
+        if (errCode == 'not_found' &&
+            host &&
+            code.isNotEmpty &&
+            _pendingCreate == null) {
+          final payload = _createPayload();
+          _pendingCreate = payload;
+          onSystem('房间已失效，正在重新创建…');
+          _send(payload);
+          break;
+        }
         if (errCode == 'not_found' || errCode == 'room_full') {
           code = '';
           host = false;
           _pendingCreate = null;
         }
-        onError(errCode, '${msg['msg'] ?? ''}');
+        onError(errCode, errMsg);
         break;
       case 'closed':
         code = '';
@@ -482,16 +495,13 @@ class TogetherClient {
     selfName = '${user['name'] ?? '观众'}';
     selfAvatar = '${user['avatar'] ?? ''}';
     _startPing();
-    // 断线重连：房主重建房间，成员按房间号 rejoin（在 onOpen 前发出，避免重复 create）。
+    // 断线重连：房主也先加入原房间号，只有服务端回 not_found 才重建，
+    // 避免每次重连都换房；创建中的 create 仍优先重发。
     final pending = _pendingCreate;
     if (pending != null) {
       _send(pending);
     } else if (code.isNotEmpty) {
-      if (host) {
-        _send(_createPayload());
-      } else {
-        _send({'action': 'join', 'code': code});
-      }
+      _send({'action': 'join', 'code': code});
     }
     onOpen(TogetherMember(
       id: selfId,

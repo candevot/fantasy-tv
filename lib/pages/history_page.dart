@@ -43,32 +43,83 @@ class FxStore {
 
   static Future<int> count(String key) async => (await read(key)).length;
 
-  /// 记录一次观看（同一作品去重，最多 100 条）
+  /// 记录一次观看（同一作品去重，最多 100 条）。
+  ///
+  /// 只传 ep/line 时保留已有进度：详情页重新加载不该把播放器写入的
+  /// position/duration 清零。线路存 id 供续播，name 仅用于展示。
   static Future<void> addHistory({
     required String id,
     required String title,
     String cover = '',
     int ep = 1,
     String epName = '',
-    String line = '',
-    int position = 0,
-    int duration = 0,
+    String lineId = '',
+    String lineName = '',
+    int? position,
+    int? duration,
   }) async {
     if (id.isEmpty) return;
     final list = await read(historyKey);
+    Map<String, dynamic>? old;
+    for (final e in list) {
+      if ('${e['id']}' == id) {
+        old = e;
+        break;
+      }
+    }
     list.removeWhere((e) => '${e['id']}' == id);
+    final oldLineId =
+        old == null ? '' : _firstNonEmpty(old['lineId'], old['line']);
+    final oldLineName =
+        old == null ? '' : _firstNonEmpty(old['lineName'], old['line']);
+    final keepProgress = old != null && fxInt(old['ep'], 1) == ep;
     list.insert(0, <String, dynamic>{
       'id': id,
       'title': title,
-      'cover': cover,
+      'cover': cover.isEmpty && old != null ? fxStr(old['cover']) : cover,
       'ep': ep,
       'epName': epName,
-      'line': line,
-      'position': position,
-      'duration': duration,
+      'lineId': lineId.isEmpty ? oldLineId : lineId,
+      'lineName': lineName.isEmpty ? oldLineName : lineName,
+      // 旧版本只认 line；保留它，避免回退时线路丢失。
+      'line': lineName.isEmpty ? oldLineName : lineName,
+      'position': position ?? (keepProgress ? fxInt(old['position']) : 0),
+      'duration': duration ?? (keepProgress ? fxInt(old['duration']) : 0),
       'updatedAt': DateTime.now().millisecondsSinceEpoch,
     });
     if (list.length > 100) list.removeRange(100, list.length);
+    await write(historyKey, list);
+  }
+
+  /// 播放器回写：只更新已有历史记录，不凭空新增。
+  static Future<void> updateProgress({
+    required String id,
+    required int ep,
+    required int position,
+    required int duration,
+    String epName = '',
+    String lineId = '',
+    String lineName = '',
+  }) async {
+    if (id.isEmpty) return;
+    final list = await read(historyKey);
+    var found = false;
+    for (final e in list) {
+      if ('${e['id']}' != id) continue;
+      found = true;
+      e['ep'] = ep;
+      if (epName.isNotEmpty) e['epName'] = epName;
+      if (lineId.isNotEmpty) e['lineId'] = lineId;
+      if (lineName.isNotEmpty) {
+        e['lineName'] = lineName;
+        e['line'] = lineName;
+      }
+      e['position'] = position < 0 ? 0 : position;
+      e['duration'] = duration < 0 ? 0 : duration;
+      e['updatedAt'] = DateTime.now().millisecondsSinceEpoch;
+      break;
+    }
+    if (!found) return;
     await write(historyKey, list);
   }
 
@@ -107,6 +158,11 @@ class FxStore {
 /*  观看历史                                                                   */
 /* ========================================================================== */
 
+String _firstNonEmpty(Object? primary, Object? fallback) {
+  final first = fxStr(primary);
+  return first.isNotEmpty ? first : fxStr(fallback);
+}
+
 class WatchRecord {
   WatchRecord({
     required this.id,
@@ -114,7 +170,8 @@ class WatchRecord {
     required this.cover,
     required this.ep,
     required this.epName,
-    required this.line,
+    required this.lineId,
+    required this.lineName,
     required this.position,
     required this.duration,
     required this.updatedAt,
@@ -125,7 +182,10 @@ class WatchRecord {
   final String cover;
   final int ep;
   final String epName;
-  final String line;
+
+  /// 续播用的线路 id（旧记录没有时回退到 line 字段）。
+  final String lineId;
+  final String lineName;
   final int position;
   final int duration;
   final int updatedAt;
@@ -136,7 +196,8 @@ class WatchRecord {
         cover: fxStr(m['cover']),
         ep: fxInt(m['ep'], 1),
         epName: fxStr(m['epName']),
-        line: fxStr(m['line']),
+        lineId: _firstNonEmpty(m['lineId'], m['line']),
+        lineName: _firstNonEmpty(m['lineName'], m['line']),
         position: fxInt(m['position']),
         duration: fxInt(m['duration']),
         updatedAt: fxInt(m['updatedAt']),
@@ -148,7 +209,10 @@ class WatchRecord {
         'cover': cover,
         'ep': ep,
         'epName': epName,
-        'line': line,
+        'lineId': lineId,
+        'lineName': lineName,
+        // 旧版本字段，保持可回退。
+        'line': lineName,
         'position': position,
         'duration': duration,
         'updatedAt': updatedAt,
@@ -240,12 +304,14 @@ class _HistoryPageState extends State<HistoryPage> {
     ));
   }
 
-  void _continue(WatchRecord r) {
-    Navigator.of(context).push(
+  Future<void> _continue(WatchRecord r) async {
+    await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => PlayerPage(videoId: r.id, ep: r.ep, line: r.line),
+        builder: (_) => PlayerPage(videoId: r.id, ep: r.ep, line: r.lineId),
       ),
     );
+    // 播放器会在播放中回写进度，返回时重新读一次让进度条保持最新。
+    if (mounted) await _load();
   }
 
   String _dayLabel(int ms) {
@@ -350,6 +416,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Widget _card(WatchRecord r) {
     final epLabel = r.epName.isNotEmpty ? r.epName : '第 ${r.ep} 集';
+    final epAndLine = r.lineName.isEmpty ? epLabel : '$epLabel · ${r.lineName}';
     final progressText = r.duration > 0 && r.position > 0
         ? '看到 ${fxDurationText(r.position)} / ${fxDurationText(r.duration)}'
         : '上次观看 ${fxTimeAgo(r.updatedAt)}';
@@ -416,7 +483,7 @@ class _HistoryPageState extends State<HistoryPage> {
                         color: Fx.ink),
                   ),
                   const SizedBox(height: 5),
-                  Text(epLabel,
+                  Text(epAndLine,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(

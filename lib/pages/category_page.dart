@@ -729,6 +729,10 @@ class _CategoryPageState extends State<CategoryPage> {
   bool _moreError = false;
   String? _error;
 
+  /// 已有内容时刷新失败：单独记错误并用 toast 提示，不占用首屏错误态，
+  /// 也不阻塞继续上拉加载。
+  String? _refreshError;
+
   @override
   void initState() {
     super.initState();
@@ -752,10 +756,13 @@ class _CategoryPageState extends State<CategoryPage> {
   Future<void> _load({required bool reset, bool clear = false}) async {
     if (reset) {
       final req = ++_req;
+      // 保留现有内容的刷新失败不该占整页错误态，否则上拉会被 _error 卡死。
+      final refreshing = !clear && _items.isNotEmpty;
       setState(() {
         _loading = true;
         _loadingMore = false;
         _error = null;
+        _refreshError = null;
         _moreError = false;
         _hasMore = true;
         _page = 1;
@@ -771,19 +778,30 @@ class _CategoryPageState extends State<CategoryPage> {
             ..addAll(list);
           _page = 1;
           _loading = false;
+          _error = null;
+          _refreshError = null;
           _hasMore = list.length >= 20;
         });
       } catch (e) {
         if (!mounted || req != _req) return;
-        setState(() {
-          _loading = false;
-          _error = fxErrorText(e);
-        });
+        final message = fxErrorText(e);
+        if (refreshing) {
+          setState(() {
+            _loading = false;
+            _refreshError = message;
+          });
+          _toast('刷新失败：$message');
+        } else {
+          setState(() {
+            _loading = false;
+            _error = message;
+          });
+        }
       }
       return;
     }
 
-    if (_loading || _loadingMore || !_hasMore || _error != null) return;
+    if (_loading || _loadingMore || !_hasMore) return;
     final req = _req;
     final next = _page + 1;
     setState(() {
@@ -798,6 +816,7 @@ class _CategoryPageState extends State<CategoryPage> {
         _items.addAll(list);
         _page = next;
         _loadingMore = false;
+        _refreshError = null;
         _hasMore = list.length >= 20;
       });
     } catch (e) {
@@ -811,6 +830,18 @@ class _CategoryPageState extends State<CategoryPage> {
 
   void _reload() {
     _load(reset: true, clear: true);
+  }
+
+  void _toast(String message) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(
+      content: Text(message),
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: const Color(0xEE1B2430),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ));
   }
 
   Future<void> _pick(String title, List<_Opt> options, String current,
@@ -913,6 +944,8 @@ class _CategoryPageState extends State<CategoryPage> {
             const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
         slivers: [
           SliverToBoxAdapter(child: _header()),
+          if (_refreshError != null && _items.isNotEmpty)
+            SliverToBoxAdapter(child: _refreshBanner()),
           if (_items.isEmpty && _loading)
             const SliverFillRemaining(
               hasScrollBody: false,
@@ -972,6 +1005,39 @@ class _CategoryPageState extends State<CategoryPage> {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _refreshBanner() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+      child: GestureDetector(
+        onTap: () => _load(reset: true),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF3E6),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFFFD9AE)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.refresh_rounded,
+                  size: 14, color: Color(0xFFB26A1F)),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  '刷新失败：${_refreshError!} · 点击重试',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style:
+                      const TextStyle(fontSize: 11, color: Color(0xFFB26A1F)),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

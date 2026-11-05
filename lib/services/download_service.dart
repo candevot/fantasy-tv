@@ -470,6 +470,8 @@ class DownloadService extends ChangeNotifier {
     if (_pumping || !_ready) return;
     _pumping = true;
     try {
+      String? abortKey;
+      var abortStreak = 0;
       while (true) {
         DownloadTask? next;
         for (final task in _tasks) {
@@ -479,7 +481,32 @@ class DownloadService extends ChangeNotifier {
           }
         }
         if (next == null) break;
-        await _runTask(next);
+        final aborted = await _runTask(next);
+        if (!aborted) {
+          abortKey = null;
+          abortStreak = 0;
+          continue;
+        }
+        // 同一任务连续 abort 说明它一直在「下载→中断→重新排队」打转，
+        // 超过 2 次直接置失败，避免队列空转。
+        if (next.key == abortKey) {
+          abortStreak++;
+        } else {
+          abortKey = next.key;
+          abortStreak = 1;
+        }
+        if (abortStreak > 2) {
+          if (_tasks.contains(next) && next.status == DownloadStatus.queued) {
+            next
+              ..status = DownloadStatus.failed
+              ..error = '下载多次中断，请点击重试'
+              ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+            _notifyNow();
+            await _persist();
+          }
+          abortKey = null;
+          abortStreak = 0;
+        }
       }
     } finally {
       _pumping = false;
@@ -489,8 +516,11 @@ class DownloadService extends ChangeNotifier {
     }
   }
 
-  Future<void> _runTask(DownloadTask task) async {
-    if (!_tasks.contains(task) || task.status != DownloadStatus.queued) return;
+  Future<bool> _runTask(DownloadTask task) async {
+    if (!_tasks.contains(task) || task.status != DownloadStatus.queued) {
+      return false;
+    }
+    var aborted = false;
     try {
       final play = await _withRetry(
         () => Api.play(task.id, task.ep, task.line),
@@ -533,6 +563,7 @@ class DownloadService extends ChangeNotifier {
       }
     } on _AbortDownload {
       // 暂停 / 删除 / 清空：状态已由控制方法处理，这里不再改状态。
+      aborted = true;
     } catch (e) {
       if (_tasks.contains(task) &&
           (task.status == DownloadStatus.downloading ||
@@ -546,10 +577,19 @@ class DownloadService extends ChangeNotifier {
     } finally {
       _notifyNow();
     }
+    return aborted;
   }
 
+  /// 只有任务被删除或被暂停才中断下载；排队（queued）不算停止，
+  /// 否则刚拿到播放地址就会误 abort，任务永远原地重排。
   bool _shouldStop(DownloadTask task) =>
-      !_tasks.contains(task) || task.status != DownloadStatus.downloading;
+      !_tasks.contains(task) || task.status == DownloadStatus.paused;
+
+  Future<void> _deleteQuietly(File file) async {
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
 
   Uri _ensureAuthorized(Uri? uri) {
     // 合规：只缓存接口给出的 http/https 直链，拒绝 file:/data:/其他协议。
@@ -619,11 +659,16 @@ class DownloadService extends ChangeNotifier {
     final signature = _signature(segments);
 
     final dir = await _taskDir(task);
-    final part = File('${dir.path}/ep_${task.ep}.part');
+    // 分片按类型分名：HLS 与 MP4 的字节格式不同，不能共用同一个 .part。
+    final part = File('${dir.path}/ep_${task.ep}.hls.part');
     final target = File('${dir.path}/ep_${task.ep}.$ext');
+    // 类型不一致（上次是 MP4 直链）或旧版命名：删掉重下，避免拼接损坏。
+    await _deleteQuietly(File('${dir.path}/ep_${task.ep}.mp4.part'));
+    await _deleteQuietly(File('${dir.path}/ep_${task.ep}.part'));
 
     var start = 0;
-    if (task.totalSegments == total &&
+    if (task.ext == ext &&
+        task.totalSegments == total &&
         task.signature == signature &&
         task.doneSegments > 0 &&
         task.doneSegments <= total &&
@@ -710,20 +755,21 @@ class DownloadService extends ChangeNotifier {
     Map<String, String> headers,
   ) async {
     final dir = await _taskDir(task);
-    final part = File('${dir.path}/ep_${task.ep}.part');
+    final part = File('${dir.path}/ep_${task.ep}.mp4.part');
     final target = File('${dir.path}/ep_${task.ep}.mp4');
+
+    // 类型不一致（上次是 HLS 或旧版命名）的 .part 必须删除重下，
+    // 否则会把 TS 分片与 MP4 Range 响应拼成一个损坏文件。
+    await _deleteQuietly(File('${dir.path}/ep_${task.ep}.hls.part'));
+    await _deleteQuietly(File('${dir.path}/ep_${task.ep}.part'));
 
     // 以本地 .part 的真实长度作为断点，避免上次异常退出时 task.bytes
     // 比实际写入多，Range 跳过尚未落盘的数据导致文件损坏。
-    // 若这个 .part 上一次属于 HLS（例如切换线路后重试），必须丢弃，
-    // 否则会把 TS 字节和 MP4 Range 响应拼成一个损坏文件。
     var received = 0;
     if (task.ext.toLowerCase() == 'mp4' && await part.exists()) {
       received = await part.length();
     } else if (await part.exists()) {
-      try {
-        await part.delete();
-      } catch (_) {}
+      await _deleteQuietly(part);
     }
 
     task

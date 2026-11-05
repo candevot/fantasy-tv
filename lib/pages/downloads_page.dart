@@ -608,6 +608,9 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   bool _initializing = true;
   String? _error;
 
+  /// 初始化序号：dispose 后让 await 中的旧任务作废，避免退出后继续播放。
+  int _openSeq = 0;
+
   @override
   void initState() {
     super.initState();
@@ -615,6 +618,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   }
 
   Future<void> _open() async {
+    final seq = ++_openSeq;
     final path = widget.task.filePath;
     if (path == null) {
       if (mounted) {
@@ -625,24 +629,45 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
       }
       return;
     }
+    VideoPlayerController? controller;
     try {
       final file = File(path);
       if (!await file.exists()) {
         throw const FileSystemException('缓存文件已被清理');
       }
-      final controller = VideoPlayerController.file(file);
-      _controller = controller;
+      if (!mounted || seq != _openSeq) return;
+      controller = VideoPlayerController.file(file);
       await controller.initialize();
+      if (!mounted || seq != _openSeq) {
+        await controller.dispose();
+        return;
+      }
       await controller.setLooping(false);
+      if (!mounted || seq != _openSeq) {
+        await controller.dispose();
+        return;
+      }
       controller.addListener(_onTick);
       await controller.play();
-      if (!mounted) return;
+      if (!mounted || seq != _openSeq) {
+        controller.removeListener(_onTick);
+        await controller.dispose();
+        return;
+      }
+      _controller = controller;
+      controller = null;
       setState(() {
         _initializing = false;
         _error = null;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (controller != null) {
+        controller.removeListener(_onTick);
+        try {
+          await controller.dispose();
+        } catch (_) {}
+      }
+      if (!mounted || seq != _openSeq) return;
       setState(() {
         _initializing = false;
         _error = '离线播放失败：${_short(e)}';
@@ -661,6 +686,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
 
   @override
   void dispose() {
+    _openSeq++;
     _controller?.removeListener(_onTick);
     _controller?.dispose();
     super.dispose();

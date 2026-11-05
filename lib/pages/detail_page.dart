@@ -212,7 +212,8 @@ class _DetailPageState extends State<DetailPage>
         cover: d.cover,
         ep: _ep,
         epName: _currentEpLabel,
-        line: _lineName,
+        lineId: _lineId,
+        lineName: _lineName,
       );
     } catch (_) {}
   }

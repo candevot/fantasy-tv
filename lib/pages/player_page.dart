@@ -8,6 +8,7 @@ import '../services/fx_player.dart';
 import '../theme.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
+import 'history_page.dart' show FxStore;
 
 /// 当前线路不能直接播放的原因，交给外层决定换线路与提示文案。
 enum SourceIssue { parse, empty, error }
@@ -77,6 +78,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   bool _controls = true;
   Timer? _hideTimer;
 
+  /// 每 10 秒把观看进度回写历史，App 被杀也能保留大致位置。
+  Timer? _progressTimer;
+
   bool _holding2x = false;
   double _rate = 1.0;
   double _rateBeforeHold = 1.0;
@@ -107,11 +111,23 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     return t.isEmpty ? '正在播放' : t;
   }
 
-  String get _epLabel {
+  String get _epLabel => _epLabelFor(_ep);
+
+  String _epLabelFor(int n) {
     for (final e in _episodeList) {
-      if (e.n == _ep && e.name.isNotEmpty) return e.name;
+      if (e.n == n && e.name.isNotEmpty) return e.name;
     }
-    return fxEpisodeLabel(_ep);
+    return fxEpisodeLabel(n);
+  }
+
+  /// 当前线路名：优先用接口返回的线路名，其次从详情线路表里按 id 查。
+  String get _lineName {
+    final infoName = _info?.lineName.trim() ?? '';
+    if (infoName.isNotEmpty) return infoName;
+    for (final line in widget.detail?.lines ?? const <LineInfo>[]) {
+      if (line.id == _line) return line.displayName;
+    }
+    return '';
   }
 
   @override
@@ -120,6 +136,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _ep = widget.ep;
     _line = widget.line;
     WidgetsBinding.instance.addObserver(this);
+    _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      // 全屏期间由全屏页保存，避免把全屏切换后的位置记到旧集。
+      if (!mounted || _fullscreenActive) return;
+      unawaited(_saveProgress());
+    });
     _bootstrap(seekToSaved: true, saveOld: false);
   }
 
@@ -163,6 +184,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    _progressTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
     _controller?.removeListener(_onVideoValue);
@@ -177,14 +199,28 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final c = _controller;
     final ep = _loadedEp;
     if (c == null || ep == null || !c.value.isInitialized) return;
-    final duration = c.value.duration.inMilliseconds;
-    var seconds = ended ? 0.0 : c.value.position.inMilliseconds / 1000.0;
-    if (!ended &&
-        duration > 0 &&
-        c.value.position.inMilliseconds >= duration - 1500) {
+    final durationMs = c.value.duration.inMilliseconds;
+    final rawPosition = c.value.position.inMilliseconds;
+    final positionMs = durationMs > 0
+        ? (rawPosition < 0
+            ? 0
+            : (rawPosition > durationMs ? durationMs : rawPosition))
+        : (rawPosition < 0 ? 0 : rawPosition);
+    var seconds = ended ? 0.0 : positionMs / 1000.0;
+    if (!ended && durationMs > 0 && positionMs >= durationMs - 1500) {
       seconds = 0;
     }
     await fxSaveProgress(widget.videoId, ep, seconds);
+    // 同一份进度回写历史页（FxStore.historyKey），让「观看历史」进度条可见。
+    await FxStore.updateProgress(
+      id: widget.videoId,
+      ep: ep,
+      epName: _epLabelFor(ep),
+      lineId: _line,
+      lineName: _lineName,
+      position: positionMs ~/ 1000,
+      duration: durationMs <= 0 ? 0 : durationMs ~/ 1000,
+    );
   }
 
   /// 详情页被新页面覆盖前调用：暂停并保存，返回覆盖前是否正在播放。
