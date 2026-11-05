@@ -14,7 +14,7 @@ import 'player_theme.dart';
 /// - 双击：播放 / 暂停（300ms 窗口自判，不让单击等系统双击超时）
 /// - 左右滑：调进度，满屏高 ≈ 240s，单次手势最多 ±120s，**松手才 seek**
 /// - 上下滑：左半屏亮度 / 右半屏音量，满屏高 = 100%，带图标与百分比提示
-/// - 长按：3.0 倍速（由页面负责恢复，来电/切后台时页面也会复位）
+/// - 长按：3.0 倍速（仅全屏启用；由页面负责恢复）
 ///
 /// 该组件铺满播放器区域，放在视频层之上、控件层之下：
 /// 控件可见时由控件自己消费点击，不会误触手势。
@@ -25,8 +25,8 @@ class FxPlayerGestures extends StatefulWidget {
     required this.onTap,
     required this.onDoubleTap,
     required this.onSeek,
-    required this.onLongPressStart,
-    required this.onLongPressEnd,
+    this.onLongPressStart,
+    this.onLongPressEnd,
     this.onGestureStart,
     this.enabled = true,
     this.enableVertical = true,
@@ -37,8 +37,10 @@ class FxPlayerGestures extends StatefulWidget {
   final VoidCallback onTap;
   final VoidCallback onDoubleTap;
   final ValueChanged<Duration> onSeek;
-  final VoidCallback onLongPressStart;
-  final VoidCallback onLongPressEnd;
+
+  /// 长按倍速：仅在需要该能力的页面（全屏）传入，竖屏不传。
+  final VoidCallback? onLongPressStart;
+  final VoidCallback? onLongPressEnd;
 
   /// 横扫 / 竖扫开始时回调，页面可借此收起控件，避免遮挡手势浮层。
   final VoidCallback? onGestureStart;
@@ -338,10 +340,15 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTapUp: widget.enabled ? _handleTapUp : null,
-      onLongPressStart:
-          widget.enabled ? (_) => widget.onLongPressStart() : null,
-      onLongPressEnd: widget.enabled ? (_) => widget.onLongPressEnd() : null,
-      onLongPressCancel: widget.enabled ? widget.onLongPressEnd : null,
+      onLongPressStart: widget.enabled && widget.onLongPressStart != null
+          ? (_) => widget.onLongPressStart!()
+          : null,
+      onLongPressEnd: widget.enabled && widget.onLongPressEnd != null
+          ? (_) => widget.onLongPressEnd!()
+          : null,
+      onLongPressCancel: widget.enabled && widget.onLongPressEnd != null
+          ? () => widget.onLongPressEnd!()
+          : null,
       onHorizontalDragStart: widget.enabled ? _onHorizontalStart : null,
       onHorizontalDragUpdate: widget.enabled ? _onHorizontalUpdate : null,
       onHorizontalDragEnd: widget.enabled ? _onHorizontalEnd : null,

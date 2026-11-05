@@ -6,10 +6,7 @@ import '../api.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
-import '../widgets/fs_controls.dart';
-import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
-import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
 import 'history_page.dart' show FxStore;
@@ -19,11 +16,11 @@ enum SourceIssue { parse, empty, error }
 
 /// 详情页内嵌播放器（16:9），也是独立播放页复用的播放控件。
 ///
-/// 控件布局：
-/// 左上 返回 + 片名/集数
-/// 右上 投屏 / 设置
-/// 底部 播放暂停 · 当前时间 · 细进度条 · 总时长 · 下一集 · 全屏
-/// 5 秒无操作自动隐藏；点画面唤出/隐藏；长按 3.0x；双击暂停。
+/// 控件布局（竖屏只保留 5 项）：
+/// 左上 返回；右上 投屏
+/// 底部 播放暂停 · 当前时间 · 细进度条 · 总时长 · 全屏
+/// 3 秒无操作自动隐藏；点画面唤出/隐藏；双击暂停。
+/// 长按倍速、亮度/音量手势、锁屏等只在全屏提供。
 class PlayerView extends StatefulWidget {
   const PlayerView({
     super.key,
@@ -80,6 +77,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   static const Duration _watchdogTick = Duration(seconds: 3);
   static const Duration _watchdogStall = Duration(seconds: 12);
 
+  /// 竖屏控件 3 秒无操作自动隐藏。
+  static const Duration _controlsAutoHide = Duration(seconds: 3);
+
   FxPlayer? _controller;
   PlayInfo? _info;
 
@@ -101,11 +101,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   bool _controls = true;
   Timer? _hideTimer;
-
-  /// 竖屏锁屏：锁住后手势层与控件层全部隐藏，只留 3 秒解锁钮。
-  bool _locked = false;
-  bool _unlockVisible = false;
-  Timer? _unlockTimer;
 
   /// 正在切换线路（防止重复点击并发 open）。
   bool _switchingLine = false;
@@ -134,20 +129,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   bool _backgrounded = false;
   bool _pausedByBackground = false;
 
-  bool _holding2x = false;
+  /// 进入全屏时随结果带回的真实倍速，切集时沿用。
   double _rate = 1.0;
-  double _rateBeforeHold = 1.0;
-
-  /// 循环模式默认列表（播完自动下一集）；关闭 / 单集由「更多」面板切换。
-  FxLoopMode _loopMode = FxLoopMode.list;
-
-  /// 跳过片头片尾默认关，只记住开关，不自动跳（产品硬性要求）。
-  bool _skipIntroOutro = false;
 
   /// 全屏画面是否撑满（cover）。默认开；关掉后全屏 contain。
   bool _fillScreen = true;
-
-  Timer? _sleepTimer;
 
   bool _openingFullscreen = false;
   bool _fullscreenActive = false;
@@ -174,8 +160,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final t = widget.detail?.title ?? '';
     return t.isEmpty ? '正在播放' : t;
   }
-
-  String get _epLabel => _epLabelFor(_ep);
 
   String _epLabelFor(int n) {
     for (final e in _episodeList) {
@@ -214,12 +198,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final value = await fxLoadFillScreen();
     if (!mounted) return;
     setState(() => _fillScreen = value);
-  }
-
-  void _setFillScreen(bool value) {
-    if (_fillScreen == value) return;
-    setState(() => _fillScreen = value);
-    unawaited(fxSaveFillScreen(value));
   }
 
   @override
@@ -413,9 +391,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 下拉通知栏 / 截屏 / 多任务预览都只到 inactive：不暂停。
         return;
       case AppLifecycleState.paused:
-        // 来电 / 切后台：长按 3.0x 必须复位；先记进度，3 秒内回前台就不暂停。
+        // 来电 / 切后台：先记进度，3 秒内回前台就不暂停。
         _backgrounded = true;
-        _endHold2x();
         unawaited(_saveProgress());
         _backgroundTimer?.cancel();
         _backgroundTimer = Timer(fxBackgroundPauseDelay, _pauseForBackground);
@@ -455,11 +432,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
-    _unlockTimer?.cancel();
     _progressTimer?.cancel();
     _backgroundTimer?.cancel();
     _watchdogTimer?.cancel();
-    _sleepTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
     _controller?.removeListener(_onVideoValue);
@@ -656,7 +631,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           await controller.dispose();
           return false;
         }
-        await controller.setLooping(_loopMode == FxLoopMode.single);
+        await controller.setLooping(false);
         try {
           await controller.setRate(_rate);
         } catch (_) {}
@@ -889,22 +864,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Future<void> _handleEnded() async {
     await _saveProgress(ended: true);
     if (!mounted) return;
-    if (_loopMode == FxLoopMode.single) {
-      final c = _controller;
-      if (c != null) {
-        try {
-          await c.seekTo(Duration.zero);
-          await c.play();
-        } catch (_) {}
-      }
-      return;
-    }
-    if (_loopMode == FxLoopMode.off) {
-      setState(() => _controls = true);
-      _startHideTimer();
-      fxToast(context, '已播放结束');
-      return;
-    }
     final next = _nextEpNumber();
     if (next != null) {
       await _switchEpisode(next, auto: true);
@@ -938,17 +897,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       epOverride: next,
       playOverride: !_covered,
     );
-  }
-
-  /// 竖屏底部栏的下一集：中间只保留播放/暂停，不再放下一集
-  Future<void> _next() async {
-    final next = _nextEpNumber();
-    if (next == null) {
-      fxToast(context, '已经是最后一集了');
-      _touch();
-      return;
-    }
-    await _switchEpisode(next);
   }
 
   int? _nextEpNumber() {
@@ -988,20 +936,21 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   // ---------------------------------------------------------------- controls
 
   void _showControls() {
-    if (!mounted || _locked) return;
+    if (!mounted) return;
     setState(() => _controls = true);
     _startHideTimer();
   }
 
   void _startHideTimer() {
     _hideTimer?.cancel();
-    _hideTimer = Timer(kPlayerControlsAutoHide, () {
+    _hideTimer = Timer(_controlsAutoHide, () {
       if (!mounted) return;
-      if (_holding2x || _openingFullscreen) {
+      if (_openingFullscreen) {
+        // 正在进入全屏，等全屏页接管后再由页面恢复显隐。
         _startHideTimer();
         return;
       }
-      if (_locked || _loading || _error || _switchingLine) return;
+      if (_loading || _error || _switchingLine) return;
       setState(() => _controls = false);
     });
   }
@@ -1017,52 +966,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   void _onSurfaceTap() {
-    if (_locked || _error) return;
+    if (_error) return;
     // 加载 / 切集期间也能显隐控件，不因为 loading 把整层点击吞掉。
     if (_controls) {
       _hideControls();
     } else {
       _showControls();
     }
-  }
-
-  /* -------------------------------------------------------------- 竖屏锁屏 */
-
-  void _lock() {
-    if (!mounted) return;
-    _hideTimer?.cancel();
-    setState(() {
-      _locked = true;
-      _controls = false;
-      _unlockVisible = true;
-    });
-    _startUnlockTimer();
-  }
-
-  /// 锁定后解锁钮只亮 3 秒；点屏幕可重新唤出（参考 LayoutLockVolume）。
-  void _startUnlockTimer() {
-    _unlockTimer?.cancel();
-    _unlockTimer = Timer(kPlayerUnlockAutoHide, () {
-      if (!mounted || !_locked) return;
-      setState(() => _unlockVisible = false);
-    });
-  }
-
-  void _onLockedTap() {
-    if (!mounted) return;
-    if (!_unlockVisible) setState(() => _unlockVisible = true);
-    _startUnlockTimer();
-  }
-
-  void _unlock() {
-    if (!mounted) return;
-    _unlockTimer?.cancel();
-    setState(() {
-      _locked = false;
-      _unlockVisible = false;
-      _controls = true;
-    });
-    _startHideTimer();
   }
 
   void _togglePlay() {
@@ -1087,118 +997,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _touch();
   }
 
-  void _startHold2x() {
-    final c = _controller;
-    if (_switchingLine ||
-        c == null ||
-        _loading ||
-        _error ||
-        !c.value.isInitialized) {
-      return;
-    }
-    _rateBeforeHold = _rate;
-    c.setRate(kPlayerHoldRate);
-    _hideTimer?.cancel();
-    setState(() {
-      _holding2x = true;
-      // 参考：按住快进时收起控件，只在顶部留「3.0倍速快进中」胶囊。
-      _controls = false;
-    });
-  }
-
-  void _endHold2x() {
-    if (!_holding2x) return;
-    _controller?.setRate(_rateBeforeHold);
-    if (!mounted) return;
-    setState(() => _holding2x = false);
-  }
-
-  void _setRate(double rate) {
-    _rate = rate;
-    _controller?.setRate(rate);
-    _touch();
-  }
-
-  Future<void> _openMorePanel() async {
-    _hideTimer?.cancel();
-    if (mounted) setState(() => _controls = true);
-    await showFxMorePanel(
-      context,
-      loopMode: _loopMode,
-      skipIntroOutro: _skipIntroOutro,
-      fillScreen: _fillScreen,
-      onFillChanged: _setFillScreen,
-      onLoopChanged: (mode) {
-        if (!mounted) return;
-        setState(() => _loopMode = mode);
-        unawaited(
-          _controller?.setLooping(mode == FxLoopMode.single) ??
-              Future<void>.value(),
-        );
-        fxToast(context, '循环播放：${mode.label}');
-      },
-      onSkipChanged: (on) {
-        if (!mounted) return;
-        setState(() => _skipIntroOutro = on);
-        fxToast(context, on ? '已开启跳过片头片尾' : '已关闭跳过片头片尾');
-      },
-      onPip: () => fxToast(context, '画中画：当前版本暂不支持'),
-      onSleepTimer: () => unawaited(_openSleepTimerPicker()),
-      onDownload: () => fxToast(context, '请到详情页下载本集'),
-      onSpeed: () => unawaited(_openSpeedPicker()),
-      onBackground: () => fxToast(context, '后台播放已开启'),
-      onFeedback: () => fxToast(context, '问题反馈：请到「我的-意见反馈」提交'),
-    );
-    if (!mounted) return;
-    _startHideTimer();
-  }
-
-  Future<void> _openSpeedPicker() async {
-    final rate = await showFxSpeedSheet(context, _rate);
-    if (!mounted || rate == null) return;
-    _setRate(rate);
-  }
-
-  Future<void> _openSleepTimerPicker() async {
-    final minutes = await showFxSleepTimerSheet(context);
-    if (!mounted || minutes == null) return;
-    _setSleepTimer(minutes);
-  }
-
-  void _setSleepTimer(int minutes) {
-    _sleepTimer?.cancel();
-    _sleepTimer = null;
-    if (minutes <= 0) {
-      fxToast(context, '已取消定时关闭');
-      return;
-    }
-    _sleepTimer = Timer(Duration(minutes: minutes), () {
-      _sleepTimer = null;
-      if (!mounted) return;
-      unawaited(_controller?.pause());
-      fxToast(context, '定时关闭：已暂停播放');
-    });
-    fxToast(context, '将在 $minutes 分钟后暂停播放');
-  }
-
-  Future<void> _openEpisodeSheet() async {
-    if (_switchingLine) return;
-    final episodes = _episodeList;
-    if (episodes.isEmpty) {
-      fxToast(context, '暂无剧集信息');
-      return;
-    }
-    final picked =
-        await showFsEpisodeSheet(context, episodes: episodes, current: _ep);
-    if (!mounted || picked == null || picked == _ep) return;
-    await _switchEpisode(picked);
-  }
-
   Future<void> _openFullscreen() async {
     final c = _controller;
     if (c == null ||
         _openingFullscreen ||
-        _holding2x ||
         _switchingLine ||
         _loading ||
         _error ||
@@ -1316,18 +1118,17 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   subtitleBottom: fxSubtitleMinBottom,
                 ),
               ),
-            // 手势层：单击显隐控件 / 双击暂停；竖屏也支持上下滑亮度音量。
-            if (c != null && !_locked)
+            // 手势层：单击显隐控件 / 双击暂停 / 左右滑调进度。
+            // 亮度音量上下滑与长按倍速只在全屏提供。
+            if (c != null)
               Positioned.fill(
                 child: FxPlayerGestures(
                   player: c,
                   enabled: !_error,
-                  enableVertical: true,
+                  enableVertical: false,
                   onTap: _onSurfaceTap,
                   onDoubleTap: _togglePlay,
                   onSeek: _seek,
-                  onLongPressStart: _startHold2x,
-                  onLongPressEnd: _endHold2x,
                   onGestureStart: _hideControls,
                 ),
               ),
@@ -1356,52 +1157,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 ),
               ),
             if (_loading && !_error) _buildLoading(),
-            // 控件层压在 loading / 缓冲之上：切集 8s 窗口里也能退出全屏、
-            // 选集、下一集；只按控件显隐禁用指针，不因 loading 整层失效。
-            if (_controls && !_error && !_locked) _buildControls(c),
+            // 控件层压在 loading / 缓冲之上：切集 8s 窗口里也能退出全屏。
+            // 只按控件显隐禁用指针，不因 loading 整层失效。
+            if (_controls && !_error) _buildControls(c),
             if (_error) _buildError(),
-            // 锁屏：吞掉所有触摸，只留 3 秒后自动隐藏的解锁钮。
-            if (_locked)
-              Positioned.fill(
-                child: SafeArea(
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: _onLockedTap,
-                        child: const SizedBox.expand(),
-                      ),
-                      if (_unlockVisible) FsUnlockButton(onUnlock: _unlock),
-                    ],
-                  ),
-                ),
-              ),
-            if (_holding2x)
-              Positioned(
-                top: 14,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(.45),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: Colors.white.withOpacity(.25)),
-                    ),
-                    child: const Text(
-                      '3.0倍速快进中',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
           ],
         ),
       ),
@@ -1518,7 +1277,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           left: 0,
           right: 0,
           child: Container(
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 22),
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 18),
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
@@ -1540,75 +1299,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     if (mounted) Navigator.of(context).maybePop();
                   },
                 ),
-                const SizedBox(width: 7),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        _title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          shadows: [
-                            Shadow(color: Colors.black54, blurRadius: 4),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        _epLabel,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 10.5,
-                          shadows: [
-                            Shadow(color: Colors.black54, blurRadius: 4),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (c != null)
-                  AnimatedBuilder(
-                    animation: c,
-                    builder: (context, _) {
-                      final quality = fxPlayerQuality(c);
-                      if (quality.isEmpty) return const SizedBox.shrink();
-                      return Padding(
-                        padding: const EdgeInsets.only(left: 12),
-                        child: FsQualityPill(label: quality, size: .95),
-                      );
-                    },
-                  ),
+                const Spacer(),
                 PGlassIcon(
                   icon: Icons.tv_rounded,
                   size: 31,
                   iconSize: 18,
                   tooltip: '投屏',
                   onTap: () => fxToast(context, '投屏：暂无可用设备'),
-                ),
-                const SizedBox(width: 6),
-                PGlassIcon(
-                  icon: Icons.lock_outline_rounded,
-                  size: 31,
-                  iconSize: 18,
-                  tooltip: '锁定屏幕',
-                  onTap: _lock,
-                ),
-                const SizedBox(width: 6),
-                PGlassIcon(
-                  icon: Icons.more_horiz_rounded,
-                  size: 31,
-                  iconSize: 20,
-                  tooltip: '更多',
-                  onTap: _openMorePanel,
                 ),
               ],
             ),
@@ -1619,7 +1316,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           right: 0,
           bottom: 0,
           child: Container(
-            padding: const EdgeInsets.fromLTRB(10, 26, 8, 6),
+            padding: const EdgeInsets.fromLTRB(10, 24, 8, 6),
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
@@ -1669,21 +1366,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                             ),
                           ),
                           const SizedBox(width: 6),
-                          PGlassIcon(
-                            icon: Icons.skip_next_rounded,
-                            size: 30,
-                            iconSize: 19,
-                            tint: .13,
-                            tooltip: '下一集',
-                            onTap: () => unawaited(_next()),
-                          ),
-                          const SizedBox(width: 6),
-                          FsTextAction(
-                            text: _episodeList.isEmpty ? '选集' : '第$_ep集',
-                            size: .88,
-                            onTap: () => unawaited(_openEpisodeSheet()),
-                          ),
-                          const SizedBox(width: 5),
                           PGlassIcon(
                             icon: Icons.fullscreen_rounded,
                             size: 30,
