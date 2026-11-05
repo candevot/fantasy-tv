@@ -801,6 +801,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     bool reportFailure = true,
     bool forcePlayInfo = false,
   }) async {
+    // 手机重新加载 / 切集 / 换线路时结束投屏：否则电视还在播上一集，
+    // 手机同时播新的，就是双声。
+    if (CastService.instance.isCasting) {
+      await CastService.instance.stop();
+      if (!mounted) return false;
+    }
     final line = lineOverride ?? _line;
     final ep = epOverride ?? _ep;
     // 同一 url+line+ep 正在打开时忽略重复请求（防抖），
@@ -1100,6 +1106,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 先重新 open 当前地址一次，仍失败或再次报错则自动切下一条线路。
   void _checkWatchdog() {
     if (!mounted || _fullscreenActive || _watchdogBusy) return;
+    // 投屏期间手机播放器是暂停的，看门狗不能把它重新拉起来出声。
+    if (CastService.instance.isCasting) {
+      _resetWatchdogClock();
+      return;
+    }
     if (_loading || _error || _switchingLine || _backgrounded) {
       _resetWatchdogClock();
       return;
@@ -1385,6 +1396,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _error ||
         !c.value.isInitialized) {
       return;
+    }
+    // 投屏中用户点手机播放：先结束投屏，避免电视 / 手机双声。
+    if (!c.value.isPlaying && CastService.instance.isCasting) {
+      unawaited(CastService.instance.stop());
     }
     // 用户手动暂停 / 播放后，回前台不再替他继续播放。
     _pausedByLifecycle = false;

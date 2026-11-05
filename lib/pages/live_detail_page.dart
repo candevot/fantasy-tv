@@ -189,6 +189,11 @@ class _LiveDetailPageState extends State<LiveDetailPage>
 
   Future<FxPlayer?> _open(String lineId) async {
     if (_releasedForTogether) return null;
+    // 切线路 / 刷新会重新拉流：先结束投屏，避免电视还在播旧线路。
+    if (CastService.instance.isCasting) {
+      await CastService.instance.stop();
+      if (!mounted) return null;
+    }
     final line = _lineFor(lineId);
     if (line == null || line.url.trim().isEmpty) {
       if (mounted) {
@@ -315,6 +320,10 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       if (player.value.isPlaying) {
         await player.pause();
       } else {
+        // 投屏中用户点手机播放：先结束投屏，避免电视 / 手机双声。
+        if (CastService.instance.isCasting) {
+          unawaited(CastService.instance.stop());
+        }
         await player.play();
       }
     } catch (_) {}
@@ -487,6 +496,12 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   }
 
   Future<void> _cast() async {
+    // 播放器还在创建 / 已出错时不能投屏：否则投屏成功后本地播放器
+    // 才 open(play: true)，会变成电视和手机双声。
+    if (_player == null || _loading || _error != null) {
+      fxToast(context, '直播还没准备好');
+      return;
+    }
     final source = _castSourceForCurrentLine();
     if (source == null) {
       fxToast(

@@ -345,7 +345,7 @@ class _CastSheetState extends State<CastSheet> {
   Widget _sourceHint() {
     final text = widget.source.viaProxy
         ? '源站需要 Referer/UA，已自动改走服务器代理'
-        : '使用当前播放直链投屏';
+        : '使用当前播放地址投屏';
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 12),
@@ -620,27 +620,41 @@ class _CastSheetState extends State<CastSheet> {
           margin: const EdgeInsets.only(bottom: 10),
           padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
           decoration: BoxDecoration(
-            color: const Color(0xFFEFFAF4),
+            color: state.phase == CastPhase.error
+                ? const Color(0xFFFFF8F3)
+                : const Color(0xFFEFFAF4),
             borderRadius: BorderRadius.circular(11),
-            border: Border.all(color: const Color(0xFFD5F2E4)),
+            border: Border.all(
+              color: state.phase == CastPhase.error
+                  ? const Color(0xFFFFE1CC)
+                  : const Color(0xFFD5F2E4),
+            ),
           ),
           child: Row(
             children: [
-              const Icon(
-                Icons.check_circle_rounded,
+              Icon(
+                state.phase == CastPhase.error
+                    ? Icons.error_outline_rounded
+                    : Icons.check_circle_rounded,
                 size: 14,
-                color: Color(0xFF35C98A),
+                color: state.phase == CastPhase.error
+                    ? const Color(0xFFF08A5D)
+                    : const Color(0xFF35C98A),
               ),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  '已投屏到 ${device?.name ?? ''}',
+                  state.phase == CastPhase.error
+                      ? '投屏连接已中断'
+                      : '已投屏到 ${device?.name ?? ''}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 10.5,
                     fontWeight: FontWeight.w700,
-                    color: Color(0xFF1F8A5F),
+                    color: state.phase == CastPhase.error
+                        ? const Color(0xFF9A5B2E)
+                        : const Color(0xFF1F8A5F),
                   ),
                 ),
               ),

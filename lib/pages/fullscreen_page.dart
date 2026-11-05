@@ -642,6 +642,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }) async {
     final c = _controller;
     if (c == null) return;
+    // 全屏内切集 / 重试会重新拉流：先结束投屏，避免电视和手机双声。
+    if (CastService.instance.isCasting) {
+      await CastService.instance.stop();
+      if (!mounted) return;
+    }
     // 同一 line+ep 正在打开时忽略重复请求（防抖）。
     final key = '$_line|$_ep';
     final opening = _opening;
@@ -1124,6 +1129,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void _checkWatchdog() {
     if (_isLive) return;
     if (!mounted || _watchdogBusy) return;
+    // 投屏期间手机播放器是暂停的，看门狗不能把它重新拉起来出声。
+    if (CastService.instance.isCasting) {
+      _resetWatchdogClock();
+      return;
+    }
     if (_loading || _error || _switching || _backgrounded) {
       _resetWatchdogClock();
       return;
@@ -1704,6 +1714,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _switching ||
         !c.value.isInitialized) {
       return;
+    }
+    // 投屏中用户点手机播放：先结束投屏，避免电视 / 手机双声。
+    if (!c.value.isPlaying && CastService.instance.isCasting) {
+      unawaited(CastService.instance.stop());
     }
     // 用户手动暂停 / 播放后，回前台不再替他继续播放。
     _pausedByLifecycle = false;

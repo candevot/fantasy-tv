@@ -391,11 +391,9 @@ class CastService {
     final location = (headers['LOCATION'] ?? '').trim();
     if (location.isEmpty) return null;
     final uri = Uri.tryParse(location);
-    if (uri == null ||
-        uri.host.isEmpty ||
-        (uri.scheme != 'http' && uri.scheme != 'https')) {
-      return null;
-    }
+    if (uri == null || uri.host.isEmpty) return null;
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') return null;
     final usn = (headers['USN'] ?? '').trim();
     final st = (headers['ST'] ?? '').trim();
     return SsdpResponse(
@@ -419,10 +417,12 @@ class CastService {
       req.headers.set(HttpHeaders.userAgentHeader, _userAgent);
       final res = await req.close().timeout(const Duration(seconds: 3));
       if (res.statusCode != HttpStatus.ok) return null;
-      final body = await res
+      var body = await res
           .transform(utf8.decoder)
           .join()
           .timeout(const Duration(seconds: 3));
+      // 部分电视的描述 XML 带 UTF-8 BOM，XmlDocument.parse 会直接报错。
+      if (body.startsWith('\uFEFF')) body = body.substring(1);
       final info = DeviceInfoParser(body).parse(uri);
       final av = _serviceFor(info, 'AVTransport');
       if (av == null) return null;
@@ -522,9 +522,11 @@ class CastService {
     final url = rawUrl.trim();
     if (url.isEmpty) throw const CastException('当前没有可投屏的播放地址');
     final uri = Uri.tryParse(url);
-    if (uri == null ||
-        uri.host.isEmpty ||
-        (uri.scheme != 'http' && uri.scheme != 'https')) {
+    if (uri == null || uri.host.isEmpty) {
+      throw const CastException('当前播放地址不是 http(s) 直链，无法投屏');
+    }
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') {
       throw const CastException('当前播放地址不是 http(s) 直链，无法投屏');
     }
     if (_isLoopback(uri)) {
@@ -598,9 +600,11 @@ class CastService {
   }) async {
     final target = url.trim();
     final uri = Uri.tryParse(target);
-    if (uri == null ||
-        uri.host.isEmpty ||
-        (uri.scheme != 'http' && uri.scheme != 'https')) {
+    if (uri == null || uri.host.isEmpty) {
+      throw const CastException('投屏地址无效，电视无法打开');
+    }
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') {
       throw const CastException('投屏地址无效，电视无法打开');
     }
     if (_isLoopback(uri)) {
