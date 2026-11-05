@@ -1503,6 +1503,9 @@ class _TogetherPageState extends State<TogetherPage>
   @override
   Widget build(BuildContext context) {
     final fullscreen = _fullscreen && _stage == _TogetherStage.room;
+    // 必须在 Scaffold 之上取 viewInsets：Scaffold 在 resizeToAvoidBottomInset
+    // 为 true 时会从 body 的 MediaQuery 里移除 bottom inset。
+    final keyboard = MediaQuery.viewInsetsOf(context).bottom > 0;
     return PopScope<Object?>(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
@@ -1521,7 +1524,7 @@ class _TogetherPageState extends State<TogetherPage>
                   child: switch (_stage) {
                     _TogetherStage.entry => _buildEntry(),
                     _TogetherStage.entering => _buildEntering(),
-                    _TogetherStage.room => _buildRoom(),
+                    _TogetherStage.room => _buildRoom(keyboard: keyboard),
                   },
                 ),
               ),
@@ -1568,7 +1571,7 @@ class _TogetherPageState extends State<TogetherPage>
     );
   }
 
-  Widget _buildRoom() {
+  Widget _buildRoom({required bool keyboard}) {
     return TogetherRoomView(
       player: _controller,
       position: _position,
@@ -1598,6 +1601,7 @@ class _TogetherPageState extends State<TogetherPage>
       onSendChat: _sendChat,
       onRetry: _retryVideo,
       onHostOnly: _hostOnly,
+      keyboardVisible: keyboard,
     );
   }
 

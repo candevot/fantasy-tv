@@ -47,6 +47,7 @@ class TogetherRoomView extends StatefulWidget {
     required this.onSendChat,
     required this.onRetry,
     required this.onHostOnly,
+    this.keyboardVisible = false,
   });
 
   final FxPlayer? player;
@@ -81,6 +82,10 @@ class TogetherRoomView extends StatefulWidget {
 
   /// 成员操作被拒绝时的统一提示。
   final VoidCallback onHostOnly;
+
+  /// 键盘是否弹起。由页面层（Scaffold 之上）读取 viewInsets 传入：
+  /// Scaffold 在 resizeToAvoidBottomInset=true 时会把 body 的 viewInsets 清零。
+  final bool keyboardVisible;
 
   @override
   State<TogetherRoomView> createState() => _TogetherRoomViewState();
@@ -182,7 +187,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   @override
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
-    final keyboard = media.viewInsets.bottom > 0;
+    final keyboard = widget.keyboardVisible;
     final fixedVideoHeight = math.max(
       togetherRoomVideoMin,
       media.size.height * togetherRoomVideoRatio,
