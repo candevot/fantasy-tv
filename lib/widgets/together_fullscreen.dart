@@ -582,7 +582,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             child: IgnorePointer(
               child: AnimatedOpacity(
                 opacity: widget.frozenFrameOpaque ? 1 : 0,
-                duration: const Duration(milliseconds: 300),
+                duration: const Duration(milliseconds: 200),
                 child: RawImage(
                   image: widget.frozenFrame,
                   fit: _fillScreen ? BoxFit.cover : BoxFit.contain,

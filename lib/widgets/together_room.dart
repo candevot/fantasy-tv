@@ -361,7 +361,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 child: IgnorePointer(
                   child: AnimatedOpacity(
                     opacity: widget.frozenFrameOpaque ? 1 : 0,
-                    duration: const Duration(milliseconds: 300),
+                    duration: const Duration(milliseconds: 200),
                     child: RawImage(
                       image: widget.frozenFrame,
                       fit: BoxFit.contain,

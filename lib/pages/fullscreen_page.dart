@@ -550,7 +550,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _hideTimer?.cancel();
     _cancelFirstFrameTimer();
     // 先抓最后一帧：同一个 player 实例换地址时纹理会被清空，用它垫住黑屏。
-    if (_firstFrame && _frozenFrame == null) await _captureFrozenFrame();
+    if (_firstFrame && (_frozenFrame == null || !_freezeOpaque)) {
+      await _captureFrozenFrame();
+    }
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return;
     unawaited(c.pause());
@@ -668,7 +670,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final c = _controller;
     if (c == null) return false;
     _cancelFirstFrameTimer();
-    if (_firstFrame && _frozenFrame == null) await _captureFrozenFrame();
+    if (_firstFrame && (_frozenFrame == null || !_freezeOpaque)) {
+      await _captureFrozenFrame();
+    }
     _firstFrame = false;
     try {
       await c.open(url, headers: headers).timeout(_openReadyTimeout);
@@ -1099,28 +1103,26 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<void> _captureFrozenFrame() async {
     final c = _controller;
     if (c == null) return;
-    try {
-      final bytes = await c.player.screenshot();
-      if (!mounted || bytes == null || bytes.isEmpty) return;
-      _freezeClearTimer?.cancel();
-      _freezeClearTimer = null;
-      setState(() {
-        _frozenFrame = bytes;
-        _freezeOpaque = true;
-      });
-    } catch (_) {
-      // 个别设备 / 格式不支持帧快照：退回纯黑 + 加载层，不影响切源。
-      if (!mounted || _frozenFrame == null) return;
-      setState(() => _freezeOpaque = true);
-    }
+    // 抓取失败返回 null：退回纯黑 + 加载层，不弹错也不影响切源。
+    final bytes = await c.captureFrame();
+    if (!mounted || bytes == null) return;
+    _freezeClearTimer?.cancel();
+    _freezeClearTimer = null;
+    setState(() {
+      _frozenFrame = bytes;
+      _freezeOpaque = true;
+    });
   }
 
-  /// 新流首帧已出：快照淡出（220ms），露出新画面。
+  /// 新流首帧已出：快照 200ms 淡出，露出新画面。
   void _fadeOutFrozenFrame() {
-    if (_frozenFrame == null) return;
+    if (_frozenFrame == null || !_freezeOpaque) return;
     _freezeClearTimer?.cancel();
+    _freezeClearTimer = null;
+    if (!mounted) return;
     setState(() => _freezeOpaque = false);
-    _freezeClearTimer = Timer(const Duration(milliseconds: 320), () {
+    _freezeClearTimer = Timer(const Duration(milliseconds: 240), () {
+      _freezeClearTimer = null;
       if (!mounted || _freezeOpaque) return;
       setState(() => _frozenFrame = null);
     });
@@ -1852,19 +1854,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
               subtitleBottom: controlsHeight + 12,
             ),
-          // 切集 / 切清晰度：最后一帧垫在黑底上，首帧就绪后淡出。
+          // 切集 / 切清晰度：最后一帧垫在黑底上，首帧就绪后 200ms 淡出。
           if (_frozenFrame != null)
             Positioned.fill(
-              child: IgnorePointer(
-                child: AnimatedOpacity(
-                  opacity: _freezeOpaque ? 1 : 0,
-                  duration: const Duration(milliseconds: 300),
-                  child: Image.memory(
-                    _frozenFrame!,
-                    fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
-                    gaplessPlayback: true,
-                  ),
-                ),
+              child: FxSnapshotLayer(
+                bytes: _frozenFrame,
+                opaque: _freezeOpaque,
+                fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
               ),
             ),
         ],
@@ -1879,10 +1875,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 不再叠一行旧线路名小字。
     final loading = _loadingHint ?? fxLoadingLineText(_ep, _lineName);
     if (!_firstFrame || _loading) {
-      return FxLoadingOverlay(
-        title: loading,
-        dim: _frozenFrame == null,
-      );
+      return FxLoadingOverlay(title: loading);
     }
     if (!v.isBuffering) return const SizedBox.shrink();
     // stream.buffer 是已缓冲位置（demuxer-cache-time），÷ 总时长即真实进度。

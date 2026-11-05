@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -139,6 +140,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
+
+  /// 切线路 / 切集前抓下的最后一帧：Video 换源时会先清空纹理，
+  /// 切换期间用它顶住空窗，新流首帧就绪后 200ms 淡出，不再闪黑。
+  Uint8List? _frozenFrame;
+  bool _frozenOpaque = false;
+  Timer? _frozenClearTimer;
+  Timer? _frozenFallbackTimer;
 
   /// 进入全屏时随结果带回的真实倍速，切集时沿用。
   double _rate = 1.0;
@@ -346,6 +354,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 两条线路都失败：停在最后尝试的线路，错误页的重试按钮直接重试它。
         final lastTried = attempts.isEmpty ? targetLine : attempts.last;
         _line = lastTried;
+        _clearFrozenFrame();
         setState(() {
           _loading = false;
           _loadedEp = null;
@@ -467,6 +476,71 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     setState(() => _videoEpoch++);
   }
 
+  /* ------------------------------------------------------------ 画面过渡 */
+
+  /// 换源前抢一帧当前画面。抓取失败返回 null，切换时退回纯黑 + 加载层。
+  Future<Uint8List?> _captureFrozenFrame() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return null;
+    return c.captureFrame();
+  }
+
+  /// 进入加载态前调用：把当前帧固定下来，盖住新 Video 纹理清空的空窗。
+  Future<void> _freezeCurrentFrame() async {
+    // 连试多条备用线路时沿用同一张快照，避免重新解码造成二闪。
+    if (_frozenOpaque && _frozenFrame != null) return;
+    final bytes = await _captureFrozenFrame();
+    if (!mounted) return;
+    // 首次加载没有旧画面：保持纯黑，不必多一次重建。
+    if (bytes == null && _frozenFrame == null) return;
+    _frozenClearTimer?.cancel();
+    _frozenClearTimer = null;
+    _frozenFallbackTimer?.cancel();
+    _frozenFallbackTimer = null;
+    setState(() {
+      _frozenFrame = bytes;
+      _frozenOpaque = bytes != null;
+    });
+  }
+
+  /// 新流首帧就绪（宽高出现）后淡出快照。
+  void _maybeFadeFrozenFrame() {
+    if (!_frozenOpaque || _frozenFrame == null || _loading || _error) return;
+    final c = _controller;
+    if (c == null) return;
+    final v = c.value;
+    final width = v.videoWidth ?? v.width ?? 0;
+    final height = v.videoHeight ?? v.height ?? 0;
+    if (!v.isInitialized || width <= 0 || height <= 0) return;
+    _fadeOutFrozenFrame();
+  }
+
+  /// 200ms 淡出快照；淡出完成后再释放，避免绘制中被销毁。
+  void _fadeOutFrozenFrame() {
+    if (_frozenFrame == null || !_frozenOpaque) return;
+    _frozenFallbackTimer?.cancel();
+    _frozenFallbackTimer = null;
+    if (!mounted) return;
+    setState(() => _frozenOpaque = false);
+    _frozenClearTimer?.cancel();
+    _frozenClearTimer = Timer(const Duration(milliseconds: 240), () {
+      _frozenClearTimer = null;
+      if (!mounted || _frozenOpaque) return;
+      setState(() => _frozenFrame = null);
+    });
+  }
+
+  /// 立即丢弃快照（加载失败 / 进入全屏 / 释放播放器时）。
+  void _clearFrozenFrame() {
+    _frozenClearTimer?.cancel();
+    _frozenClearTimer = null;
+    _frozenFallbackTimer?.cancel();
+    _frozenFallbackTimer = null;
+    if (_frozenFrame == null && !_frozenOpaque) return;
+    _frozenFrame = null;
+    _frozenOpaque = false;
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -474,6 +548,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _progressTimer?.cancel();
     _cancelFocusLossPause();
     _watchdogTimer?.cancel();
+    _frozenClearTimer?.cancel();
+    _frozenFallbackTimer?.cancel();
+    _frozenFrame = null;
+    _frozenOpaque = false;
     _loadToken++;
     unawaited(_saveProgress());
     _controller?.removeListener(_onVideoValue);
@@ -549,6 +627,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Future<void> pauseAndReleaseForTogether() async {
     _loadToken++;
     _hideTimer?.cancel();
+    _clearFrozenFrame();
     await _saveProgress();
     final controller = _controller;
     _controller = null;
@@ -590,6 +669,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final ep = epOverride ?? _ep;
     final token = ++_loadToken;
     _hideTimer?.cancel();
+    // 先抓最后一帧，再换播放器：Video 在 open 期间会清空纹理，
+    // 用快照顶住加载窗口，新流首帧就绪后淡出。
+    await _freezeCurrentFrame();
+    if (!mounted || token != _loadToken) return false;
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return false;
     unawaited(_controller?.pause());
@@ -617,7 +700,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _errorText = '获取播放地址失败，请检查网络后重试';
         }
       });
-      if (reportFailure) _notifySourceFailed();
+      if (reportFailure) {
+        _clearFrozenFrame();
+        _notifySourceFailed();
+      }
       return false;
     }
     if (!mounted || token != _loadToken) return false;
@@ -717,6 +803,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         });
         _sourceFailNotified = false;
         ok = true;
+        // 新画面已挂上：等这一帧绘制完再淡出快照，避免露出还没上纹理的黑帧。
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && !_fullscreenActive) _maybeFadeFrozenFrame();
+        });
+        _frozenFallbackTimer?.cancel();
+        if (_frozenFrame != null) {
+          // 首帧参数迟迟不到（异常流）时兜底淡出，不能让快照一直盖着。
+          _frozenFallbackTimer = Timer(
+            const Duration(seconds: 2),
+            _fadeOutFrozenFrame,
+          );
+        }
         _resetWatchdogClock();
         widget.onPlaybackStarted?.call();
         _showControls();
@@ -737,7 +835,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _errorText = '播放失败：线路不可用，请重试或切换下方线路';
         }
       });
-      if (reportFailure) _notifySourceFailed();
+      if (reportFailure) {
+        _clearFrozenFrame();
+        _notifySourceFailed();
+      }
       return false;
     }
     return true;
@@ -750,6 +851,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return;
     }
     if (!mounted) return;
+    _clearFrozenFrame();
     setState(() {
       _loading = false;
       _error = true;
@@ -864,6 +966,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (next == _line) next = null;
     }
     if (next == null || next.isEmpty) {
+      _clearFrozenFrame();
       setState(() {
         _loading = false;
         _loadedEp = null;
@@ -883,6 +986,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
+    // 新流首帧就绪（宽高出现）后淡出切换快照；loading / error 期间不动。
+    if (!_fullscreenActive) _maybeFadeFrozenFrame();
     // 全屏期间由全屏页接管同一个播放器的事件（切集 / 结束 / 报错）；
     // loading 期间的错误由 _bootstrap 的 try/catch 处理。
     if (_fullscreenActive || _loading || _error) return;
@@ -967,6 +1072,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 详情页试完全部线路仍不可播时调用，展示错误与重试/换线路按钮。
   void showSourceError(String message) {
     if (!mounted) return;
+    _clearFrozenFrame();
     setState(() {
       _loading = false;
       _error = true;
@@ -1068,6 +1174,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _openingFullscreen = false;
       return;
     }
+    // 全屏交给全屏页接管画面，切换快照不再需要，避免返回竖屏后留下旧帧。
+    _clearFrozenFrame();
     setState(() => _fullscreenActive = true);
 
     FullPlayerResult? result;
@@ -1162,6 +1270,16 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   player: c,
                   fit: BoxFit.contain,
                   subtitleBottom: fxSubtitleMinBottom,
+                ),
+              ),
+            // 切线路 / 切集：上一帧快照盖住已被清空的 Video 纹理，
+            // 新流首帧就绪后 200ms 淡出；截图失败时保持纯黑底 + 加载层。
+            if (!_fullscreenActive && _frozenFrame != null)
+              Positioned.fill(
+                child: FxSnapshotLayer(
+                  bytes: _frozenFrame,
+                  opaque: _frozenOpaque,
+                  fit: BoxFit.contain,
                 ),
               ),
             // 手势层：单击显隐控件 / 双击暂停 / 左右滑调进度。

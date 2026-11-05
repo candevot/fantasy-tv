@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -217,6 +218,22 @@ class FxPlayer implements Listenable {
 
   /// [buildVideo] 的简写入口。
   Widget video({BoxFit fit = BoxFit.contain}) => buildVideo(fit: fit);
+
+  /// 抓取当前画面的一帧（JPEG 字节）。
+  ///
+  /// media_kit 的 Video 在 open 新地址时会清空纹理，切线路 / 切集前先存下
+  /// 这张快照，切换期间垫在画面层上，等新流首帧就绪后再淡出。
+  /// 播放器未就绪、设备不支持或抓取异常时返回 null，调用方退回纯黑即可。
+  Future<Uint8List?> captureFrame() async {
+    if (_disposed || !_value.isInitialized) return null;
+    try {
+      final bytes = await _player.screenshot();
+      if (bytes == null || bytes.isEmpty) return null;
+      return bytes;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// 打开一个网络地址并等待其就绪。
   ///
@@ -450,5 +467,47 @@ class FxPlayer implements Listenable {
     for (final listener in List<VoidCallback>.of(_listeners)) {
       listener();
     }
+  }
+}
+
+/// 切线路 / 切集期间的画面快照层。
+///
+/// 铺在视频层之上、加载与控件层之下：Video 换源时纹理会先清空，
+/// 这张图顶住空窗；[opaque] 置 false 后 200ms 淡出，露出新流首帧。
+/// [bytes] 为 null（截图失败）时不渲染任何东西，页面退回纯黑 + 加载层。
+class FxSnapshotLayer extends StatelessWidget {
+  const FxSnapshotLayer({
+    super.key,
+    required this.bytes,
+    required this.opaque,
+    this.fit = BoxFit.contain,
+  });
+
+  /// media_kit `Player.screenshot()` 返回的图片字节。
+  final Uint8List? bytes;
+
+  /// 是否完全盖住画面；false 时淡出。
+  final bool opaque;
+
+  /// 与当前播放模式一致：竖屏 contain，全屏撑满时 cover。
+  final BoxFit fit;
+
+  @override
+  Widget build(BuildContext context) {
+    final data = bytes;
+    if (data == null) return const SizedBox.shrink();
+    return IgnorePointer(
+      child: AnimatedOpacity(
+        opacity: opaque ? 1 : 0,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        child: Image.memory(
+          data,
+          fit: fit,
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.low,
+        ),
+      ),
+    );
   }
 }
