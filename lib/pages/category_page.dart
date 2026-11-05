@@ -3,53 +3,16 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
+import '../widgets/fx_cards.dart';
 import 'detail_page.dart';
+
+// 通用海报 / 分区 / 骨架组件已抽到 widgets/fx_cards.dart；
+// 这里继续 export，保持历史 `import 'category_page.dart'` 的页面可用。
+export '../widgets/fx_cards.dart';
 
 /* ========================================================================== */
 /*  公共内容组件 / 工具（放在允许修改的页面文件内，避免新增文件或改主题）      */
 /* ========================================================================== */
-
-/// 分类 key → 中文
-String fxCategoryName(String key) {
-  switch (key) {
-    case 'juji':
-      return '剧集';
-    case 'movie':
-      return '电影';
-    case 'zongyi':
-      return '综艺';
-    case 'manhua':
-      return '动漫';
-    case 'duanju':
-      return '短剧';
-    case 'live':
-      return '直播';
-    default:
-      return key.isEmpty ? '影视' : key;
-  }
-}
-
-/// 封面地址：相对代理地址补全，协议相对地址补 https，data: 地址原样返回。
-String fxCoverUrl(String url) {
-  final u = url.trim();
-  if (u.isEmpty) return '';
-  if (u.startsWith('data:')) return u;
-  // 协议相对地址（//pic.example/a.jpg）必须补 https，否则 Api.abs 会拼成 host//...
-  if (u.startsWith('//')) return 'https:$u';
-  return Api.abs(u);
-}
-
-/// 封面是否可用：空串 / data: 占位图 / 非 http(s)、协议相对、站内相对地址都算无效。
-/// 无效时 FxCover 统一显示灰底 + 影片图标的占位图。
-bool fxUsableCover(String url) {
-  final u = url.trim();
-  if (u.isEmpty) return false;
-  if (u.startsWith('//')) return true;
-  final lower = u.toLowerCase();
-  if (lower.startsWith('http://') || lower.startsWith('https://')) return true;
-  if (u.startsWith('/')) return true;
-  return false;
-}
 
 int fxInt(Object? v, [int fallback = 0]) {
   if (v is int) return v;
@@ -113,68 +76,6 @@ String fxTimeAgo(int ms) {
   }
   if (now.year == d.year) return '${d.month} 月 ${d.day} 日';
   return '${d.year}/${d.month}/${d.day}';
-}
-
-/// 网络封面：加载失败 / 空地址 / 非法 URL 时统一显示灰底影片图标占位
-class FxCover extends StatelessWidget {
-  const FxCover({
-    super.key,
-    required this.url,
-    required this.title,
-    this.radius = 14,
-    this.fit = BoxFit.cover,
-    this.big = false,
-    this.showText = true,
-  });
-
-  final String url;
-  final String title;
-  final double radius;
-  final BoxFit fit;
-  final bool big;
-  final bool showText;
-
-  /// 统一占位图：灰底 + 影片图标。不再按片名生成彩色块。
-  /// 空地址、data: 占位图、非法 URL 都走这里。
-  Widget _placeholder() {
-    final iconSize = big ? 44.0 : 30.0;
-    return ColoredBox(
-      color: const Color(0xFFE6E9EF),
-      child: Center(
-        child: Icon(
-          Icons.movie_outlined,
-          size: iconSize,
-          color: const Color(0xFF98A4B5),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final usable = fxUsableCover(url);
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(radius),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          _placeholder(),
-          if (usable)
-            Image.network(
-              fxCoverUrl(url),
-              fit: fit,
-              gaplessPlayback: true,
-              filterQuality: FilterQuality.medium,
-              loadingBuilder: (context, child, progress) {
-                if (progress == null) return child;
-                return _placeholder();
-              },
-              errorBuilder: (context, error, stack) => _placeholder(),
-            ),
-        ],
-      ),
-    );
-  }
 }
 
 class FxStatusTag extends StatelessWidget {
@@ -278,78 +179,6 @@ class FxPosterCard extends StatelessWidget {
       child: card,
     );
     return width == null ? tappable : SizedBox(width: width, child: tappable);
-  }
-}
-
-class FxSectionTitle extends StatelessWidget {
-  const FxSectionTitle({
-    super.key,
-    required this.title,
-    this.subtitle,
-    this.onMore,
-    this.moreText = '更多',
-  });
-
-  final String title;
-  final String? subtitle;
-  final VoidCallback? onMore;
-  final String moreText;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Container(
-            width: 3,
-            height: 16,
-            decoration: BoxDecoration(
-              gradient: Fx.brand,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Text(title,
-              style: const TextStyle(
-                  fontSize: 17, fontWeight: FontWeight.w600, color: Fx.ink)),
-          if (subtitle != null) ...[
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                subtitle!,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
-              ),
-            ),
-          ] else
-            const Spacer(),
-          if (onMore != null)
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: onMore,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(moreText,
-                        style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w400,
-                            color: Fx.sub)),
-                    const Icon(Icons.chevron_right_rounded,
-                        size: 16, color: Fx.sub),
-                  ],
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
   }
 }
 
@@ -868,7 +697,14 @@ class _CategoryPageState extends State<CategoryPage> {
     );
     if (v == null || !mounted) return;
     apply(v);
+    // 切换筛选后回到顶部：新结果从第一屏开始看。
+    _scrollTop();
     _reload();
+  }
+
+  void _scrollTop() {
+    if (!_scroll.hasClients) return;
+    _scroll.jumpTo(0);
   }
 
   void _openDetail(String id) {
@@ -905,7 +741,8 @@ class _CategoryPageState extends State<CategoryPage> {
 
   Widget _buildContent(BuildContext context) {
     final width = MediaQuery.of(context).size.width;
-    final itemWidth = (width - 32 - 20) / 3;
+    // 与首页一致：4 列、2:3、间距 8，下方留片名 1 行 + 状态 1 行。
+    final itemWidth = (width - 16 * 2 - 8 * 3) / 4;
     return RefreshIndicator(
       color: Fx.accent,
       backgroundColor: Colors.white,
@@ -919,9 +756,14 @@ class _CategoryPageState extends State<CategoryPage> {
           if (_refreshError != null && _items.isNotEmpty)
             SliverToBoxAdapter(child: _refreshBanner()),
           if (_items.isEmpty && _loading)
-            const SliverFillRemaining(
-              hasScrollBody: false,
-              child: FxLoadingView(label: '正在加载片库…'),
+            const SliverToBoxAdapter(
+              child: FxSkeletonPulse(
+                child: FxPosterGridSkeleton(
+                  crossAxisCount: 4,
+                  itemCount: 16,
+                  padding: EdgeInsets.fromLTRB(16, 2, 16, 0),
+                ),
+              ),
             )
           else if (_items.isEmpty && _error != null)
             SliverFillRemaining(
@@ -944,6 +786,7 @@ class _CategoryPageState extends State<CategoryPage> {
                           _year = '';
                           _sort = 'latest';
                         });
+                        _scrollTop();
                         _reload();
                       }
                     : null,
@@ -954,15 +797,15 @@ class _CategoryPageState extends State<CategoryPage> {
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
               sliver: SliverGrid(
                 gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 3,
-                  crossAxisSpacing: 10,
-                  mainAxisSpacing: 10,
-                  mainAxisExtent: itemWidth * 1.5 + 48,
+                  crossAxisCount: 4,
+                  crossAxisSpacing: 8,
+                  mainAxisSpacing: 8,
+                  mainAxisExtent: itemWidth * 1.5 + 40,
                 ),
                 delegate: SliverChildBuilderDelegate(
                   (ctx, i) {
                     final item = _items[i];
-                    return FxPosterCard(
+                    return FxPosterTile(
                       item: item,
                       onTap: () => _openDetail(item.id),
                     );
@@ -1057,6 +900,7 @@ class _CategoryPageState extends State<CategoryPage> {
                       _year = '';
                       _sort = 'latest';
                     });
+                    _scrollTop();
                     _reload();
                   },
                   child: Container(
@@ -1086,50 +930,59 @@ class _CategoryPageState extends State<CategoryPage> {
           ),
           const SizedBox(height: 4),
           Text(
-            widget.initialTitle == null
-                ? '精选好剧，随心看'
-                : '${widget.initialTitle} · 为你精选',
+            '${widget.initialTitle == null ? '精选好剧' : widget.initialTitle} · '
+            '${_sort == 'latest' ? '默认按更新时间排序' : '按${_valueOf(_sorts, _sort)}排序'}',
             style: const TextStyle(
                 fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
           ),
           const SizedBox(height: 14),
-          SizedBox(
-            height: 36,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              children: [
-                _filterPill('类型', _valueOf(_types, _type), _type.isNotEmpty,
+          Row(
+            children: [
+              Expanded(
+                child: _filterPill('类型', _valueOf(_types, _type),
+                    _type.isNotEmpty,
                     () => _pick('选择类型', _types, _type, (v) => _type = v)),
-                const SizedBox(width: 8),
-                _filterPill('地区', _valueOf(_areas, _area), _area.isNotEmpty,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _filterPill('地区', _valueOf(_areas, _area),
+                    _area.isNotEmpty,
                     () => _pick('选择地区', _areas, _area, (v) => _area = v)),
-                const SizedBox(width: 8),
-                _filterPill('年份', _valueOf(_years, _year), _year.isNotEmpty,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _filterPill('年份', _valueOf(_years, _year),
+                    _year.isNotEmpty,
                     () => _pick('选择年份', _years, _year, (v) => _year = v)),
-                const SizedBox(width: 8),
-                _filterPill('排序', _valueOf(_sorts, _sort), _sort != 'latest',
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _filterPill('排序', _valueOf(_sorts, _sort),
+                    _sort != 'latest',
                     () => _pick('排序方式', _sorts, _sort, (v) => _sort = v)),
-              ],
-            ),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
+  /// 顶部筛选胶囊：上标签（类型/地区/年份/排序）+ 下当前值，四枚等宽排列。
   Widget _filterPill(
       String label, String value, bool active, VoidCallback onTap) {
     final fg = active ? Colors.white : Fx.ink;
+    final sub = active ? Colors.white.withOpacity(.86) : Fx.sub;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        height: 36,
-        padding: const EdgeInsets.symmetric(horizontal: 13),
+        height: 44,
+        padding: const EdgeInsets.symmetric(horizontal: 9),
         decoration: BoxDecoration(
           gradient: active ? Fx.brand : null,
           color: active ? null : Colors.white.withOpacity(.72),
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: active ? Colors.transparent : Colors.white,
           ),
@@ -1144,21 +997,34 @@ class _CategoryPageState extends State<CategoryPage> {
               : null,
         ),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            Text(label,
-                style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w400,
-                    color: active ? Colors.white.withOpacity(.82) : Fx.sub)),
-            const SizedBox(width: 4),
-            Text(value,
-                style: TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600, color: fg)),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 9,
+                          height: 1.1,
+                          fontWeight: FontWeight.w400,
+                          color: sub)),
+                  const SizedBox(height: 3),
+                  Text(value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 12.5,
+                          height: 1.1,
+                          fontWeight: FontWeight.w600,
+                          color: fg)),
+                ],
+              ),
+            ),
             const SizedBox(width: 1),
-            Icon(Icons.expand_more_rounded,
-                size: 15,
-                color: active ? Colors.white.withOpacity(.9) : Fx.sub),
+            Icon(Icons.expand_more_rounded, size: 15, color: sub),
           ],
         ),
       ),

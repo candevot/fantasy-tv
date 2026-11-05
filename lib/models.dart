@@ -124,6 +124,16 @@ class VideoCard {
   final String id, title, cover, status, category;
   final num rating;
   final int year, episodes;
+
+  /// 列表接口附带的展示字段：类型（电视剧）、地区（内地）、热度文案（9.5万）。
+  /// 接口没给时保持空串，UI 自动隐藏对应信息。
+  final String type, area, heat;
+
+  /// 简介：短列表接口通常不带（空串），排行榜按需再拉详情补齐。
+  final String desc;
+
+  /// 榜单排名（列表接口给 1 起的名次），非榜单数据为 0。
+  final int rank;
   final List<String> tags;
 
   VideoCard({
@@ -135,6 +145,11 @@ class VideoCard {
     this.status = '',
     this.episodes = 0,
     this.category = '',
+    this.type = '',
+    this.area = '',
+    this.heat = '',
+    this.desc = '',
+    this.rank = 0,
     this.tags = const [],
   });
 
@@ -147,6 +162,11 @@ class VideoCard {
         status: _asStr(j['status']),
         episodes: _asInt(j['episodes']),
         category: _asStr(j['category']),
+        type: _asStr(j['type']),
+        area: _asStr(j['area']),
+        heat: _asStr(j['heat']),
+        desc: _cleanDescription(j['desc']),
+        rank: _asInt(j['rank']),
         tags: _asStrList(j['tags']),
       );
 }

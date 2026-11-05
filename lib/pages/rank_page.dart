@@ -34,8 +34,8 @@ class _RankPageState extends State<RankPage> {
     _RankType('manhua', '动漫'),
   ];
   static const List<_Period> _periods = [
-    _Period('day', '日榜'),
     _Period('week', '周榜'),
+    _Period('day', '日榜'),
     _Period('month', '月榜'),
     _Period('total', '总榜'),
   ];
@@ -47,6 +47,13 @@ class _RankPageState extends State<RankPage> {
   bool _loading = true;
   String? _error;
   int _req = 0;
+
+  /// 榜单接口不返回简介：可见卡片按需拉一次详情补齐，失败就保持占位文案。
+  final Map<String, String> _desc = <String, String>{};
+  final Set<String> _descPending = <String>{};
+  final List<String> _descQueue = <String>[];
+  int _descActive = 0;
+  static const int _descConcurrency = 3;
 
   @override
   void initState() {
@@ -125,6 +132,51 @@ class _RankPageState extends State<RankPage> {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => DetailPage(id: id)),
     );
+  }
+
+  /* -------------------------------------------------- 简介懒加载 */
+
+  void _ensureDesc(VideoCard item) {
+    final id = item.id;
+    if (id.isEmpty || item.desc.isNotEmpty) return;
+    if (_desc.containsKey(id) || _descPending.contains(id)) return;
+    _descPending.add(id);
+    _descQueue.add(id);
+    _pumpDesc();
+  }
+
+  void _pumpDesc() {
+    while (_descActive < _descConcurrency && _descQueue.isNotEmpty) {
+      final id = _descQueue.removeAt(0);
+      _descActive++;
+      _fetchDesc(id);
+    }
+  }
+
+  Future<void> _fetchDesc(String id) async {
+    try {
+      final detail = await Api.detail(id);
+      if (!mounted) return;
+      setState(() => _desc[id] = detail.desc);
+    } catch (_) {
+      if (!mounted) return;
+      // 记空串：不再重复请求，卡片显示「暂无简介」而不是留白。
+      setState(() => _desc[id] = '');
+    } finally {
+      _descActive--;
+      _descPending.remove(id);
+      if (mounted) _pumpDesc();
+    }
+  }
+
+  String _descOf(VideoCard item) {
+    if (item.desc.isNotEmpty) return item.desc;
+    return _desc[item.id] ?? '';
+  }
+
+  String _descPlaceholder(VideoCard item) {
+    if (_desc.containsKey(item.id)) return '暂无简介';
+    return '简介加载中…';
   }
 
   Color _rankColor(int i) {
@@ -206,7 +258,7 @@ class _RankPageState extends State<RankPage> {
                             fontWeight: FontWeight.w600,
                             color: Fx.ink)),
                     SizedBox(height: 2),
-                    Text('发现此刻最热的剧集',
+                    Text('根据实时热度整理',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -365,7 +417,7 @@ class _RankPageState extends State<RankPage> {
 
   Widget _content() {
     if (_loading && _items.isEmpty) {
-      return const FxLoadingView(label: '正在整理榜单…');
+      return const FxSkeletonPulse(child: FxRankListSkeleton(count: 6));
     }
     if (_error != null && _items.isEmpty) {
       return FxErrorView(message: _error!, onRetry: _load);
@@ -388,7 +440,7 @@ class _RankPageState extends State<RankPage> {
             parent: BouncingScrollPhysics()),
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 104),
         itemCount: _items.length,
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
+        separatorBuilder: (_, __) => const SizedBox(height: 10),
         itemBuilder: (ctx, i) => _row(_items[i], i),
       ),
     );
@@ -398,8 +450,8 @@ class _RankPageState extends State<RankPage> {
     final top = i < 3;
     final color = _rankColor(i);
     return Container(
-      width: 34,
-      height: 38,
+      width: 30,
+      height: 34,
       alignment: Alignment.center,
       decoration: BoxDecoration(
         gradient: top
@@ -410,7 +462,7 @@ class _RankPageState extends State<RankPage> {
               )
             : null,
         color: top ? null : Colors.white.withOpacity(.66),
-        borderRadius: BorderRadius.circular(11),
+        borderRadius: BorderRadius.circular(10),
         border: Border.all(
           color: top ? Colors.white.withOpacity(.38) : Colors.white,
         ),
@@ -427,7 +479,7 @@ class _RankPageState extends State<RankPage> {
       child: Text(
         '${i + 1}',
         style: TextStyle(
-          fontSize: top ? 16 : 14,
+          fontSize: top ? 15 : 13,
           height: 1,
           fontWeight: FontWeight.w700,
           color: top ? Colors.white : Fx.sub,
@@ -436,84 +488,124 @@ class _RankPageState extends State<RankPage> {
     );
   }
 
+  Widget _statusTag(String status) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: Fx.accent.withOpacity(.10),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        status,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          fontSize: 10.5,
+          height: 1.2,
+          fontWeight: FontWeight.w600,
+          color: Fx.accent,
+        ),
+      ),
+    );
+  }
+
   Widget _row(VideoCard item, int i) {
-    final meta = [
+    final meta = <String>[
       if (item.year > 0) '${item.year}',
-      fxCategoryName(item.category),
+      if (item.type.isNotEmpty) item.type else fxCategoryName(item.category),
+      if (item.area.isNotEmpty) item.area,
     ].join(' · ');
-    final update = item.status.isNotEmpty
-        ? '${item.status}${item.episodes > 0 ? ' · 共 ${item.episodes} 集' : ''}'
-        : (item.episodes > 0 ? '全 ${item.episodes} 集' : '榜单热度上升中');
+    final status = item.status.isNotEmpty
+        ? item.status
+        : (item.episodes > 0 ? '全 ${item.episodes} 集' : '热度上升中');
+    final badge = fxBadgeText(item);
+    _ensureDesc(item);
+    final desc = _descOf(item);
     return GlassCard(
       padding: const EdgeInsets.all(10),
       radius: 18,
       opacity: i < 3 ? .72 : .6,
       onTap: () => _openDetail(item.id),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _rankBadge(i),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           SizedBox(
-            width: 64,
-            height: 96,
-            child: FxCover(url: item.cover, title: item.title, radius: 14),
+            width: 66,
+            height: 99,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                FxCover(url: item.cover, title: item.title, radius: 10),
+                if (badge != null)
+                  Positioned(
+                    left: 4,
+                    top: 4,
+                    child: FxPosterBadge(badge),
+                  ),
+              ],
+            ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
           Expanded(
             child: SizedBox(
-              height: 96,
+              height: 99,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
                     item.title,
-                    maxLines: 2,
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                         fontSize: 14,
                         height: 1.25,
-                        fontWeight: FontWeight.w500,
+                        fontWeight: FontWeight.w600,
                         color: Fx.ink),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    meta.isEmpty ? '影视' : meta,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 11.5,
+                        height: 1.2,
+                        fontWeight: FontWeight.w400,
+                        color: Fx.sub),
+                  ),
+                  const SizedBox(height: 4),
+                  Expanded(
+                    child: Text(
+                      desc.isNotEmpty ? desc : _descPlaceholder(item),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        height: 1.45,
+                        fontWeight: FontWeight.w400,
+                        color: desc.isNotEmpty
+                            ? const Color(0xFF5A6577)
+                            : const Color(0xFFA6B1C2),
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 4),
                   Row(
                     children: [
-                      const Icon(Icons.star_rounded, size: 14, color: Fx.gold),
-                      const SizedBox(width: 3),
-                      Text(
-                        item.rating > 0 ? item.rating.toStringAsFixed(1) : '—',
-                        style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: Fx.gold),
-                      ),
-                      if (meta.isNotEmpty) ...[
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            meta,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w400,
-                                color: Fx.sub),
-                          ),
+                      Flexible(child: _statusTag(status)),
+                      if (item.heat.isNotEmpty) ...[
+                        const SizedBox(width: 6),
+                        Text(
+                          '热度 ${item.heat}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 10.5, color: Color(0xFFA6B1C2)),
                         ),
                       ],
                     ],
-                  ),
-                  const Spacer(),
-                  Text(
-                    update,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 12,
-                        height: 1.2,
-                        fontWeight: FontWeight.w400,
-                        color: Fx.sub),
                   ),
                 ],
               ),

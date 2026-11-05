@@ -1,0 +1,657 @@
+import 'package:flutter/material.dart';
+
+import '../api.dart';
+import '../models.dart';
+import '../theme.dart';
+
+/* ========================================================================== */
+/*  通用海报 / 分区 / 骨架组件（首页、分类、排行榜、搜索共用）                 */
+/* ========================================================================== */
+
+/// 分类 key → 中文
+String fxCategoryName(String key) {
+  switch (key) {
+    case 'juji':
+      return '剧集';
+    case 'movie':
+      return '电影';
+    case 'zongyi':
+      return '综艺';
+    case 'manhua':
+      return '动漫';
+    case 'duanju':
+      return '短剧';
+    case 'live':
+      return '直播';
+    default:
+      return key.isEmpty ? '影视' : key;
+  }
+}
+
+/// 封面地址：相对代理地址补全，协议相对地址补 https，data: 地址原样返回。
+String fxCoverUrl(String url) {
+  final u = url.trim();
+  if (u.isEmpty) return '';
+  if (u.startsWith('data:')) return u;
+  // 协议相对地址（//pic.example/a.jpg）必须补 https，否则 Api.abs 会拼成 host//...
+  if (u.startsWith('//')) return 'https:$u';
+  return Api.abs(u);
+}
+
+/// 封面是否可用：空串 / data: 占位图 / 非 http(s)、协议相对、站内相对地址都算无效。
+/// 无效时 FxCover 统一显示灰底 + 影片图标的占位图。
+bool fxUsableCover(String url) {
+  final u = url.trim();
+  if (u.isEmpty) return false;
+  if (u.startsWith('//')) return true;
+  final lower = u.toLowerCase();
+  if (lower.startsWith('http://') || lower.startsWith('https://')) return true;
+  if (u.startsWith('/')) return true;
+  return false;
+}
+
+/// 网络封面：加载失败 / 空地址 / 非法 URL 时统一显示灰底影片图标占位
+class FxCover extends StatelessWidget {
+  const FxCover({
+    super.key,
+    required this.url,
+    required this.title,
+    this.radius = 14,
+    this.fit = BoxFit.cover,
+    this.big = false,
+    this.showText = true,
+  });
+
+  final String url;
+  final String title;
+  final double radius;
+  final BoxFit fit;
+  final bool big;
+  final bool showText;
+
+  /// 统一占位图：灰底 + 影片图标。不再按片名生成彩色块。
+  /// 空地址、data: 占位图、非法 URL 都走这里。
+  Widget _placeholder() {
+    final iconSize = big ? 44.0 : 30.0;
+    return ColoredBox(
+      color: const Color(0xFFE6E9EF),
+      child: Center(
+        child: Icon(
+          Icons.movie_outlined,
+          size: iconSize,
+          color: const Color(0xFF98A4B5),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final usable = fxUsableCover(url);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          _placeholder(),
+          if (usable)
+            Image.network(
+              fxCoverUrl(url),
+              fit: fit,
+              gaplessPlayback: true,
+              filterQuality: FilterQuality.medium,
+              loadingBuilder: (context, child, progress) {
+                if (progress == null) return child;
+                return _placeholder();
+              },
+              errorBuilder: (context, error, stack) => _placeholder(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 海报角标文案：新 / 更新至N集 / 全N集 / 已完结。
+/// 服务端 status 文案很杂（更新至10集 / 全29集 / 已完结 / HD / 第261104期），
+/// 只认这四类；认不出来的老片不显示角标，当年的新片显示「新」。
+String? fxBadgeText(VideoCard item) {
+  final s = item.status.trim();
+  if (s.isNotEmpty) {
+    if (s.contains('完结')) return '已完结';
+    final full = RegExp(r'全\s*(\d+)\s*集').firstMatch(s);
+    if (full != null) return '全${full.group(1)}集';
+    final fullTail = RegExp(r'(\d+)\s*集全').firstMatch(s);
+    if (fullTail != null) return '全${fullTail.group(1)}集';
+    final updating = RegExp(r'更新至\s*第?\s*(\d+)\s*集').firstMatch(s);
+    if (updating != null) return '更新至${updating.group(1)}集';
+    final variety = RegExp(r'更新至\s*第?\s*(\d+)\s*期').firstMatch(s);
+    if (variety != null) return '更新至${variety.group(1)}期';
+  }
+  return item.year == DateTime.now().year ? '新' : null;
+}
+
+/// 海报左上角小角标
+class FxPosterBadge extends StatelessWidget {
+  const FxPosterBadge(this.text, {super.key});
+
+  final String text;
+
+  LinearGradient get _gradient {
+    if (text == '新') {
+      return const LinearGradient(
+        colors: [Color(0xFFFF6B6B), Color(0xFFFF9A3D)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      );
+    }
+    if (text.startsWith('更新')) {
+      return const LinearGradient(
+        colors: [Color(0xFF5B8CFF), Color(0xFF8E6BFF)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      );
+    }
+    if (text.startsWith('全')) {
+      return const LinearGradient(
+        colors: [Color(0xFF2FA985), Color(0xFF5BC8A8)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      );
+    }
+    return const LinearGradient(
+      colors: [Color(0xCC2B3440), Color(0xCC4A5566)],
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 84),
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        gradient: _gradient,
+        borderRadius: BorderRadius.circular(6),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(.16),
+            blurRadius: 5,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Text(
+        text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(
+          fontSize: 9.5,
+          height: 1.15,
+          fontWeight: FontWeight.w600,
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
+}
+
+/// 海报下方唯一的一行状态：优先服务端 status，其次「年份 · 类型」。
+String fxPosterStatusLine(VideoCard item) {
+  final s = item.status.trim();
+  if (s.isNotEmpty) return s;
+  final parts = <String>[
+    if (item.year > 0) '${item.year}',
+    if (item.type.isNotEmpty) item.type else fxCategoryName(item.category),
+  ];
+  return parts.join(' · ');
+}
+
+/// 2:3 海报 + 左上角角标 + 片名 1 行省略 + 状态 1 行
+class FxPosterTile extends StatelessWidget {
+  const FxPosterTile({
+    super.key,
+    required this.item,
+    this.onTap,
+    this.radius = 12,
+    this.showBadge = true,
+    this.titleSize = 12.5,
+    this.showTitle = true,
+    this.showStatus = true,
+  });
+
+  final VideoCard item;
+  final VoidCallback? onTap;
+  final double radius;
+  final bool showBadge;
+  final double titleSize;
+  final bool showTitle;
+  final bool showStatus;
+
+  @override
+  Widget build(BuildContext context) {
+    final badge = showBadge ? fxBadgeText(item) : null;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AspectRatio(
+            aspectRatio: 2 / 3,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                FxCover(url: item.cover, title: item.title, radius: radius),
+                if (badge != null)
+                  Positioned(
+                    left: 5,
+                    top: 5,
+                    child: FxPosterBadge(badge),
+                  ),
+              ],
+            ),
+          ),
+          if (showTitle) ...[
+            const SizedBox(height: 5),
+            Text(
+              item.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: titleSize,
+                height: 1.3,
+                fontWeight: FontWeight.w500,
+                color: Fx.ink,
+              ),
+            ),
+          ],
+          if (showStatus) ...[
+            const SizedBox(height: 2),
+            Text(
+              fxPosterStatusLine(item),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 11,
+                height: 1.2,
+                fontWeight: FontWeight.w400,
+                color: Fx.sub,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 分区标题：标题左 + 「更多 ›」右
+class FxSectionTitle extends StatelessWidget {
+  const FxSectionTitle({
+    super.key,
+    required this.title,
+    this.subtitle,
+    this.onMore,
+    this.moreText = '更多',
+  });
+
+  final String title;
+  final String? subtitle;
+  final VoidCallback? onMore;
+  final String moreText;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: 3,
+            height: 16,
+            decoration: BoxDecoration(
+              gradient: Fx.brand,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(title,
+              style: const TextStyle(
+                  fontSize: 17, fontWeight: FontWeight.w600, color: Fx.ink)),
+          if (subtitle != null) ...[
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                subtitle!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
+              ),
+            ),
+          ] else
+            const Spacer(),
+          if (onMore != null)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onMore,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(moreText,
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w400,
+                            color: Fx.sub)),
+                    const Icon(Icons.chevron_right_rounded,
+                        size: 16, color: Fx.sub),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 首页分区：4 列海报横滑（2:3 / 圆角 12 / 间距 8），最多 [maxItems] 条。
+class FxSectionRow extends StatelessWidget {
+  const FxSectionRow({
+    super.key,
+    required this.title,
+    required this.items,
+    this.onMore,
+    this.onTapItem,
+    this.visibleCount = 4,
+    this.gap = 8,
+    this.horizontalPadding = 16,
+    this.maxItems = 10,
+  });
+
+  final String title;
+  final List<VideoCard> items;
+  final VoidCallback? onMore;
+  final ValueChanged<VideoCard>? onTapItem;
+  final int visibleCount;
+  final double gap;
+  final double horizontalPadding;
+  final int maxItems;
+
+  @override
+  Widget build(BuildContext context) {
+    final list = items.take(maxItems).toList();
+    if (list.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        FxSectionTitle(title: title, onMore: onMore, moreText: '更多'),
+        const SizedBox(height: 12),
+        LayoutBuilder(
+          builder: (ctx, cons) {
+            final available = cons.maxWidth -
+                horizontalPadding * 2 -
+                gap * (visibleCount - 1);
+            final itemWidth = available <= 0 ? 72.0 : available / visibleCount;
+            return SizedBox(
+              height: itemWidth * 1.5 + 40,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+                physics: const BouncingScrollPhysics(),
+                itemCount: list.length,
+                separatorBuilder: (_, __) => SizedBox(width: gap),
+                itemBuilder: (ctx, i) {
+                  final item = list[i];
+                  return SizedBox(
+                    width: itemWidth,
+                    child: FxPosterTile(
+                      item: item,
+                      onTap: onTapItem == null
+                          ? null
+                          : () => onTapItem!(item),
+                    ),
+                  );
+                },
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+/* ------------------------------------------------------------ 骨架屏 */
+
+/// 骨架屏呼吸动画容器
+class FxSkeletonPulse extends StatefulWidget {
+  const FxSkeletonPulse({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<FxSkeletonPulse> createState() => _FxSkeletonPulseState();
+}
+
+class _FxSkeletonPulseState extends State<FxSkeletonPulse>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (ctx, child) =>
+          Opacity(opacity: .55 + .35 * _controller.value, child: child),
+      child: widget.child,
+    );
+  }
+}
+
+/// 骨架屏占位块
+class FxSkeletonBox extends StatelessWidget {
+  const FxSkeletonBox({
+    super.key,
+    this.width,
+    this.height,
+    this.radius = 12,
+  });
+
+  final double? width;
+  final double? height;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(.62),
+        borderRadius: BorderRadius.circular(radius),
+        border: Border.all(color: Colors.white.withOpacity(.9)),
+      ),
+    );
+  }
+}
+
+/// 3 列 / N 列海报网格骨架屏
+class FxPosterGridSkeleton extends StatelessWidget {
+  const FxPosterGridSkeleton({
+    super.key,
+    this.crossAxisCount = 4,
+    this.itemCount = 12,
+    this.padding = const EdgeInsets.fromLTRB(16, 4, 16, 0),
+    this.spacing = 8,
+    this.showTitle = true,
+  });
+
+  final int crossAxisCount;
+  final int itemCount;
+  final EdgeInsets padding;
+  final double spacing;
+  final bool showTitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (ctx, cons) {
+        final width = (cons.maxWidth -
+                padding.horizontal -
+                spacing * (crossAxisCount - 1)) /
+            crossAxisCount;
+        return Padding(
+          padding: padding,
+          child: Wrap(
+            spacing: spacing,
+            runSpacing: 14,
+            children: [
+              for (var i = 0; i < itemCount; i++)
+                SizedBox(
+                  width: width,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      FxSkeletonBox(height: width * 1.5, radius: 12),
+                      if (showTitle) ...[
+                        const SizedBox(height: 7),
+                        FxSkeletonBox(
+                            height: 12, width: width * .78, radius: 4),
+                        const SizedBox(height: 5),
+                        FxSkeletonBox(
+                            height: 10, width: width * .52, radius: 4),
+                      ],
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 4 列海报横滑骨架屏（首页分区用）
+class FxPosterRowSkeleton extends StatelessWidget {
+  const FxPosterRowSkeleton({
+    super.key,
+    this.count = 4,
+    this.gap = 8,
+    this.horizontalPadding = 16,
+  });
+
+  final int count;
+  final double gap;
+  final double horizontalPadding;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (ctx, cons) {
+        final width = (cons.maxWidth -
+                horizontalPadding * 2 -
+                gap * (count - 1)) /
+            count;
+        return Padding(
+          padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (var i = 0; i < count; i++) ...[
+                if (i != 0) SizedBox(width: gap),
+                SizedBox(
+                  width: width,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      FxSkeletonBox(height: width * 1.5, radius: 12),
+                      const SizedBox(height: 7),
+                      FxSkeletonBox(height: 12, width: width * .78, radius: 4),
+                      const SizedBox(height: 5),
+                      FxSkeletonBox(height: 10, width: width * .52, radius: 4),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 排行榜列表骨架屏
+class FxRankListSkeleton extends StatelessWidget {
+  const FxRankListSkeleton({
+    super.key,
+    this.count = 6,
+    this.padding = const EdgeInsets.fromLTRB(16, 0, 16, 0),
+  });
+
+  final int count;
+  final EdgeInsets padding;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.separated(
+      physics: const NeverScrollableScrollPhysics(),
+      padding: padding,
+      itemCount: count,
+      separatorBuilder: (_, __) => const SizedBox(height: 10),
+      itemBuilder: (ctx, i) => Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(.62),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.white.withOpacity(.9)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const FxSkeletonBox(width: 30, height: 36, radius: 10),
+            const SizedBox(width: 8),
+            const FxSkeletonBox(width: 66, height: 99, radius: 10),
+            const SizedBox(width: 10),
+            Expanded(
+              child: SizedBox(
+                height: 99,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    FxSkeletonBox(height: 14, width: 130, radius: 4),
+                    const SizedBox(height: 8),
+                    FxSkeletonBox(height: 11, width: 90, radius: 4),
+                    const SizedBox(height: 8),
+                    FxSkeletonBox(height: 11, radius: 4),
+                    const SizedBox(height: 5),
+                    FxSkeletonBox(height: 11, width: 160, radius: 4),
+                    const Spacer(),
+                    FxSkeletonBox(height: 11, width: 74, radius: 4),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

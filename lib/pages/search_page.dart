@@ -36,13 +36,15 @@ class _SearchPageState extends State<SearchPage> {
   bool _loadingMore = false;
   bool _moreError = false;
   bool _hasMore = true;
+  bool _hotLoading = true;
+  bool _hotError = false;
   int _page = 1;
   int _req = 0;
 
   @override
   void initState() {
     super.initState();
-    _showAi = true;
+    _showAi = widget.openAi;
     _q.addListener(_onQueryChanged);
     _scroll.addListener(_onScroll);
     _loadHistory();
@@ -87,10 +89,21 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Future<void> _loadHotWords() async {
+    if (mounted && !_hotLoading) {
+      setState(() {
+        _hotLoading = true;
+        _hotError = false;
+      });
+    }
     List<VideoCard> items = const [];
     try {
       items = await Api.rank('hot');
     } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _hotLoading = false;
+        _hotError = true;
+      });
       return;
     }
     if (!mounted) return;
@@ -100,9 +113,13 @@ class _SearchPageState extends State<SearchPage> {
       final title = item.title.trim();
       if (title.isEmpty || !seen.add(title)) continue;
       words.add(title);
-      if (words.length >= 10) break;
+      if (words.length >= 12) break;
     }
-    setState(() => _hotWords = words);
+    setState(() {
+      _hotWords = words;
+      _hotLoading = false;
+      _hotError = words.isEmpty;
+    });
   }
 
   Future<void> _saveHistory(String q) async {
@@ -395,17 +412,48 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Widget _body() {
-    if (_loading) {
-      return FxLoadingView(
-        label: _mode == 'ai' ? 'AI 正在为你找片…' : '正在搜索「${_lastQuery ?? ''}」…',
-      );
-    }
+    if (_loading) return _loadingView();
     if (_error != null && _results.isEmpty) {
       return FxErrorView(message: _error!, onRetry: _retry);
     }
     if (_results.isNotEmpty) return _resultsView();
     if (_mode != null) return _emptyResults();
     return _discover();
+  }
+
+  /// 搜索中骨架屏：结果头 + 3 列海报占位，避免一片空白。
+  Widget _loadingView() {
+    return FxSkeletonPulse(
+      child: ListView(
+        physics: const NeverScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+        children: [
+          Row(
+            children: [
+              FxSkeletonBox(
+                  height: 16,
+                  width: _mode == 'ai' ? 76 : 82,
+                  radius: 4),
+              const SizedBox(width: 8),
+              FxSkeletonBox(height: 12, width: 120, radius: 4),
+            ],
+          ),
+          const SizedBox(height: 14),
+          const FxPosterGridSkeleton(
+            crossAxisCount: 3,
+            itemCount: 9,
+            padding: EdgeInsets.zero,
+          ),
+          const SizedBox(height: 16),
+          Center(
+            child: Text(
+              _mode == 'ai' ? 'AI 正在为你找片…' : '正在搜索「${_lastQuery ?? ''}」…',
+              style: const TextStyle(fontSize: 11.5, color: Color(0xFFA6B1C2)),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _discover() {
@@ -492,96 +540,129 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _hotCard() {
     return GlassCard(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             children: [
-              Icon(Icons.local_fire_department_rounded,
+              const Icon(Icons.local_fire_department_rounded,
                   size: 19, color: Color(0xFFFF8A3D)),
-              SizedBox(width: 6),
-              Text('热搜榜',
+              const SizedBox(width: 6),
+              const Text('热搜词',
                   style: TextStyle(
                       fontSize: 17,
                       height: 1.2,
                       fontWeight: FontWeight.w600,
                       color: Fx.ink)),
-              SizedBox(width: 7),
-              Text('大家都在搜',
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w400,
-                      color: Fx.sub)),
+              const SizedBox(width: 7),
+              const Expanded(
+                child: Text('大家都在搜',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w400,
+                        color: Fx.sub)),
+              ),
+              if (_hotLoading && _hotWords.isEmpty)
+                const SizedBox(
+                  width: 13,
+                  height: 13,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.8,
+                    valueColor: AlwaysStoppedAnimation<Color>(Fx.accent),
+                  ),
+                ),
             ],
           ),
-          const SizedBox(height: 10),
-          LayoutBuilder(
-            builder: (ctx, cons) {
-              if (_hotWords.isEmpty) {
-                return const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 10),
-                  child: Text('暂无热搜，请稍后重试',
-                      style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w400,
-                          color: Fx.sub)),
-                );
-              }
-              final half = (cons.maxWidth - 10) / 2;
-              return Wrap(
-                children: [
-                  for (var i = 0; i < _hotWords.length; i++)
-                    SizedBox(
-                      width: half,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => _search(_hotWords[i]),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          child: Row(
-                            children: [
-                              SizedBox(
-                                width: 20,
-                                child: Text(
-                                  '${i + 1}',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: i == 0
-                                        ? Fx.gold
-                                        : i == 1
-                                            ? Fx.accent
-                                            : i == 2
-                                                ? Fx.accent2
-                                                : const Color(0xFFB3BECD),
-                                  ),
-                                ),
-                              ),
-                              Expanded(
-                                child: Text(
-                                  _hotWords[i],
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w400,
-                                      color: Fx.ink),
-                                ),
-                              ),
-                              if (i < 3)
-                                const Icon(Icons.north_east_rounded,
-                                    size: 11, color: Color(0xFFFF8A3D)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              );
-            },
-          ),
+          const SizedBox(height: 12),
+          if (_hotLoading && _hotWords.isEmpty)
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (var i = 0; i < 6; i++)
+                  const FxSkeletonBox(height: 28, width: 76, radius: 14),
+              ],
+            )
+          else if (_hotWords.isEmpty)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _loadHotWords,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    const Icon(Icons.refresh_rounded,
+                        size: 15, color: Fx.accent),
+                    const SizedBox(width: 5),
+                    Text(_hotError ? '热搜加载失败，点击重试' : '暂无热搜，点击重试',
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w400,
+                            color: Fx.sub)),
+                  ],
+                ),
+              ),
+            )
+          else
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (var i = 0; i < _hotWords.length; i++)
+                  _hotChip(i, _hotWords[i]),
+              ],
+            ),
         ],
+      ),
+    );
+  }
+
+  Widget _hotChip(int i, String word) {
+    final color = i == 0
+        ? Fx.gold
+        : i == 1
+            ? Fx.accent
+            : i == 2
+                ? Fx.accent2
+                : const Color(0xFFB3BECD);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _search(word),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(.7),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('${i + 1}',
+                style: TextStyle(
+                    fontSize: 10,
+                    height: 1.1,
+                    fontWeight: FontWeight.w700,
+                    color: color)),
+            const SizedBox(width: 4),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 132),
+              child: Text(
+                word,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    fontSize: 12,
+                    height: 1.1,
+                    fontWeight: FontWeight.w400,
+                    color: Fx.ink),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -745,7 +826,7 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _resultsView() {
     final width = MediaQuery.of(context).size.width;
-    final itemWidth = (width - 32 - 20) / 3;
+    final itemWidth = (width - 32 - 16) / 3;
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     return Column(
       children: [
@@ -793,14 +874,14 @@ class _SearchPageState extends State<SearchPage> {
                 sliver: SliverGrid(
                   gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: 3,
-                    crossAxisSpacing: 10,
-                    mainAxisSpacing: 10,
-                    mainAxisExtent: itemWidth * 1.5 + 48,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                    mainAxisExtent: itemWidth * 1.5 + 40,
                   ),
                   delegate: SliverChildBuilderDelegate(
                     (ctx, i) {
                       final item = _results[i];
-                      return FxPosterCard(
+                      return FxPosterTile(
                         item: item,
                         onTap: () => _openDetail(item.id),
                       );
@@ -865,24 +946,50 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _emptyResults() {
     final ai = _mode == 'ai';
-    return FxEmptyView(
-      icon: ai ? Icons.auto_awesome_rounded : Icons.search_off_rounded,
-      title: ai ? '没有找到合适的片子' : '没有找到相关影片',
-      subtitle: ai ? '试试换一种描述，或直接搜索片名' : '换个关键词，或者试试下方的热搜',
-      actionText: ai ? '重新描述' : '重新搜索',
-      onAction: () {
-        if (ai) {
-          setState(() {
-            _mode = null;
-            _lastQuery = null;
-            _results = [];
-            _showAi = true;
-          });
-          _aiFocus.requestFocus();
-        } else {
-          _reset();
-        }
-      },
+    return ListView(
+      physics: const BouncingScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 28, 16, 32),
+      children: [
+        FxEmptyView(
+          icon: ai ? Icons.auto_awesome_rounded : Icons.search_off_rounded,
+          title: ai ? '没有找到合适的片子' : '没有找到相关影片',
+          subtitle: ai ? '试试换一种描述，或直接搜索片名' : '换个关键词再试一次，或看看大家最近在搜什么',
+          actionText: ai ? '重新描述' : '重新搜索',
+          onAction: () {
+            if (ai) {
+              setState(() {
+                _mode = null;
+                _lastQuery = null;
+                _results = [];
+                _showAi = true;
+              });
+              _aiFocus.requestFocus();
+            } else {
+              _reset();
+            }
+          },
+        ),
+        if (!ai && _hotWords.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          const Center(
+            child: Text('大家都在搜',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w400,
+                    color: Color(0xFFA6B1C2))),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (var i = 0; i < _hotWords.length && i < 8; i++)
+                _hotChip(i, _hotWords[i]),
+            ],
+          ),
+        ],
+      ],
     );
   }
 }

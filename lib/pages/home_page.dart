@@ -192,14 +192,50 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 服务端分区名较长，首页统一成短标题，保持分区节奏一致。
+  /// 注意「电影精选 · 高分片单」同时含「电影」「高分」，必须先判分类词，
+  /// 否则会被误归到「高分好剧」，导致电影分区丢失。
   String _sectionLabel(String raw) {
+    if (raw.contains('今日热播')) return '今日热播';
     if (raw.contains('最新')) return '最新更新';
     if (raw.contains('电影')) return '电影';
-    if (raw.contains('动漫')) return '动漫';
     if (raw.contains('综艺')) return '综艺';
+    if (raw.contains('动漫')) return '动漫';
     if (raw.contains('高分')) return '高分好剧';
-    if (raw.contains('今日') || raw.contains('热播')) return '今日热播';
     return raw;
+  }
+
+  /// 首页分区固定顺序：今日热播（腾讯榜命中）→ 最新更新 → 高分好剧 →
+  /// 电影 → 综艺 → 动漫。推荐频道只保留这 6 个分区，每区最多 10 条。
+  static const List<String> _sectionOrder = <String>[
+    '今日热播',
+    '最新更新',
+    '高分好剧',
+    '电影',
+    '综艺',
+    '动漫',
+  ];
+
+  int _sectionRank(String label) {
+    final i = _sectionOrder.indexOf(label);
+    return i < 0 ? _sectionOrder.length : i;
+  }
+
+  List<HomeSection> _arrangeSections(List<HomeSection> raw) {
+    final list = <HomeSection>[
+      for (final s in raw)
+        if (s.items.isNotEmpty && !s.title.contains('短剧'))
+          HomeSection(_sectionLabel(s.title), s.items.take(10).toList()),
+    ];
+    if (_channel == 'recommend') {
+      // 推荐频道严格按 6 个分区输出，服务端的其它分区不占用首页首屏。
+      return <HomeSection>[
+        for (final label in _sectionOrder)
+          ...list.where((s) => s.title == label),
+      ];
+    }
+    // 分类频道保留服务端分区，但同样按统一顺序排列。
+    list.sort((a, b) => _sectionRank(a.title).compareTo(_sectionRank(b.title)));
+    return list;
   }
 
   @override
@@ -240,9 +276,7 @@ class _HomePageState extends State<HomePage> {
       ];
     }
 
-    final sections = data.sections
-        .where((s) => s.items.isNotEmpty && !s.title.contains('短剧'))
-        .toList();
+    final sections = _arrangeSections(data.sections);
     if (data.banners.isEmpty && sections.isEmpty) {
       return [
         SliverFillRemaining(
@@ -679,121 +713,38 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _section(HomeSection s) {
-    final count = s.items.length > 12 ? 12 : s.items.length;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SizedBox(height: 20),
-        FxSectionTitle(
-            title: _sectionLabel(s.title), onMore: () => _openSectionMore(s)),
-        const SizedBox(height: 12),
-        SizedBox(
-          height: 212,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            itemCount: count,
-            separatorBuilder: (_, __) => const SizedBox(width: 10),
-            itemBuilder: (ctx, i) {
-              final item = s.items[i];
-              return FxPosterCard(
-                item: item,
-                width: 112,
-                onTap: () => _openDetail(item.id),
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _HomeSkeleton extends StatefulWidget {
-  const _HomeSkeleton();
-
-  @override
-  State<_HomeSkeleton> createState() => _HomeSkeletonState();
-}
-
-class _HomeSkeletonState extends State<_HomeSkeleton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1100),
-  )..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  Widget _box({double? height, double? width, double radius = 14}) {
-    return Container(
-      height: height,
-      width: width,
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.62),
-        borderRadius: BorderRadius.circular(radius),
-        border: Border.all(color: Colors.white.withOpacity(.9)),
+    return Padding(
+      padding: const EdgeInsets.only(top: 20),
+      child: FxSectionRow(
+        title: s.title,
+        items: s.items,
+        onMore: () => _openSectionMore(s),
+        onTapItem: (item) => _openDetail(item.id),
       ),
     );
   }
+}
+
+class _HomeSkeleton extends StatelessWidget {
+  const _HomeSkeleton();
 
   @override
   Widget build(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    final itemWidth = (width - 32 - 20) / 3;
-    return AnimatedBuilder(
-      animation: _c,
-      builder: (ctx, _) => Opacity(
-        opacity: .55 + .35 * _c.value,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _box(height: 176, radius: 18),
-              const SizedBox(height: 20),
-              _box(height: 17, width: 132, radius: 6),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  for (var i = 0; i < 3; i++) ...[
-                    if (i != 0) const SizedBox(width: 10),
-                    SizedBox(
-                      width: itemWidth,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _box(height: itemWidth * 1.5, radius: 14),
-                          const SizedBox(height: 6),
-                          _box(height: 14, width: itemWidth * .84, radius: 4),
-                          const SizedBox(height: 4),
-                          _box(height: 11, width: itemWidth * .55, radius: 3),
-                        ],
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 20),
-              _box(height: 17, width: 156, radius: 6),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  for (var i = 0; i < 3; i++) ...[
-                    if (i != 0) const SizedBox(width: 10),
-                    SizedBox(
-                      width: itemWidth,
-                      child: _box(height: itemWidth * 1.5, radius: 14),
-                    ),
-                  ],
-                ],
-              ),
+    return FxSkeletonPulse(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const FxSkeletonBox(height: 176, radius: 18),
+            const SizedBox(height: 22),
+            for (var i = 0; i < 3; i++) ...[
+              const FxSkeletonBox(height: 17, width: 132, radius: 6),
+              const SizedBox(height: 12),
+              const FxPosterRowSkeleton(horizontalPadding: 0),
+              const SizedBox(height: 22),
             ],
-          ),
+          ],
         ),
       ),
     );
