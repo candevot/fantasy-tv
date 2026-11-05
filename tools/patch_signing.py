@@ -22,6 +22,7 @@ KTS_BLOCK = '''
     signingConfigs {
         create("release") {
             storeFile = file("../fx-release.jks")
+            storeType = "JKS"
             storePassword = "fx123456"
             keyAlias = "fx"
             keyPassword = "fx123456"
@@ -33,6 +34,7 @@ GROOVY_BLOCK = '''
     signingConfigs {
         release {
             storeFile file("../fx-release.jks")
+            storeType "JKS"
             storePassword "fx123456"
             keyAlias "fx"
             keyPassword "fx123456"
