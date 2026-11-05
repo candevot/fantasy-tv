@@ -6,13 +6,11 @@ import 'package:flutter/services.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
-import '../services/screen_fit.dart';
 import '../theme.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_theme.dart';
-import '../widgets/screen_fit_selector.dart';
 import 'history_page.dart' show FxStore;
 
 /// 全屏播放退出时带回给竖屏播放器的结果。
@@ -306,8 +304,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _line = widget.line;
     _title = widget.title.trim().isEmpty ? '正在播放' : widget.title.trim();
     _episodes = List<Episode>.from(widget.episodes);
-    // 与竖屏共用持久化档位，进出全屏保持一致。
-    unawaited(ScreenFitStore.ensureLoaded());
 
     // 复用竖屏的播放器实例：不新建 player，也不重新 open。
     final c = widget.player;
@@ -1265,7 +1261,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       ],
                     ),
                     const SizedBox(height: 14),
-                    const ScreenFitSelector(),
                     if (quality.length >= 2) ...[
                       const SizedBox(height: 14),
                       const Text('清晰度',
@@ -1474,14 +1469,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null || !c.value.isInitialized) {
       return const ColoredBox(color: Colors.black);
     }
-    // 三种档位都让 Video 铺满整屏，只切换 fit；contain 的黑边由 Video 自己补，
-    // 不会重建 controller，也不会重新加载视频。
+    // 画面固定自适应：等比完整显示并居中，不裁剪、不变形。
     return ClipRect(
       child: SizedBox.expand(
-        child: ValueListenableBuilder<ScreenFit>(
-          valueListenable: ScreenFitStore.notifier,
-          builder: (context, fit, _) => c.buildVideo(fit: fit.boxFit),
-        ),
+        child: c.buildVideo(fit: BoxFit.contain),
       ),
     );
   }
