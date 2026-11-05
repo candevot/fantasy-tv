@@ -32,7 +32,6 @@ class _RankPageState extends State<RankPage> {
     _RankType('movie', '电影'),
     _RankType('zongyi', '综艺'),
     _RankType('manhua', '动漫'),
-    _RankType('duanju', '短剧'),
   ];
   static const List<_Period> _periods = [
     _Period('day', '日榜'),

@@ -686,7 +686,6 @@ class _CategoryPageState extends State<CategoryPage> {
     _Opt('movie', '电影'),
     _Opt('zongyi', '综艺'),
     _Opt('manhua', '动漫'),
-    _Opt('duanju', '短剧'),
     _Opt('live', '直播'),
   ];
   static const List<_Opt> _areas = [

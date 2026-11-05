@@ -30,7 +30,6 @@ class _HomePageState extends State<HomePage> {
     _Channel('movie', '电影'),
     _Channel('zongyi', '综艺'),
     _Channel('manhua', '动漫'),
-    _Channel('duanju', '短剧'),
   ];
 
   final PageController _bannerCtrl = PageController(viewportFraction: .88);
@@ -176,10 +175,7 @@ class _HomePageState extends State<HomePage> {
   void _openSectionMore(HomeSection s) {
     var type = _channel == 'recommend' ? '' : _channel;
     var title = type.isEmpty ? '全部片库' : _channelLabel;
-    if (s.title.contains('短剧')) {
-      type = 'duanju';
-      title = '短剧';
-    } else if (s.title.contains('动漫')) {
+    if (s.title.contains('动漫')) {
       type = 'manhua';
       title = '动漫';
     } else if (s.title.contains('直播')) {
@@ -227,7 +223,9 @@ class _HomePageState extends State<HomePage> {
       ];
     }
 
-    final sections = data.sections.where((s) => s.items.isNotEmpty).toList();
+    final sections = data.sections
+        .where((s) => s.items.isNotEmpty && !s.title.contains('短剧'))
+        .toList();
     if (data.banners.isEmpty && sections.isEmpty) {
       return [
         SliverFillRemaining(
@@ -307,13 +305,13 @@ class _HomePageState extends State<HomePage> {
                 children: [
                   const Text('幻想影视',
                       style: TextStyle(
-                          fontSize: 18.5,
+                          fontSize: 20.5,
                           fontWeight: FontWeight.w800,
                           color: Fx.ink,
                           letterSpacing: .4)),
                   Text('高画 · 免费 · 无广',
                       style: TextStyle(
-                          fontSize: 9,
+                          fontSize: 13,
                           color: Fx.sub.withOpacity(.9),
                           letterSpacing: .2)),
                 ],
@@ -423,43 +421,42 @@ class _HomePageState extends State<HomePage> {
 
   Widget _channelTabs() {
     return SizedBox(
-      height: 34,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.only(right: 10),
-        itemCount: _channels.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 21),
-        itemBuilder: (ctx, i) {
-          final c = _channels[i];
-          final active = c.key == _channel;
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => _selectChannel(c.key),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  c.label,
-                  style: TextStyle(
-                    fontSize: active ? 16 : 14.5,
-                    fontWeight: active ? FontWeight.w800 : FontWeight.w400,
-                    color: active ? Fx.ink : Fx.sub,
-                  ),
+      height: 36,
+      child: Row(
+        children: [
+          for (final c in _channels)
+            Expanded(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _selectChannel(c.key),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      c.label,
+                      style: TextStyle(
+                        fontSize: c.key == _channel ? 18 : 17,
+                        fontWeight: c.key == _channel
+                            ? FontWeight.w800
+                            : FontWeight.w400,
+                        color: c.key == _channel ? Fx.ink : Fx.sub,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 220),
+                      width: c.key == _channel ? 18 : 0,
+                      height: 3,
+                      decoration: BoxDecoration(
+                        gradient: c.key == _channel ? Fx.brand : null,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 5),
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 220),
-                  width: active ? 18 : 0,
-                  height: 3,
-                  decoration: BoxDecoration(
-                    gradient: active ? Fx.brand : null,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ],
+              ),
             ),
-          );
-        },
+        ],
       ),
     );
   }
