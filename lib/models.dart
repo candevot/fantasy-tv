@@ -195,6 +195,28 @@ class HomeData {
   HomeData(this.banners, this.sections);
 }
 
+/// 直播频道条目：`GET /api/live` → `{items:[{id,title,cover,url,group}]}`。
+/// 先只用于首页 2 列卡片展示；url/group 缺失时退化成空串，不影响展示。
+class LiveChannel {
+  final String id, title, cover, url, group;
+
+  const LiveChannel({
+    required this.id,
+    required this.title,
+    required this.cover,
+    this.url = '',
+    this.group = '',
+  });
+
+  factory LiveChannel.fromJson(Map<String, dynamic> j) => LiveChannel(
+        id: _asStr(j['id']),
+        title: _asStr(j['title']),
+        cover: _asStr(j['cover']),
+        url: _asStr(j['url']),
+        group: _asStr(j['group']),
+      );
+}
+
 class LineInfo {
   final String id, name, type;
   final int priority;

@@ -111,6 +111,33 @@ class Api {
     return HomeData(banners, sections);
   }
 
+  /// `GET /api/live` → `{items:[{id,title,cover,url,group}]}`。
+  /// 新接口可能直接返回 items（不带 code/data 包装），这里不走 _decode，
+  /// 两种结构都兼容；404、空结构、脏数据一律按空列表处理，由页面展示空态。
+  static Future<List<LiveChannel>> live() async {
+    final r =
+        await http.get(_u('/live'), headers: _headers()).timeout(_timeout);
+    if (r.statusCode == 404) return const <LiveChannel>[];
+    dynamic j;
+    try {
+      j = jsonDecode(utf8.decode(r.bodyBytes));
+    } catch (_) {
+      return const <LiveChannel>[];
+    }
+    dynamic raw;
+    if (j is Map) {
+      raw = j['items'];
+      final data = j['data'];
+      if (raw is! List && data is Map) raw = data['items'];
+      if (raw is! List) raw = data;
+    }
+    if (raw is! List) return const <LiveChannel>[];
+    return <LiveChannel>[
+      for (final e in raw)
+        if (e is Map) LiveChannel.fromJson(Map<String, dynamic>.from(e)),
+    ];
+  }
+
   static Future<List<VideoCard>> search(String q, int page) async {
     final d = await _get('/search', {'q': q, 'page': page});
     return ((d['items'] ?? []) as List)

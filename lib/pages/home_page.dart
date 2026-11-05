@@ -30,6 +30,7 @@ class _HomePageState extends State<HomePage> {
     _Channel('movie', '电影'),
     _Channel('zongyi', '综艺'),
     _Channel('manhua', '动漫'),
+    _Channel('live', '直播'),
   ];
 
   final PageController _bannerCtrl = PageController(viewportFraction: .88);
@@ -42,6 +43,11 @@ class _HomePageState extends State<HomePage> {
   bool _loading = true;
   bool _dragging = false;
   String? _error;
+
+  /// 直播频道单独维护：接口可能为空 / 404，失败也按空态处理，不弹错误。
+  List<LiveChannel> _liveItems = const <LiveChannel>[];
+  bool _liveLoading = false;
+  bool _liveLoaded = false;
 
   @override
   void initState() {
@@ -112,6 +118,28 @@ class _HomePageState extends State<HomePage> {
     ));
   }
 
+  Future<void> _loadLive() async {
+    final req = ++_req;
+    setState(() => _liveLoading = true);
+    try {
+      final items = await Api.live();
+      if (!mounted || req != _req || _channel != 'live') return;
+      setState(() {
+        _liveItems = items;
+        _liveLoaded = true;
+        _liveLoading = false;
+      });
+    } catch (_) {
+      // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它频道。
+      if (!mounted || req != _req || _channel != 'live') return;
+      setState(() {
+        _liveItems = const <LiveChannel>[];
+        _liveLoaded = true;
+        _liveLoading = false;
+      });
+    }
+  }
+
   void _restartAuto() {
     _timer?.cancel();
     final n = _cache[_channel]?.banners.length ?? 0;
@@ -133,9 +161,13 @@ class _HomePageState extends State<HomePage> {
       _channel = key;
       _bannerIndex = 0;
       _error = null;
-      _loading = !_cache.containsKey(key);
+      _loading = key != 'live' && !_cache.containsKey(key);
     });
     _timer?.cancel();
+    if (key == 'live') {
+      _loadLive();
+      return;
+    }
     if (_cache.containsKey(key)) {
       _restartAuto();
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -246,7 +278,7 @@ class _HomePageState extends State<HomePage> {
       child: RefreshIndicator(
         color: Fx.accent,
         backgroundColor: Colors.white,
-        onRefresh: () => _load(force: true),
+        onRefresh: () => _channel == 'live' ? _loadLive() : _load(force: true),
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(
               parent: BouncingScrollPhysics()),
@@ -261,6 +293,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   List<Widget> _body(HomeData? data) {
+    if (_channel == 'live') return _liveBody();
     if (data == null) {
       if (_loading) {
         return const [SliverToBoxAdapter(child: _HomeSkeleton())];
@@ -321,6 +354,47 @@ class _HomePageState extends State<HomePage> {
                       fontWeight: FontWeight.w400,
                       color: Color(0xFFA6B1C2))),
             ],
+          ),
+        ),
+      ),
+    ];
+  }
+
+  /// 直播频道：2 列卡片；接口为空 / 失败时展示占位空态，不影响其它频道。
+  List<Widget> _liveBody() {
+    if (_liveLoading && !_liveLoaded) {
+      return const [SliverToBoxAdapter(child: _HomeSkeleton())];
+    }
+    if (_liveItems.isEmpty) {
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: FxEmptyView(
+            icon: Icons.live_tv_rounded,
+            title: '暂无直播频道 · 敬请期待',
+            subtitle: '频道上线后会在这里出现',
+            actionText: '刷新试试',
+            onAction: _loadLive,
+          ),
+        ),
+      ];
+    }
+    return [
+      SliverPadding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+        sliver: SliverGrid(
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            mainAxisSpacing: 12,
+            crossAxisSpacing: 12,
+            childAspectRatio: 1.05,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (ctx, i) => _LiveCard(
+              item: _liveItems[i],
+              onTap: () => _toast('直播即将上线'),
+            ),
+            childCount: _liveItems.length,
           ),
         ),
       ),
@@ -743,6 +817,111 @@ class _HomeSkeleton extends StatelessWidget {
               const SizedBox(height: 12),
               const FxPosterRowSkeleton(horizontalPadding: 0),
               const SizedBox(height: 22),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 直播卡片：封面 + 台名 + 分组标签。直播源尚未接入，点击只给占位提示。
+class _LiveCard extends StatelessWidget {
+  const _LiveCard({required this.item, required this.onTap});
+
+  final LiveChannel item;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = item.title.trim().isEmpty ? '未命名频道' : item.title.trim();
+    final group = item.group.trim();
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(6),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(.72),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF50729F).withOpacity(.08),
+              blurRadius: 14,
+              offset: const Offset(0, 5),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  FxCover(url: item.cover, title: title, radius: 10),
+                  Positioned(
+                    top: 6,
+                    left: 6,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(.42),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.circle, size: 6, color: Color(0xFFFF5A5A)),
+                          SizedBox(width: 3),
+                          Text(
+                            'LIVE',
+                            style: TextStyle(
+                              fontSize: 9,
+                              height: 1.1,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: Fx.ink,
+              ),
+            ),
+            if (group.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Fx.accent.withOpacity(.10),
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Text(
+                  group,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                    color: Fx.accent,
+                  ),
+                ),
+              ),
             ],
           ],
         ),
