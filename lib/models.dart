@@ -562,6 +562,36 @@ List<LineInfo> mergeLines(List<LineInfo> lines) {
   return <LineInfo>[for (final group in groups) pick(group)];
 }
 
+/// 是否为「幻想腾讯4K」平台线路。
+///
+/// 服务端平台匹配改成异步后，首屏 /api/detail 可能暂时只返回采集线路，
+/// 客户端据此决定要不要在 1.5 秒后再拉一次 lines。
+bool fxIsTencentLine(LineInfo line) {
+  final raw = '${line.id} ${line.name} ${line.source ?? ''} ${line.from ?? ''}';
+  final lower = raw.toLowerCase();
+  return lower.contains('tencent') || raw.contains('腾讯');
+}
+
+/// 合并两次 /api/detail 的线路表：以新返回的顺序为准（平台线路在服务端
+/// 已置顶），旧表里新返回没带的线路追加在后面，避免刷新反而少线路。
+List<LineInfo> fxMergeLines(List<LineInfo> oldLines, List<LineInfo> fresh) {
+  final seen = <String>{};
+  final merged = <LineInfo>[];
+  void add(LineInfo line) {
+    final key = line.id.trim();
+    if (key.isEmpty || !seen.add(key)) return;
+    merged.add(line);
+  }
+
+  for (final line in fresh) {
+    add(line);
+  }
+  for (final line in oldLines) {
+    add(line);
+  }
+  return merged;
+}
+
 class Episode {
   final int n, duration;
   final String name;
@@ -611,6 +641,31 @@ class VideoDetail {
   });
 
   List<Episode> get allEpisodes => [for (final g in groups) ...g.episodes];
+
+  /// 线路异步补全后只替换 lines：集数 / 简介 / 相关推荐都沿用原对象，
+  /// 播放器拿到的 detail 仍是同一部片，不会因为刷新线路而重新加载。
+  VideoDetail copyWith({List<LineInfo>? lines}) {
+    return VideoDetail(
+      id: id,
+      title: title,
+      cover: cover,
+      backdrop: backdrop,
+      rating: rating,
+      year: year,
+      area: area,
+      category: category,
+      status: status,
+      episodes: episodes,
+      desc: desc,
+      tags: tags,
+      director: director,
+      cast: cast,
+      lines: lines ?? this.lines,
+      groups: groups,
+      related: related,
+      relatedIds: relatedIds,
+    );
+  }
 
   /// 详情主线路的来源标记（线路名优先，空则退回 source），
   /// 供榜单这类懒加载详情的卡片补上来源小字。

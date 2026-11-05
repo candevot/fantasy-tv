@@ -145,14 +145,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 每 10 秒把观看进度回写历史，App 被杀也能保留大致位置。
   Timer? _progressTimer;
 
-  /// 是否已切到后台：后台播放开关默认开，切后台只记进度、不暂停；
-  /// 看门狗在后台期间也必须停摆，避免回前台误判卡顿重新 open。
+  /// 是否已切到后台：小窗 / 分屏 / 多任务只算 inactive，不暂停；
+  /// 看门狗在后台期间必须停摆，避免回前台误判卡顿重新 open。
   bool _backgrounded = false;
 
-  /// 音频焦点：inactive 持续一段时间才暂停（来电 / 被其它页面遮住）；
-  /// 下拉通知栏、截屏会很快回到 resumed，不打断声音。
-  Timer? _focusLossTimer;
-  bool _pausedByFocusLoss = false;
+  /// 只有 paused 持续超过 [fxBackgroundPauseDelay] 才暂停（来电 / 音乐等
+  /// 真正离开前台的情况）；inactive 本身不再触发暂停。
+  Timer? _backgroundPauseTimer;
+  bool _pausedByLifecycle = false;
 
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
@@ -284,7 +284,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       seekToSaved: true,
       saveOld: false,
       epOverride: next,
-      playOverride: widget.autoPlay && !_covered,
+      playOverride: !_covered && _shouldContinuePlayback(),
     );
   }
 
@@ -301,7 +301,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         old.value.isInitialized &&
         !old.value.hasError &&
         !_error;
-    final wasPlaying = healthy && old.value.isPlaying;
+    // 切换动作默认「继续播放」；只有切换前确实是暂停（用户主动暂停）
+    // 才保持暂停。未就绪 / 报错时按继续处理，避免自动换线后停在暂停。
+    final continuePlayback = _shouldContinuePlayback(old);
     final resume = healthy ? old.value.position : Duration.zero;
     final oldDuration = old?.value.duration;
     var resumeSeconds = resume.inMilliseconds / 1000.0;
@@ -312,7 +314,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (!mounted) return;
 
       if (!healthy) {
-        resumeSeconds = await fxLoadProgress(widget.videoId, targetEp);
+        final saved = await fxLoadProgress(widget.videoId, targetEp);
+        // 不足 60 秒视为刚看片头，不把 20 秒进度当成续播。
+        resumeSeconds = saved >= fxResumeMinSeconds ? saved : 0;
         if (!mounted) return;
       }
 
@@ -342,7 +346,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           lineOverride: candidate,
           epOverride: targetEp,
           resumeSeconds: resumeSeconds,
-          playOverride: wasPlaying,
+          playOverride: continuePlayback,
           commitLine: true,
           reportFailure: false,
         );
@@ -423,29 +427,41 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     return attempts.take(_maxLineAttempts).toList(growable: false);
   }
 
+  /// 切换线路 / 切集时是否继续播放：
+  /// - 已初始化且正常播放：继续；
+  /// - 已初始化但暂停：用户主动暂停，保持暂停；
+  /// - 未就绪 / 出错 / 刚播完：按继续处理（切换动作就是继续看）。
+  bool _shouldContinuePlayback([FxPlayer? player]) {
+    final c = player ?? _controller;
+    if (c == null) return true;
+    final v = c.value;
+    if (!v.isInitialized || v.hasError || v.isCompleted) return true;
+    return v.isPlaying;
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 全屏期间由全屏页负责保存进度、音频焦点与画面重建。
+    // 全屏期间由全屏页负责保存进度、后台暂停与画面重建。
     if (_fullscreenActive) return;
     switch (state) {
       case AppLifecycleState.inactive:
-        // 来电 / 其它应用抢占音频焦点：先等一小会儿，仍在后台就暂停；
-        // 通知栏 / 截屏会很快回到 resumed，不触发暂停。
-        _armFocusLossPause();
+        // 多任务 / 分屏 / 小窗 / 下拉通知栏：只是失去前台焦点，绝不暂停。
+        // 真正被其它应用占用音频时系统会继续走到 paused，由 5 秒兜底处理。
         return;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
-        // 切后台：后台播放默认开启，完全不暂停，只保存进度。
+        // 切到后台：先记进度；超过 5 秒仍不回来才暂停（不 seek、不换源）。
         _backgrounded = true;
-        _cancelFocusLossPause();
+        _cancelBackgroundPause();
         unawaited(_saveProgress());
+        _armBackgroundPause();
         return;
       case AppLifecycleState.resumed:
         final wasBackgrounded = _backgrounded;
         _backgrounded = false;
-        _cancelFocusLossPause();
+        _cancelBackgroundPause();
         _resetWatchdogClock();
-        _resumeAfterFocusLoss();
+        _resumeAfterLifecyclePause();
         // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
         if (wasBackgrounded) _remountVideoLayer();
         return;
@@ -454,27 +470,28 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
   }
 
-  void _armFocusLossPause() {
-    _cancelFocusLossPause();
-    _focusLossTimer = Timer(fxAudioFocusLossGrace, () {
-      _focusLossTimer = null;
-      if (!mounted || _backgrounded || _fullscreenActive) return;
+  /// paused 后等 5 秒：仍在后台且正在播放才暂停。
+  void _armBackgroundPause() {
+    _cancelBackgroundPause();
+    _backgroundPauseTimer = Timer(fxBackgroundPauseDelay, () {
+      _backgroundPauseTimer = null;
+      if (!mounted || !_backgrounded || _fullscreenActive) return;
       final c = _controller;
       if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
-      _pausedByFocusLoss = true;
+      _pausedByLifecycle = true;
       unawaited(c.pause());
     });
   }
 
-  void _cancelFocusLossPause() {
-    _focusLossTimer?.cancel();
-    _focusLossTimer = null;
+  void _cancelBackgroundPause() {
+    _backgroundPauseTimer?.cancel();
+    _backgroundPauseTimer = null;
   }
 
-  /// 焦点恢复：只在「因失去焦点而暂停」且之前确实在播放时继续。
-  void _resumeAfterFocusLoss() {
-    if (!_pausedByFocusLoss) return;
-    _pausedByFocusLoss = false;
+  /// 回前台：只有「因为切后台超过 5 秒而暂停」才继续播放，不 seek。
+  void _resumeAfterLifecyclePause() {
+    if (!_pausedByLifecycle) return;
+    _pausedByLifecycle = false;
     if (!mounted || _loading || _error || _covered) return;
     final c = _controller;
     if (c == null ||
@@ -563,7 +580,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _progressTimer?.cancel();
-    _cancelFocusLossPause();
+    _cancelBackgroundPause();
     _watchdogTimer?.cancel();
     _frozenClearTimer?.cancel();
     _frozenFallbackTimer?.cancel();
@@ -836,10 +853,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return false;
     }
 
-    final saved = resumeSeconds ??
+    var saved = resumeSeconds ??
         (seekToSaved ? await fxLoadProgress(widget.videoId, ep) : 0.0);
+    // 续播门槛：只看本地保存的进度，活跃切换（resumeSeconds）不受影响。
+    final fromSavedPosition = resumeSeconds == null && seekToSaved;
+    if (fromSavedPosition && saved < fxResumeMinSeconds) saved = 0;
     if (!mounted || token != _loadToken) return false;
     final shouldPlay = playOverride ?? (widget.autoPlay && !_covered);
+    var restoredPosition = 0.0;
 
     var ok = false;
     for (final url in candidates) {
@@ -874,6 +895,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           await controller.seekTo(
             Duration(milliseconds: (resume * 1000).round()),
           );
+          if (fromSavedPosition && resume >= fxResumeMinSeconds) {
+            restoredPosition = resume;
+          }
         }
         if (shouldPlay) {
           await controller.play();
@@ -919,6 +943,16 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _resetWatchdogClock();
         widget.onPlaybackStarted?.call();
         _showControls();
+        if (restoredPosition >= fxResumeMinSeconds) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted || _fullscreenActive) return;
+            fxResumeToast(
+              context,
+              Duration(milliseconds: (restoredPosition * 1000).round()),
+              onRestart: _restartFromBeginning,
+            );
+          });
+        }
         break;
       } catch (_) {
         try {
@@ -1148,7 +1182,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       seekToSaved: true,
       saveOld: false,
       epOverride: next,
-      playOverride: !_covered,
+      playOverride: !_covered && _shouldContinuePlayback(),
     );
   }
 
@@ -1268,12 +1302,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         !c.value.isInitialized) {
       return;
     }
-    // 用户手动暂停 / 播放后，焦点恢复不再替他继续播放。
-    _pausedByFocusLoss = false;
+    // 用户手动暂停 / 播放后，回前台不再替他继续播放。
+    _pausedByLifecycle = false;
     // 以播放器真实状态为准：交给 media_kit 切换，按钮图标随后续
     // player.stream.playing 事件刷新，不用本地布尔抢先改状态。
     unawaited(c.playOrPause());
     _touch();
+  }
+
+  /// 续播提示里的「从头播放」：只把进度拉回 0，不改变播放 / 暂停状态。
+  void _restartFromBeginning() {
+    final c = _controller;
+    if (c == null || _loading || _error) return;
+    unawaited(c.seek(Duration.zero));
+    _showControls();
   }
 
   void _seek(Duration d) {
@@ -1490,18 +1532,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Widget _buildError() {
     return Positioned.fill(
       child: Container(
-        color: Colors.black.withOpacity(.36),
+        color: Colors.black.withValues(alpha: .36),
         alignment: Alignment.center,
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 20),
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.94),
+            color: Colors.white.withValues(alpha: .94),
             borderRadius: BorderRadius.circular(18),
             border: Border.all(color: Colors.white),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(.18),
+                color: Colors.black.withValues(alpha: .18),
                 blurRadius: 24,
                 offset: const Offset(0, 10),
               ),
@@ -1552,7 +1594,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-              color: Fx.accent.withOpacity(.25),
+              color: Fx.accent.withValues(alpha: .25),
               blurRadius: 12,
               offset: const Offset(0, 4),
             ),
@@ -1593,8 +1635,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.black.withOpacity(.55),
-                  Colors.black.withOpacity(0),
+                  Colors.black.withValues(alpha: .55),
+                  Colors.black.withValues(alpha: 0),
                 ],
               ),
             ),
@@ -1632,8 +1674,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.black.withOpacity(0),
-                  Colors.black.withOpacity(.62),
+                  Colors.black.withValues(alpha: 0),
+                  Colors.black.withValues(alpha: .62),
                 ],
               ),
             ),
@@ -1859,11 +1901,11 @@ class _PlayerPageState extends State<PlayerPage> {
                                   horizontal: 12, vertical: 7),
                               decoration: BoxDecoration(
                                 color: _ep == e.n
-                                    ? Fx.accent.withOpacity(.9)
-                                    : Colors.white.withOpacity(.08),
+                                    ? Fx.accent.withValues(alpha: .9)
+                                    : Colors.white.withValues(alpha: .08),
                                 borderRadius: BorderRadius.circular(14),
                                 border: Border.all(
-                                  color: Colors.white.withOpacity(.18),
+                                  color: Colors.white.withValues(alpha: .18),
                                 ),
                               ),
                               child: Text(

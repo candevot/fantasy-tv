@@ -251,9 +251,9 @@ class _TogetherPageState extends State<TogetherPage>
         _videoId = videoId;
         _ep = widget.ep < 1 ? 1 : widget.ep;
         _videoLine = widget.line.trim().isEmpty ? 'l1' : widget.line.trim();
-        // 从详情页进入时沿用当前进度（0 也要带，表示从开头继续），
-        // 并沿用播放 / 暂停状态。
-        _resumePos = widget.position;
+        // 从详情页进入时沿用当前进度；不足 60 秒视为刚看片头，从头开始。
+        _resumePos =
+            widget.position >= fxResumeMinSeconds ? widget.position : 0;
         _resumePlaying = widget.playing;
         _createRoom(videoId, _ep);
       }
@@ -832,7 +832,11 @@ class _TogetherPageState extends State<TogetherPage>
     }
   }
 
-  void _createRoom(String videoId, int ep) {
+  void _createRoom(
+    String videoId,
+    int ep, {
+    VideoDetail? detail,
+  }) {
     _liveChannel = null;
     _liveLineId = '';
     _clearMessages();
@@ -850,9 +854,10 @@ class _TogetherPageState extends State<TogetherPage>
     if (_videoLine.trim().isEmpty) _videoLine = 'l1';
     _qualityKey = null;
     _playInfo = null;
-    _detailVideoId = '';
-    _lines = const <LineInfo>[];
-    _episodes = const <Episode>[];
+    // 选集面板已经拿到的详情直接带进来，不再多请求一次 /api/detail。
+    _detailVideoId = detail == null ? '' : videoId;
+    _lines = detail?.lines ?? const <LineInfo>[];
+    _episodes = detail?.allEpisodes ?? const <Episode>[];
     _loadedKey = '';
     _loadingKey = '';
     _videoError = '';
@@ -865,7 +870,14 @@ class _TogetherPageState extends State<TogetherPage>
     );
     _client.connect();
     _armEnterTimer();
-    _loadVideoTitle(videoId);
+    if (detail == null) {
+      _loadVideoTitle(videoId);
+    } else {
+      if (detail.title.isNotEmpty) _videoTitle = detail.title;
+      if (detail.cover.isNotEmpty) {
+        _videoCover = togetherCoverUrl(detail.cover);
+      }
+    }
     if (mounted) setState(() {});
   }
 
@@ -1652,40 +1664,80 @@ class _TogetherPageState extends State<TogetherPage>
     }
     final card = await showTogetherVideoPicker(context);
     if (!mounted || card == null) return;
+    // 选片后必须先选集：服务端 room_state 只负责同步，不能替用户默认第 1 集。
+    final detail = await _fetchDetailForPicker(card.id);
+    if (!mounted) return;
+    final episodes = _episodesForPicker(detail, card);
+    final episode = await _pickEpisodeFor(card, episodes);
+    if (!mounted) return;
     if (!_online) {
       togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
-    // 房主本地立即切到新片的第 1 集，再广播 room_state；其它成员收到后
-    // 重新拉流。最后一帧由 _loadVideo 抓取，切剧不黑屏。
+    // 换剧视为「继续播放」：切换前暂停才保持暂停。
+    final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
+    final lineId = detail != null && detail.lines.isNotEmpty
+        ? detail.lines.first.id
+        : 'l1';
+    // 房主本地立即切到新片，再广播 room_state；其它成员收到后重新拉流。
+    // 最后一帧由 _loadVideo 抓取，切剧不黑屏。
     setState(() {
       _videoId = card.id;
-      _ep = 1;
-      _videoLine = 'l1';
+      _ep = episode;
+      _videoLine = lineId;
       _videoTitle = card.title;
       _videoCover = togetherCoverUrl(card.cover);
-      _episodes = const <Episode>[];
-      _lines = const <LineInfo>[];
-      _detailVideoId = '';
+      _episodes = episodes;
+      _lines = detail?.lines ?? const <LineInfo>[];
+      _detailVideoId = detail == null ? '' : card.id;
       _qualityKey = null;
       _playInfo = null;
       _videoError = '';
       _resumePos = 0;
-      _resumePlaying = false;
+      _resumePlaying = playing;
       _endedSent = false;
     });
     _loadedKey = '';
     _loadingKey = '';
     _client.sendState(
-      'pause',
+      playing ? 'play' : 'pause',
       0,
       videoId: card.id,
-      ep: 1,
-      line: 'l1',
+      ep: episode,
+      line: lineId,
       rate: _hostRate,
     );
     _syncVideo();
     togetherToast(context, '正在切换影片…');
+  }
+
+  /// 选片弹层用：拿详情补真实集数；失败时退回卡片自带的集数。
+  Future<VideoDetail?> _fetchDetailForPicker(String videoId) async {
+    try {
+      return await Api.detail(videoId);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  List<Episode> _episodesForPicker(VideoDetail? detail, VideoCard card) {
+    final real = detail?.allEpisodes ?? const <Episode>[];
+    if (real.isNotEmpty) return real;
+    final detailCount = detail?.episodes ?? 0;
+    final count = detailCount > 0 ? detailCount : card.episodes;
+    if (count <= 0) return const <Episode>[];
+    return <Episode>[for (var i = 1; i <= count; i++) Episode(i, '', 0)];
+  }
+
+  /// 选完片先弹一次选集面板；直接关闭 / 下滑取消时默认第 1 集。
+  Future<int> _pickEpisodeFor(VideoCard card, List<Episode> episodes) async {
+    final picked = await showTogetherEpisodePicker(
+      context,
+      episodes: episodes,
+      current: 1,
+      title: card.title,
+    );
+    return picked ?? 1;
   }
 
   Future<void> _pickEpisode() async {
@@ -1712,7 +1764,16 @@ class _TogetherPageState extends State<TogetherPage>
       togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
-    _client.sendEpisode(episode, line: _videoLine);
+    // 服务端 episode 动作会重置为 pause；这里带播放意图发 state，
+    // 切集视为继续播放，只有切换前确实暂停才保持暂停。
+    final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
+    _client.sendState(
+      playing ? 'play' : 'pause',
+      0,
+      ep: episode,
+      line: _videoLine,
+      rate: _hostRate,
+    );
   }
 
   void _nextEpisode() {
@@ -1745,7 +1806,14 @@ class _TogetherPageState extends State<TogetherPage>
       togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
-    _client.sendEpisode(next, line: _videoLine);
+    final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
+    _client.sendState(
+      playing ? 'play' : 'pause',
+      0,
+      ep: next,
+      line: _videoLine,
+      rate: _hostRate,
+    );
   }
 
   Future<void> _pickQuality() async {
@@ -2197,6 +2265,10 @@ class _TogetherPageState extends State<TogetherPage>
     _loadingKey = key;
     final seq = ++_videoSeq;
     _endedSent = false;
+    // 切剧 / 切集发起时记下本地的「继续播放」意图：加载期间 room_state
+    // 可能先到并清掉 _resume*，不能让它把这次切换变成暂停。
+    final localResumePos = _resumePos;
+    final localResumePlaying = _resumePlaying;
 
     // 先抓最后一帧再摘旧 controller：切剧/切集/换线路不露出黑屏。
     final frozen = await _captureVideoFrame();
@@ -2279,11 +2351,11 @@ class _TogetherPageState extends State<TogetherPage>
           double target;
           bool shouldPlay;
           if (_isHost) {
-            final resume = _resumePos;
+            final resume = localResumePos;
             final state = _remote;
             if (resume != null) {
               target = resume;
-              shouldPlay = _resumePlaying;
+              shouldPlay = localResumePlaying;
             } else if (state != null && state.playing) {
               target = _targetPosition(state);
               shouldPlay = true;
@@ -2497,10 +2569,23 @@ class _TogetherPageState extends State<TogetherPage>
   Future<void> _pickAndCreate() async {
     final card = await showTogetherVideoPicker(context);
     if (!mounted || card == null) return;
+    // 选片后先选集，再建房；直接关闭选集面板时默认第 1 集。
+    final detail = await _fetchDetailForPicker(card.id);
+    if (!mounted) return;
+    final episodes = _episodesForPicker(detail, card);
+    final episode = await _pickEpisodeFor(card, episodes);
+    if (!mounted) return;
     _videoTitle = card.title;
     _videoCover = togetherCoverUrl(card.cover);
-    _episodes = const <Episode>[];
-    _createRoom(card.id, 1);
+    _episodes = episodes;
+    _lines = detail?.lines ?? const <LineInfo>[];
+    _videoLine = detail != null && detail.lines.isNotEmpty
+        ? detail.lines.first.id
+        : 'l1';
+    // 主动选片建房视为「开始观看」，从第 1 集（或用户选的那集）自动播放。
+    _resumePos = 0;
+    _resumePlaying = true;
+    _createRoom(card.id, episode, detail: detail);
   }
 
   void _joinByInput() {
@@ -2705,7 +2790,7 @@ class _TogetherPageState extends State<TogetherPage>
                             width: 38,
                             height: 38,
                             decoration: BoxDecoration(
-                              color: Fx.accent.withOpacity(.11),
+                              color: Fx.accent.withValues(alpha: .11),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: const Icon(
@@ -2764,10 +2849,10 @@ class _TogetherPageState extends State<TogetherPage>
                             fontSize: 22,
                             fontWeight: FontWeight.w800,
                             letterSpacing: 7,
-                            color: Fx.sub.withOpacity(.35),
+                            color: Fx.sub.withValues(alpha: .35),
                           ),
                           filled: true,
-                          fillColor: Colors.white.withOpacity(.76),
+                          fillColor: Colors.white.withValues(alpha: .76),
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 12,
                             vertical: 13,
@@ -2775,7 +2860,7 @@ class _TogetherPageState extends State<TogetherPage>
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(15),
                             borderSide: BorderSide(
-                              color: Colors.white.withOpacity(.95),
+                              color: Colors.white.withValues(alpha: .95),
                             ),
                           ),
                           focusedBorder: OutlineInputBorder(
@@ -2808,7 +2893,7 @@ class _TogetherPageState extends State<TogetherPage>
                         width: 56,
                         height: 56,
                         decoration: BoxDecoration(
-                          color: Fx.accent2.withOpacity(.10),
+                          color: Fx.accent2.withValues(alpha: .10),
                           shape: BoxShape.circle,
                         ),
                         child: const Icon(
@@ -2890,7 +2975,7 @@ class _TogetherPageState extends State<TogetherPage>
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 10.5,
-                color: Fx.sub.withOpacity(.9),
+                color: Fx.sub.withValues(alpha: .9),
               ),
             ),
             const SizedBox(height: 16),
@@ -2903,7 +2988,7 @@ class _TogetherPageState extends State<TogetherPage>
                   vertical: 8,
                 ),
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(.85),
+                  color: Colors.white.withValues(alpha: .85),
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: const Text(

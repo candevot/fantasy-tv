@@ -13,9 +13,12 @@ import '../theme.dart';
 /// 播放器通用小工具：时间格式、进度持久化、白玻璃控件。
 String fxPad2(int n) => n.toString().padLeft(2, '0');
 
-/// 音频焦点丢失的宽限时间：来电 / 被其它应用遮挡超过这个时长才暂停，
-/// 下拉通知栏、截屏等短暂 inactive 不打断播放。
-const Duration fxAudioFocusLossGrace = Duration(milliseconds: 1200);
+/// 切到后台 / 失去音频焦点后的暂停宽限：只有 paused 超过 5 秒才暂停，
+/// 小窗、分屏、多任务等短暂 inactive 一律不打断播放。
+const Duration fxBackgroundPauseDelay = Duration(seconds: 5);
+
+/// 续播门槛：上次进度不足 60 秒时从头播，避免把「片头 20 秒」误当成续播。
+const double fxResumeMinSeconds = 60;
 
 /// 控件无操作后自动隐藏：参考实现 5000ms（PlayerControllerImpl）。
 const Duration kPlayerControlsAutoHide = Duration(seconds: 5);
@@ -228,12 +231,49 @@ void fxToast(BuildContext context, String message) {
           fontWeight: FontWeight.w600,
         ),
       ),
-      backgroundColor: Colors.white.withOpacity(.96),
+      backgroundColor: Colors.white.withValues(alpha: .96),
       elevation: 4,
       behavior: SnackBarBehavior.floating,
       margin: const EdgeInsets.fromLTRB(18, 0, 18, 18),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       duration: const Duration(seconds: 2),
+    ),
+  );
+}
+
+/// 续播提示：告知跳到了上次位置，并提供「从头播放」。
+///
+/// 只在恢复位置 ≥ [fxResumeMinSeconds] 时由播放器调用；不足 60 秒直接从头，
+/// 不会出现「片头 20 秒被跳过」。点击操作只 seek 回 0，不改变播放 / 暂停态。
+void fxResumeToast(
+  BuildContext context,
+  Duration position, {
+  required VoidCallback onRestart,
+}) {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  if (messenger == null) return;
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(
+        '已跳到上次位置 ${fxTime(position)}（点击从头播放）',
+        style: const TextStyle(
+          color: Fx.ink,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      action: SnackBarAction(
+        label: '从头播放',
+        textColor: Fx.accent,
+        onPressed: onRestart,
+      ),
+      backgroundColor: Colors.white.withValues(alpha: .96),
+      elevation: 4,
+      behavior: SnackBarBehavior.floating,
+      margin: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      duration: const Duration(seconds: 5),
     ),
   );
 }
@@ -271,13 +311,14 @@ class PGlassIcon extends StatelessWidget {
         height: size,
         decoration: BoxDecoration(
           color: active
-              ? Fx.accent.withOpacity(.82)
-              : Colors.white.withOpacity(tint),
+              ? Fx.accent.withValues(alpha: .82)
+              : Colors.white.withValues(alpha: tint),
           shape: BoxShape.circle,
-          border: Border.all(color: Colors.white.withOpacity(.32), width: 1),
+          border:
+              Border.all(color: Colors.white.withValues(alpha: .32), width: 1),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(.10),
+              color: Colors.black.withValues(alpha: .10),
               blurRadius: 12,
               offset: const Offset(0, 3),
             ),
@@ -309,9 +350,10 @@ class PGlassPill extends StatelessWidget {
     final box = Container(
       padding: padding,
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.14),
+        color: Colors.white.withValues(alpha: .14),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withOpacity(.28), width: 1),
+        border:
+            Border.all(color: Colors.white.withValues(alpha: .28), width: 1),
       ),
       child: child,
     );
@@ -493,7 +535,8 @@ class _PProgressBarState extends State<PProgressBar> {
                   child: Container(
                     height: widget.height,
                     decoration: BoxDecoration(
-                      color: widget.trackColor ?? Colors.white.withOpacity(.28),
+                      color: widget.trackColor ??
+                          Colors.white.withValues(alpha: .28),
                       borderRadius: BorderRadius.circular(widget.height),
                     ),
                   ),
@@ -505,8 +548,8 @@ class _PProgressBarState extends State<PProgressBar> {
                     width: bufferedWidth,
                     height: widget.height,
                     decoration: BoxDecoration(
-                      color:
-                          widget.bufferedColor ?? Colors.white.withOpacity(.34),
+                      color: widget.bufferedColor ??
+                          Colors.white.withValues(alpha: .34),
                       borderRadius: BorderRadius.circular(widget.height),
                     ),
                   ),
@@ -536,7 +579,7 @@ class _PProgressBarState extends State<PProgressBar> {
                         border: Border.all(color: Colors.white, width: 1.5),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withOpacity(.22),
+                            color: Colors.black.withValues(alpha: .22),
                             blurRadius: 6,
                             offset: const Offset(0, 2),
                           ),
@@ -717,7 +760,7 @@ class FxLoadingOverlay extends StatelessWidget {
     final ring = compact ? 44.0 : 62.0;
     return IgnorePointer(
       child: Container(
-        color: dim ? Colors.black.withOpacity(.26) : Colors.transparent,
+        color: dim ? Colors.black.withValues(alpha: .26) : Colors.transparent,
         alignment: Alignment.center,
         padding: const EdgeInsets.symmetric(horizontal: 24),
         child: Column(
@@ -731,12 +774,12 @@ class FxLoadingOverlay extends StatelessWidget {
                   height: ring,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: Colors.white.withOpacity(.14),
+                    color: Colors.white.withValues(alpha: .14),
                     border: Border.all(
-                        color: Colors.white.withOpacity(.34), width: 1),
+                        color: Colors.white.withValues(alpha: .34), width: 1),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(.16),
+                        color: Colors.black.withValues(alpha: .16),
                         blurRadius: 18,
                         offset: const Offset(0, 6),
                       ),
@@ -753,7 +796,7 @@ class FxLoadingOverlay extends StatelessWidget {
                           value: value,
                           strokeWidth: compact ? 2.4 : 3,
                           color: Colors.white,
-                          backgroundColor: Colors.white.withOpacity(.18),
+                          backgroundColor: Colors.white.withValues(alpha: .18),
                         ),
                         if (safePercent != null)
                           Text(
@@ -774,13 +817,13 @@ class FxLoadingOverlay extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(.42),
+                color: Colors.black.withValues(alpha: .42),
                 borderRadius: BorderRadius.circular(16),
-                border:
-                    Border.all(color: Colors.white.withOpacity(.26), width: 1),
+                border: Border.all(
+                    color: Colors.white.withValues(alpha: .26), width: 1),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(.14),
+                    color: Colors.black.withValues(alpha: .14),
                     blurRadius: 14,
                     offset: const Offset(0, 5),
                   ),

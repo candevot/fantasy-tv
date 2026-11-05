@@ -77,6 +77,11 @@ class _DetailPageState extends State<DetailPage>
   /// 稳定播放 3 秒后才清零重试预算与失败集合。
   Timer? _stableTimer;
 
+  /// 服务端平台线路是异步补的：首屏没腾讯线时，页面加载 1.5 秒后再拉一次
+  /// /api/detail，只合并 lines，不重载页面、不重建播放器。
+  Timer? _lineRefreshTimer;
+  bool _lineRefreshScheduled = false;
+
   List<CommentItem> _comments = const <CommentItem>[];
   final Set<String> _liked = <String>{};
   bool _commentsLoading = false;
@@ -141,6 +146,7 @@ class _DetailPageState extends State<DetailPage>
   void dispose() {
     _downloads.removeListener(_onDownloadsChanged);
     _stableTimer?.cancel();
+    _lineRefreshTimer?.cancel();
     _scroll.dispose();
     _fade.dispose();
     super.dispose();
@@ -176,6 +182,7 @@ class _DetailPageState extends State<DetailPage>
         _ep = ep;
         _error = null;
       });
+      _scheduleLineRefresh();
       // 详情页一打开就后台预热当前线路 / 集（上次看的集优先）：
       // PlayerView 的 open / 用户稍后点播放都能直接复用缓存，
       // 不再从 0 等 /api/play 和 m3u8。
@@ -199,6 +206,60 @@ class _DetailPageState extends State<DetailPage>
       setState(() => _error = msg);
       if (_detail != null) fxToast(context, msg);
     }
+  }
+
+  /// 首屏线路里没有腾讯线时，1.5 秒后再取一次详情，把服务端异步补上的
+  /// 平台线路显示出来。只执行一次；确实超时就等下次进入详情页。
+  void _scheduleLineRefresh() {
+    if (_lineRefreshScheduled) return;
+    final d = _detail;
+    if (d == null || d.lines.any(fxIsTencentLine)) return;
+    _lineRefreshScheduled = true;
+    _lineRefreshTimer?.cancel();
+    _lineRefreshTimer = Timer(const Duration(milliseconds: 1500), () {
+      _lineRefreshTimer = null;
+      unawaited(_refreshLines());
+    });
+  }
+
+  /// 只刷新线路表：不动当前集数、评论区、历史与播放器实例。
+  Future<void> _refreshLines() async {
+    if (!mounted) return;
+    final current = _detail;
+    if (current == null) return;
+    if (current.lines.any(fxIsTencentLine)) return;
+    VideoDetail fresh;
+    try {
+      fresh = await Api.detail(widget.id);
+    } catch (_) {
+      // 服务端平台匹配确实超时：本次不显示，下次进入详情页再取。
+      return;
+    }
+    if (!mounted) return;
+    final latest = _detail;
+    if (latest == null) return;
+    if (latest.lines.any(fxIsTencentLine)) return;
+
+    final merged = fxMergeLines(latest.lines, fresh.lines);
+    if (merged.length == latest.lines.length &&
+        !merged.asMap().entries.any(
+              (entry) => entry.value.id != latest.lines[entry.key].id,
+            )) {
+      return;
+    }
+    var lineId = _lineId;
+    if (lineId.isEmpty || !merged.any((line) => line.id == lineId)) {
+      if (merged.any((line) => line.id == widget.line)) {
+        lineId = widget.line;
+      } else {
+        lineId = merged.isEmpty ? '' : merged.first.id;
+      }
+    }
+    setState(() {
+      _detail = latest.copyWith(lines: merged);
+      _lineId = lineId;
+    });
+    if (lineId.isNotEmpty) FxPlayCache.warm(widget.id, _ep, lineId);
   }
 
   /// `related` 只是 id 数组：按 id 补卡片，最多补 8 个。
@@ -1186,9 +1247,9 @@ class _DetailPageState extends State<DetailPage>
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: BoxDecoration(
-        color: Fx.accent.withOpacity(.10),
+        color: Fx.accent.withValues(alpha: .10),
         borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: Fx.accent.withOpacity(.20)),
+        border: Border.all(color: Fx.accent.withValues(alpha: .20)),
       ),
       child: Text(
         text,
@@ -1265,9 +1326,9 @@ class _DetailPageState extends State<DetailPage>
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.56),
+          color: Colors.white.withValues(alpha: .56),
           borderRadius: BorderRadius.circular(13),
-          border: Border.all(color: Colors.white.withOpacity(.9)),
+          border: Border.all(color: Colors.white.withValues(alpha: .9)),
         ),
         child: const Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1293,7 +1354,7 @@ class _DetailPageState extends State<DetailPage>
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.72),
+          color: Colors.white.withValues(alpha: .72),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: Colors.white),
         ),
@@ -1333,8 +1394,8 @@ class _DetailPageState extends State<DetailPage>
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               decoration: BoxDecoration(
                 color: active
-                    ? Fx.accent.withOpacity(.12)
-                    : Colors.white.withOpacity(.72),
+                    ? Fx.accent.withValues(alpha: .12)
+                    : Colors.white.withValues(alpha: .72),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(
                   color: active ? Fx.accent : Colors.white,
@@ -1398,7 +1459,7 @@ class _DetailPageState extends State<DetailPage>
                   padding:
                       const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(.78),
+                    color: Colors.white.withValues(alpha: .78),
                     borderRadius: BorderRadius.circular(11),
                     border: Border.all(color: Colors.white),
                   ),
@@ -1463,7 +1524,7 @@ class _DetailPageState extends State<DetailPage>
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(.42),
+                  color: Colors.black.withValues(alpha: .42),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(

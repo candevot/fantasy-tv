@@ -220,14 +220,17 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Timer? _hideTimer;
   Timer? _progressTimer;
 
-  /// 是否已切到后台：后台播放默认开启，切后台只记进度、不暂停；
-  /// 看门狗在后台期间也必须停摆，避免回前台误判卡顿重新 open。
+  /// 是否已切到后台：小窗 / 分屏 / 多任务只算 inactive，不暂停；
+  /// 看门狗在后台期间必须停摆，避免回前台误判卡顿重新 open。
   bool _backgrounded = false;
 
-  /// 音频焦点：inactive 持续一段时间才暂停（来电 / 被其它页面遮住）；
-  /// 下拉通知栏、截屏会很快回到 resumed，不打断声音。
-  Timer? _focusLossTimer;
-  bool _pausedByFocusLoss = false;
+  /// 只有 paused 持续超过 [fxBackgroundPauseDelay] 才暂停；
+  /// inactive 不再触发暂停，避免小窗回复消息就断播。
+  Timer? _backgroundPauseTimer;
+  bool _pausedByLifecycle = false;
+
+  /// 本次进入全屏后是否已经提示过「已跳到上次位置」。
+  bool _resumeHintShown = false;
 
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
@@ -419,8 +422,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         unawaited(_saveProgress());
         _maybePrewarmNext();
       });
-      _watchdogTimer =
-          Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
+      _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
       _resetWatchdogClock();
       if (widget.videoId.isNotEmpty && _episodes.isEmpty) {
         unawaited(_loadEpisodeMeta());
@@ -437,7 +439,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _unlockTimer?.cancel();
     _uiHoldTimer?.cancel();
     _progressTimer?.cancel();
-    _cancelFocusLossPause();
+    _cancelBackgroundPause();
     _watchdogTimer?.cancel();
     _sleepTimer?.cancel();
     _firstFrameTimer?.cancel();
@@ -457,24 +459,24 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.inactive:
-        // 来电 / 其它应用抢占音频焦点：先等一小会儿，仍在后台就暂停；
-        // 通知栏 / 截屏会很快回到 resumed，不触发暂停。
-        _armFocusLossPause();
+        // 多任务 / 分屏 / 小窗 / 下拉通知栏：只失去前台焦点，绝不暂停。
+        // 真正离开前台会继续收到 paused，由 5 秒兜底处理。
         return;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
-        // 切后台：后台播放默认开启，完全不暂停；只复位长按倍速并记进度。
+        // 切后台：先复位长按倍速并记进度；超过 5 秒仍不回来才暂停。
         _backgrounded = true;
-        _cancelFocusLossPause();
+        _cancelBackgroundPause();
         _endHold2x();
         unawaited(_saveProgress());
+        _armBackgroundPause();
         return;
       case AppLifecycleState.resumed:
         final wasBackgrounded = _backgrounded;
         _backgrounded = false;
-        _cancelFocusLossPause();
+        _cancelBackgroundPause();
         _resetWatchdogClock();
-        _resumeAfterFocusLoss();
+        _resumeAfterLifecyclePause();
         // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
         if (wasBackgrounded) _remountVideoLayer();
         return;
@@ -483,27 +485,28 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
   }
 
-  void _armFocusLossPause() {
-    _cancelFocusLossPause();
-    _focusLossTimer = Timer(fxAudioFocusLossGrace, () {
-      _focusLossTimer = null;
-      if (!mounted || _backgrounded) return;
+  /// paused 后等 5 秒：仍在后台且正在播放才暂停。
+  void _armBackgroundPause() {
+    _cancelBackgroundPause();
+    _backgroundPauseTimer = Timer(fxBackgroundPauseDelay, () {
+      _backgroundPauseTimer = null;
+      if (!mounted || !_backgrounded) return;
       final c = _controller;
       if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
-      _pausedByFocusLoss = true;
+      _pausedByLifecycle = true;
       unawaited(c.pause());
     });
   }
 
-  void _cancelFocusLossPause() {
-    _focusLossTimer?.cancel();
-    _focusLossTimer = null;
+  void _cancelBackgroundPause() {
+    _backgroundPauseTimer?.cancel();
+    _backgroundPauseTimer = null;
   }
 
-  /// 焦点恢复：只在「因失去焦点而暂停」且之前确实在播放时继续。
-  void _resumeAfterFocusLoss() {
-    if (!_pausedByFocusLoss) return;
-    _pausedByFocusLoss = false;
+  /// 回前台：只有「因为切后台超过 5 秒而暂停」才继续播放，不 seek。
+  void _resumeAfterLifecyclePause() {
+    if (!_pausedByLifecycle) return;
+    _pausedByLifecycle = false;
     if (!mounted || _loading || _error || _switching) return;
     final c = _controller;
     if (c == null ||
@@ -592,6 +595,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
   }
 
+  /// 切集 / 重载时是否继续播放：暂停态保持暂停，未就绪 / 出错 / 刚播完
+  /// 则按「继续播放」处理。
+  bool _shouldContinuePlayback(FxPlayer c) {
+    final v = c.value;
+    if (!v.isInitialized || v.hasError || v.isCompleted) return true;
+    return v.isPlaying;
+  }
+
   Future<void> _bootstrapSource({
     required bool seekToSaved,
     required bool saveOld,
@@ -608,6 +619,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return;
+    final continuePlayback = _shouldContinuePlayback(c);
     unawaited(c.pause());
     // 缓存命中时不等接口与 playlist，直接用上一帧快照垫着 open。
     final cacheHit =
@@ -666,11 +678,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
 
     var resume = 0.0;
+    var fromSavedPosition = false;
     if (seekToSaved) {
       resume = await fxLoadProgress(widget.videoId, _ep);
+      // 不足 60 秒视为「刚看片头」，直接从头播，避免误跳片头。
+      if (resume < fxResumeMinSeconds) {
+        resume = 0;
+      } else {
+        fromSavedPosition = true;
+      }
     }
     if (!mounted || token != _loadToken) return;
 
+    var restoredPosition = 0.0;
     var ok = false;
     for (final url in candidates) {
       if (!mounted || token != _loadToken) return;
@@ -680,7 +700,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             .open(
               url,
               headers: source.headers,
-              play: true,
+              play: continuePlayback,
               waitForWarm: waitForWarm,
               direct: source.direct && source.isHls,
             )
@@ -691,13 +711,23 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (durationMs > 0 && start >= durationMs / 1000.0 - 2) start = 0;
         if (start > 0) {
           await c.seekTo(Duration(milliseconds: (start * 1000).round()));
+          if (fromSavedPosition && start >= fxResumeMinSeconds) {
+            restoredPosition = start;
+          }
         }
         await c.setLooping(_loopMode == FxLoopMode.single);
         try {
           await c.setRate(_rate);
         } catch (_) {}
         if (!mounted || token != _loadToken) return;
-        await c.play();
+        if (continuePlayback) {
+          await c.play();
+        } else {
+          // 本来暂停：先拉一帧再暂停，切集后不黑屏。
+          await c.play();
+          await Future<void>.delayed(const Duration(milliseconds: 60));
+          await c.pause();
+        }
         if (!mounted || token != _loadToken) return;
         // open 期间可能只是"假成功"：play 后仍带错误就不要当成可播。
         if (c.value.hasError) throw StateError('player error');
@@ -715,6 +745,17 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _watchdogRetried = false;
         _resetWatchdogClock();
         _wake();
+        if (!_resumeHintShown && restoredPosition >= fxResumeMinSeconds) {
+          _resumeHintShown = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            fxResumeToast(
+              context,
+              Duration(milliseconds: (restoredPosition * 1000).round()),
+              onRestart: _restartFromBeginning,
+            );
+          });
+        }
         break;
       } catch (_) {
         // 换下一条备用地址继续尝试
@@ -1594,10 +1635,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         !c.value.isInitialized) {
       return;
     }
-    // 用户手动暂停 / 播放后，焦点恢复不再替他继续播放。
-    _pausedByFocusLoss = false;
+    // 用户手动暂停 / 播放后，回前台不再替他继续播放。
+    _pausedByLifecycle = false;
     // 直接让 media_kit 切换，图标由 player.stream.playing 驱动，避免本地态覆盖。
     unawaited(c.playOrPause());
+    _wake();
+  }
+
+  /// 续播提示里的「从头播放」：只 seek 回 0，不改变播放 / 暂停态。
+  void _restartFromBeginning() {
+    if (_isLive) return;
+    final c = _controller;
+    if (c == null || _loading || _error || _switching) return;
+    unawaited(c.seek(Duration.zero));
     _wake();
   }
 
@@ -1771,7 +1821,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       onSleepTimer: () => unawaited(_openSleepTimerPicker()),
       onDownload: () => fxToast(context, '请到详情页下载本集'),
       onSpeed: () => unawaited(_openSpeedPicker()),
-      onBackground: () => fxToast(context, '后台播放已开启'),
+      onBackground: () => fxToast(context, '切后台超过 5 秒会暂停，回前台继续播放'),
       onFeedback: () => fxToast(context, '问题反馈：请到「我的-意见反馈」提交'),
     );
     if (!mounted) return;
@@ -2045,12 +2095,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           width: 330,
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.95),
+            color: Colors.white.withValues(alpha: .95),
             borderRadius: BorderRadius.circular(18),
             border: Border.all(color: Colors.white),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(.20),
+                color: Colors.black.withValues(alpha: .20),
                 blurRadius: 24,
                 offset: const Offset(0, 10),
               ),
@@ -2104,7 +2154,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-              color: Fx.accent.withOpacity(.25),
+              color: Fx.accent.withValues(alpha: .25),
               blurRadius: 12,
               offset: const Offset(0, 4),
             ),
@@ -2202,9 +2252,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       buffered: v.buffered,
                       playing: v.isInitialized && v.isPlaying,
                       rate: _rate,
-                      qualityLabel: _isLive
-                          ? ''
-                          : (_canChangeQuality ? '清晰度' : ''),
+                      qualityLabel:
+                          _isLive ? '' : (_canChangeQuality ? '清晰度' : ''),
                       qualityActive:
                           !_isLive && _canChangeQuality && _qualityKey != null,
                       compact: compact,
@@ -2215,9 +2264,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       onNext: _isLive ? null : () => unawaited(_next()),
                       onSpeed: _isLive ? null : _toggleSpeed,
                       onQuality: _isLive ? null : _toggleQuality,
-                      onEpisodes: _isLive
-                          ? null
-                          : () => unawaited(_openEpisodeSheet()),
+                      onEpisodes:
+                          _isLive ? null : () => unawaited(_openEpisodeSheet()),
                       onExit: () => unawaited(_exit()),
                     );
                   },
@@ -2241,9 +2289,9 @@ class _FsBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.52),
+        color: Colors.black.withValues(alpha: .52),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(.28)),
+        border: Border.all(color: Colors.white.withValues(alpha: .28)),
       ),
       child: Text(
         text,

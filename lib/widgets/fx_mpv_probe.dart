@@ -36,6 +36,8 @@ class _FxMpvProbeState extends State<FxMpvProbe> {
   Future<void> _open() async {
     try {
       await _player.open(Media(widget.url));
+      // 探针也遵守播放链路约定：open 之后显式 play。
+      await _player.play();
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     }
