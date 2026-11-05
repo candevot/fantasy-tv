@@ -1,6 +1,13 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
+
+/// 大字体上限：跟随系统字号，但最多放大到 1.3 倍。
+/// 超过 1.3 倍的极端字号会把固定高度的卡片 / 导航撑破，统一在根部截断。
+TextScaler fxClampTextScaler(TextScaler scaler) =>
+    scaler.clamp(maxScaleFactor: 1.3);
 
 /// 幻想影视 · 白色液态玻璃主题
 class Fx {
@@ -45,14 +52,81 @@ class FxBackground extends StatefulWidget {
 }
 
 class _FxBackgroundState extends State<FxBackground>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c =
-      AnimationController(vsync: this, duration: const Duration(seconds: 18))
-        ..repeat();
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  /// 背景只是缓慢流动的光斑，30fps 肉眼无差别，比 60fps 少一半重绘。
+  static const Duration _frameInterval = Duration(milliseconds: 33);
+  static const double _loopSeconds = 18;
+
+  late final Ticker _ticker = createTicker(_onTick);
+  final ValueNotifier<double> _phase = ValueNotifier<double>(0);
+
+  Duration _lastTick = Duration.zero;
+  double _phaseBase = 0;
+  bool _tickerMode = true;
+  bool _resumed = true;
+  ValueListenable<bool>? _modeNotifier;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 跟随最近的 TickerMode：被 IndexedStack 隐藏的 Tab、被新页面盖住的
+    // 路由、以及显式 TickerMode(enabled:false) 都会自动暂停动画。
+    final mode = TickerMode.getNotifier(context);
+    if (!identical(mode, _modeNotifier)) {
+      _modeNotifier?.removeListener(_onTickerModeChanged);
+      _modeNotifier = mode..addListener(_onTickerModeChanged);
+      _tickerMode = mode.value;
+    }
+    _syncTicker();
+  }
+
+  void _onTickerModeChanged() {
+    _tickerMode = _modeNotifier?.value ?? true;
+    _syncTicker();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _resumed = state == AppLifecycleState.resumed;
+    _syncTicker();
+  }
+
+  void _syncTicker() {
+    if (!mounted) return;
+    if (_tickerMode && _resumed) {
+      // 用 isActive 而不是 isTicking：muted / 引擎暂停时 isTicking 为 false，
+      // 但 Ticker 仍处于 active，直接 start 会触发「started twice」。
+      if (!_ticker.isActive) {
+        _lastTick = Duration.zero;
+        _ticker.start();
+      }
+    } else if (_ticker.isActive) {
+      // Ticker 重新 start 后 elapsed 会从 0 开始，先把当前相位记下来，
+      // 恢复时不会瞬间跳一帧。
+      _phaseBase = _phase.value;
+      _ticker.stop();
+    }
+  }
+
+  void _onTick(Duration elapsed) {
+    if (elapsed - _lastTick < _frameInterval) return;
+    _lastTick = elapsed;
+    _phase.value =
+        (_phaseBase + elapsed.inMicroseconds / 1000000) % _loopSeconds;
+  }
 
   @override
   void dispose() {
-    _c.dispose();
+    _modeNotifier?.removeListener(_onTickerModeChanged);
+    WidgetsBinding.instance.removeObserver(this);
+    _ticker.dispose();
+    _phase.dispose();
     super.dispose();
   }
 
@@ -64,7 +138,11 @@ class _FxBackgroundState extends State<FxBackground>
           child: DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
-                colors: [Color(0xFFF7FAFF), Color(0xFFFDFBFF), Color(0xFFF4FAFF)],
+                colors: [
+                  Color(0xFFF7FAFF),
+                  Color(0xFFFDFBFF),
+                  Color(0xFFF4FAFF)
+                ],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
@@ -72,12 +150,19 @@ class _FxBackgroundState extends State<FxBackground>
           ),
         ),
         Positioned.fill(
-          child: AnimatedBuilder(
-            animation: _c,
-            builder: (_, __) {
-              final t = _c.value * math.pi * 2;
-              return CustomPaint(painter: _BlobPainter(t));
-            },
+          // 单独成层：背景每帧重绘时，页面内容不需要跟着重绘。
+          child: RepaintBoundary(
+            child: AnimatedBuilder(
+              animation: _phase,
+              builder: (_, __) {
+                final t = _phase.value / _loopSeconds * math.pi * 2;
+                return CustomPaint(
+                  painter: _BlobPainter(t),
+                  isComplex: true,
+                  willChange: true,
+                );
+              },
+            ),
           ),
         ),
         widget.child,
@@ -100,10 +185,16 @@ class _BlobPainter extends CustomPainter {
       canvas.drawCircle(c, r, paint);
     }
 
-    blob(Offset(size.width * .18 + 24 * math.cos(t), size.height * .14 + 18 * math.sin(t)),
-        size.width * .55, const Color(0xFFBBD6FF));
-    blob(Offset(size.width * .92 + 20 * math.sin(t * .8), size.height * .42 + 24 * math.cos(t * .7)),
-        size.width * .5, const Color(0xFFDCCFFF));
+    blob(
+        Offset(size.width * .18 + 24 * math.cos(t),
+            size.height * .14 + 18 * math.sin(t)),
+        size.width * .55,
+        const Color(0xFFBBD6FF));
+    blob(
+        Offset(size.width * .92 + 20 * math.sin(t * .8),
+            size.height * .42 + 24 * math.cos(t * .7)),
+        size.width * .5,
+        const Color(0xFFDCCFFF));
     blob(Offset(size.width * .3, size.height * .92 + 20 * math.sin(t * .6)),
         size.width * .55, const Color(0xFFCFF0EA));
   }
@@ -133,22 +224,27 @@ class GlassCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final box = Container(
-      margin: margin,
-      padding: padding,
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(opacity),
-        borderRadius: BorderRadius.circular(radius),
-        border: Border.all(color: Colors.white.withOpacity(.9), width: 1),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF50729F).withOpacity(.10),
-            blurRadius: 30,
-            offset: const Offset(0, 8),
-          ),
-        ],
+    // 卡片自带大范围阴影 + 半透明背景，单独成层后滚动时不会带着
+    // 整页一起重绘（列表里的卡片都已由 Sliver 自动分层，这里兜住
+    // 非列表场景，同时让列表卡片的边界固定落在卡片本身）。
+    final box = RepaintBoundary(
+      child: Container(
+        margin: margin,
+        padding: padding,
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(opacity),
+          borderRadius: BorderRadius.circular(radius),
+          border: Border.all(color: Colors.white.withOpacity(.9), width: 1),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF50729F).withOpacity(.10),
+              blurRadius: 30,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: child,
       ),
-      child: child,
     );
     if (onTap == null) return box;
     return GestureDetector(onTap: onTap, child: box);
@@ -157,7 +253,8 @@ class GlassCard extends StatelessWidget {
 
 /// 渐变胶囊按钮
 class GradButton extends StatelessWidget {
-  const GradButton({super.key, required this.text, this.onTap, this.height = 46, this.icon});
+  const GradButton(
+      {super.key, required this.text, this.onTap, this.height = 46, this.icon});
 
   final String text;
   final VoidCallback? onTap;
@@ -193,7 +290,9 @@ class GradButton extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 10),
               child: Text(text,
                   style: const TextStyle(
-                      color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600)),
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600)),
             ),
           ],
         ),
@@ -216,7 +315,9 @@ class ChipTag extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
-          color: active ? Fx.accent.withOpacity(.12) : Colors.white.withOpacity(.7),
+          color: active
+              ? Fx.accent.withOpacity(.12)
+              : Colors.white.withOpacity(.7),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
             color: active ? Fx.accent : Colors.white.withOpacity(.9),
@@ -253,7 +354,8 @@ class RatingBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(score.toStringAsFixed(1),
-          style: const TextStyle(color: Fx.gold, fontSize: 11, fontWeight: FontWeight.w700)),
+          style: const TextStyle(
+              color: Fx.gold, fontSize: 11, fontWeight: FontWeight.w700)),
     );
   }
 }
@@ -276,7 +378,8 @@ class FxAppBar extends StatelessWidget implements PreferredSizeWidget {
       centerTitle: true,
       automaticallyImplyLeading: false,
       title: Text(title,
-          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: Fx.ink)),
+          style: const TextStyle(
+              fontSize: 17, fontWeight: FontWeight.w700, color: Fx.ink)),
       leading: IconButton(
         icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
         onPressed: onBack ?? () => Navigator.maybePop(context),
@@ -418,8 +521,8 @@ class FxErrorBanner extends StatelessWidget {
               color: Fx.gold.withOpacity(.12),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.cloud_off_rounded,
-                size: 19, color: Fx.gold),
+            child:
+                const Icon(Icons.cloud_off_rounded, size: 19, color: Fx.gold),
           ),
           const SizedBox(width: 10),
           Expanded(

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../api.dart';
@@ -23,7 +24,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   static const List<_Channel> _channels = [
     _Channel('recommend', '推荐'),
     _Channel('juji', '剧集'),
@@ -38,10 +39,15 @@ class _HomePageState extends State<HomePage> {
 
   Timer? _timer;
   String _channel = 'recommend';
-  int _bannerIndex = 0;
+
+  /// banner 页码只驱动指示点，不再 setState 整页。
+  final ValueNotifier<int> _bannerPage = ValueNotifier<int>(0);
   int _req = 0;
   bool _loading = true;
   bool _dragging = false;
+  bool _tabVisible = true;
+  bool _appResumed = true;
+  ValueListenable<bool>? _tickerMode;
   String? _error;
 
   /// 直播频道单独维护：接口可能为空 / 404，失败也按空态处理，不弹错误。
@@ -52,13 +58,51 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Tab 切走 / 被详情页盖住时，TickerMode 会变 false：banner 定时器
+    // 随可见性启停，不再在后台空转。
+    final mode = TickerMode.getNotifier(context);
+    if (!identical(mode, _tickerMode)) {
+      _tickerMode?.removeListener(_onTickerModeChanged);
+      _tickerMode = mode..addListener(_onTickerModeChanged);
+      _tabVisible = mode.value;
+    }
+  }
+
+  void _onTickerModeChanged() {
+    final visible = _tickerMode?.value ?? true;
+    if (visible == _tabVisible) return;
+    _tabVisible = visible;
+    _syncAuto();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appResumed = state == AppLifecycleState.resumed;
+    _syncAuto();
+  }
+
+  void _syncAuto() {
+    if (_tabVisible && _appResumed) {
+      _restartAuto();
+    } else {
+      _timer?.cancel();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _tickerMode?.removeListener(_onTickerModeChanged);
     _timer?.cancel();
     _bannerCtrl.dispose();
+    _bannerPage.dispose();
     super.dispose();
   }
 
@@ -86,7 +130,7 @@ class _HomePageState extends State<HomePage> {
         _cache[channel] = data;
         _loading = false;
         _error = null;
-        _bannerIndex = 0;
+        _bannerPage.value = 0;
       });
       _restartAuto();
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -142,11 +186,13 @@ class _HomePageState extends State<HomePage> {
 
   void _restartAuto() {
     _timer?.cancel();
+    if (!mounted || !_tabVisible || !_appResumed) return;
     final n = _cache[_channel]?.banners.length ?? 0;
     if (n <= 1) return;
     _timer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (!mounted || !_bannerCtrl.hasClients) return;
-      final next = (_bannerIndex + 1) % n;
+      if (!mounted || !_tabVisible || !_appResumed || _dragging) return;
+      if (!_bannerCtrl.hasClients) return;
+      final next = (_bannerPage.value + 1) % n;
       _bannerCtrl.animateToPage(
         next,
         duration: const Duration(milliseconds: 520),
@@ -159,7 +205,7 @@ class _HomePageState extends State<HomePage> {
     if (_channel == key) return;
     setState(() {
       _channel = key;
-      _bannerIndex = 0;
+      _bannerPage.value = 0;
       _error = null;
       _loading = key != 'live' && !_cache.containsKey(key);
     });
@@ -424,7 +470,13 @@ class _HomePageState extends State<HomePage> {
                 ),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(11),
-                  child: Image.asset('assets/logo.png', fit: BoxFit.cover),
+                  child: Image.asset(
+                    'assets/logo.png',
+                    fit: BoxFit.cover,
+                    cacheWidth: (36 * MediaQuery.devicePixelRatioOf(context))
+                        .round()
+                        .clamp(36, 216),
+                  ),
                 ),
               ),
               const SizedBox(width: 10),
@@ -641,118 +693,121 @@ class _HomePageState extends State<HomePage> {
               child: PageView.builder(
                 controller: _bannerCtrl,
                 itemCount: banners.length,
-                onPageChanged: (i) => setState(() => _bannerIndex = i),
+                onPageChanged: (i) => _bannerPage.value = i,
                 itemBuilder: (ctx, i) {
                   final b = banners[i];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: GestureDetector(
-                      onTap: () => _openDetail(b.id),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(18),
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            FxCover(
-                              url: b.cover,
-                              title: b.title,
-                              radius: 18,
-                              big: true,
-                              showText: false,
-                            ),
-                            DecoratedBox(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [
-                                    Colors.black.withOpacity(.02),
-                                    Colors.black.withOpacity(.12),
-                                    Colors.black.withOpacity(.74),
-                                  ],
-                                  stops: const [0, .42, 1],
+                  return RepaintBoundary(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: GestureDetector(
+                        onTap: () => _openDetail(b.id),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(18),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              FxCover(
+                                url: b.cover,
+                                title: b.title,
+                                radius: 18,
+                                big: true,
+                                showText: false,
+                              ),
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      Colors.black.withOpacity(.02),
+                                      Colors.black.withOpacity(.12),
+                                      Colors.black.withOpacity(.74),
+                                    ],
+                                    stops: const [0, .42, 1],
+                                  ),
                                 ),
                               ),
-                            ),
-                            if (b.rating > 0)
-                              Positioned(
-                                top: 10,
-                                right: 10,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.black.withOpacity(.32),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                        color: Colors.white.withOpacity(.24)),
+                              if (b.rating > 0)
+                                Positioned(
+                                  top: 10,
+                                  right: 10,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withOpacity(.32),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                          color: Colors.white.withOpacity(.24)),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.star_rounded,
+                                            size: 12, color: Fx.gold),
+                                        const SizedBox(width: 2),
+                                        Text(
+                                          b.rating.toStringAsFixed(1),
+                                          style: const TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w600,
+                                              color: Colors.white),
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.star_rounded,
-                                          size: 12, color: Fx.gold),
-                                      const SizedBox(width: 2),
+                                ),
+                              Positioned(
+                                left: 16,
+                                right: 16,
+                                bottom: 13,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 7, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        gradient: Fx.brand,
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      child: const Text('正在热播',
+                                          style: TextStyle(
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.w600,
+                                              color: Colors.white)),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      b.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          fontSize: 20,
+                                          height: 1.2,
+                                          fontWeight: FontWeight.w600,
+                                          color: Colors.white),
+                                    ),
+                                    if (b.desc.isNotEmpty) ...[
+                                      const SizedBox(height: 4),
                                       Text(
-                                        b.rating.toStringAsFixed(1),
-                                        style: const TextStyle(
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.w600,
-                                            color: Colors.white),
+                                        b.desc,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                            fontSize: 12,
+                                            height: 1.45,
+                                            fontWeight: FontWeight.w400,
+                                            color:
+                                                Colors.white.withOpacity(.84)),
                                       ),
                                     ],
-                                  ),
+                                  ],
                                 ),
                               ),
-                            Positioned(
-                              left: 16,
-                              right: 16,
-                              bottom: 13,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 7, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      gradient: Fx.brand,
-                                      borderRadius: BorderRadius.circular(6),
-                                    ),
-                                    child: const Text('正在热播',
-                                        style: TextStyle(
-                                            fontSize: 9,
-                                            fontWeight: FontWeight.w600,
-                                            color: Colors.white)),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    b.title,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                        fontSize: 20,
-                                        height: 1.2,
-                                        fontWeight: FontWeight.w600,
-                                        color: Colors.white),
-                                  ),
-                                  if (b.desc.isNotEmpty) ...[
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      b.desc,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                          fontSize: 12,
-                                          height: 1.45,
-                                          fontWeight: FontWeight.w400,
-                                          color: Colors.white.withOpacity(.84)),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -763,22 +818,26 @@ class _HomePageState extends State<HomePage> {
           ),
         ),
         const SizedBox(height: 12),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: List.generate(
-            banners.length,
-            (i) => AnimatedContainer(
-              duration: const Duration(milliseconds: 240),
-              width: i == _bannerIndex % banners.length ? 18 : 6,
-              height: 6,
-              margin: const EdgeInsets.symmetric(horizontal: 3),
-              decoration: BoxDecoration(
-                gradient: i == _bannerIndex % banners.length ? Fx.brand : null,
-                color: i == _bannerIndex % banners.length
-                    ? null
-                    : const Color(0xFFCBD6E6),
-                borderRadius: BorderRadius.circular(3),
-              ),
+        ValueListenableBuilder<int>(
+          valueListenable: _bannerPage,
+          builder: (context, index, _) => Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(
+              banners.length,
+              (i) {
+                final on = i == index % banners.length;
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 240),
+                  width: on ? 18 : 6,
+                  height: 6,
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  decoration: BoxDecoration(
+                    gradient: on ? Fx.brand : null,
+                    color: on ? null : const Color(0xFFCBD6E6),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                );
+              },
             ),
           ),
         ),
@@ -836,94 +895,98 @@ class _LiveCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final title = item.title.trim().isEmpty ? '未命名频道' : item.title.trim();
     final group = item.group.trim();
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(6),
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.72),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.white),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF50729F).withOpacity(.08),
-              blurRadius: 14,
-              offset: const Offset(0, 5),
-            ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  FxCover(url: item.cover, title: title, radius: 10),
-                  Positioned(
-                    top: 6,
-                    left: 6,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(.42),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.circle, size: 6, color: Color(0xFFFF5A5A)),
-                          SizedBox(width: 3),
-                          Text(
-                            'LIVE',
-                            style: TextStyle(
-                              fontSize: 9,
-                              height: 1.1,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 7),
-            Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: Fx.ink,
-              ),
-            ),
-            if (group.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: Fx.accent.withOpacity(.10),
-                  borderRadius: BorderRadius.circular(5),
-                ),
-                child: Text(
-                  group,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w500,
-                    color: Fx.accent,
-                  ),
-                ),
+    return RepaintBoundary(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(.72),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF50729F).withOpacity(.08),
+                blurRadius: 14,
+                offset: const Offset(0, 5),
               ),
             ],
-          ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    FxCover(url: item.cover, title: title, radius: 10),
+                    Positioned(
+                      top: 6,
+                      left: 6,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(.42),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.circle,
+                                size: 6, color: Color(0xFFFF5A5A)),
+                            SizedBox(width: 3),
+                            Text(
+                              'LIVE',
+                              style: TextStyle(
+                                fontSize: 9,
+                                height: 1.1,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 7),
+              Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Fx.ink,
+                ),
+              ),
+              if (group.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Fx.accent.withOpacity(.10),
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: Text(
+                    group,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                      color: Fx.accent,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );

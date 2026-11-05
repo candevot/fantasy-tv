@@ -173,10 +173,12 @@ class FxPosterCard extends StatelessWidget {
         ],
       ],
     );
-    final tappable = GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: card,
+    final tappable = RepaintBoundary(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: card,
+      ),
     );
     return width == null ? tappable : SizedBox(width: width, child: tappable);
   }
@@ -800,7 +802,7 @@ class _CategoryPageState extends State<CategoryPage> {
                   crossAxisCount: 4,
                   crossAxisSpacing: 8,
                   mainAxisSpacing: 8,
-                  mainAxisExtent: itemWidth * 1.5 + 40,
+                  mainAxisExtent: itemWidth * 1.5 + fxPosterMetaExtent(context),
                 ),
                 delegate: SliverChildBuilderDelegate(
                   (ctx, i) {
@@ -939,25 +941,33 @@ class _CategoryPageState extends State<CategoryPage> {
           Row(
             children: [
               Expanded(
-                child: _filterPill('类型', _valueOf(_types, _type),
+                child: _filterPill(
+                    '类型',
+                    _valueOf(_types, _type),
                     _type.isNotEmpty,
                     () => _pick('选择类型', _types, _type, (v) => _type = v)),
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: _filterPill('地区', _valueOf(_areas, _area),
+                child: _filterPill(
+                    '地区',
+                    _valueOf(_areas, _area),
                     _area.isNotEmpty,
                     () => _pick('选择地区', _areas, _area, (v) => _area = v)),
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: _filterPill('年份', _valueOf(_years, _year),
+                child: _filterPill(
+                    '年份',
+                    _valueOf(_years, _year),
                     _year.isNotEmpty,
                     () => _pick('选择年份', _years, _year, (v) => _year = v)),
               ),
               const SizedBox(width: 6),
               Expanded(
-                child: _filterPill('排序', _valueOf(_sorts, _sort),
+                child: _filterPill(
+                    '排序',
+                    _valueOf(_sorts, _sort),
                     _sort != 'latest',
                     () => _pick('排序方式', _sorts, _sort, (v) => _sort = v)),
               ),

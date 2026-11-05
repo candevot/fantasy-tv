@@ -431,9 +431,7 @@ class _SearchPageState extends State<SearchPage> {
           Row(
             children: [
               FxSkeletonBox(
-                  height: 16,
-                  width: _mode == 'ai' ? 76 : 82,
-                  radius: 4),
+                  height: 16, width: _mode == 'ai' ? 76 : 82, radius: 4),
               const SizedBox(width: 8),
               FxSkeletonBox(height: 12, width: 120, radius: 4),
             ],
@@ -876,7 +874,8 @@ class _SearchPageState extends State<SearchPage> {
                     crossAxisCount: 3,
                     crossAxisSpacing: 8,
                     mainAxisSpacing: 8,
-                    mainAxisExtent: itemWidth * 1.5 + 40,
+                    mainAxisExtent:
+                        itemWidth * 1.5 + fxPosterMetaExtent(context),
                   ),
                   delegate: SliverChildBuilderDelegate(
                     (ctx, i) {

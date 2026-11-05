@@ -82,7 +82,10 @@ class _FavoritePageState extends State<FavoritePage> {
 
   Future<void> _load() async {
     final raw = await FxStore.read(FxStore.favoriteKey);
-    final list = raw.map(FavRecord.fromMap).where((e) => e.id.isNotEmpty).toList()
+    final list = raw
+        .map(FavRecord.fromMap)
+        .where((e) => e.id.isNotEmpty)
+        .toList()
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     if (!mounted) return;
     setState(() {
@@ -119,8 +122,7 @@ class _FavoritePageState extends State<FavoritePage> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child:
-                const Text('清空', style: TextStyle(color: Color(0xFFE45C5C))),
+            child: const Text('清空', style: TextStyle(color: Color(0xFFE45C5C))),
           ),
         ],
       ),
@@ -241,10 +243,13 @@ class _FavoritePageState extends State<FavoritePage> {
           ),
           const SizedBox(width: 12),
           Expanded(
-            child: SizedBox(
-              height: 96,
+            // 不锁死 96pt：大字体下文字会变高，这里跟随内容一起长高，
+            // 1.3 倍字号时最下面一行也不会溢出卡片。
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 96),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 mainAxisAlignment: MainAxisAlignment.start,
                 children: [
                   const SizedBox(height: 2),
@@ -260,8 +265,7 @@ class _FavoritePageState extends State<FavoritePage> {
                   const SizedBox(height: 6),
                   Row(
                     children: [
-                      const Icon(Icons.star_rounded,
-                          size: 13, color: Fx.gold),
+                      const Icon(Icons.star_rounded, size: 13, color: Fx.gold),
                       const SizedBox(width: 2),
                       Text(r.rating > 0 ? r.rating.toStringAsFixed(1) : '—',
                           style: const TextStyle(
@@ -273,15 +277,17 @@ class _FavoritePageState extends State<FavoritePage> {
                         child: Text(meta,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontSize: 10, color: Fx.sub)),
+                            style:
+                                const TextStyle(fontSize: 10, color: Fx.sub)),
                       ),
                     ],
                   ),
                   const SizedBox(height: 7),
                   Text(
                     tags.isEmpty
-                        ? (r.status.isEmpty ? '收藏于 ${fxTimeAgo(r.updatedAt)}' : r.status)
+                        ? (r.status.isEmpty
+                            ? '收藏于 ${fxTimeAgo(r.updatedAt)}'
+                            : r.status)
                         : tags,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -300,7 +306,7 @@ class _FavoritePageState extends State<FavoritePage> {
                     style: const TextStyle(
                         fontSize: 10.5, color: Fx.sub, height: 1.4),
                   ),
-                  const Spacer(),
+                  const SizedBox(height: 6),
                   Text('收藏于 ${fxTimeAgo(r.updatedAt)}',
                       style: const TextStyle(
                           fontSize: 9.5, color: Color(0xFFA6B1C2))),

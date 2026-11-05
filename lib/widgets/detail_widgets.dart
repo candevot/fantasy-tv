@@ -650,7 +650,7 @@ class DetailCommentTile extends StatelessWidget {
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _avatar(),
+              _avatar(context),
               const SizedBox(width: 9),
               Expanded(
                 child: Column(
@@ -745,7 +745,7 @@ class DetailCommentTile extends StatelessWidget {
     return '${t.year}-${two(t.month)}-${two(t.day)}';
   }
 
-  Widget _avatar() {
+  Widget _avatar(BuildContext context) {
     final fallback = Container(
       width: 34,
       height: 34,
@@ -770,6 +770,9 @@ class DetailCommentTile extends StatelessWidget {
         Api.abs(url),
         width: 34,
         height: 34,
+        cacheWidth: (34 * MediaQuery.devicePixelRatioOf(context))
+            .round()
+            .clamp(34, 256),
         fit: BoxFit.cover,
         errorBuilder: (context, error, stack) => fallback,
       ),

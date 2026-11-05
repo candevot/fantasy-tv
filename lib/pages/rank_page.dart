@@ -549,9 +549,11 @@ class _RankPageState extends State<RankPage> {
           ),
           const SizedBox(width: 10),
           Expanded(
-            child: SizedBox(
-              height: 99,
+            // 内容至少与封面同高；大字体下随文字长高，不裁描述也不压住底栏。
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 99),
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
@@ -576,19 +578,17 @@ class _RankPageState extends State<RankPage> {
                         color: Fx.sub),
                   ),
                   const SizedBox(height: 4),
-                  Expanded(
-                    child: Text(
-                      desc.isNotEmpty ? desc : _descPlaceholder(item),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        height: 1.45,
-                        fontWeight: FontWeight.w400,
-                        color: desc.isNotEmpty
-                            ? const Color(0xFF5A6577)
-                            : const Color(0xFFA6B1C2),
-                      ),
+                  Text(
+                    desc.isNotEmpty ? desc : _descPlaceholder(item),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.45,
+                      fontWeight: FontWeight.w400,
+                      color: desc.isNotEmpty
+                          ? const Color(0xFF5A6577)
+                          : const Color(0xFFA6B1C2),
                     ),
                   ),
                   const SizedBox(height: 4),

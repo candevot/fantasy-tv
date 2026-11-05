@@ -758,22 +758,10 @@ class _DetailPageState extends State<DetailPage>
         slivers: [
           SliverToBoxAdapter(child: _playerHeader(d)),
           SliverToBoxAdapter(child: _topArea()),
-          SliverToBoxAdapter(
-            child: AnimatedBuilder(
-              animation: _fade,
-              builder: (context, child) {
-                final t = Curves.easeOut.transform(_fade.value);
-                return Opacity(
-                  opacity: t,
-                  child: Transform.translate(
-                    offset: Offset(0, 8 * (1 - t)),
-                    child: child,
-                  ),
-                );
-              },
-              child: _tab == 0 ? _videoTab(d) : _commentsTab(),
-            ),
-          ),
+          if (_tab == 0)
+            SliverToBoxAdapter(child: _fadeWrap(_videoTab(d)))
+          else
+            ..._commentsSlivers(),
           SliverToBoxAdapter(
             child: SizedBox(height: 28 + MediaQuery.of(context).padding.bottom),
           ),
@@ -1389,121 +1377,170 @@ class _DetailPageState extends State<DetailPage>
 
   /* --------------------------------------------------------- comments tab */
 
-  Widget _commentsTab() {
-    final list = _comments;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              const Text(
-                '全部评论',
-                style: TextStyle(
-                  fontSize: 16.5,
-                  fontWeight: FontWeight.w800,
-                  color: Fx.ink,
-                ),
-              ),
-              const SizedBox(width: 6),
-              if (list.isNotEmpty)
-                Text(
-                  '${list.length}',
-                  style: const TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w600,
-                    color: Fx.accent,
-                  ),
-                ),
-              const Spacer(),
-              const Icon(Icons.local_fire_department_rounded,
-                  size: 13, color: Fx.gold),
-              const SizedBox(width: 2),
-              const Text('按热度',
-                  style: TextStyle(fontSize: 10.5, color: Fx.sub)),
-            ],
+  Widget _fadeWrap(Widget child) {
+    return AnimatedBuilder(
+      animation: _fade,
+      builder: (context, child) {
+        final t = Curves.easeOut.transform(_fade.value);
+        return Opacity(
+          opacity: t,
+          child: Transform.translate(
+            offset: Offset(0, 8 * (1 - t)),
+            child: child,
           ),
-          const SizedBox(height: 12),
-          if (list.isEmpty && _commentsLoading)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 34),
-              child: Center(
-                child: SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.3,
-                    color: Fx.accent,
-                  ),
-                ),
+        );
+      },
+      child: child,
+    );
+  }
+
+  /// 评论列表可能一次加载几十条：拆成 SliverList + builder，
+  /// 只构建屏幕内的评论，而不是在 Column 里一次性全部 build。
+  List<Widget> _commentsSlivers() {
+    final list = _comments;
+    final header = Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+      child: Row(
+        children: [
+          const Text(
+            '全部评论',
+            style: TextStyle(
+              fontSize: 16.5,
+              fontWeight: FontWeight.w800,
+              color: Fx.ink,
+            ),
+          ),
+          const SizedBox(width: 6),
+          if (list.isNotEmpty)
+            Text(
+              '${list.length}',
+              style: const TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w600,
+                color: Fx.accent,
               ),
-            )
-          else if (list.isEmpty && _commentError != null)
-            FxErrorView(
-              message: _commentError!,
-              compact: true,
-              onRetry: () => _loadComments(reset: true),
-            )
-          else if (list.isEmpty)
-            const FxEmptyView(
-              icon: Icons.forum_outlined,
-              title: '还没有评论',
-              subtitle: '登录后来说两句，抢个沙发吧',
-            )
-          else ...[
-            for (final c in list)
-              DetailCommentTile(
-                key: ValueKey<String>(_commentKey(c)),
-                item: c,
-                liked: _liked.contains(_commentKey(c)),
-                onLike: () {
-                  final key = _commentKey(c);
-                  setState(() {
-                    if (_liked.contains(key)) {
-                      _liked.remove(key);
-                    } else {
-                      _liked.add(key);
-                    }
-                  });
-                },
-              ),
-            if (_commentsLoading)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 14),
-                child: Center(
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Fx.accent,
-                    ),
-                  ),
-                ),
-              )
-            else if (_commentsHasMore)
-              Center(
-                child: TextButton(
-                  onPressed: () => _loadComments(reset: false),
-                  child: const Text(
-                    '加载更多评论',
-                    style: TextStyle(fontSize: 12, color: Fx.accent),
-                  ),
-                ),
-              )
-            else
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 14),
-                child: Center(
-                  child: Text(
-                    '— 已经到底啦 —',
-                    style: TextStyle(fontSize: 10.5, color: Fx.sub),
-                  ),
-                ),
-              ),
-          ],
+            ),
+          const Spacer(),
+          const Icon(Icons.local_fire_department_rounded,
+              size: 13, color: Fx.gold),
+          const SizedBox(width: 2),
+          const Text('按热度', style: TextStyle(fontSize: 10.5, color: Fx.sub)),
         ],
+      ),
+    );
+
+    if (list.isEmpty) {
+      return [
+        SliverToBoxAdapter(child: _fadeWrap(header)),
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: _commentsEmptyView(),
+          ),
+        ),
+      ];
+    }
+
+    return [
+      SliverToBoxAdapter(child: _fadeWrap(header)),
+      SliverPadding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        sliver: SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (context, i) {
+              final c = list[i];
+              final key = _commentKey(c);
+              return RepaintBoundary(
+                child: DetailCommentTile(
+                  key: ValueKey<String>(key),
+                  item: c,
+                  liked: _liked.contains(key),
+                  onLike: () => _toggleCommentLike(key),
+                ),
+              );
+            },
+            childCount: list.length,
+          ),
+        ),
+      ),
+      SliverToBoxAdapter(child: _commentsFooter()),
+    ];
+  }
+
+  void _toggleCommentLike(String key) {
+    setState(() {
+      if (_liked.contains(key)) {
+        _liked.remove(key);
+      } else {
+        _liked.add(key);
+      }
+    });
+  }
+
+  Widget _commentsEmptyView() {
+    if (_commentsLoading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 34),
+        child: Center(
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(
+              strokeWidth: 2.3,
+              color: Fx.accent,
+            ),
+          ),
+        ),
+      );
+    }
+    if (_commentError != null) {
+      return FxErrorView(
+        message: _commentError!,
+        compact: true,
+        onRetry: () => _loadComments(reset: true),
+      );
+    }
+    return const FxEmptyView(
+      icon: Icons.forum_outlined,
+      title: '还没有评论',
+      subtitle: '登录后来说两句，抢个沙发吧',
+    );
+  }
+
+  Widget _commentsFooter() {
+    if (_commentsLoading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 14),
+        child: Center(
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: Fx.accent,
+            ),
+          ),
+        ),
+      );
+    }
+    if (_commentsHasMore) {
+      return Center(
+        child: TextButton(
+          onPressed: () => _loadComments(reset: false),
+          child: const Text(
+            '加载更多评论',
+            style: TextStyle(fontSize: 12, color: Fx.accent),
+          ),
+        ),
+      );
+    }
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 14),
+      child: Center(
+        child: Text(
+          '— 已经到底啦 —',
+          style: TextStyle(fontSize: 10.5, color: Fx.sub),
+        ),
       ),
     );
   }

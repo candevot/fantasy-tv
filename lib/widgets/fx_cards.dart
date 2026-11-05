@@ -90,26 +90,45 @@ class FxCover extends StatelessWidget {
     final usable = fxUsableCover(url);
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          _placeholder(),
-          if (usable)
-            Image.network(
-              fxCoverUrl(url),
-              fit: fit,
-              gaplessPlayback: true,
-              filterQuality: FilterQuality.medium,
-              loadingBuilder: (context, child, progress) {
-                if (progress == null) return child;
-                return _placeholder();
-              },
-              errorBuilder: (context, error, stack) => _placeholder(),
-            ),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // 按真实显示宽度 × 屏幕像素比解码：同一张 2K 海报在 4 列网格里
+          // 只解码到 ~360px，滚动时内存和 GPU 上传都小一个数量级。
+          final dpr = MediaQuery.devicePixelRatioOf(context);
+          final width = constraints.maxWidth;
+          final cacheWidth = width.isFinite && width > 0
+              ? (width * dpr).round().clamp(64, 4096).toInt()
+              : null;
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              _placeholder(),
+              if (usable)
+                Image.network(
+                  fxCoverUrl(url),
+                  fit: fit,
+                  cacheWidth: cacheWidth,
+                  gaplessPlayback: true,
+                  filterQuality: big ? FilterQuality.medium : FilterQuality.low,
+                  loadingBuilder: (context, child, progress) {
+                    if (progress == null) return child;
+                    return _placeholder();
+                  },
+                  errorBuilder: (context, error, stack) => _placeholder(),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
+}
+
+/// 海报下方「片名 + 状态」两行文字在当前系统字号下的高度。
+/// 网格 / 横滑列表用它算 mainAxisExtent，1.3 倍大字体下也不会裁字。
+double fxPosterMetaExtent(BuildContext context) {
+  final scaler = MediaQuery.textScalerOf(context);
+  return 8 + scaler.scale(12.5 * 1.3) + scaler.scale(11 * 1.2) + 3;
 }
 
 /// 海报角标文案：新 / 更新至N集 / 全N集 / 已完结。
@@ -232,57 +251,59 @@ class FxPosterTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final badge = showBadge ? fxBadgeText(item) : null;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          AspectRatio(
-            aspectRatio: 2 / 3,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                FxCover(url: item.cover, title: item.title, radius: radius),
-                if (badge != null)
-                  Positioned(
-                    left: 5,
-                    top: 5,
-                    child: FxPosterBadge(badge),
-                  ),
-              ],
-            ),
-          ),
-          if (showTitle) ...[
-            const SizedBox(height: 5),
-            Text(
-              item.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: titleSize,
-                height: 1.3,
-                fontWeight: FontWeight.w500,
-                color: Fx.ink,
+    return RepaintBoundary(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AspectRatio(
+              aspectRatio: 2 / 3,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  FxCover(url: item.cover, title: item.title, radius: radius),
+                  if (badge != null)
+                    Positioned(
+                      left: 5,
+                      top: 5,
+                      child: FxPosterBadge(badge),
+                    ),
+                ],
               ),
             ),
-          ],
-          if (showStatus) ...[
-            const SizedBox(height: 2),
-            Text(
-              fxPosterStatusLine(item),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 11,
-                height: 1.2,
-                fontWeight: FontWeight.w400,
-                color: Fx.sub,
+            if (showTitle) ...[
+              const SizedBox(height: 5),
+              Text(
+                item.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: titleSize,
+                  height: 1.3,
+                  fontWeight: FontWeight.w500,
+                  color: Fx.ink,
+                ),
               ),
-            ),
+            ],
+            if (showStatus) ...[
+              const SizedBox(height: 2),
+              Text(
+                fxPosterStatusLine(item),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11,
+                  height: 1.2,
+                  fontWeight: FontWeight.w400,
+                  color: Fx.sub,
+                ),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -400,7 +421,7 @@ class FxSectionRow extends StatelessWidget {
                 gap * (visibleCount - 1);
             final itemWidth = available <= 0 ? 72.0 : available / visibleCount;
             return SizedBox(
-              height: itemWidth * 1.5 + 40,
+              height: itemWidth * 1.5 + fxPosterMetaExtent(context),
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
@@ -413,9 +434,7 @@ class FxSectionRow extends StatelessWidget {
                     width: itemWidth,
                     child: FxPosterTile(
                       item: item,
-                      onTap: onTapItem == null
-                          ? null
-                          : () => onTapItem!(item),
+                      onTap: onTapItem == null ? null : () => onTapItem!(item),
                     ),
                   );
                 },
@@ -565,10 +584,8 @@ class FxPosterRowSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (ctx, cons) {
-        final width = (cons.maxWidth -
-                horizontalPadding * 2 -
-                gap * (count - 1)) /
-            count;
+        final width =
+            (cons.maxWidth - horizontalPadding * 2 - gap * (count - 1)) / count;
         return Padding(
           padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
           child: Row(

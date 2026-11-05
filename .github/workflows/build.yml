@@ -26,6 +26,11 @@ jobs:
           cp -r _tmp/android/. ./android/
           rm -rf _tmp
           test -f android/fx-release.jks
+      - name: Pin Android SDK levels
+        run: |
+          # targetSdk/compileSdk 显式钉死：安卓 8+（API 26+）设备覆盖，
+          # 分区存储按 targetSdk 34 的行为处理。
+          python3 tools/patch_android_sdk.py
       - name: Patch release signing (fixed keystore)
         run: |
           test -f android/fx-release.jks
@@ -46,7 +51,7 @@ jobs:
           import re,io
           p='android/app/src/main/AndroidManifest.xml'
           s=open(p,encoding='utf-8').read()
-          s=s.replace('<application','<uses-permission android:name="android.permission.INTERNET"/>\n    <application',1)
+          s=s.replace('<application','<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <application',1)
           s=s.replace('android:label="fantasy_tv"','android:label="幻想影视"')
           if 'usesCleartextTraffic' not in s:
               s=s.replace('<application','<application\n        android:usesCleartextTraffic="true"',1)
@@ -80,11 +85,14 @@ jobs:
               m=cands[0] if cands else m
           k=open(m,encoding='utf-8').read()
           if 'setDecorFitsSystemWindows' not in k:
-              k=k.replace('import io.flutter.embedding.android.FlutterActivity','import io.flutter.embedding.android.FlutterActivity\nimport androidx.core.view.WindowCompat')
-              k=k.replace('class MainActivity: FlutterActivity()','class MainActivity: FlutterActivity() {\n  override fun onCreate(savedInstanceState: android.os.Bundle?) {\n    super.onCreate(savedInstanceState)\n    WindowCompat.setDecorFitsSystemWindows(window, false)\n  }\n}')
+              k=k.replace('import io.flutter.embedding.android.FlutterActivity','import io.flutter.embedding.android.FlutterActivity\nimport androidx.core.view.WindowCompat\nimport androidx.core.app.ActivityCompat\nimport androidx.core.content.ContextCompat')
+              k=k.replace('class MainActivity: FlutterActivity()','class MainActivity: FlutterActivity() {\n  override fun onCreate(savedInstanceState: android.os.Bundle?) {\n    super.onCreate(savedInstanceState)\n    WindowCompat.setDecorFitsSystemWindows(window, false)\n    // Android 8/9（API 26-28）写公共 Download 目录需要旧版存储权限；\n    // Android 10+ 走分区存储，写入失败会自动回退应用专属目录。\n    if (android.os.Build.VERSION.SDK_INT <= 28 && ContextCompat.checkSelfPermission(this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {\n      ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 1001)\n    }\n  }\n}')
               open(m,'w',encoding='utf-8').write(k)
           print(open(st,encoding='utf-8').read()[:300])
           PY2
+      - name: Check Android 8+ compatibility
+        run: |
+          python3 tools/check_android_compat.py
       - run: flutter pub get
       - run: flutter analyze
       - name: Build release APKs (split per ABI)

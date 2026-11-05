@@ -435,11 +435,15 @@ class _MinePageState extends State<MinePage> {
     final logged = user != null;
     Widget content;
     final path = Auth.instance.avatarPath;
+    // 头像只显示 64pt，按 dpr 解码，别把 1MB 原图塞进图片缓存。
+    final cacheWidth =
+        (64 * MediaQuery.devicePixelRatioOf(context)).round().clamp(64, 512);
     if (path.isNotEmpty && File(path).existsSync()) {
       content = Image.file(
         File(path),
         width: 64,
         height: 64,
+        cacheWidth: cacheWidth,
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) => _avatarFallback(user),
       );
@@ -448,6 +452,7 @@ class _MinePageState extends State<MinePage> {
         user.avatar,
         width: 64,
         height: 64,
+        cacheWidth: cacheWidth,
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) => _avatarFallback(user),
       );

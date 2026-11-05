@@ -12,6 +12,14 @@ import 'category_page.dart';
 /*  离线缓存                                                                   */
 /* ========================================================================== */
 
+class _DownloadSection {
+  const _DownloadSection(this.title, this.count, this.icon);
+
+  final String title;
+  final int count;
+  final IconData icon;
+}
+
 class DownloadsPage extends StatefulWidget {
   const DownloadsPage({super.key});
 
@@ -175,6 +183,16 @@ class _DownloadsPageState extends State<DownloadsPage> {
     }
     final active = _active;
     final completed = _completed;
+    // 任务可能很多：拍平成「分组头 / 任务」两类行，交给 builder
+    // 按需构建，避免一次性创建全部卡片。
+    final rows = <Object>[
+      if (active.isNotEmpty)
+        _DownloadSection('下载中', active.length, Icons.downloading_rounded),
+      ...active,
+      if (completed.isNotEmpty)
+        _DownloadSection('已完成', completed.length, Icons.offline_pin_rounded),
+      ...completed,
+    ];
     return Column(
       children: [
         Padding(
@@ -208,28 +226,23 @@ class _DownloadsPageState extends State<DownloadsPage> {
           ),
         ),
         Expanded(
-          child: ListView(
+          child: ListView.builder(
             physics: const BouncingScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(18, 0, 18, 30),
-            children: [
-              if (active.isNotEmpty) ...[
-                _section('下载中', active.length, Icons.downloading_rounded),
-                const SizedBox(height: 8),
-                for (final task in active) ...[
-                  _card(task),
-                  const SizedBox(height: 10),
-                ],
-              ],
-              if (completed.isNotEmpty) ...[
-                if (active.isNotEmpty) const SizedBox(height: 8),
-                _section('已完成', completed.length, Icons.offline_pin_rounded),
-                const SizedBox(height: 8),
-                for (final task in completed) ...[
-                  _card(task),
-                  const SizedBox(height: 10),
-                ],
-              ],
-            ],
+            itemCount: rows.length,
+            itemBuilder: (ctx, i) {
+              final row = rows[i];
+              if (row is _DownloadSection) {
+                return Padding(
+                  padding: EdgeInsets.only(top: i == 0 ? 0 : 8, bottom: 8),
+                  child: _section(row.title, row.count, row.icon),
+                );
+              }
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: _card(row as DownloadTask),
+              );
+            },
           ),
         ),
       ],

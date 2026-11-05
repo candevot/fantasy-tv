@@ -25,13 +25,12 @@ void main() {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
     _installErrorHandlers();
-    try {
-      await Boot.run();
-    } catch (e, st) {
-      // 兜底中的兜底：无论启动流程发生什么，都必须进入主界面。
-      AppLog.write('boot', e, st);
-    }
+    // 首帧只负责出界面：配置 / 登录态 / 内核初始化全部挪到首帧之后，
+    // 启动阶段任何网络或磁盘等待都不再挡住首屏。
     runApp(const FantasyApp());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(Boot.run());
+    });
   }, (error, stack) {
     AppLog.write('zone', error, stack);
   });
@@ -162,11 +161,19 @@ class FantasyApp extends StatelessWidget {
       title: '幻想影视',
       debugShowCheckedModeBanner: false,
       theme: FxTheme.data,
+      // 深色模式下也固定浅色主题：自绘玻璃卡片是按浅色校准的，
+      // 跟随系统切到深色会出现低对比度 / 白底白字。
+      darkTheme: FxTheme.data,
+      themeMode: ThemeMode.light,
       home: const SplashPage(),
-      builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context).copyWith(textScaler: TextScaler.noScaling),
-        child: child ?? const SizedBox.shrink(),
-      ),
+      builder: (context, child) {
+        final mq = MediaQuery.of(context);
+        return MediaQuery(
+          // 大字体最多跟随到 1.3 倍，再大就统一截断，避免固定高度布局溢出。
+          data: mq.copyWith(textScaler: fxClampTextScaler(mq.textScaler)),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
     );
   }
 }
@@ -179,7 +186,8 @@ class SplashPage extends StatefulWidget {
   State<SplashPage> createState() => _SplashPageState();
 }
 
-class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateMixin {
+class _SplashPageState extends State<SplashPage>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _c = AnimationController(
       vsync: this, duration: const Duration(milliseconds: 2000))
     ..forward();
@@ -192,7 +200,8 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
         Navigator.of(context).pushReplacement(PageRouteBuilder(
           transitionDuration: const Duration(milliseconds: 350),
           pageBuilder: (_, __, ___) => const RootShell(),
-          transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: a, child: child),
+          transitionsBuilder: (_, a, __, child) =>
+              FadeTransition(opacity: a, child: child),
         ));
       }
     });
@@ -212,7 +221,8 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
         builder: (context, __) {
           final t = _c.value;
           final pop = Curves.easeOutBack.transform((t / .5).clamp(0.0, 1.0));
-          final fadeText = Curves.easeOut.transform(((t - .45) / .35).clamp(0.0, 1.0));
+          final fadeText =
+              Curves.easeOut.transform(((t - .45) / .35).clamp(0.0, 1.0));
           final sheen = ((t - .42) / .3).clamp(0.0, 1.0); // 玻璃反光扫过
           return Stack(
             fit: StackFit.expand,
@@ -220,7 +230,11 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
               const DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    colors: [Color(0xFFF7FAFF), Color(0xFFFDFBFF), Color(0xFFF4FAFF)],
+                    colors: [
+                      Color(0xFFF7FAFF),
+                      Color(0xFFFDFBFF),
+                      Color(0xFFF4FAFF)
+                    ],
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
                   ),
@@ -295,7 +309,8 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                     Opacity(
                       opacity: fadeText,
                       child: const Text('高画 · 免费 · 无广',
-                          style: TextStyle(fontSize: 12, color: Fx.sub, letterSpacing: 1.5)),
+                          style: TextStyle(
+                              fontSize: 12, color: Fx.sub, letterSpacing: 1.5)),
                     ),
                   ],
                 ),
@@ -309,7 +324,9 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                   child: const Text('FANTASY  TV',
                       textAlign: TextAlign.center,
                       style: TextStyle(
-                          fontSize: 10, letterSpacing: 6, color: Color(0xFF9AA6B8))),
+                          fontSize: 10,
+                          letterSpacing: 6,
+                          color: Color(0xFF9AA6B8))),
                 ),
               ),
             ],
@@ -328,9 +345,12 @@ class _SplashBlobPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     // 光斑从四周向中心汇聚（0→0.45），之后缓慢散开
     final conv = t < .45 ? Curves.easeOutCubic.transform(t / .45) : 1.0;
-    final spread = t < .45 ? 0.0 : Curves.easeOutSine.transform(((t - .45) / .55).clamp(0.0, 1.0));
+    final spread = t < .45
+        ? 0.0
+        : Curves.easeOutSine.transform(((t - .45) / .55).clamp(0.0, 1.0));
     final center = Offset(size.width / 2, size.height * .42);
-    void blob(double angle, double dist, double radius, Color color, double phase) {
+    void blob(
+        double angle, double dist, double radius, Color color, double phase) {
       final d = dist * (1 - conv * .55) * (1 + spread * .35);
       final c = Offset(
         center.dx + d * math.cos(angle + phase * .3 + t),
@@ -365,6 +385,10 @@ class RootShell extends StatefulWidget {
 class _RootShellState extends State<RootShell> {
   int _i = 0;
 
+  /// 首次进入的 Tab 才创建页面：分类 / 排行榜 / 我的都要在 initState
+  /// 里请求数据，全部预建会让启动瞬间并发 4 个请求。
+  final Set<int> _visited = <int>{0};
+
   static const _tabs = [
     (icon: Icons.home_rounded, label: '首页'),
     (icon: Icons.grid_view_rounded, label: '分类'),
@@ -385,7 +409,18 @@ class _RootShellState extends State<RootShell> {
       body: FxBackground(
         child: Stack(
           children: [
-            IndexedStack(index: _i, children: pages),
+            IndexedStack(
+              index: _i,
+              children: [
+                // 只让当前 Tab 的动画 / 定时器运行；隐藏 Tab 的
+                // 背景光斑、骨架呼吸、banner 轮播全部暂停。
+                for (var i = 0; i < pages.length; i++)
+                  if (_visited.contains(i))
+                    TickerMode(enabled: i == _i, child: pages[i])
+                  else
+                    const SizedBox.shrink(),
+              ],
+            ),
             if (_i == 0)
               Positioned(
                 top: 0,
@@ -412,7 +447,9 @@ class _RootShellState extends State<RootShell> {
       ),
       bottomNavigationBar: Padding(
         padding: EdgeInsets.only(
-            left: 14, right: 14, bottom: 10 + MediaQuery.of(context).padding.bottom * .4),
+            left: 14,
+            right: 14,
+            bottom: 10 + MediaQuery.of(context).padding.bottom * .4),
         child: Container(
           height: 62,
           decoration: BoxDecoration(
@@ -434,7 +471,13 @@ class _RootShellState extends State<RootShell> {
               final tab = _tabs[i];
               return GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => setState(() => _i = i),
+                onTap: () {
+                  if (i == _i) return;
+                  setState(() {
+                    _i = i;
+                    _visited.add(i);
+                  });
+                },
                 child: SizedBox(
                   width: 68,
                   height: 62,
@@ -442,7 +485,8 @@ class _RootShellState extends State<RootShell> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(tab.icon,
-                          size: 23, color: on ? Fx.accent : const Color(0xFF9AA6B8)),
+                          size: 23,
+                          color: on ? Fx.accent : const Color(0xFF9AA6B8)),
                       const SizedBox(height: 2),
                       Text(tab.label,
                           style: TextStyle(
@@ -493,17 +537,18 @@ class _BootRetryBannerState extends State<_BootRetryBanner> {
 
 /// 统一导航
 class Nav {
-  static Future<void> detail(BuildContext c, String id) => Navigator.of(c).push(
-      MaterialPageRoute(builder: (_) => DetailPage(id: id)));
+  static Future<void> detail(BuildContext c, String id) => Navigator.of(c)
+      .push(MaterialPageRoute(builder: (_) => DetailPage(id: id)));
 
-  static Future<void> search(BuildContext c) =>
-      Navigator.of(c).push(MaterialPageRoute(builder: (_) => const SearchPage()));
+  static Future<void> search(BuildContext c) => Navigator.of(c)
+      .push(MaterialPageRoute(builder: (_) => const SearchPage()));
 
   static Future<void> together(BuildContext c, {String? videoId, int? ep}) =>
       Navigator.of(c).push(MaterialPageRoute(
           builder: (_) => TogetherPage(videoId: videoId, ep: ep ?? 1)));
 
-  static Future<void> player(BuildContext c, {required String id, int ep = 1, String line = ''}) =>
+  static Future<void> player(BuildContext c,
+          {required String id, int ep = 1, String line = ''}) =>
       Navigator.of(c).push(MaterialPageRoute(
           builder: (_) => PlayerPage(videoId: id, ep: ep, line: line)));
 }
