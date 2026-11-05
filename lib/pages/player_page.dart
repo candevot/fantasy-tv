@@ -124,10 +124,17 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 每 10 秒把观看进度回写历史，App 被杀也能保留大致位置。
   Timer? _progressTimer;
 
-  /// 切后台 3 秒后才暂停；通知栏 / 截屏只到 inactive，不打断播放。
-  Timer? _backgroundTimer;
+  /// 是否已切到后台：后台播放开关默认开，切后台只记进度、不暂停；
+  /// 看门狗在后台期间也必须停摆，避免回前台误判卡顿重新 open。
   bool _backgrounded = false;
-  bool _pausedByBackground = false;
+
+  /// 音频焦点：inactive 持续一段时间才暂停（来电 / 被其它页面遮住）；
+  /// 下拉通知栏、截屏会很快回到 resumed，不打断声音。
+  Timer? _focusLossTimer;
+  bool _pausedByFocusLoss = false;
+
+  /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
+  int _videoEpoch = 0;
 
   /// 进入全屏时随结果带回的真实倍速，切集时沿用。
   double _rate = 1.0;
@@ -384,48 +391,65 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 全屏期间由全屏页负责保存进度与暂停，避免同一实例被重复处理。
+    // 全屏期间由全屏页负责保存进度、音频焦点与画面重建。
     if (_fullscreenActive) return;
     switch (state) {
       case AppLifecycleState.inactive:
-        // 下拉通知栏 / 截屏 / 多任务预览都只到 inactive：不暂停。
+        // 来电 / 其它应用抢占音频焦点：先等一小会儿，仍在后台就暂停；
+        // 通知栏 / 截屏会很快回到 resumed，不触发暂停。
+        _armFocusLossPause();
         return;
+      case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
-        // 来电 / 切后台：先记进度，3 秒内回前台就不暂停。
+        // 切后台：后台播放默认开启，完全不暂停，只保存进度。
         _backgrounded = true;
+        _cancelFocusLossPause();
         unawaited(_saveProgress());
-        _backgroundTimer?.cancel();
-        _backgroundTimer = Timer(fxBackgroundPauseDelay, _pauseForBackground);
         return;
       case AppLifecycleState.resumed:
         _backgrounded = false;
-        _backgroundTimer?.cancel();
-        _backgroundTimer = null;
-        _resumeAfterBackground();
+        _cancelFocusLossPause();
+        _resetWatchdogClock();
+        _resumeAfterFocusLoss();
+        _remountVideoLayer();
         return;
-      case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
         return;
     }
   }
 
-  void _pauseForBackground() {
-    _backgroundTimer = null;
-    if (!mounted || !_backgrounded || _fullscreenActive) return;
-    final c = _controller;
-    if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
-    _pausedByBackground = true;
-    unawaited(_saveProgress());
-    unawaited(c.pause());
+  void _armFocusLossPause() {
+    _cancelFocusLossPause();
+    _focusLossTimer = Timer(const Duration(milliseconds: 1200), () {
+      _focusLossTimer = null;
+      if (!mounted || _backgrounded || _fullscreenActive) return;
+      final c = _controller;
+      if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
+      _pausedByFocusLoss = true;
+      unawaited(c.pause());
+    });
   }
 
-  void _resumeAfterBackground() {
-    if (!_pausedByBackground) return;
-    _pausedByBackground = false;
-    if (!mounted || _fullscreenActive || _loading || _error || _covered) return;
+  void _cancelFocusLossPause() {
+    _focusLossTimer?.cancel();
+    _focusLossTimer = null;
+  }
+
+  /// 焦点恢复：只在「因失去焦点而暂停」且之前确实在播放时继续。
+  void _resumeAfterFocusLoss() {
+    if (!_pausedByFocusLoss) return;
+    _pausedByFocusLoss = false;
+    if (!mounted || _loading || _error || _covered) return;
     final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
+    if (c == null || !c.value.isInitialized || c.value.isPlaying) return;
     unawaited(c.play());
+  }
+
+  /// 回前台只重挂 Video 层（不 open / 不 seek）：换 key 让输出层重建，
+  /// 同一 FxPlayer 实例、播放位置与播放状态全部保持。
+  void _remountVideoLayer() {
+    if (!mounted) return;
+    setState(() => _videoEpoch++);
   }
 
   @override
@@ -433,7 +457,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _progressTimer?.cancel();
-    _backgroundTimer?.cancel();
+    _cancelFocusLossPause();
     _watchdogTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
@@ -984,6 +1008,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         !c.value.isInitialized) {
       return;
     }
+    // 用户手动暂停 / 播放后，焦点恢复不再替他继续播放。
+    _pausedByFocusLoss = false;
     // 以播放器真实状态为准：交给 media_kit 切换，按钮图标随后续
     // player.stream.playing 事件刷新，不用本地布尔抢先改状态。
     unawaited(c.playOrPause());
@@ -1113,6 +1139,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             if (c != null && c.value.isInitialized && !_fullscreenActive)
               SizedBox.expand(
                 child: FxPlayerSurface(
+                  key: ValueKey<int>(_videoEpoch),
                   player: c,
                   fit: BoxFit.contain,
                   subtitleBottom: fxSubtitleMinBottom,

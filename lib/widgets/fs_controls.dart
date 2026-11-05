@@ -342,32 +342,46 @@ class FsSideControls extends StatelessWidget {
   }
 }
 
-/// 锁屏后唯一的解锁按钮：半透明小圆钮，3 秒后由页面负责隐藏。
+/// 锁屏后唯一的解锁按钮：半透明小圆钮。
+///
+/// 锁定后由页面用 3 秒计时器控制 [visible]：默认只短暂出现，点屏幕再亮 3 秒，
+/// 不会常驻在画面上。
 class FsUnlockButton extends StatelessWidget {
   const FsUnlockButton({
     super.key,
     required this.onUnlock,
+    this.visible = true,
     this.alignment = const Alignment(-.96, 0),
     this.size = 40,
   });
 
   final VoidCallback onUnlock;
+
+  /// 是否显示；隐藏时不可点击，淡出后完全让出触摸。
+  final bool visible;
   final Alignment alignment;
   final double size;
 
   @override
   Widget build(BuildContext context) {
-    return Align(
-      alignment: alignment,
-      child: Opacity(
-        opacity: .62,
-        child: PGlassIcon(
-          icon: Icons.lock_rounded,
-          size: size,
-          iconSize: size * .48,
-          tint: .12,
-          tooltip: '点击解锁',
-          onTap: onUnlock,
+    return IgnorePointer(
+      ignoring: !visible,
+      child: AnimatedOpacity(
+        opacity: visible ? 1 : 0,
+        duration: const Duration(milliseconds: 160),
+        child: Align(
+          alignment: alignment,
+          child: Opacity(
+            opacity: .62,
+            child: PGlassIcon(
+              icon: Icons.lock_rounded,
+              size: size,
+              iconSize: size * .48,
+              tint: .12,
+              tooltip: '点击解锁',
+              onTap: onUnlock,
+            ),
+          ),
         ),
       ),
     );

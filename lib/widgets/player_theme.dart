@@ -13,10 +13,6 @@ import '../theme.dart';
 /// 播放器通用小工具：时间格式、进度持久化、白玻璃控件。
 String fxPad2(int n) => n.toString().padLeft(2, '0');
 
-/// 切后台后等待多久才真正暂停：通知栏预览 / 截屏只到 inactive，
-/// 短暂离开不打断播放。
-const Duration fxBackgroundPauseDelay = Duration(seconds: 3);
-
 /// 控件无操作后自动隐藏：参考实现 5000ms（PlayerControllerImpl）。
 const Duration kPlayerControlsAutoHide = Duration(seconds: 5);
 
@@ -84,6 +80,21 @@ String fxPlayerQuality(FxPlayer? player) {
   if (value == null || !value.isInitialized) return '';
   final width = (value.videoWidth ?? 0) > 0 ? value.videoWidth : value.width;
   return fxResolutionLabel(width);
+}
+
+/// 真实缓冲进度：`player.stream.buffer`（libmpv demuxer-cache-time，
+/// 已缓冲位置）÷ 总时长。
+///
+/// - 时长未知时返回 null：调用方用不确定转圈 +「加载中…」，不猜进度；
+/// - 百分比向下取整并锁在 99% 以内，绝不显示假的 100%。
+double? fxBufferedPercent(Duration buffered, Duration duration) {
+  if (duration <= Duration.zero) return null;
+  if (buffered <= Duration.zero) return 0;
+  final ratio = buffered.inMilliseconds / duration.inMilliseconds;
+  if (!ratio.isFinite) return null;
+  final percent = (ratio * 100).floorToDouble();
+  if (percent <= 0) return 0;
+  return percent > 99 ? 99 : percent;
 }
 
 /// 字幕距播放器底部的安全距离：至少 96dp，始终高过底部控件区。
@@ -354,8 +365,12 @@ class _PProgressBarState extends State<PProgressBar> {
 
   double get _bufferedFraction {
     if (!_hasDuration) return 0;
-    final end = widget.position.inMilliseconds + widget.buffered.inMilliseconds;
-    return (end / widget.duration.inMilliseconds).clamp(0.0, 1.0).toDouble();
+    // FxPlayer 的 buffered 来自 media_kit `stream.buffer`
+    // （libmpv demuxer-cache-time），它本身就是已缓冲到的绝对位置，
+    // 不要再叠加 position，否则会虚高成假的 100%。
+    return (widget.buffered.inMilliseconds / widget.duration.inMilliseconds)
+        .clamp(0.0, 1.0)
+        .toDouble();
   }
 
   Duration _targetFor(double fraction) => Duration(
@@ -623,8 +638,9 @@ class _FxSeekRowState extends State<FxSeekRow> {
 
 /// 播放器加载 / 缓冲浮层。
 ///
-/// - 切集、切线路：圆环 + 「正在加载 幻想腾讯4K 第03集」；
-/// - 播放中缓冲：圆环 + 「缓冲中 42%」（libmpv 的真实缓存百分比）。
+/// - 切集、切线路、首帧未出：圆环 +「正在连接线路…」等文案；
+/// - 播放中缓冲：圆环 +「缓冲中 42%」（[fxBufferedPercent] 的真实进度）；
+/// - 时长未知：不确定圆环 +「加载中…」。
 class FxLoadingOverlay extends StatelessWidget {
   const FxLoadingOverlay({
     super.key,
@@ -638,7 +654,8 @@ class FxLoadingOverlay extends StatelessWidget {
   /// 主文案。
   final String title;
 
-  /// 0–100；为 null 时圆环不确定进度。
+  /// 0–100；为 null 时圆环不确定进度。即使调用方传 100 也会锁到 99，
+  /// 缓冲进度不能显示假的 100%（媒体缓存经常先到 duration 但仍在缓冲）。
   final double? percent;
 
   /// 副文案，如线路名。
@@ -648,7 +665,13 @@ class FxLoadingOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final value = percent == null ? null : (percent! / 100).clamp(0.0, 1.0);
+    // 兜底：任何情况下都不把缓冲显示成 100%。
+    final safePercent = percent == null
+        ? null
+        : percent!.isFinite
+            ? percent!.clamp(0.0, 99.0).toDouble()
+            : null;
+    final value = safePercent == null ? null : safePercent / 100;
     final ring = compact ? 44.0 : 62.0;
     return IgnorePointer(
       child: Container(
@@ -690,9 +713,9 @@ class FxLoadingOverlay extends StatelessWidget {
                           color: Colors.white,
                           backgroundColor: Colors.white.withOpacity(.18),
                         ),
-                        if (percent != null)
+                        if (safePercent != null)
                           Text(
-                            '${percent!.round()}%',
+                            '${safePercent.round()}%',
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 10.5,

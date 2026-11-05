@@ -21,7 +21,7 @@ import '../widgets/together_ui.dart';
 /*                                                                            */
 /*  · 入口/建房/加入；房间内服务器权威同步（房主写 state/seek/episode）          */
 /*  · 竖屏房间 UI 在 widgets/together_room.dart，全屏在 together_fullscreen.dart */
-/*  · 切后台只停心跳不主动断连，回前台 refreshRoom 后重新对齐                   */
+/*  · 切后台不断 WS / 不暂停播放，回前台 refreshRoom 后再对齐                   */
 /*  · 退出房间 pause → stop → dispose，并把房间进度写回本地进度                 */
 /* ========================================================================== */
 
@@ -179,7 +179,9 @@ class _TogetherPageState extends State<TogetherPage>
         } else {
           _client.connect();
         }
-        _resync();
+        // 回前台只做对齐：房主把本地进度写回；客人等最新的 room_state
+        // 回来再同步位置，不拿旧状态先 pause 再 play 造成声音断层。
+        if (_isHost) _resync();
       } else if (_stage == _TogetherStage.entering && !_client.connected) {
         _client.connect();
       }

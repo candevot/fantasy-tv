@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -124,6 +125,34 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 单次 open 等待 ready 的上限：超过即视为该地址不可播，避免黑屏空等。
   static const Duration _openReadyTimeout = Duration(seconds: 8);
 
+  /// 首帧等待上限：open 成功但 10 秒内仍没有画面（红屏 / 黑屏不播）时
+  /// 进入错误页；用户点「重试」重新 open 当前地址，连续失败 2 次自动换线路。
+  static const Duration _firstFrameTimeout = Duration(seconds: 10);
+
+  /// 连续播放失败次数；首帧真正出现后清零。
+  int _failStreak = 0;
+
+  /// 首帧超时看门狗。
+  Timer? _firstFrameTimer;
+
+  /// media_kit 平台错误（解码 / 输出 / 网络）：作为 Video 层错误源。
+  StreamSubscription<String>? _platformErrorSub;
+
+  /// 当前片源是否已经出过视频首帧；未出首帧时展示「正在连接线路…」。
+  bool _firstFrame = false;
+
+  /// 切集 / 切清晰度 / 重连前抓下的最后一帧：盖在黑底和新画面之间，
+  /// 等新流首帧出来再淡出，避免切换过程中闪一下黑屏。
+  Uint8List? _frozenFrame;
+  bool _freezeOpaque = false;
+  Timer? _freezeClearTimer;
+
+  /// 防止平台错误与首帧超时重复进入错误页。
+  bool _failureBusy = false;
+
+  /// 出错前的播放位置，重试时尽量接着播。
+  Duration _positionBeforeError = Duration.zero;
+
   /// 看门狗：每 3 秒检查一次，连续 12 秒位置不前进即尝试自愈。
   static const Duration _watchdogTick = Duration(seconds: 3);
   static const Duration _watchdogStall = Duration(seconds: 12);
@@ -168,10 +197,17 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Timer? _hideTimer;
   Timer? _progressTimer;
 
-  /// 切后台 3 秒后才暂停；通知栏 / 截屏只到 inactive，不打断播放。
-  Timer? _backgroundTimer;
+  /// 是否已切到后台：后台播放默认开启，切后台只记进度、不暂停；
+  /// 看门狗在后台期间也必须停摆，避免回前台误判卡顿重新 open。
   bool _backgrounded = false;
-  bool _pausedByBackground = false;
+
+  /// 音频焦点：inactive 持续一段时间才暂停（来电 / 被其它页面遮住）；
+  /// 下拉通知栏、截屏会很快回到 resumed，不打断声音。
+  Timer? _focusLossTimer;
+  bool _pausedByFocusLoss = false;
+
+  /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
+  int _videoEpoch = 0;
   bool _locked = false;
 
   /// 锁屏后解锁钮是否可见：出现 3 秒后自动隐藏，点屏幕再出现。
@@ -335,7 +371,17 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _rate = widget.rate > 0 ? widget.rate : (c.rate > 0 ? c.rate : 1.0);
     _loadedEp = c.value.isInitialized ? _ep : null;
     _loading = !c.value.isInitialized;
+    _firstFrame = _hasFirstFrame(c);
+    // 全屏复用的是竖屏已经打开的播放器：这里只监听平台错误，不重新 open。
+    _platformErrorSub = c.player.stream.error.listen(_onPlatformError);
     c.addListener(_onVideoValue);
+    if (!_firstFrame) _armFirstFrameTimer();
+    if (c.value.hasError) {
+      // 竖屏交过来时播放器就已经坏了：进全屏直接给错误页，别黑屏干等。
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_onPlaybackFailure());
+      });
+    }
     if (c.value.isInitialized && (c.rate - _rate).abs() > .01) {
       unawaited(_applyRate(_rate));
     }
@@ -362,9 +408,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _unlockTimer?.cancel();
     _uiHoldTimer?.cancel();
     _progressTimer?.cancel();
-    _backgroundTimer?.cancel();
+    _cancelFocusLossPause();
     _watchdogTimer?.cancel();
     _sleepTimer?.cancel();
+    _firstFrameTimer?.cancel();
+    _freezeClearTimer?.cancel();
+    final errorSub = _platformErrorSub;
+    _platformErrorSub = null;
+    if (errorSub != null) unawaited(errorSub.cancel());
     _loadToken++;
     unawaited(_saveProgress());
     // 播放器实例属于竖屏页面，退出全屏只移除监听，不能 dispose。
@@ -377,45 +428,62 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.inactive:
-        // 下拉通知栏 / 截屏 / 多任务预览都只到 inactive：不暂停。
+        // 来电 / 其它应用抢占音频焦点：先等一小会儿，仍在后台就暂停；
+        // 通知栏 / 截屏会很快回到 resumed，不触发暂停。
+        _armFocusLossPause();
         return;
+      case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
-        // 来电 / 切后台：长按 2 倍速必须复位；先记进度，3 秒内回前台就不暂停。
+        // 切后台：后台播放默认开启，完全不暂停；只复位长按倍速并记进度。
         _backgrounded = true;
+        _cancelFocusLossPause();
         _endHold2x();
         unawaited(_saveProgress());
-        _backgroundTimer?.cancel();
-        _backgroundTimer = Timer(fxBackgroundPauseDelay, _pauseForBackground);
         return;
       case AppLifecycleState.resumed:
         _backgrounded = false;
-        _backgroundTimer?.cancel();
-        _backgroundTimer = null;
-        _resumeAfterBackground();
+        _cancelFocusLossPause();
+        _resetWatchdogClock();
+        _resumeAfterFocusLoss();
+        _remountVideoLayer();
         return;
-      case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
         return;
     }
   }
 
-  void _pauseForBackground() {
-    _backgroundTimer = null;
-    if (!mounted || !_backgrounded) return;
-    final c = _controller;
-    if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
-    _pausedByBackground = true;
-    unawaited(_saveProgress());
-    unawaited(c.pause());
+  void _armFocusLossPause() {
+    _cancelFocusLossPause();
+    _focusLossTimer = Timer(const Duration(milliseconds: 1200), () {
+      _focusLossTimer = null;
+      if (!mounted || _backgrounded) return;
+      final c = _controller;
+      if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
+      _pausedByFocusLoss = true;
+      unawaited(c.pause());
+    });
   }
 
-  void _resumeAfterBackground() {
-    if (!_pausedByBackground) return;
-    _pausedByBackground = false;
-    if (!mounted || _loading || _error) return;
+  void _cancelFocusLossPause() {
+    _focusLossTimer?.cancel();
+    _focusLossTimer = null;
+  }
+
+  /// 焦点恢复：只在「因失去焦点而暂停」且之前确实在播放时继续。
+  void _resumeAfterFocusLoss() {
+    if (!_pausedByFocusLoss) return;
+    _pausedByFocusLoss = false;
+    if (!mounted || _loading || _error || _switching) return;
     final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
+    if (c == null || !c.value.isInitialized || c.value.isPlaying) return;
     unawaited(c.play());
+  }
+
+  /// 回前台只重挂 Video 层（不 open / 不 seek）：换 key 让输出层重建，
+  /// 同一 FxPlayer 实例、播放位置与播放状态全部保持。
+  void _remountVideoLayer() {
+    if (!mounted) return;
+    setState(() => _videoEpoch++);
   }
 
   /* ------------------------------------------------------------------ 系统 */
@@ -467,6 +535,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null) return;
     final token = ++_loadToken;
     _hideTimer?.cancel();
+    _cancelFirstFrameTimer();
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return;
     unawaited(c.pause());
@@ -481,6 +550,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _uiPosition = null;
       _uiDuration = null;
       _loadingHint = null;
+      _firstFrame = false;
     });
 
     PlayInfo source;
@@ -488,12 +558,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       source = await Api.play(widget.videoId, _ep, _line);
     } catch (_) {
       if (!mounted || token != _loadToken) return;
-      setState(() {
-        _loading = false;
-        _error = true;
-        _errorText = '获取播放地址失败，请检查网络后重试';
-      });
       _notifySourceFailed();
+      _failWith('获取播放地址失败，请检查网络后重试');
       return;
     }
     if (!mounted || token != _loadToken) return;
@@ -510,12 +576,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (!candidates.contains(u)) candidates.add(u);
     }
     if (candidates.isEmpty) {
-      setState(() {
-        _loading = false;
-        _error = true;
-        _errorText = '当前线路没有可用播放地址，请更换线路';
-      });
       _notifySourceFailed();
+      _failWith('当前线路没有可用播放地址，请更换线路');
       return;
     }
 
@@ -545,7 +607,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (!mounted || token != _loadToken) return;
         await c.play();
         if (!mounted || token != _loadToken) return;
+        // open 期间可能只是"假成功"：play 后仍带错误就不要当成可播。
+        if (c.value.hasError) throw StateError('player error');
         _loadedEp = _ep;
+        if (!_firstFrame) _armFirstFrameTimer();
         setState(() {
           _loading = false;
           _error = false;
@@ -565,13 +630,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
     if (!ok) {
       if (!mounted || token != _loadToken) return;
-      setState(() {
-        _loading = false;
-        _error = true;
-        _errorText = '播放失败：线路不可用，请重试或切换线路';
-        _loadingHint = null;
-      });
       _notifySourceFailed();
+      _failWith('播放失败：线路不可用，请重试或切换线路');
     }
   }
 
@@ -592,6 +652,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }) async {
     final c = _controller;
     if (c == null) return false;
+    _cancelFirstFrameTimer();
+    _firstFrame = false;
     try {
       await c.open(url, headers: headers).timeout(_openReadyTimeout);
       if (!mounted) return false;
@@ -614,6 +676,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         await Future<void>.delayed(const Duration(milliseconds: 60));
         await c.pause();
       }
+      // 平台错误可能发生在 open ready 之后、play 之前：这里再查一次，
+      // 避免把已经坏掉的输出当成切换成功。
+      if (c.value.hasError) return false;
+      // open 成功不代表首帧已出（红屏/黑屏常见于这里）：超时仍未出画面
+      // 就进入错误页，而不是一直干等。
+      if (!_firstFrame) _armFirstFrameTimer();
       return true;
     } catch (_) {
       return false;
@@ -715,6 +783,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _controls = true;
         _uiPosition = resume;
         _uiDuration = resumeDuration;
+        _firstFrame = false;
       });
 
       var ok = false;
@@ -928,6 +997,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _controls = true;
       _uiPosition = resume;
       _uiDuration = c.value.duration > Duration.zero ? c.value.duration : null;
+      _firstFrame = false;
     });
     final ok = await _openSource(
       url,
@@ -966,9 +1036,187 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _loadingHint = null;
       _loadedEp = null;
       _error = true;
-      _errorText = '播放中断，自动恢复失败，请重试或换线路';
+      _errorText = '加载失败，重试';
       _uiPosition = null;
       _uiDuration = null;
+    });
+    _wake();
+  }
+
+  /* ------------------------------------------------------ 首帧 / 错误检测 */
+
+  /// 是否已经拿到视频画面参数（宽高 > 0）。open 成功但一直没画面时，
+  /// 由 [_firstFrameTimeout] 兜底进入错误页。
+  bool _hasFirstFrame(FxPlayer? player) {
+    final v = player?.value;
+    if (v == null || !v.isInitialized) return false;
+    var w = v.videoWidth ?? 0;
+    var h = v.videoHeight ?? 0;
+    if (w <= 0) w = v.width ?? 0;
+    if (h <= 0) h = v.height ?? 0;
+    return w > 0 && h > 0;
+  }
+
+  void _armFirstFrameTimer() {
+    _firstFrameTimer?.cancel();
+    _firstFrameTimer = Timer(_firstFrameTimeout, () {
+      _firstFrameTimer = null;
+      if (!mounted || _error || _exiting) return;
+      if (!_firstFrame && _hasFirstFrame(_controller)) {
+        _firstFrame = true;
+        _failStreak = 0;
+        setState(() {});
+        return;
+      }
+      if (_firstFrame) return;
+      unawaited(_onPlaybackFailure());
+    });
+  }
+
+  void _cancelFirstFrameTimer() {
+    _firstFrameTimer?.cancel();
+    _firstFrameTimer = null;
+  }
+
+  /// 切片源之前抓一帧当前画面。新地址 open 会清空 Video 纹理，
+  /// 用这张快照垫在黑底上，等新流首帧出来再淡出，切换过程就不会闪黑。
+  Future<void> _captureFrozenFrame() async {
+    final c = _controller;
+    if (c == null) return;
+    try {
+      final bytes = await c.player.screenshot();
+      if (!mounted || bytes == null || bytes.isEmpty) return;
+      _freezeClearTimer?.cancel();
+      _freezeClearTimer = null;
+      setState(() {
+        _frozenFrame = bytes;
+        _freezeOpaque = true;
+      });
+    } catch (_) {
+      // 个别设备 / 格式不支持帧快照：退回纯黑 + 加载层，不影响切源。
+      if (!mounted || _frozenFrame == null) return;
+      setState(() => _freezeOpaque = true);
+    }
+  }
+
+  /// 新流首帧已出：快照淡出（220ms），露出新画面。
+  void _fadeOutFrozenFrame() {
+    if (_frozenFrame == null) return;
+    _freezeClearTimer?.cancel();
+    setState(() => _freezeOpaque = false);
+    _freezeClearTimer = Timer(const Duration(milliseconds: 320), () {
+      if (!mounted || _freezeOpaque) return;
+      setState(() => _frozenFrame = null);
+    });
+  }
+
+  /// media_kit 平台错误（Video 层解码 / 输出失败）：直接进错误页。
+  /// open / 切清晰度期间由各自 try/catch 处理，避免重复弹错误。
+  void _onPlatformError(String message) {
+    if (!mounted || _exiting || _error || _loading) return;
+    unawaited(_onPlaybackFailure());
+  }
+
+  /// 一次真实播放失败：记录连续失败次数；首帧从未出来时展示
+  /// 「加载失败，重试」，连续 2 次自动让竖屏切下一条线路。
+  Future<void> _onPlaybackFailure() async {
+    if (!mounted || _exiting || _error || _failureBusy) return;
+    _failureBusy = true;
+    _firstFrameTimer?.cancel();
+    _firstFrameTimer = null;
+    final c = _controller;
+    _positionBeforeError = c?.value.position ?? Duration.zero;
+    if (c != null && c.value.isInitialized) {
+      try {
+        await c.pause();
+      } catch (_) {
+        // 播放器已经坏了，暂停失败不影响展示错误页。
+      }
+    }
+    _failureBusy = false;
+    if (!mounted || _exiting || _error) return;
+    _failWith('加载失败，重试');
+  }
+
+  /// 连续失败达到 2 次且还有其它线路时，退出全屏交给竖屏自动换线路。
+  bool _registerFailure() {
+    _failStreak++;
+    if (_failStreak >= 2 && widget.canChangeLine && !_exiting) {
+      if (mounted) fxToast(context, '连续加载失败，正在切换线路');
+      unawaited(_exit(requestLineChange: true));
+      return true;
+    }
+    return false;
+  }
+
+  /// 统一失败收尾：要么自动换线路退出，要么停留在可重试的错误页。
+  void _failWith(String text) {
+    if (!mounted || _exiting) return;
+    _cancelFirstFrameTimer();
+    // 失败即未加载成功：退出全屏时不能让竖屏把这一集记成「已加载」。
+    _loadedEp = null;
+    if (_registerFailure()) return;
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _loadingHint = null;
+      _loadedEp = null;
+      _error = true;
+      _errorText = text;
+      _controls = true;
+      _uiPosition = null;
+      _uiDuration = null;
+    });
+    _wake();
+  }
+
+  /// 错误页「重试」：不再重新请求接口，直接用当前地址重新 open，
+  /// 尽量接着出错前的位置播放。
+  Future<void> _retryPlayback() async {
+    if (!mounted || _exiting || _loading || _switching) return;
+    final c = _controller;
+    if (c == null) return;
+    final url = _watchdogUrl();
+    if (url == null) {
+      // 上次连播放地址都没拿到：只能重新走一次接口。
+      await _bootstrap(seekToSaved: true, saveOld: false);
+      return;
+    }
+    final resume = _positionBeforeError > Duration.zero
+        ? _positionBeforeError
+        : c.value.position;
+    final headers = _watchdogHeaders(url);
+    final token = ++_loadToken;
+    _cancelFirstFrameTimer();
+    setState(() {
+      _loading = true;
+      _loadingHint = '正在重新连接';
+      _error = false;
+      _errorText = '';
+      _firstFrame = false;
+      _controls = true;
+      _uiPosition = resume > Duration.zero ? resume : null;
+      _uiDuration = c.value.duration > Duration.zero ? c.value.duration : null;
+    });
+    final ok = await _openSource(
+      url,
+      headers: headers,
+      resume: resume,
+      wasPlaying: true,
+    );
+    if (!mounted || token != _loadToken) return;
+    if (!ok) {
+      _failWith('加载失败，重试');
+      return;
+    }
+    _loadedEp = _ep;
+    _sourceFailNotified = false;
+    _watchdogRetried = false;
+    _resetWatchdogClock();
+    if (!_firstFrame) _armFirstFrameTimer();
+    setState(() {
+      _loading = false;
+      _loadingHint = null;
     });
     _wake();
   }
@@ -976,9 +1224,20 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
+    final v = c.value;
+    // 首帧检测：open 成功不等于画面已经出来，参数真正到达后才算。
+    if (!_firstFrame && _hasFirstFrame(c)) {
+      _firstFrame = true;
+      _failStreak = 0;
+      _cancelFirstFrameTimer();
+      setState(() {});
+    } else if (_firstFrame && _loading && !v.isInitialized) {
+      // 重新 open 会重置播放器：画面层退回纯黑，避免残留红屏 / 黑屏。
+      _firstFrame = false;
+      setState(() {});
+    }
     // loading 期间的错误交给 _bootstrap / _openSource 的 try/catch 处理。
     if (_loading || _error) return;
-    final v = c.value;
     // 切清晰度成功后，真实进度追上占位值再释放，避免进度条归零。
     if (_uiPosition != null && v.isInitialized) {
       final diff = (v.position - _uiPosition!).abs();
@@ -996,8 +1255,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       setState(() {});
     }
     if (v.hasError) {
-      // ready 后出错也交给看门狗重开 / 切线路。
-      unawaited(_recoverFromWatchdog());
+      unawaited(_onPlaybackFailure());
       return;
     }
     if (!v.isInitialized) return;
@@ -1150,11 +1408,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showQuality = false;
     });
     _hideTimer?.cancel();
+    // 锁按钮只亮 3 秒，之后完全隐藏；不弹 toast 打扰观看。
     _startUnlockTimer();
-    fxToast(context, '已锁定，点击屏幕显示解锁按钮');
   }
 
-  /// 锁定后解锁钮只亮 3 秒；点屏幕可重新唤出。
+  /// 锁定后解锁钮只亮 3 秒；点屏幕可重新唤出（同样 3 秒后隐藏）。
   void _startUnlockTimer() {
     _unlockTimer?.cancel();
     _unlockTimer = Timer(kPlayerUnlockAutoHide, () {
@@ -1167,7 +1425,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!mounted) return;
     if (!_unlockVisible) setState(() => _unlockVisible = true);
     _startUnlockTimer();
-    _showSeekHint('已锁定，点锁图标解锁');
   }
 
   void _unlock() {
@@ -1190,6 +1447,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         !c.value.isInitialized) {
       return;
     }
+    // 用户手动暂停 / 播放后，焦点恢复不再替他继续播放。
+    _pausedByFocusLoss = false;
     // 直接让 media_kit 切换，图标由 player.stream.playing 驱动，避免本地态覆盖。
     unawaited(c.playOrPause());
     _wake();
@@ -1485,31 +1744,16 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     child: const SizedBox.expand(),
                   ),
                 ),
-              // 播放中的缓冲：玻璃圆环 + libmpv 真实缓存百分比。
-              // 加载/缓冲层在视频之上、控件层之下，不能压住底部按钮。
-              if (!_loading && !_error && c != null)
+              // 加载 / 首帧 / 缓冲层：在视频之上、控件层之下，不挡底部按钮。
+              // 缓冲百分比来自 stream.buffer（真实已缓冲位置）÷ duration；
+              // 时长未知时用不确定转圈 + 「加载中…」，绝不显示假的 100%。
+              if (!_error && c != null)
                 Positioned.fill(
                   child: AnimatedBuilder(
                     animation: c,
-                    builder: (context, _) {
-                      final v = c.value;
-                      if (!v.isInitialized || !v.isBuffering) {
-                        return const SizedBox.shrink();
-                      }
-                      final raw = v.bufferingPercentage.isFinite
-                          ? v.bufferingPercentage
-                          : 0.0;
-                      final percent = raw.clamp(0.0, 100.0).toDouble();
-                      return FxLoadingOverlay(
-                        title: '缓冲中 ${percent.round()}%',
-                        percent: percent,
-                        dim: false,
-                        compact: true,
-                      );
-                    },
+                    builder: (context, _) => _buildStatusOverlay(c),
                   ),
                 ),
-              if (_loading && !_error) _buildLoading(),
               // 控件层必须在 loading/缓冲层之上：切集 8s 窗口里也能退出全屏、
               // 选集、点下一集；只按「控件是否显示」禁用指针。
               if (!_locked)
@@ -1524,8 +1768,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                   ),
                 ),
               if (_error) _buildError(),
-              // 锁屏：所有控件隐藏，只留一个 3 秒后自动隐藏的解锁钮；
-              // 点屏幕重新唤出并提示如何解锁。
+              // 锁屏：所有控件隐藏；解锁钮只亮 3 秒（点屏幕再亮 3 秒），
+              // 不常驻，也不再弹锁定 toast。
               if (_locked)
                 Positioned.fill(
                   child: SafeArea(
@@ -1537,7 +1781,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                           onTap: _onLockedTap,
                           child: const SizedBox.expand(),
                         ),
-                        if (_unlockVisible) FsUnlockButton(onUnlock: _unlock),
+                        FsUnlockButton(
+                          onUnlock: _unlock,
+                          visible: _unlockVisible,
+                        ),
                       ],
                     ),
                   ),
@@ -1562,32 +1809,58 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Widget _buildVideoSurface(FxPlayer? c) {
-    if (c == null || !c.value.isInitialized) {
-      return const ColoredBox(color: Colors.black);
-    }
     // 底部控制条：26 上边距 + 40 进度条 + 4 间距 + 34 按钮 + 6 下边距，
     // 再留 12dp 间距，字幕层就不会压在进度条/按钮上。
     final controlsHeight =
         26.0 + 40.0 + 4.0 + 34.0 + 6.0 + MediaQuery.paddingOf(context).bottom;
-    // 默认撑满：等比缩放裁掉多余边缘，不拉伸变形；
-    // 关闭「撑满全屏」后回到 contain（完整显示，可能上下留黑边）。
+    // 首帧未出 / 出错时不要挂 Video 纹理：部分设备会显示红屏或透明残帧。
+    // 始终先铺纯黑底色，再把 Video 放上去，缓冲时不会出现纯黑无内容的画面。
+    final showVideo =
+        c != null && c.value.isInitialized && _firstFrame && !_error;
     return ClipRect(
-      child: SizedBox.expand(
-        child: FxPlayerSurface(
-          player: c,
-          fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
-          subtitleBottom: controlsHeight + 12,
-        ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          const ColoredBox(color: Colors.black),
+          if (showVideo)
+            // 默认撑满：等比缩放裁掉多余边缘，不拉伸变形；
+            // 关闭「撑满全屏」后回到 contain（完整显示，可能上下留黑边）。
+            FxPlayerSurface(
+              key: ValueKey<int>(_videoEpoch),
+              player: c,
+              fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+              subtitleBottom: controlsHeight + 12,
+            ),
+        ],
       ),
     );
   }
 
-  Widget _buildLoading() {
-    return Positioned.fill(
-      child: FxLoadingOverlay(
+  /// 首帧 / 加载 / 缓冲统一浮层。
+  Widget _buildStatusOverlay(FxPlayer c) {
+    final v = c.value;
+    // 首帧还没出来：明确告诉用户在连接线路，而不是一直黑屏转圈。
+    if (!_firstFrame) {
+      return FxLoadingOverlay(
+        title: _loadingHint ?? '正在连接线路…',
+        subtitle: _lineName,
+      );
+    }
+    if (_loading) {
+      return FxLoadingOverlay(
         title: _loadingHint ?? fxLoadingEpisodeText(_ep),
         subtitle: _lineName,
-      ),
+      );
+    }
+    if (!v.isBuffering) return const SizedBox.shrink();
+    // stream.buffer 是已缓冲位置（demuxer-cache-time），÷ 总时长即真实进度。
+    final percent = fxBufferedPercent(v.buffered, v.duration);
+    return FxLoadingOverlay(
+      title: percent == null ? '加载中…' : '缓冲中 ${percent.round()}%',
+      percent: percent,
+      subtitle: percent == null ? _lineName : null,
+      dim: false,
+      compact: true,
     );
   }
 
@@ -1625,10 +1898,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   _errorAction('重试', () {
-                    unawaited(_bootstrap(
-                      seekToSaved: true,
-                      saveOld: false,
-                    ));
+                    unawaited(_retryPlayback());
                   }),
                   if (widget.canChangeLine) ...[
                     const SizedBox(width: 10),
