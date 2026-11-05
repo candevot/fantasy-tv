@@ -287,7 +287,7 @@ class _FavoritePageState extends State<FavoritePage> {
                     width: 20,
                     height: 20,
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(.28),
+                      color: Colors.black.withValues(alpha: .28),
                       shape: BoxShape.circle,
                     ),
                     child: const Icon(Icons.favorite_rounded,
@@ -377,7 +377,7 @@ class _FavoritePageState extends State<FavoritePage> {
               width: 28,
               height: 28,
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.6),
+                color: Colors.white.withValues(alpha: .6),
                 shape: BoxShape.circle,
               ),
               child: const Icon(Icons.close_rounded, size: 15, color: Fx.sub),

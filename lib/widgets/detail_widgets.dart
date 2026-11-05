@@ -150,7 +150,7 @@ class DetailNoticeBar extends StatelessWidget {
     final textStyle = TextStyle(
       fontSize: bare ? 11 : 11.5,
       height: 1.2,
-      color: bare ? Fx.sub : Fx.ink.withOpacity(.78),
+      color: bare ? Fx.sub : Fx.ink.withValues(alpha: .78),
       fontWeight: bare ? FontWeight.w400 : FontWeight.w600,
     );
     final row = Row(
@@ -178,7 +178,7 @@ class DetailNoticeBar extends StatelessWidget {
               height: 20,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.82),
+                color: Colors.white.withValues(alpha: .82),
                 shape: BoxShape.circle,
                 border: Border.all(color: Colors.white),
               ),
@@ -193,12 +193,12 @@ class DetailNoticeBar extends StatelessWidget {
       height: height,
       padding: const EdgeInsets.only(left: 10, right: 6),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.70),
+        color: Colors.white.withValues(alpha: .70),
         borderRadius: BorderRadius.circular(height / 2),
-        border: Border.all(color: Colors.white.withOpacity(.95)),
+        border: Border.all(color: Colors.white.withValues(alpha: .95)),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF50729F).withOpacity(.08),
+            color: const Color(0xFF50729F).withValues(alpha: .08),
             blurRadius: 14,
             offset: const Offset(0, 4),
           ),
@@ -329,16 +329,16 @@ class DetailActionButton extends StatelessWidget {
             height: 47,
             decoration: BoxDecoration(
               color: active
-                  ? color.withOpacity(.15)
-                  : Colors.white.withOpacity(.88),
+                  ? color.withValues(alpha: .15)
+                  : Colors.white.withValues(alpha: .88),
               shape: BoxShape.circle,
               border: Border.all(
-                color: active ? color.withOpacity(.60) : Colors.white,
+                color: active ? color.withValues(alpha: .60) : Colors.white,
                 width: active ? 1.4 : 1,
               ),
               boxShadow: [
                 BoxShadow(
-                  color: color.withOpacity(active ? .18 : .08),
+                  color: color.withValues(alpha: active ? .18 : .08),
                   blurRadius: 16,
                   offset: const Offset(0, 5),
                 ),
@@ -397,18 +397,18 @@ class DetailLineCard extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
         decoration: BoxDecoration(
           color: active
-              ? Fx.accent.withOpacity(.09)
-              : Colors.white.withOpacity(.72),
+              ? Fx.accent.withValues(alpha: .09)
+              : Colors.white.withValues(alpha: .72),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: active
-                ? Fx.accent.withOpacity(.85)
-                : Colors.white.withOpacity(.92),
+                ? Fx.accent.withValues(alpha: .85)
+                : Colors.white.withValues(alpha: .92),
             width: active ? 1.4 : 1,
           ),
           boxShadow: [
             BoxShadow(
-              color: const Color(0xFF50729F).withOpacity(.08),
+              color: const Color(0xFF50729F).withValues(alpha: .08),
               blurRadius: 14,
               offset: const Offset(0, 5),
             ),
@@ -475,11 +475,11 @@ class DetailEpisodeChip extends StatelessWidget {
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: active
-              ? Fx.accent.withOpacity(.09)
-              : Colors.white.withOpacity(.72),
+              ? Fx.accent.withValues(alpha: .09)
+              : Colors.white.withValues(alpha: .72),
           borderRadius: BorderRadius.circular(11),
           border: Border.all(
-            color: active ? Fx.accent : Colors.white.withOpacity(.92),
+            color: active ? Fx.accent : Colors.white.withValues(alpha: .92),
             width: active ? 1.4 : 1,
           ),
         ),
@@ -516,7 +516,7 @@ class DetailEpisodeChip extends StatelessWidget {
                   fontSize: 8,
                   height: 1.15,
                   fontWeight: FontWeight.w600,
-                  color: const Color(0xFF2FA985).withOpacity(.92),
+                  color: const Color(0xFF2FA985).withValues(alpha: .92),
                 ),
               ),
           ],
@@ -668,12 +668,12 @@ class DetailCommentTile extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.fromLTRB(12, 11, 12, 9),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.62),
+        color: Colors.white.withValues(alpha: .62),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(.92)),
+        border: Border.all(color: Colors.white.withValues(alpha: .92)),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF50729F).withOpacity(.07),
+            color: const Color(0xFF50729F).withValues(alpha: .07),
             blurRadius: 18,
             offset: const Offset(0, 5),
           ),
@@ -853,11 +853,11 @@ class DetailCommentInput extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.92),
+        color: Colors.white.withValues(alpha: .92),
         border: const Border(top: BorderSide(color: Colors.white, width: 1)),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF50729F).withOpacity(.10),
+            color: const Color(0xFF50729F).withValues(alpha: .10),
             blurRadius: 22,
             offset: const Offset(0, -4),
           ),
@@ -892,7 +892,7 @@ class DetailCommentInput extends StatelessWidget {
                     height: 36,
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.80),
+                      color: Colors.white.withValues(alpha: .80),
                       borderRadius: BorderRadius.circular(18),
                       border: Border.all(color: Colors.white),
                     ),
@@ -933,7 +933,7 @@ class DetailCommentInput extends StatelessWidget {
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: Fx.accent.withOpacity(.30),
+                        color: Fx.accent.withValues(alpha: .30),
                         blurRadius: 12,
                         offset: const Offset(0, 4),
                       ),
@@ -967,7 +967,7 @@ Future<int?> showDetailEpisodeSheet(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    barrierColor: Colors.black.withOpacity(.32),
+    barrierColor: Colors.black.withValues(alpha: .32),
     builder: (sheetContext) => _DetailEpisodeSheet(
       episodes: episodes,
       current: current,
@@ -981,7 +981,7 @@ Future<String?> showDetailFeedbackSheet(BuildContext context) {
   return showModalBottomSheet<String>(
     context: context,
     backgroundColor: Colors.transparent,
-    barrierColor: Colors.black.withOpacity(.32),
+    barrierColor: Colors.black.withValues(alpha: .32),
     builder: (sheetContext) {
       return Container(
         padding: EdgeInsets.fromLTRB(
@@ -1118,7 +1118,7 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                     height: 30,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.85),
+                      color: Colors.white.withValues(alpha: .85),
                       shape: BoxShape.circle,
                       border: Border.all(color: Colors.white),
                     ),
@@ -1161,18 +1161,18 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
                           gradient: active ? Fx.brand : null,
-                          color: active ? null : Colors.white.withOpacity(.82),
+                          color: active ? null : Colors.white.withValues(alpha: .82),
                           borderRadius: BorderRadius.circular(11),
                           border: Border.all(
                             color: active
                                 ? Fx.accent
-                                : Colors.white.withOpacity(.95),
+                                : Colors.white.withValues(alpha: .95),
                           ),
                           boxShadow: [
                             BoxShadow(
                               color:
                                   (active ? Fx.accent : const Color(0xFF50729F))
-                                      .withOpacity(active ? .22 : .06),
+                                      .withValues(alpha: active ? .22 : .06),
                               blurRadius: 10,
                               offset: const Offset(0, 3),
                             ),
@@ -1203,7 +1203,7 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                                   height: 1.1,
                                   fontWeight: FontWeight.w600,
                                   color: active
-                                      ? Colors.white.withOpacity(.86)
+                                      ? Colors.white.withValues(alpha: .86)
                                       : const Color(0xFF2FA985),
                                 ),
                               ),
@@ -1272,7 +1272,7 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(enabled ? .85 : .35),
+          color: Colors.white.withValues(alpha: enabled ? .85 : .35),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: Colors.white),
         ),

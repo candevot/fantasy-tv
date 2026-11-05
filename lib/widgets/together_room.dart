@@ -273,7 +273,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   Icon(
                     Icons.copy_rounded,
                     size: 12,
-                    color: Fx.sub.withOpacity(.65),
+                    color: Fx.sub.withValues(alpha: .65),
                   ),
                   if (!widget.online) ...[
                     const SizedBox(width: 5),
@@ -512,9 +512,9 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.46),
+        color: Colors.black.withValues(alpha: .46),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white.withOpacity(.16)),
+        border: Border.all(color: Colors.white.withValues(alpha: .16)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -547,7 +547,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           Icon(
             loading ? Icons.movie_filter_rounded : Icons.ondemand_video_rounded,
             size: 30,
-            color: Colors.white.withOpacity(.45),
+            color: Colors.white.withValues(alpha: .45),
           ),
           const SizedBox(height: 8),
           Text(
@@ -558,7 +558,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                     : (widget.isHost ? '点击播放，和朋友一起看' : '等待房主播放')),
             style: TextStyle(
               fontSize: 11,
-              color: Colors.white.withOpacity(.72),
+              color: Colors.white.withValues(alpha: .72),
             ),
           ),
         ],
@@ -568,16 +568,16 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
 
   Widget _buildError(BuildContext context) {
     return Container(
-      color: Colors.black.withOpacity(.34),
+      color: Colors.black.withValues(alpha: .34),
       alignment: Alignment.center,
       padding: const EdgeInsets.symmetric(horizontal: 28),
       child: Container(
         constraints: const BoxConstraints(maxWidth: 330),
         padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
         decoration: BoxDecoration(
-          color: const Color(0xFF1B2430).withOpacity(.92),
+          color: const Color(0xFF1B2430).withValues(alpha: .92),
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.white.withOpacity(.16)),
+          border: Border.all(color: Colors.white.withValues(alpha: .16)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -677,7 +677,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                     fontWeight: FontWeight.w600,
                     color: widget.isLive
                         ? const Color(0xFFFF5A5A)
-                        : Fx.sub.withOpacity(.92),
+                        : Fx.sub.withValues(alpha: .92),
                   ),
                 ),
               ],
@@ -695,7 +695,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                               '等待成员加入',
                               style: TextStyle(
                                 fontSize: 10,
-                                color: Fx.sub.withOpacity(.7),
+                                color: Fx.sub.withValues(alpha: .7),
                               ),
                             ),
                           )
@@ -736,7 +736,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                       Icon(
                         Icons.people_outline_rounded,
                         size: 12,
-                        color: Fx.sub.withOpacity(.8),
+                        color: Fx.sub.withValues(alpha: .8),
                       ),
                       const SizedBox(width: 3),
                       Text(
@@ -744,7 +744,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                         style: TextStyle(
                           fontSize: 9.5,
                           fontWeight: FontWeight.w600,
-                          color: Fx.sub.withOpacity(.9),
+                          color: Fx.sub.withValues(alpha: .9),
                         ),
                       ),
                     ],
@@ -791,9 +791,9 @@ class _RoomLiveBadge extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
         decoration: BoxDecoration(
-          color: const Color(0xFFFF4D4F).withOpacity(.20),
+          color: const Color(0xFFFF4D4F).withValues(alpha: .20),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFFF6B6B).withOpacity(.5)),
+          border: Border.all(color: const Color(0xFFFF6B6B).withValues(alpha: .5)),
         ),
         child: const Row(
           mainAxisSize: MainAxisSize.min,
@@ -914,7 +914,7 @@ class _RoomProgressState extends State<_RoomProgress> {
                       '跟随房主',
                       style: TextStyle(
                         fontSize: 8.5,
-                        color: Colors.white.withOpacity(.72),
+                        color: Colors.white.withValues(alpha: .72),
                       ),
                     ),
                   ),

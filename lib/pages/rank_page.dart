@@ -284,7 +284,7 @@ class _RankPageState extends State<RankPage> {
                   width: 36,
                   height: 36,
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(.72),
+                    color: Colors.white.withValues(alpha: .72),
                     shape: BoxShape.circle,
                     border: Border.all(color: Colors.white),
                   ),
@@ -308,9 +308,9 @@ class _RankPageState extends State<RankPage> {
             height: 40,
             padding: const EdgeInsets.all(3),
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(.58),
+              color: Colors.white.withValues(alpha: .58),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.white.withOpacity(.92)),
+              border: Border.all(color: Colors.white.withValues(alpha: .92)),
             ),
             child: Row(
               children: [
@@ -328,7 +328,7 @@ class _RankPageState extends State<RankPage> {
                           boxShadow: t.key == _type
                               ? [
                                   BoxShadow(
-                                    color: Fx.accent.withOpacity(.22),
+                                    color: Fx.accent.withValues(alpha: .22),
                                     blurRadius: 10,
                                     offset: const Offset(0, 3),
                                   ),
@@ -397,12 +397,12 @@ class _RankPageState extends State<RankPage> {
         height: 36,
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.8),
+          color: Colors.white.withValues(alpha: .8),
           borderRadius: BorderRadius.circular(18),
           border: Border.all(color: Colors.white),
           boxShadow: [
             BoxShadow(
-              color: const Color(0xFF50729F).withOpacity(.08),
+              color: const Color(0xFF50729F).withValues(alpha: .08),
               blurRadius: 12,
               offset: const Offset(0, 4),
             ),
@@ -463,20 +463,20 @@ class _RankPageState extends State<RankPage> {
       decoration: BoxDecoration(
         gradient: top
             ? LinearGradient(
-                colors: [color, color.withOpacity(.72)],
+                colors: [color, color.withValues(alpha: .72)],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               )
             : null,
-        color: top ? null : Colors.white.withOpacity(.66),
+        color: top ? null : Colors.white.withValues(alpha: .66),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
-          color: top ? Colors.white.withOpacity(.38) : Colors.white,
+          color: top ? Colors.white.withValues(alpha: .38) : Colors.white,
         ),
         boxShadow: top
             ? [
                 BoxShadow(
-                  color: color.withOpacity(.26),
+                  color: color.withValues(alpha: .26),
                   blurRadius: 10,
                   offset: const Offset(0, 4),
                 ),
@@ -499,7 +499,7 @@ class _RankPageState extends State<RankPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: Fx.accent.withOpacity(.10),
+        color: Fx.accent.withValues(alpha: .10),
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(

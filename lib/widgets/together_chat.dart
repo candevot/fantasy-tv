@@ -141,7 +141,7 @@ class _TogetherChatListState extends State<TogetherChatList>
               Icon(
                 Icons.forum_outlined,
                 size: widget.compact ? 24 : 30,
-                color: Fx.sub.withOpacity(.42),
+                color: Fx.sub.withValues(alpha: .42),
               ),
               SizedBox(height: widget.compact ? 6 : 8),
               Text(
@@ -150,7 +150,7 @@ class _TogetherChatListState extends State<TogetherChatList>
                 style: TextStyle(
                   fontSize: widget.compact ? 11 : 12,
                   height: 1.4,
-                  color: Fx.sub.withOpacity(.78),
+                  color: Fx.sub.withValues(alpha: .78),
                 ),
               ),
             ],
@@ -198,9 +198,9 @@ class _SystemLine extends StatelessWidget {
             vertical: compact ? 4 : 5,
           ),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.46),
+            color: Colors.white.withValues(alpha: .46),
             borderRadius: BorderRadius.circular(11),
-            border: Border.all(color: Colors.white.withOpacity(.58)),
+            border: Border.all(color: Colors.white.withValues(alpha: .58)),
           ),
           child: Text(
             '${message.text}  ${togetherClock(message.time)}',
@@ -208,7 +208,7 @@ class _SystemLine extends StatelessWidget {
             style: TextStyle(
               fontSize: compact ? 9 : 9.5,
               height: 1.4,
-              color: Fx.sub.withOpacity(.9),
+              color: Fx.sub.withValues(alpha: .9),
             ),
           ),
         ),
@@ -240,7 +240,7 @@ class _ChatBubble extends StatelessWidget {
       ),
       decoration: BoxDecoration(
         gradient: mine ? Fx.brand : null,
-        color: mine ? null : Colors.white.withOpacity(.84),
+        color: mine ? null : Colors.white.withValues(alpha: .84),
         borderRadius: BorderRadius.only(
           topLeft: const Radius.circular(16),
           topRight: const Radius.circular(16),
@@ -249,12 +249,12 @@ class _ChatBubble extends StatelessWidget {
         ),
         border: mine
             ? null
-            : Border.all(color: Colors.white.withOpacity(.95), width: 1),
+            : Border.all(color: Colors.white.withValues(alpha: .95), width: 1),
         boxShadow: [
           BoxShadow(
             color: mine
-                ? Fx.accent.withOpacity(.18)
-                : const Color(0xFF50729F).withOpacity(.07),
+                ? Fx.accent.withValues(alpha: .18)
+                : const Color(0xFF50729F).withValues(alpha: .07),
             blurRadius: 12,
             offset: const Offset(0, 4),
           ),
@@ -277,7 +277,7 @@ class _ChatBubble extends StatelessWidget {
       textAlign: mine ? TextAlign.right : TextAlign.left,
       style: TextStyle(
         fontSize: compact ? 8 : 9,
-        color: Fx.sub.withOpacity(.72),
+        color: Fx.sub.withValues(alpha: .72),
       ),
     );
 
@@ -475,7 +475,7 @@ class _TogetherComposerState extends State<TogetherComposer> {
                         height: compact ? 24 : 32,
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(.42),
+                          color: Colors.white.withValues(alpha: .42),
                           borderRadius: BorderRadius.circular(9),
                         ),
                         child: Text(
@@ -499,16 +499,16 @@ class _TogetherComposerState extends State<TogetherComposer> {
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     color: _emojiOpen
-                        ? Fx.accent.withOpacity(.12)
-                        : Colors.white.withOpacity(.5),
+                        ? Fx.accent.withValues(alpha: .12)
+                        : Colors.white.withValues(alpha: .5),
                     shape: BoxShape.circle,
                   ),
                   child: Icon(
                     Icons.emoji_emotions_outlined,
                     size: compact ? 17 : 21,
                     color: widget.enabled
-                        ? (_emojiOpen ? Fx.accent : Fx.ink.withOpacity(.72))
-                        : Fx.sub.withOpacity(.4),
+                        ? (_emojiOpen ? Fx.accent : Fx.ink.withValues(alpha: .72))
+                        : Fx.sub.withValues(alpha: .4),
                   ),
                 ),
               ),
@@ -544,7 +544,7 @@ class _TogetherComposerState extends State<TogetherComposer> {
                         (widget.enabled ? '说点什么…' : '正在重连，稍后可以聊天'),
                     hintStyle: TextStyle(
                       fontSize: compact ? 11.5 : 13,
-                      color: Fx.sub.withOpacity(.7),
+                      color: Fx.sub.withValues(alpha: .7),
                     ),
                     border: InputBorder.none,
                     contentPadding: EdgeInsets.symmetric(
@@ -564,9 +564,9 @@ class _TogetherComposerState extends State<TogetherComposer> {
                     padding: EdgeInsets.symmetric(horizontal: compact ? 6 : 9),
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: Fx.accent.withOpacity(.12),
+                      color: Fx.accent.withValues(alpha: .12),
                       borderRadius: BorderRadius.circular(actionSize / 2),
-                      border: Border.all(color: Fx.accent.withOpacity(.22)),
+                      border: Border.all(color: Fx.accent.withValues(alpha: .22)),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -604,12 +604,12 @@ class _TogetherComposerState extends State<TogetherComposer> {
                     gradient: (_failed || canSend) ? Fx.brand : null,
                     color: (_failed || canSend)
                         ? null
-                        : Colors.white.withOpacity(.55),
+                        : Colors.white.withValues(alpha: .55),
                     shape: BoxShape.circle,
                     boxShadow: (_failed || canSend)
                         ? [
                             BoxShadow(
-                              color: Fx.accent.withOpacity(.3),
+                              color: Fx.accent.withValues(alpha: .3),
                               blurRadius: 12,
                               offset: const Offset(0, 4),
                             ),
@@ -623,7 +623,7 @@ class _TogetherComposerState extends State<TogetherComposer> {
                     size: compact ? 17 : 21,
                     color: (_failed || canSend)
                         ? Colors.white
-                        : Fx.sub.withOpacity(.5),
+                        : Fx.sub.withValues(alpha: .5),
                   ),
                 ),
               ),

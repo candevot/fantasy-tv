@@ -87,7 +87,7 @@ class FxStatusTag extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.34),
+        color: Colors.black.withValues(alpha: .34),
         borderRadius: BorderRadius.circular(7),
       ),
       child: Text(
@@ -210,7 +210,7 @@ class FxErrorView extends StatelessWidget {
                 width: 58,
                 height: 58,
                 decoration: BoxDecoration(
-                  color: Fx.accent.withOpacity(.10),
+                  color: Fx.accent.withValues(alpha: .10),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(Icons.cloud_off_rounded,
@@ -274,17 +274,17 @@ class FxEmptyView extends StatelessWidget {
               height: 72,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: Colors.white.withOpacity(.7),
+                color: Colors.white.withValues(alpha: .7),
                 border: Border.all(color: Colors.white),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF50729F).withOpacity(.08),
+                    color: const Color(0xFF50729F).withValues(alpha: .08),
                     blurRadius: 24,
                     offset: const Offset(0, 8),
                   ),
                 ],
               ),
-              child: Icon(icon, size: 32, color: Fx.accent.withOpacity(.8)),
+              child: Icon(icon, size: 32, color: Fx.accent.withValues(alpha: .8)),
             ),
             const SizedBox(height: 14),
             Text(title,
@@ -395,7 +395,7 @@ class FxPageScaffold extends StatelessWidget {
                           width: 34,
                           height: 34,
                           decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(.72),
+                            color: Colors.white.withValues(alpha: .72),
                             shape: BoxShape.circle,
                             border: Border.all(color: Colors.white),
                           ),
@@ -438,7 +438,7 @@ class FxTextAction extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.7),
+          color: Colors.white.withValues(alpha: .7),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: Colors.white),
         ),
@@ -652,7 +652,7 @@ class _CategoryPageState extends State<CategoryPage> {
     final v = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.transparent,
-      barrierColor: Colors.black.withOpacity(.22),
+      barrierColor: Colors.black.withValues(alpha: .22),
       builder: (ctx) => Container(
         padding: const EdgeInsets.fromLTRB(20, 10, 20, 20),
         decoration: const BoxDecoration(
@@ -879,7 +879,7 @@ class _CategoryPageState extends State<CategoryPage> {
                     width: 36,
                     height: 36,
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.72),
+                      color: Colors.white.withValues(alpha: .72),
                       shape: BoxShape.circle,
                       border: Border.all(color: Colors.white),
                     ),
@@ -912,7 +912,7 @@ class _CategoryPageState extends State<CategoryPage> {
                     height: 32,
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.7),
+                      color: Colors.white.withValues(alpha: .7),
                       borderRadius: BorderRadius.circular(16),
                       border: Border.all(color: Colors.white),
                     ),
@@ -985,7 +985,7 @@ class _CategoryPageState extends State<CategoryPage> {
   Widget _filterPill(
       String label, String value, bool active, VoidCallback onTap) {
     final fg = active ? Colors.white : Fx.ink;
-    final sub = active ? Colors.white.withOpacity(.86) : Fx.sub;
+    final sub = active ? Colors.white.withValues(alpha: .86) : Fx.sub;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -994,7 +994,7 @@ class _CategoryPageState extends State<CategoryPage> {
         padding: const EdgeInsets.symmetric(horizontal: 9),
         decoration: BoxDecoration(
           gradient: active ? Fx.brand : null,
-          color: active ? null : Colors.white.withOpacity(.72),
+          color: active ? null : Colors.white.withValues(alpha: .72),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: active ? Colors.transparent : Colors.white,
@@ -1002,7 +1002,7 @@ class _CategoryPageState extends State<CategoryPage> {
           boxShadow: active
               ? [
                   BoxShadow(
-                    color: Fx.accent.withOpacity(.22),
+                    color: Fx.accent.withValues(alpha: .22),
                     blurRadius: 12,
                     offset: const Offset(0, 4),
                   ),

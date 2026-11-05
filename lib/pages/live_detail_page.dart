@@ -617,8 +617,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.black.withOpacity(.52),
-                  Colors.black.withOpacity(0),
+                  Colors.black.withValues(alpha: .52),
+                  Colors.black.withValues(alpha: 0),
                 ],
               ),
             ),
@@ -653,8 +653,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Colors.black.withOpacity(0),
-                  Colors.black.withOpacity(.62),
+                  Colors.black.withValues(alpha: 0),
+                  Colors.black.withValues(alpha: .62),
                 ],
               ),
             ),
@@ -791,14 +791,14 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       child: Container(
         padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.66),
+          color: Colors.white.withValues(alpha: .66),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: Colors.white),
         ),
         child: Row(
           children: [
             Icon(Icons.wifi_tethering_rounded,
-                size: 16, color: Color(0xFF39B7B0).withOpacity(.9)),
+                size: 16, color: Color(0xFF39B7B0).withValues(alpha: .9)),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -822,13 +822,13 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   Widget _buildError() {
     return Positioned.fill(
       child: Container(
-        color: Colors.black.withOpacity(.42),
+        color: Colors.black.withValues(alpha: .42),
         alignment: Alignment.center,
         child: Container(
           margin: const EdgeInsets.symmetric(horizontal: 24),
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.95),
+            color: Colors.white.withValues(alpha: .95),
             borderRadius: BorderRadius.circular(18),
             border: Border.all(color: Colors.white),
           ),
@@ -902,12 +902,12 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         width: size,
         height: size,
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.78),
+          color: Colors.white.withValues(alpha: .78),
           shape: BoxShape.circle,
           border: Border.all(color: Colors.white),
           boxShadow: [
             BoxShadow(
-              color: const Color(0xFF50729F).withOpacity(.10),
+              color: const Color(0xFF50729F).withValues(alpha: .10),
               blurRadius: 12,
               offset: const Offset(0, 4),
             ),
@@ -927,9 +927,9 @@ class _LiveBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: BoxDecoration(
-        color: const Color(0xFFFF4D4F).withOpacity(.13),
+        color: const Color(0xFFFF4D4F).withValues(alpha: .13),
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: const Color(0xFFFF6B6B).withOpacity(.45)),
+        border: Border.all(color: const Color(0xFFFF6B6B).withValues(alpha: .45)),
       ),
       child: const Row(
         mainAxisSize: MainAxisSize.min,

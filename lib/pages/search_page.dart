@@ -328,7 +328,7 @@ class _SearchPageState extends State<SearchPage> {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.72),
+                color: Colors.white.withValues(alpha: .72),
                 shape: BoxShape.circle,
                 border: Border.all(color: Colors.white),
               ),
@@ -342,12 +342,12 @@ class _SearchPageState extends State<SearchPage> {
               height: 44,
               padding: const EdgeInsets.symmetric(horizontal: 13),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.78),
+                color: Colors.white.withValues(alpha: .78),
                 borderRadius: BorderRadius.circular(22),
                 border: Border.all(color: Colors.white),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF50729F).withOpacity(.08),
+                    color: const Color(0xFF50729F).withValues(alpha: .08),
                     blurRadius: 16,
                     offset: const Offset(0, 6),
                   ),
@@ -483,7 +483,7 @@ class _SearchPageState extends State<SearchPage> {
           Row(
             children: [
               Icon(Icons.history_rounded,
-                  size: 18, color: Fx.accent.withOpacity(.85)),
+                  size: 18, color: Fx.accent.withValues(alpha: .85)),
               const SizedBox(width: 7),
               const Text('搜索历史',
                   style: TextStyle(
@@ -628,7 +628,7 @@ class _SearchPageState extends State<SearchPage> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.7),
+          color: Colors.white.withValues(alpha: .7),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: Colors.white),
         ),
@@ -666,15 +666,15 @@ class _SearchPageState extends State<SearchPage> {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: [Fx.accent.withOpacity(.10), Fx.accent2.withOpacity(.07)],
+          colors: [Fx.accent.withValues(alpha: .10), Fx.accent2.withValues(alpha: .07)],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withOpacity(.95)),
+        border: Border.all(color: Colors.white.withValues(alpha: .95)),
         boxShadow: [
           BoxShadow(
-            color: Fx.accent.withOpacity(.08),
+            color: Fx.accent.withValues(alpha: .08),
             blurRadius: 24,
             offset: const Offset(0, 8),
           ),
@@ -693,7 +693,7 @@ class _SearchPageState extends State<SearchPage> {
                   borderRadius: BorderRadius.circular(10),
                   boxShadow: [
                     BoxShadow(
-                      color: Fx.accent.withOpacity(.3),
+                      color: Fx.accent.withValues(alpha: .3),
                       blurRadius: 12,
                       offset: const Offset(0, 4),
                     ),
@@ -748,7 +748,7 @@ class _SearchPageState extends State<SearchPage> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.78),
+                color: Colors.white.withValues(alpha: .78),
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: Colors.white),
               ),
@@ -789,7 +789,7 @@ class _SearchPageState extends State<SearchPage> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 9, vertical: 5),
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(.6),
+                        color: Colors.white.withValues(alpha: .6),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(e,

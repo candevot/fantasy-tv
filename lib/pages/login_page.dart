@@ -85,7 +85,7 @@ class _LoginPageState extends State<LoginPage> {
                       width: 38,
                       height: 38,
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(.72),
+                        color: Colors.white.withValues(alpha: .72),
                         shape: BoxShape.circle,
                         border: Border.all(color: Colors.white),
                       ),
@@ -104,7 +104,7 @@ class _LoginPageState extends State<LoginPage> {
                   borderRadius: BorderRadius.circular(20),
                   boxShadow: [
                     BoxShadow(
-                      color: Fx.accent.withOpacity(.30),
+                      color: Fx.accent.withValues(alpha: .30),
                       blurRadius: 22,
                       offset: const Offset(0, 8),
                     ),
@@ -169,10 +169,10 @@ class _LoginPageState extends State<LoginPage> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFF6B6B).withOpacity(.10),
+                    color: const Color(0xFFFF6B6B).withValues(alpha: .10),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                        color: const Color(0xFFFF6B6B).withOpacity(.24)),
+                        color: const Color(0xFFFF6B6B).withValues(alpha: .24)),
                   ),
                   child: Row(
                     children: [
@@ -220,9 +220,9 @@ class _LoginPageState extends State<LoginPage> {
       height: 44,
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.62),
+        color: Colors.white.withValues(alpha: .62),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(.92)),
+        border: Border.all(color: Colors.white.withValues(alpha: .92)),
       ),
       child: Row(
         children: [
@@ -253,7 +253,7 @@ class _LoginPageState extends State<LoginPage> {
             boxShadow: active
                 ? [
                     BoxShadow(
-                      color: Fx.accent.withOpacity(.25),
+                      color: Fx.accent.withValues(alpha: .25),
                       blurRadius: 12,
                       offset: const Offset(0, 4),
                     ),
@@ -307,12 +307,12 @@ class _LoginPageState extends State<LoginPage> {
         suffixIconConstraints:
             const BoxConstraints(minWidth: 40, minHeight: 40),
         filled: true,
-        fillColor: Colors.white.withOpacity(.76),
+        fillColor: Colors.white.withValues(alpha: .76),
         contentPadding:
             const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(15),
-          borderSide: BorderSide(color: Colors.white.withOpacity(.95)),
+          borderSide: BorderSide(color: Colors.white.withValues(alpha: .95)),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(15),

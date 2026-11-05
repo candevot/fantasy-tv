@@ -273,7 +273,7 @@ class FxPosterBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(.16),
+            color: Colors.black.withValues(alpha: .16),
             blurRadius: 5,
             offset: const Offset(0, 2),
           ),
@@ -483,7 +483,7 @@ class FxSearchResultTile extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 7, vertical: 3),
                       decoration: BoxDecoration(
-                        color: Fx.accent.withOpacity(.10),
+                        color: Fx.accent.withValues(alpha: .10),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
@@ -706,9 +706,9 @@ class FxSkeletonBox extends StatelessWidget {
       width: width,
       height: height,
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.62),
+        color: Colors.white.withValues(alpha: .62),
         borderRadius: BorderRadius.circular(radius),
-        border: Border.all(color: Colors.white.withOpacity(.9)),
+        border: Border.all(color: Colors.white.withValues(alpha: .9)),
       ),
     );
   }
@@ -841,9 +841,9 @@ class FxResultListSkeleton extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.62),
+                color: Colors.white.withValues(alpha: .62),
                 borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.white.withOpacity(.9)),
+                border: Border.all(color: Colors.white.withValues(alpha: .9)),
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -911,9 +911,9 @@ class FxRankListSkeleton extends StatelessWidget {
       itemBuilder: (ctx, i) => Container(
         padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.62),
+          color: Colors.white.withValues(alpha: .62),
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white.withOpacity(.9)),
+          border: Border.all(color: Colors.white.withValues(alpha: .9)),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,

@@ -36,12 +36,12 @@ class FsGlassCard extends StatelessWidget {
       width: width,
       padding: padding,
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.95),
+        color: Colors.white.withValues(alpha: .95),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: Colors.white, width: 1),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF50729F).withOpacity(.24),
+            color: const Color(0xFF50729F).withValues(alpha: .24),
             blurRadius: 26,
             offset: const Offset(0, 10),
           ),
@@ -111,7 +111,7 @@ class FsBottomBar extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.black.withOpacity(0), Colors.black.withOpacity(.66)],
+          colors: [Colors.black.withValues(alpha: 0), Colors.black.withValues(alpha: .66)],
         ),
       ),
       child: Column(
@@ -424,7 +424,7 @@ class _FsJumpTile extends StatelessWidget {
               width: 30,
               height: 30,
               decoration: BoxDecoration(
-                color: Fx.accent.withOpacity(.12),
+                color: Fx.accent.withValues(alpha: .12),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(icon, size: 17, color: Fx.accent),
@@ -489,7 +489,7 @@ class _FsChip extends StatelessWidget {
               Border.all(color: active ? Fx.accent : const Color(0xFFE4EAF4)),
           boxShadow: [
             BoxShadow(
-              color: Fx.accent.withOpacity(active ? .28 : .04),
+              color: Fx.accent.withValues(alpha: active ? .28 : .04),
               blurRadius: 10,
               offset: const Offset(0, 3),
             ),
@@ -524,7 +524,7 @@ Future<int?> showFsEpisodeSheet(
     backgroundColor: Colors.transparent,
     isScrollControlled: true,
     useSafeArea: true,
-    barrierColor: Colors.black.withOpacity(.38),
+    barrierColor: Colors.black.withValues(alpha: .38),
     builder: (_) => FsEpisodeSheet(episodes: episodes, current: current),
   );
 }
@@ -688,7 +688,7 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                             boxShadow: [
                               BoxShadow(
                                 color:
-                                    Fx.accent.withOpacity(active ? .28 : .03),
+                                    Fx.accent.withValues(alpha: active ? .28 : .03),
                                 blurRadius: 10,
                                 offset: const Offset(0, 3),
                               ),
@@ -738,9 +738,9 @@ class _FsLiveBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
-        color: const Color(0xFFFF4D4F).withOpacity(.20),
+        color: const Color(0xFFFF4D4F).withValues(alpha: .20),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFFF6B6B).withOpacity(.55)),
+        border: Border.all(color: const Color(0xFFFF6B6B).withValues(alpha: .55)),
       ),
       child: const Row(
         mainAxisSize: MainAxisSize.min,

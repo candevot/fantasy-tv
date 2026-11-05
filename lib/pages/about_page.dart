@@ -71,7 +71,7 @@ class _AboutPageState extends State<AboutPage> {
                 gradient: Fx.brand,
                 boxShadow: [
                   BoxShadow(
-                    color: Fx.accent.withOpacity(.30),
+                    color: Fx.accent.withValues(alpha: .30),
                     blurRadius: 24,
                     offset: const Offset(0, 9),
                   ),
@@ -183,7 +183,7 @@ class _AboutPageState extends State<AboutPage> {
 
   Widget _divider() => Padding(
         padding: const EdgeInsets.only(left: 48),
-        child: Container(height: 1, color: Fx.ink.withOpacity(.05)),
+        child: Container(height: 1, color: Fx.ink.withValues(alpha: .05)),
       );
 
   Widget _row({
@@ -205,7 +205,7 @@ class _AboutPageState extends State<AboutPage> {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: color.withOpacity(.11),
+                color: color.withValues(alpha: .11),
                 borderRadius: BorderRadius.circular(11),
               ),
               child: Icon(icon, size: 18, color: color),
@@ -256,7 +256,7 @@ class _Tag extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: Fx.accent.withOpacity(.07),
+        color: Fx.accent.withValues(alpha: .07),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(

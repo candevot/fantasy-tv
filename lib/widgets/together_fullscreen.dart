@@ -664,7 +664,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.black.withOpacity(.52), Colors.black.withOpacity(0)],
+          colors: [Colors.black.withValues(alpha: .52), Colors.black.withValues(alpha: 0)],
         ),
       ),
       child: Row(
@@ -835,19 +835,19 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
   Widget _buildError() {
     return Container(
-      color: Colors.black.withOpacity(.46),
+      color: Colors.black.withValues(alpha: .46),
       alignment: Alignment.center,
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Container(
         constraints: const BoxConstraints(maxWidth: 340),
         padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.96),
+          color: Colors.white.withValues(alpha: .96),
           borderRadius: BorderRadius.circular(18),
           border: Border.all(color: Colors.white),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(.20),
+              color: Colors.black.withValues(alpha: .20),
               blurRadius: 24,
               offset: const Offset(0, 10),
             ),
@@ -893,7 +893,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
           borderRadius: BorderRadius.circular(18),
           boxShadow: [
             BoxShadow(
-              color: Fx.accent.withOpacity(.25),
+              color: Fx.accent.withValues(alpha: .25),
               blurRadius: 12,
               offset: const Offset(0, 4),
             ),
@@ -949,12 +949,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               width: maxWidth,
               height: panelHeight,
               decoration: BoxDecoration(
-                color: const Color(0xFFF7FAFF).withOpacity(.96),
+                color: const Color(0xFFF7FAFF).withValues(alpha: .96),
                 borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.white.withOpacity(.92)),
+                border: Border.all(color: Colors.white.withValues(alpha: .92)),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(.28),
+                    color: Colors.black.withValues(alpha: .28),
                     blurRadius: 24,
                     offset: const Offset(0, 10),
                   ),
@@ -990,7 +990,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                                 : '重连中',
                             style: TextStyle(
                               fontSize: 9,
-                              color: Fx.sub.withOpacity(.9),
+                              color: Fx.sub.withValues(alpha: .9),
                             ),
                           ),
                           const SizedBox(width: 2),
@@ -1004,7 +1004,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                               child: Icon(
                                 Icons.close_rounded,
                                 size: 15,
-                                color: Fx.sub.withOpacity(.8),
+                                color: Fx.sub.withValues(alpha: .8),
                               ),
                             ),
                           ),
@@ -1050,12 +1050,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               height: 32,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(.52),
+                color: Colors.black.withValues(alpha: .52),
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.white.withOpacity(.32)),
+                border: Border.all(color: Colors.white.withValues(alpha: .32)),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(.18),
+                    color: Colors.black.withValues(alpha: .18),
                     blurRadius: 12,
                     offset: const Offset(0, 3),
                   ),
@@ -1139,9 +1139,9 @@ class _FsBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.52),
+        color: Colors.black.withValues(alpha: .52),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(.28)),
+        border: Border.all(color: Colors.white.withValues(alpha: .28)),
       ),
       child: Text(
         text,

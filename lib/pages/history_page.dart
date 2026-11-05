@@ -482,7 +482,7 @@ class _HistoryPageState extends State<HistoryPage> {
                         width: 25,
                         height: 25,
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(.84),
+                          color: Colors.white.withValues(alpha: .84),
                           shape: BoxShape.circle,
                         ),
                         child: const Icon(Icons.play_arrow_rounded,
@@ -497,7 +497,7 @@ class _HistoryPageState extends State<HistoryPage> {
                         child: LinearProgressIndicator(
                           value: r.progress,
                           minHeight: 3,
-                          backgroundColor: Colors.white.withOpacity(.4),
+                          backgroundColor: Colors.white.withValues(alpha: .4),
                           valueColor:
                               const AlwaysStoppedAnimation<Color>(Fx.accent),
                         ),
@@ -559,7 +559,7 @@ class _HistoryPageState extends State<HistoryPage> {
                 width: 28,
                 height: 28,
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(.6),
+                  color: Colors.white.withValues(alpha: .6),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(Icons.close_rounded, size: 15, color: Fx.sub),

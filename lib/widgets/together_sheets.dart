@@ -23,7 +23,7 @@ Future<void> showTogetherMembers(
     backgroundColor: Colors.transparent,
     isScrollControlled: true,
     useSafeArea: true,
-    barrierColor: Colors.black.withOpacity(.30),
+    barrierColor: Colors.black.withValues(alpha: .30),
     builder: (ctx) => SafeArea(
       top: false,
       child: Container(
@@ -56,7 +56,7 @@ Future<void> showTogetherMembers(
                   '${members.length} 人',
                   style: TextStyle(
                     fontSize: 10.5,
-                    color: Fx.sub.withOpacity(.9),
+                    color: Fx.sub.withValues(alpha: .9),
                   ),
                 ),
               ],
@@ -70,7 +70,7 @@ Future<void> showTogetherMembers(
                         '暂无成员',
                         style: TextStyle(
                           fontSize: 12,
-                          color: Fx.sub.withOpacity(.75),
+                          color: Fx.sub.withValues(alpha: .75),
                         ),
                       ),
                     )
@@ -108,7 +108,7 @@ Future<void> showTogetherMembers(
                                       vertical: 2,
                                     ),
                                     decoration: BoxDecoration(
-                                      color: Fx.gold.withOpacity(.16),
+                                      color: Fx.gold.withValues(alpha: .16),
                                       borderRadius: BorderRadius.circular(8),
                                     ),
                                     child: const Text(
@@ -134,7 +134,7 @@ Future<void> showTogetherMembers(
                 height: 38,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(.9),
+                  color: Colors.white.withValues(alpha: .9),
                   borderRadius: BorderRadius.circular(19),
                 ),
                 child: const Text(
@@ -171,7 +171,7 @@ Future<void> showTogetherInvite(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setLocal) => AlertDialog(
-        backgroundColor: Colors.white.withOpacity(.98),
+        backgroundColor: Colors.white.withValues(alpha: .98),
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
         titlePadding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
@@ -199,8 +199,8 @@ Future<void> showTogetherInvite(
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   colors: [
-                    Fx.accent.withOpacity(.10),
-                    Fx.accent2.withOpacity(.10),
+                    Fx.accent.withValues(alpha: .10),
+                    Fx.accent2.withValues(alpha: .10),
                   ],
                 ),
                 borderRadius: BorderRadius.circular(16),
@@ -296,7 +296,7 @@ Future<TogetherRoomMenuAction?> showTogetherRoomMenu(
     backgroundColor: Colors.transparent,
     isScrollControlled: true,
     useSafeArea: true,
-    barrierColor: Colors.black.withOpacity(.28),
+    barrierColor: Colors.black.withValues(alpha: .28),
     builder: (ctx) => SafeArea(
       top: false,
       child: Container(
@@ -388,7 +388,7 @@ class _SheetTile extends StatelessWidget {
                 height: 34,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: Fx.accent.withOpacity(.1),
+                  color: Fx.accent.withValues(alpha: .1),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Icon(icon, size: 17, color: Fx.accent),
@@ -414,7 +414,7 @@ class _SheetTile extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 9.5,
-                          color: Fx.sub.withOpacity(.9),
+                          color: Fx.sub.withValues(alpha: .9),
                         ),
                       ),
                     ],
@@ -456,7 +456,7 @@ Future<String?> showTogetherQualitySheet(
     context: context,
     backgroundColor: Colors.transparent,
     useSafeArea: true,
-    barrierColor: Colors.black.withOpacity(.28),
+    barrierColor: Colors.black.withValues(alpha: .28),
     builder: (ctx) => SafeArea(
       top: false,
       child: Container(
@@ -518,7 +518,7 @@ Future<String?> showTogetherLineSheet(
     context: context,
     backgroundColor: Colors.transparent,
     useSafeArea: true,
-    barrierColor: Colors.black.withOpacity(.28),
+    barrierColor: Colors.black.withValues(alpha: .28),
     builder: (ctx) => SafeArea(
       top: false,
       child: Container(
@@ -584,7 +584,7 @@ Future<double?> showTogetherSpeedSheet(
     context: context,
     backgroundColor: Colors.transparent,
     useSafeArea: true,
-    barrierColor: Colors.black.withOpacity(.28),
+    barrierColor: Colors.black.withValues(alpha: .28),
     builder: (ctx) => SafeArea(
       top: false,
       child: Container(
@@ -671,7 +671,7 @@ class _ChoiceChip extends StatelessWidget {
           ),
           boxShadow: [
             BoxShadow(
-              color: Fx.accent.withOpacity(active ? .28 : .04),
+              color: Fx.accent.withValues(alpha: active ? .28 : .04),
               blurRadius: 10,
               offset: const Offset(0, 3),
             ),

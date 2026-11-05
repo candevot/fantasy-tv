@@ -40,13 +40,13 @@ class FsTextAction extends StatelessWidget {
             EdgeInsets.symmetric(horizontal: 12 * size, vertical: 7 * size),
         decoration: BoxDecoration(
           color: active
-              ? Fx.accent.withOpacity(.86)
-              : Colors.white.withOpacity(.13),
+              ? Fx.accent.withValues(alpha: .86)
+              : Colors.white.withValues(alpha: .13),
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white.withOpacity(.30), width: 1),
+          border: Border.all(color: Colors.white.withValues(alpha: .30), width: 1),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(.12),
+              color: Colors.black.withValues(alpha: .12),
               blurRadius: 10,
               offset: const Offset(0, 3),
             ),
@@ -194,7 +194,7 @@ class FsTopBar extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.black.withOpacity(.52), Colors.black.withOpacity(0)],
+          colors: [Colors.black.withValues(alpha: .52), Colors.black.withValues(alpha: 0)],
         ),
       ),
       child: Row(

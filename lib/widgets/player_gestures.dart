@@ -391,9 +391,9 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
                 width: 64,
                 height: 64,
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(.42),
+                  color: Colors.black.withValues(alpha: .42),
                   shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white.withOpacity(.28)),
+                  border: Border.all(color: Colors.white.withValues(alpha: .28)),
                 ),
                 child: Icon(_flashIcon, color: Colors.white, size: 34),
               ),
@@ -414,12 +414,12 @@ class _GestureHudCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.52),
+        color: Colors.black.withValues(alpha: .52),
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withOpacity(.26), width: 1),
+        border: Border.all(color: Colors.white.withValues(alpha: .26), width: 1),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(.18),
+            color: Colors.black.withValues(alpha: .18),
             blurRadius: 18,
             offset: const Offset(0, 6),
           ),
@@ -448,7 +448,7 @@ class _GestureHudCard extends StatelessWidget {
                 child: LinearProgressIndicator(
                   value: math.max(0, math.min(1, hud.value!)),
                   minHeight: 4,
-                  backgroundColor: Colors.white.withOpacity(.24),
+                  backgroundColor: Colors.white.withValues(alpha: .24),
                   valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
                 ),
               ),

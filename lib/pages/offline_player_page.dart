@@ -288,7 +288,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
 
   Widget _errorView() {
     return ColoredBox(
-      color: Colors.black.withOpacity(.78),
+      color: Colors.black.withValues(alpha: .78),
       child: Center(
         child: Padding(
           padding: const EdgeInsets.all(28),
@@ -389,7 +389,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
                                 padding: const EdgeInsets.symmetric(
                                     horizontal: 5, vertical: 1),
                                 decoration: BoxDecoration(
-                                  color: Fx.accent.withOpacity(.82),
+                                  color: Fx.accent.withValues(alpha: .82),
                                   borderRadius: BorderRadius.circular(5),
                                 ),
                                 child: const Text(

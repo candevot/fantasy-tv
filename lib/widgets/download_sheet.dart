@@ -25,7 +25,7 @@ Future<int?> showDownloadSheet(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    barrierColor: Colors.black.withOpacity(.32),
+    barrierColor: Colors.black.withValues(alpha: .32),
     builder: (_) => DownloadSheet(
       videoId: videoId,
       title: title,
@@ -257,7 +257,7 @@ class _DownloadSheetState extends State<DownloadSheet> {
                     height: 30,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.85),
+                      color: Colors.white.withValues(alpha: .85),
                       shape: BoxShape.circle,
                       border: Border.all(color: Colors.white),
                     ),
@@ -276,9 +276,9 @@ class _DownloadSheetState extends State<DownloadSheet> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: Fx.accent.withOpacity(.08),
+                    color: Fx.accent.withValues(alpha: .08),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Fx.accent.withOpacity(.14)),
+                    border: Border.all(color: Fx.accent.withValues(alpha: .14)),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -382,7 +382,7 @@ class _DownloadSheetState extends State<DownloadSheet> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(.86),
+                          color: Colors.white.withValues(alpha: .86),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: const Color(0xFFE4EAF4)),
                         ),
@@ -450,10 +450,10 @@ class _DownloadSheetState extends State<DownloadSheet> {
           };
     final bg = switch (state) {
       _EpState.cached => const Color(0xFFF0F4F8),
-      _EpState.busy => Fx.accent.withOpacity(.10),
-      _EpState.paused => Fx.gold.withOpacity(.12),
-      _EpState.failed => const Color(0xFFE45C5C).withOpacity(.08),
-      _EpState.available => selected ? null : Colors.white.withOpacity(.82),
+      _EpState.busy => Fx.accent.withValues(alpha: .10),
+      _EpState.paused => Fx.gold.withValues(alpha: .12),
+      _EpState.failed => const Color(0xFFE45C5C).withValues(alpha: .08),
+      _EpState.available => selected ? null : Colors.white.withValues(alpha: .82),
     };
 
     return GestureDetector(
@@ -471,14 +471,14 @@ class _DownloadSheetState extends State<DownloadSheet> {
             color: selected
                 ? Fx.accent
                 : isCurrent
-                    ? Fx.gold.withOpacity(.65)
-                    : Colors.white.withOpacity(.95),
+                    ? Fx.gold.withValues(alpha: .65)
+                    : Colors.white.withValues(alpha: .95),
             width: selected || isCurrent ? 1.2 : 1,
           ),
           boxShadow: [
             BoxShadow(
               color: (selected ? Fx.accent : const Color(0xFF50729F))
-                  .withOpacity(selected ? .22 : .06),
+                  .withValues(alpha: selected ? .22 : .06),
               blurRadius: 10,
               offset: const Offset(0, 3),
             ),
@@ -509,8 +509,8 @@ class _DownloadSheetState extends State<DownloadSheet> {
                 fontSize: 8,
                 height: 1.1,
                 color: selected
-                    ? Colors.white.withOpacity(.85)
-                    : color.withOpacity(.8),
+                    ? Colors.white.withValues(alpha: .85)
+                    : color.withValues(alpha: .8),
               ),
             ),
           ],

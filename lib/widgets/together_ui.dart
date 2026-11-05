@@ -93,13 +93,13 @@ BoxDecoration togetherGlass({
 }) {
   final base = tint ?? Colors.white;
   return BoxDecoration(
-    color: base.withOpacity(opacity),
+    color: base.withValues(alpha: opacity),
     borderRadius: BorderRadius.circular(radius),
     border:
-        border ?? Border.all(color: Colors.white.withOpacity(.92), width: 1),
+        border ?? Border.all(color: Colors.white.withValues(alpha: .92), width: 1),
     boxShadow: [
       BoxShadow(
-        color: const Color(0xFF50729F).withOpacity(.10),
+        color: const Color(0xFF50729F).withValues(alpha: .10),
         blurRadius: 26,
         offset: const Offset(0, 8),
       ),
@@ -139,7 +139,7 @@ class TogetherCircleButton extends StatelessWidget {
         child: Icon(
           icon,
           size: iconSize,
-          color: active ? Fx.accent : Fx.ink.withOpacity(.82),
+          color: active ? Fx.accent : Fx.ink.withValues(alpha: .82),
         ),
       ),
     );
@@ -180,19 +180,19 @@ class TogetherPill extends StatelessWidget {
                 borderRadius: BorderRadius.circular(height / 2),
                 boxShadow: [
                   BoxShadow(
-                    color: Fx.accent.withOpacity(.28),
+                    color: Fx.accent.withValues(alpha: .28),
                     blurRadius: 14,
                     offset: const Offset(0, 5),
                   ),
                 ],
               )
             : BoxDecoration(
-                color: Colors.white.withOpacity(.86),
+                color: Colors.white.withValues(alpha: .86),
                 borderRadius: BorderRadius.circular(height / 2),
-                border: Border.all(color: Colors.white.withOpacity(.96)),
+                border: Border.all(color: Colors.white.withValues(alpha: .96)),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF263A5A).withOpacity(.14),
+                    color: const Color(0xFF263A5A).withValues(alpha: .14),
                     blurRadius: 12,
                     offset: const Offset(0, 3),
                   ),
@@ -205,7 +205,7 @@ class TogetherPill extends StatelessWidget {
               Icon(
                 icon,
                 size: 14,
-                color: accent ? Colors.white : Fx.ink.withOpacity(.78),
+                color: accent ? Colors.white : Fx.ink.withValues(alpha: .78),
               ),
               const SizedBox(width: 4),
             ],
@@ -214,7 +214,7 @@ class TogetherPill extends StatelessWidget {
               style: TextStyle(
                 fontSize: 11.5,
                 fontWeight: FontWeight.w600,
-                color: accent ? Colors.white : Fx.ink.withOpacity(.86),
+                color: accent ? Colors.white : Fx.ink.withValues(alpha: .86),
               ),
             ),
             if (locked) ...[
@@ -222,7 +222,7 @@ class TogetherPill extends StatelessWidget {
               Icon(
                 Icons.lock_outline_rounded,
                 size: 11,
-                color: accent ? Colors.white70 : Fx.sub.withOpacity(.7),
+                color: accent ? Colors.white70 : Fx.sub.withValues(alpha: .7),
               ),
             ],
           ],
@@ -299,7 +299,7 @@ class TogetherAvatar extends StatelessWidget {
                   shape: BoxShape.circle,
                   boxShadow: [
                     BoxShadow(
-                      color: Fx.gold.withOpacity(.35),
+                      color: Fx.gold.withValues(alpha: .35),
                       blurRadius: 5,
                     ),
                   ],
@@ -428,7 +428,7 @@ Future<bool> showTogetherConfirm(
   final result = await showDialog<bool>(
     context: context,
     builder: (ctx) => AlertDialog(
-      backgroundColor: Colors.white.withOpacity(.97),
+      backgroundColor: Colors.white.withValues(alpha: .97),
       surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       title: Text(

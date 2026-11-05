@@ -22,7 +22,7 @@ void fxGlobalToast(String message) {
           fontWeight: FontWeight.w600,
         ),
       ),
-      backgroundColor: Colors.white.withOpacity(.96),
+      backgroundColor: Colors.white.withValues(alpha: .96),
       elevation: 4,
       behavior: SnackBarBehavior.floating,
       margin: const EdgeInsets.fromLTRB(18, 0, 18, 18),

@@ -374,7 +374,7 @@ class _BlobPainter extends CustomPainter {
     void blob(Offset c, double r, Color color) {
       final paint = Paint()
         ..shader = RadialGradient(
-          colors: [color.withOpacity(.55), color.withOpacity(0)],
+          colors: [color.withValues(alpha: .55), color.withValues(alpha: 0)],
         ).createShader(Rect.fromCircle(center: c, radius: r));
       canvas.drawCircle(c, r, paint);
     }
@@ -426,12 +426,12 @@ class GlassCard extends StatelessWidget {
         margin: margin,
         padding: padding,
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(opacity),
+          color: Colors.white.withValues(alpha: opacity),
           borderRadius: BorderRadius.circular(radius),
-          border: Border.all(color: Colors.white.withOpacity(.9), width: 1),
+          border: Border.all(color: Colors.white.withValues(alpha: .9), width: 1),
           boxShadow: [
             BoxShadow(
-              color: const Color(0xFF50729F).withOpacity(.10),
+              color: const Color(0xFF50729F).withValues(alpha: .10),
               blurRadius: 30,
               offset: const Offset(0, 8),
             ),
@@ -467,7 +467,7 @@ class GradButton extends StatelessWidget {
           borderRadius: BorderRadius.circular(height / 2),
           boxShadow: [
             BoxShadow(
-              color: Fx.accent.withOpacity(.35),
+              color: Fx.accent.withValues(alpha: .35),
               blurRadius: 18,
               offset: const Offset(0, 6),
             ),
@@ -510,11 +510,11 @@ class ChipTag extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
           color: active
-              ? Fx.accent.withOpacity(.12)
-              : Colors.white.withOpacity(.7),
+              ? Fx.accent.withValues(alpha: .12)
+              : Colors.white.withValues(alpha: .7),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
-            color: active ? Fx.accent : Colors.white.withOpacity(.9),
+            color: active ? Fx.accent : Colors.white.withValues(alpha: .9),
             width: active ? 1.2 : 1,
           ),
         ),
@@ -544,7 +544,7 @@ class RatingBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.45),
+        color: Colors.black.withValues(alpha: .45),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(score.toStringAsFixed(1),
@@ -605,12 +605,12 @@ class FxFatalErrorView extends StatelessWidget {
       constraints: const BoxConstraints(maxWidth: 340),
       padding: const EdgeInsets.fromLTRB(24, 26, 24, 22),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.94),
+        color: Colors.white.withValues(alpha: .94),
         borderRadius: BorderRadius.circular(24),
         border: Border.all(color: Colors.white),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF50729F).withOpacity(.14),
+            color: const Color(0xFF50729F).withValues(alpha: .14),
             blurRadius: 30,
             offset: const Offset(0, 10),
           ),
@@ -623,7 +623,7 @@ class FxFatalErrorView extends StatelessWidget {
             width: 58,
             height: 58,
             decoration: BoxDecoration(
-              color: Fx.accent.withOpacity(.10),
+              color: Fx.accent.withValues(alpha: .10),
               shape: BoxShape.circle,
             ),
             child: const Icon(Icons.sentiment_dissatisfied_rounded,
@@ -695,12 +695,12 @@ class FxErrorBanner extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 11, 10, 11),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.94),
+        color: Colors.white.withValues(alpha: .94),
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: const Color(0xFFFFD9A8)),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF50729F).withOpacity(.14),
+            color: const Color(0xFF50729F).withValues(alpha: .14),
             blurRadius: 22,
             offset: const Offset(0, 8),
           ),
@@ -712,7 +712,7 @@ class FxErrorBanner extends StatelessWidget {
             width: 34,
             height: 34,
             decoration: BoxDecoration(
-              color: Fx.gold.withOpacity(.12),
+              color: Fx.gold.withValues(alpha: .12),
               shape: BoxShape.circle,
             ),
             child:
@@ -759,7 +759,7 @@ class FxErrorBanner extends StatelessWidget {
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: Fx.accent.withOpacity(.10),
+                  color: Fx.accent.withValues(alpha: .10),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: retrying

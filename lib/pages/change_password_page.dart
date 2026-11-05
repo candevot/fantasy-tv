@@ -200,10 +200,10 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFF6B6B).withOpacity(.10),
+                    color: const Color(0xFFFF6B6B).withValues(alpha: .10),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                        color: const Color(0xFFFF6B6B).withOpacity(.24)),
+                        color: const Color(0xFFFF6B6B).withValues(alpha: .24)),
                   ),
                   child: Row(
                     children: [
@@ -273,7 +273,7 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
             const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(color: Colors.white.withOpacity(.95)),
+          borderSide: BorderSide(color: Colors.white.withValues(alpha: .95)),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(14),

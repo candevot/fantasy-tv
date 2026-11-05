@@ -14,9 +14,13 @@ jobs:
           java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.5'
+          # Flutter 3.32.8 = Dart 3.8.1；配合 AGP 8.13 / compileSdk 36
+          # 满足 media_kit libmpv 1.1.7 与 Android 16KB 页要求。
+          flutter-version: '3.32.8'
           channel: stable
           cache: true
+      - name: Show Flutter version
+        run: flutter --version
       - name: Generate android shell
         run: |
           # android/ 不入库，只提交固定签名的 android/fx-release.jks；
@@ -26,10 +30,10 @@ jobs:
           cp -r _tmp/android/. ./android/
           rm -rf _tmp
           test -f android/fx-release.jks
-      - name: Pin Android SDK levels
+      - name: Pin Android toolchain and SDK levels
         run: |
-          # targetSdk/compileSdk 显式钉死：安卓 8+（API 26+）设备覆盖，
-          # 分区存储按 targetSdk 34 的行为处理。
+          # compileSdk 36 / targetSdk 36（Android 16）/ minSdk 23；
+          # AGP 8.13 + Gradle 8.13 + Kotlin 2.1 + NDK 27，覆盖 16KB 页。
           python3 tools/patch_android_sdk.py
       - name: Patch release signing (fixed keystore)
         run: |
@@ -58,41 +62,21 @@ jobs:
           open(p,'w',encoding='utf-8').write(s)
           print(s[:600])
           PY
-      - name: Patch edge-to-edge
+      - name: Patch edge-to-edge and legacy storage permission
         run: |
-          python3 - <<'PY2'
-          import re,os
-          st='android/app/src/main/res/values/styles.xml'
-          s=open(st,encoding='utf-8').read()
-          style="""
-          <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
-              <item name="android:windowBackground">?android:colorBackground</item>
-              <item name="android:statusBarColor">@android:color/transparent</item>
-              <item name="android:navigationBarColor">@android:color/transparent</item>
-              <item name="android:windowDrawsSystemBarBackgrounds">true</item>
-              <item name="android:windowLightStatusBar">true</item>
-              <item name="android:windowLightNavigationBar">true</item>
-              <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
-              <item name="android:windowTranslucentStatus">false</item>
-          </style>
-          """
-          if 'windowLightNavigationBar' not in s:
-              s=re.sub(r'<style name="NormalTheme"[^>]*>.*?</style>', style.strip(), s, flags=re.S)
-              open(st,'w',encoding='utf-8').write(s)
-          m='android/app/src/main/kotlin/com/huanxiang/fantasy_tv/MainActivity.kt'
-          if not os.path.exists(m):
-              cands=[os.path.join(r,f) for r,_,fs in os.walk('android/app/src/main') for f in fs if f=='MainActivity.kt']
-              m=cands[0] if cands else m
-          k=open(m,encoding='utf-8').read()
-          if 'setDecorFitsSystemWindows' not in k:
-              k=k.replace('import io.flutter.embedding.android.FlutterActivity','import io.flutter.embedding.android.FlutterActivity\nimport androidx.core.view.WindowCompat\nimport androidx.core.app.ActivityCompat\nimport androidx.core.content.ContextCompat')
-              k=k.replace('class MainActivity: FlutterActivity()','class MainActivity: FlutterActivity() {\n  override fun onCreate(savedInstanceState: android.os.Bundle?) {\n    super.onCreate(savedInstanceState)\n    WindowCompat.setDecorFitsSystemWindows(window, false)\n    // Android 8/9（API 26-28）写公共 Download 目录需要旧版存储权限；\n    // Android 10+ 走分区存储，写入失败会自动回退应用专属目录。\n    if (android.os.Build.VERSION.SDK_INT <= 28 && ContextCompat.checkSelfPermission(this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {\n      ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 1001)\n    }\n  }\n}')
-              open(m,'w',encoding='utf-8').write(k)
-          print(open(st,encoding='utf-8').read()[:300])
-          PY2
-      - name: Check Android 8+ compatibility
+          # Flutter 3.32 模板是 `class MainActivity : FlutterActivity()`，
+          # 冒号两侧带空格；用独立脚本匹配，避免 patch 静默失效。
+          python3 tools/patch_edge_to_edge.py
+      - name: Check Android 8+ / 16KB compatibility
         run: |
           python3 tools/check_android_compat.py
+      - name: Verify dependency overrides removed
+        run: |
+          if grep -q '^dependency_overrides:' pubspec.yaml; then
+            echo 'dependency_overrides must be removed' >&2
+            exit 1
+          fi
+          grep -E 'media_kit(_video|_libs_video)?:' pubspec.yaml
       - run: flutter pub get
       - run: flutter analyze
       - name: Build release APKs (split per ABI)
@@ -102,6 +86,29 @@ jobs:
             --build-number=${{ github.run_number }} \
             --build-name=1.0.${{ github.run_number }}
           ls -lh build/app/outputs/flutter-apk/
+      - name: Verify 16KB page alignment (arm64)
+        run: |
+          APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          test -f "$APK"
+          echo "APK_SIZE_BYTES=$(stat -c %s "$APK")"
+          rm -rf /tmp/apk16 && mkdir -p /tmp/apk16
+          unzip -q -o "$APK" 'lib/arm64-v8a/*.so' -d /tmp/apk16
+          for so in /tmp/apk16/lib/arm64-v8a/*.so; do
+            ALIGN=$(readelf -lW "$so" | awk '/LOAD/{print $NF; exit}')
+            echo "$(basename "$so") LOAD ALIGN=$ALIGN"
+          done
+          echo '--- libmpv LOAD ---'
+          readelf -lW /tmp/apk16/lib/arm64-v8a/libmpv.so | grep LOAD
+          MPV_ALIGN=$(readelf -lW /tmp/apk16/lib/arm64-v8a/libmpv.so | awk '/LOAD/{print $NF; exit}')
+          echo "libmpv ALIGN=$MPV_ALIGN"
+          test "$MPV_ALIGN" = "0x4000"
+          # APK 内未压缩 .so 的 zip 偏移也必须是 16KB 对齐。
+          ZIPALIGN=$(ls "$ANDROID_HOME"/build-tools/*/zipalign 2>/dev/null | sort -V | tail -1)
+          if [ -n "$ZIPALIGN" ] && [ -x "$ZIPALIGN" ]; then
+            "$ZIPALIGN" -c -P 16 -v 4 "$APK" | tail -5
+          else
+            echo 'zipalign not found, skip zip alignment check'
+          fi
       - name: Verify APK signature
         run: |
           APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk

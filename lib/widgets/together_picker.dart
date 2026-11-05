@@ -16,7 +16,7 @@ Future<VideoCard?> showTogetherVideoPicker(BuildContext context) {
     isScrollControlled: true,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
-    barrierColor: Colors.black.withOpacity(.28),
+    barrierColor: Colors.black.withValues(alpha: .28),
     builder: (_) => const _TogetherVideoPicker(),
   );
 }
@@ -33,7 +33,7 @@ Future<int?> showTogetherEpisodePicker(
     isScrollControlled: true,
     useSafeArea: true,
     backgroundColor: Colors.transparent,
-    barrierColor: Colors.black.withOpacity(.28),
+    barrierColor: Colors.black.withValues(alpha: .28),
     builder: (_) => _TogetherEpisodePicker(
       episodes: episodes,
       current: current,
@@ -272,7 +272,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                   child: Container(
                     height: 42,
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.78),
+                      color: Colors.white.withValues(alpha: .78),
                       borderRadius: BorderRadius.circular(21),
                       border: Border.all(color: Colors.white),
                     ),
@@ -296,12 +296,12 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                         hintText: '搜索想看的剧',
                         hintStyle: TextStyle(
                           fontSize: 12.5,
-                          color: Fx.sub.withOpacity(.7),
+                          color: Fx.sub.withValues(alpha: .7),
                         ),
                         prefixIcon: Icon(
                           Icons.search_rounded,
                           size: 19,
-                          color: Fx.sub.withOpacity(.8),
+                          color: Fx.sub.withValues(alpha: .8),
                         ),
                         suffixIcon: _query.text.isEmpty
                             ? null
@@ -315,7 +315,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                                 child: Icon(
                                   Icons.cancel_rounded,
                                   size: 17,
-                                  color: Fx.sub.withOpacity(.55),
+                                  color: Fx.sub.withValues(alpha: .55),
                                 ),
                               ),
                         contentPadding:
@@ -361,7 +361,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                 width: 56,
                 height: 56,
                 decoration: BoxDecoration(
-                  color: Fx.accent.withOpacity(.10),
+                  color: Fx.accent.withValues(alpha: .10),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(
@@ -389,7 +389,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                   style: TextStyle(
                     fontSize: 11.5,
                     height: 1.4,
-                    color: Fx.sub.withOpacity(.9),
+                    color: Fx.sub.withValues(alpha: .9),
                   ),
                 ),
               ],
@@ -422,13 +422,13 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
               width: 56,
               height: 56,
               decoration: BoxDecoration(
-                color: Fx.accent.withOpacity(.08),
+                color: Fx.accent.withValues(alpha: .08),
                 shape: BoxShape.circle,
               ),
               child: Icon(
                 Icons.search_off_rounded,
                 size: 27,
-                color: Fx.accent.withOpacity(.75),
+                color: Fx.accent.withValues(alpha: .75),
               ),
             ),
             const SizedBox(height: 12),
@@ -446,7 +446,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                 '换个关键词试试',
                 style: TextStyle(
                   fontSize: 11.5,
-                  color: Fx.sub.withOpacity(.85),
+                  color: Fx.sub.withValues(alpha: .85),
                 ),
               ),
             ],
@@ -542,7 +542,7 @@ class _VideoTile extends StatelessWidget {
                         vertical: 2,
                       ),
                       decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(.45),
+                        color: Colors.black.withValues(alpha: .45),
                         borderRadius: BorderRadius.circular(7),
                       ),
                       child: Text(
@@ -577,7 +577,7 @@ class _VideoTile extends StatelessWidget {
             ].join(' · '),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 9, color: Fx.sub.withOpacity(.85)),
+            style: TextStyle(fontSize: 9, color: Fx.sub.withValues(alpha: .85)),
           ),
         ],
       ),
@@ -677,7 +677,7 @@ class _TogetherEpisodePicker extends StatelessWidget {
                           '暂无剧集信息',
                           style: TextStyle(
                             fontSize: 12,
-                            color: Fx.sub.withOpacity(.8),
+                            color: Fx.sub.withValues(alpha: .8),
                           ),
                         ),
                       )
@@ -702,12 +702,12 @@ class _TogetherEpisodePicker extends StatelessWidget {
                                 gradient: active ? Fx.brand : null,
                                 color: active
                                     ? null
-                                    : Colors.white.withOpacity(.72),
+                                    : Colors.white.withValues(alpha: .72),
                                 borderRadius: BorderRadius.circular(11),
                                 border: Border.all(
                                   color: active
                                       ? Colors.transparent
-                                      : Colors.white.withOpacity(.95),
+                                      : Colors.white.withValues(alpha: .95),
                                 ),
                               ),
                               child: Text(

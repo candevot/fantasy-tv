@@ -307,9 +307,9 @@ class _SplashPageState extends State<SplashPage>
                                       decoration: BoxDecoration(
                                         gradient: LinearGradient(
                                           colors: [
-                                            Colors.white.withOpacity(0),
-                                            Colors.white.withOpacity(.55),
-                                            Colors.white.withOpacity(0),
+                                            Colors.white.withValues(alpha: 0),
+                                            Colors.white.withValues(alpha: .55),
+                                            Colors.white.withValues(alpha: 0),
                                           ],
                                         ),
                                       ),
@@ -396,8 +396,8 @@ class _SplashBlobPainter extends CustomPainter {
       final r = radius * (.75 + .25 * conv);
       final paint = Paint()
         ..shader = RadialGradient(colors: [
-          color.withOpacity(.5 * conv),
-          color.withOpacity(0),
+          color.withValues(alpha: .5 * conv),
+          color.withValues(alpha: 0),
         ]).createShader(Rect.fromCircle(center: c, radius: r));
       canvas.drawCircle(c, r, paint);
     }
@@ -490,12 +490,12 @@ class _RootShellState extends State<RootShell> {
         child: Container(
           height: 62,
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.78),
+            color: Colors.white.withValues(alpha: .78),
             borderRadius: BorderRadius.circular(26),
-            border: Border.all(color: Colors.white.withOpacity(.95)),
+            border: Border.all(color: Colors.white.withValues(alpha: .95)),
             boxShadow: [
               BoxShadow(
-                color: const Color(0xFF5B7BAF).withOpacity(.16),
+                color: const Color(0xFF5B7BAF).withValues(alpha: .16),
                 blurRadius: 26,
                 offset: const Offset(0, 8),
               ),

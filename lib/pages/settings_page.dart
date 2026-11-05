@@ -153,7 +153,7 @@ class _SettingsPageState extends State<SettingsPage> {
               width: 38,
               height: 38,
               decoration: BoxDecoration(
-                color: Fx.accent.withOpacity(.10),
+                color: Fx.accent.withValues(alpha: .10),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: const Icon(
@@ -496,7 +496,7 @@ class _SettingsPageState extends State<SettingsPage> {
         height: 48,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(.72),
+          color: Colors.white.withValues(alpha: .72),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: const Color(0xFFFFD7D7)),
         ),
@@ -525,7 +525,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _divider() => Padding(
         padding: const EdgeInsets.only(left: 48),
-        child: Container(height: 1, color: Fx.ink.withOpacity(.05)),
+        child: Container(height: 1, color: Fx.ink.withValues(alpha: .05)),
       );
 
   Widget _row({
@@ -548,7 +548,7 @@ class _SettingsPageState extends State<SettingsPage> {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: color.withOpacity(.11),
+                color: color.withValues(alpha: .11),
                 borderRadius: BorderRadius.circular(11),
               ),
               child: Icon(icon, size: 18, color: color),
@@ -607,7 +607,7 @@ class _SettingsPageState extends State<SettingsPage> {
             width: 36,
             height: 36,
             decoration: BoxDecoration(
-              color: color.withOpacity(.11),
+              color: color.withValues(alpha: .11),
               borderRadius: BorderRadius.circular(11),
             ),
             child: Icon(icon, size: 18, color: color),
@@ -716,12 +716,12 @@ class _QualitySheet extends StatelessWidget {
                   ),
                   decoration: BoxDecoration(
                     color: current == option.key
-                        ? Fx.accent.withOpacity(.07)
-                        : Colors.white.withOpacity(.72),
+                        ? Fx.accent.withValues(alpha: .07)
+                        : Colors.white.withValues(alpha: .72),
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(
                       color: current == option.key
-                          ? Fx.accent.withOpacity(.45)
+                          ? Fx.accent.withValues(alpha: .45)
                           : Colors.white,
                     ),
                   ),

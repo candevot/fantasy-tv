@@ -514,7 +514,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   borderRadius: BorderRadius.circular(11),
                   boxShadow: [
                     BoxShadow(
-                      color: Fx.accent.withOpacity(.18),
+                      color: Fx.accent.withValues(alpha: .18),
                       blurRadius: 14,
                       offset: const Offset(0, 5),
                     ),
@@ -569,12 +569,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       height: 36,
                       padding: const EdgeInsets.symmetric(horizontal: 11),
                       decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(.72),
+                        color: Colors.white.withValues(alpha: .72),
                         borderRadius: BorderRadius.circular(18),
                         border: Border.all(color: Colors.white),
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(0xFF50729F).withOpacity(.08),
+                            color: const Color(0xFF50729F).withValues(alpha: .08),
                             blurRadius: 12,
                             offset: const Offset(0, 4),
                           ),
@@ -613,12 +613,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return Container(
       height: 44,
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.72),
+        color: Colors.white.withValues(alpha: .72),
         borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: Colors.white.withOpacity(.95)),
+        border: Border.all(color: Colors.white.withValues(alpha: .95)),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF50729F).withOpacity(.08),
+            color: const Color(0xFF50729F).withValues(alpha: .08),
             blurRadius: 18,
             offset: const Offset(0, 6),
           ),
@@ -677,9 +677,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       height: 42,
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(.58),
+        color: Colors.white.withValues(alpha: .58),
         borderRadius: BorderRadius.circular(21),
-        border: Border.all(color: Colors.white.withOpacity(.92)),
+        border: Border.all(color: Colors.white.withValues(alpha: .92)),
       ),
       child: Row(
         children: [
@@ -697,7 +697,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     boxShadow: c.key == _channel
                         ? [
                             BoxShadow(
-                              color: Fx.accent.withOpacity(.22),
+                              color: Fx.accent.withValues(alpha: .22),
                               blurRadius: 10,
                               offset: const Offset(0, 3),
                             ),
@@ -771,9 +771,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                     begin: Alignment.topCenter,
                                     end: Alignment.bottomCenter,
                                     colors: [
-                                      Colors.black.withOpacity(.02),
-                                      Colors.black.withOpacity(.12),
-                                      Colors.black.withOpacity(.74),
+                                      Colors.black.withValues(alpha: .02),
+                                      Colors.black.withValues(alpha: .12),
+                                      Colors.black.withValues(alpha: .74),
                                     ],
                                     stops: const [0, .42, 1],
                                   ),
@@ -787,10 +787,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 8, vertical: 4),
                                     decoration: BoxDecoration(
-                                      color: Colors.black.withOpacity(.32),
+                                      color: Colors.black.withValues(alpha: .32),
                                       borderRadius: BorderRadius.circular(12),
                                       border: Border.all(
-                                          color: Colors.white.withOpacity(.24)),
+                                          color: Colors.white.withValues(alpha: .24)),
                                     ),
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
@@ -852,7 +852,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                             height: 1.45,
                                             fontWeight: FontWeight.w400,
                                             color:
-                                                Colors.white.withOpacity(.84)),
+                                                Colors.white.withValues(alpha: .84)),
                                       ),
                                     ],
                                   ],
@@ -954,12 +954,12 @@ class _LiveChannelCard extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.all(6),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.72),
+            color: Colors.white.withValues(alpha: .72),
             borderRadius: BorderRadius.circular(14),
             border: Border.all(color: Colors.white),
             boxShadow: [
               BoxShadow(
-                color: const Color(0xFF50729F).withOpacity(.08),
+                color: const Color(0xFF50729F).withValues(alpha: .08),
                 blurRadius: 14,
                 offset: const Offset(0, 5),
               ),
@@ -996,7 +996,7 @@ class _LiveChannelCard extends StatelessWidget {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(.42),
+                          color: Colors.black.withValues(alpha: .42),
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: const Row(
@@ -1026,7 +1026,7 @@ class _LiveChannelCard extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(.46),
+                            color: Colors.black.withValues(alpha: .46),
                             borderRadius: BorderRadius.circular(6),
                           ),
                           child: Text(

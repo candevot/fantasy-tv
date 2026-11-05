@@ -295,7 +295,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.white.withOpacity(enabled ? .72 : .38),
+          color: Colors.white.withValues(alpha: enabled ? .72 : .38),
           borderRadius: BorderRadius.circular(11),
           border: Border.all(color: Colors.white),
         ),
@@ -338,7 +338,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
             decoration: BoxDecoration(
-              color: Fx.accent.withOpacity(.10),
+              color: Fx.accent.withValues(alpha: .10),
               borderRadius: BorderRadius.circular(6),
             ),
             child: Text(
@@ -391,7 +391,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(.36),
+                      color: Colors.black.withValues(alpha: .36),
                       borderRadius: BorderRadius.circular(5),
                     ),
                     child: Text(
@@ -597,7 +597,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withOpacity(.11),
+        color: color.withValues(alpha: .11),
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
@@ -623,9 +623,9 @@ class _DownloadsPageState extends State<DownloadsPage> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
         decoration: BoxDecoration(
-          color: color.withOpacity(.08),
+          color: color.withValues(alpha: .08),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: color.withOpacity(.16)),
+          border: Border.all(color: color.withValues(alpha: .16)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,

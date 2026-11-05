@@ -110,7 +110,7 @@ class _FeedbackPageState extends State<FeedbackPage> {
                   width: 34,
                   height: 34,
                   decoration: BoxDecoration(
-                    color: Fx.accent.withOpacity(.10),
+                    color: Fx.accent.withValues(alpha: .10),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: const Icon(
@@ -185,7 +185,7 @@ class _FeedbackPageState extends State<FeedbackPage> {
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(14),
                       borderSide:
-                          BorderSide(color: Colors.white.withOpacity(.95)),
+                          BorderSide(color: Colors.white.withValues(alpha: .95)),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(14),
@@ -251,7 +251,7 @@ class _FeedbackPageState extends State<FeedbackPage> {
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(14),
                       borderSide:
-                          BorderSide(color: Colors.white.withOpacity(.95)),
+                          BorderSide(color: Colors.white.withValues(alpha: .95)),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(14),
@@ -268,10 +268,10 @@ class _FeedbackPageState extends State<FeedbackPage> {
                       vertical: 9,
                     ),
                     decoration: BoxDecoration(
-                      color: const Color(0xFFFF6B6B).withOpacity(.10),
+                      color: const Color(0xFFFF6B6B).withValues(alpha: .10),
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
-                        color: const Color(0xFFFF6B6B).withOpacity(.24),
+                        color: const Color(0xFFFF6B6B).withValues(alpha: .24),
                       ),
                     ),
                     child: Row(
