@@ -54,6 +54,9 @@ class _DetailPageState extends State<DetailPage>
   int _autoLineTries = 0;
   int _relatedOffset = 0;
 
+  /// 播放器正在切线路：禁用线路卡片，避免重复点击并发 open。
+  bool _playerSwitchingLine = false;
+
   /// 真正播放成功后才允许回写历史集数/进度；只打开详情页不算。
   bool _played = false;
 
@@ -388,7 +391,10 @@ class _DetailPageState extends State<DetailPage>
   }
 
   void _selectLine(LineInfo line) {
-    if (line.id == _lineId) return;
+    if (_playerSwitchingLine) {
+      fxToast(context, '正在切换线路，请稍候');
+      return;
+    }
     _stableTimer?.cancel();
     // 用户手动选线路视为重新开始，允许重试这一条。
     _failedLines.remove(line.id);
@@ -400,13 +406,13 @@ class _DetailPageState extends State<DetailPage>
     fxToast(context, '正在切换播放源…');
   }
 
-  /// 播放器切线路失败并已回退到原线路：把详情页的选中线路也改回去，
-  /// 避免 UI 指着新线路、实际播的却是旧线路。
-  void _onLineFallback(String oldLineId) {
-    if (!mounted || oldLineId.isEmpty || oldLineId == _lineId) return;
+  /// 播放器切换结束回调实际生效的线路（自动尝试下一条成功或全失败时），
+  /// 同步高亮，避免 UI 指着失败线路而实际播的是另一条。
+  void _onLineFallback(String lineId) {
+    if (!mounted || lineId.isEmpty || lineId == _lineId) return;
     final lines = _detail?.lines ?? const <LineInfo>[];
-    if (!lines.any((l) => l.id == oldLineId)) return;
-    setState(() => _lineId = oldLineId);
+    if (!lines.any((l) => l.id == lineId)) return;
+    setState(() => _lineId = lineId);
     _saveHistory();
   }
 
@@ -419,7 +425,8 @@ class _DetailPageState extends State<DetailPage>
       _showPlaybackError(issue: issue);
       return;
     }
-    if (auto && _autoLineTries >= lines.length - 1) {
+    // 自动兜底最多试 2 条线路（当前 1 条 + 下一条），全失败才展示错误页。
+    if (auto && _autoLineTries >= 1) {
       _showPlaybackError(issue: issue);
       return;
     }
@@ -804,6 +811,10 @@ class _DetailPageState extends State<DetailPage>
           onSourceIssue: _reportLineIssue,
           onChangeLine: d.lines.length > 1 ? () => _switchNextLine() : null,
           onLineFallback: _onLineFallback,
+          onSwitchingChanged: (busy) {
+            if (!mounted || _playerSwitchingLine == busy) return;
+            setState(() => _playerSwitchingLine = busy);
+          },
           onPlaybackStarted: _onPlaybackStarted,
           autoPlay: true,
         ),
@@ -886,7 +897,8 @@ class _DetailPageState extends State<DetailPage>
                         : line.displayName,
                     count: total,
                     active: line.id == _lineId,
-                    onTap: () => _selectLine(line),
+                    onTap:
+                        _playerSwitchingLine ? null : () => _selectLine(line),
                   ),
                 );
               },

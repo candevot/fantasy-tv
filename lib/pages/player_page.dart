@@ -19,7 +19,7 @@ enum SourceIssue { parse, empty, error }
 ///
 /// 控件布局：
 /// 左上 返回 + 片名/集数
-/// 右上 投屏 / TV / 设置
+/// 右上 投屏 / 设置
 /// 底部 播放暂停 · 当前时间 · 细进度条 · 总时长 · 下一集 · 全屏
 /// 3 秒无操作自动隐藏；点画面唤出/隐藏；长按 2x；双击暂停。
 class PlayerView extends StatefulWidget {
@@ -36,6 +36,7 @@ class PlayerView extends StatefulWidget {
     this.onPlaybackStarted,
     this.onChangeLine,
     this.onLineFallback,
+    this.onSwitchingChanged,
     this.autoPlay = true,
   });
 
@@ -53,8 +54,13 @@ class PlayerView extends StatefulWidget {
   final VoidCallback? onPlaybackStarted;
   final VoidCallback? onChangeLine;
 
-  /// 手动切线路失败、已回退到原线路时回调，外层把线路 id 也改回去。
+  /// 切线路结束（成功或失败）后回调实际生效的线路 id，外层据此同步高亮，
+  /// 避免自动尝试下一条线路时 UI 仍指着失败线路。
   final ValueChanged<String>? onLineFallback;
+
+  /// 线路切换开关状态：为 true 时外层应禁用线路卡片，避免重复点击并发 open。
+  final ValueChanged<bool>? onSwitchingChanged;
+
   final bool autoPlay;
 
   @override
@@ -62,6 +68,16 @@ class PlayerView extends StatefulWidget {
 }
 
 class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
+  /// 单次 open 等待 ready 的上限：超过即视为该地址不可播，避免黑屏空等。
+  static const Duration _openReadyTimeout = Duration(seconds: 8);
+
+  /// 切线路时最多尝试的线路数（含用户选中的目标线路）。
+  static const int _maxLineAttempts = 2;
+
+  /// 看门狗：每 3 秒检查一次，连续 12 秒位置不前进即尝试自愈。
+  static const Duration _watchdogTick = Duration(seconds: 3);
+  static const Duration _watchdogStall = Duration(seconds: 12);
+
   FxPlayer? _controller;
   PlayInfo? _info;
 
@@ -91,8 +107,17 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   /// 正在切换线路（防止重复点击并发 open）。
   bool _switchingLine = false;
-  String? _pendingLine;
   int? _pendingEp;
+
+  /// 看门狗：播放中位置长时间不动时自愈一次，再失败自动换下一条线路。
+  Timer? _watchdogTimer;
+  Duration _watchdogLastPosition = Duration.zero;
+  DateTime _watchdogLastAdvance = DateTime.now();
+  bool _watchdogBusy = false;
+  bool _watchdogRetried = false;
+
+  /// 自愈成功后等 position 真正前进，再提示「已自动恢复」。
+  bool _watchdogRecoverPending = false;
 
   /// 切换期间锁住 UI 进度，避免新播放器 open 时进度归零。
   Duration? _uiPosition;
@@ -190,6 +215,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (!mounted || _fullscreenActive) return;
       unawaited(_saveProgress());
     });
+    _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
     _bootstrap(seekToSaved: true, saveOld: false);
   }
 
@@ -198,7 +224,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     super.didUpdateWidget(oldWidget);
     if (widget.ep == _ep && widget.line == _line) return;
     if (widget.line != _line) {
-      // 切线路：记住当前集+进度，就绪后 seek 回并恢复播放；失败回退原线路。
+      // 切线路：记住当前集+进度，就绪后 seek 回并恢复播放；
+      // 目标线路失败会自动尝试下一条，最多 2 条。
       unawaited(_switchLine(widget.line, widget.ep));
       return;
     }
@@ -209,7 +236,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   Future<void> _switchEpisodeFromParent(int next) async {
     if (_switchingLine) {
-      _pendingLine = widget.line;
       _pendingEp = next;
       return;
     }
@@ -242,17 +268,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   Future<void> _switchLine(String targetLine, int targetEp) async {
     if (_switchingLine) {
-      // 切换中又点了别的线路：记下来，等当前这一次结束再切，避免并发 open。
-      _pendingLine = targetLine;
-      _pendingEp = targetEp;
+      // 切换中禁止重复点击：直接忽略新的线路请求，绝不允许并发 open。
       return;
     }
     _switchingLine = true;
-    final oldLine = _line;
-    final oldEp = _ep;
-    final oldLoadedEp = _loadedEp;
-    final oldInfo = _info;
-    final oldQualityKey = _qualityKey;
+    widget.onSwitchingChanged?.call(true);
+    _watchdogRecoverPending = false;
     final old = _controller;
     final healthy = old != null &&
         old.value.isInitialized &&
@@ -261,117 +282,123 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final wasPlaying = healthy && old.value.isPlaying;
     final resume = healthy ? old.value.position : Duration.zero;
     final oldDuration = old?.value.duration;
-
-    // 先保存旧线路进度（此刻还没进入 loading，_saveProgress 才会生效）。
-    await _saveProgress();
-    if (!mounted) {
-      _switchingLine = false;
-      return;
-    }
-
     var resumeSeconds = resume.inMilliseconds / 1000.0;
-    if (!healthy) {
-      resumeSeconds = await fxLoadProgress(widget.videoId, targetEp);
-      if (!mounted) {
-        _switchingLine = false;
-        return;
+
+    try {
+      // 先保存旧线路进度（此刻还没进入 loading，_saveProgress 才会生效）。
+      await _saveProgress();
+      if (!mounted) return;
+
+      if (!healthy) {
+        resumeSeconds = await fxLoadProgress(widget.videoId, targetEp);
+        if (!mounted) return;
       }
-    }
 
-    _loadToken++;
-    unawaited(old?.pause());
-    _hideTimer?.cancel();
-    setState(() {
-      _loading = true;
-      _loadingHint = '正在切换线路，请稍候';
-      _uiPosition = Duration(milliseconds: (resumeSeconds * 1000).round());
-      _uiDuration = oldDuration;
-      _error = false;
-      _errorText = '';
-      _sourceFailNotified = false;
-      _ended = false;
-    });
-
-    final ok = await _bootstrap(
-      seekToSaved: false,
-      saveOld: false,
-      lineOverride: targetLine,
-      epOverride: targetEp,
-      resumeSeconds: resumeSeconds,
-      playOverride: wasPlaying,
-      commitLine: true,
-      reportFailure: false,
-    );
-    if (!mounted) {
-      _switchingLine = false;
-      return;
-    }
-
-    if (ok) {
+      _loadToken++;
+      unawaited(old?.pause());
+      _hideTimer?.cancel();
       setState(() {
-        _loadingHint = null;
-        _uiPosition = null;
-        _uiDuration = null;
-      });
-      _showControls();
-      fxToast(context, '已切换线路');
-    } else if (healthy) {
-      // 新线路失败：旧片源还活着，seek 回原进度并按原状态继续播放。
-      try {
-        await old.seekTo(resume);
-        if (wasPlaying) await old.play();
-      } catch (_) {}
-      if (!mounted) {
-        _switchingLine = false;
-        return;
-      }
-      setState(() {
-        _loading = false;
-        _loadingHint = null;
+        _loading = true;
+        _loadingHint = '正在切换线路，请稍候';
+        _uiPosition = Duration(milliseconds: (resumeSeconds * 1000).round());
+        _uiDuration = oldDuration;
         _error = false;
-        _ep = oldEp;
-        _loadedEp = oldLoadedEp;
-        _info = oldInfo;
-        _qualityKey = oldQualityKey;
-        _uiPosition = null;
-        _uiDuration = null;
+        _errorText = '';
+        _sourceFailNotified = false;
+        _ended = false;
       });
-      _showControls();
-      fxToast(context, '切换线路失败，已回退原线路');
-      // 用户在切换期间又选了别的线路：保持外层的新选择，等下面接着切，
-      // 不能把详情页的线路 id 改成旧线路。
-      if (_pendingLine == null) {
-        widget.onLineFallback?.call(oldLine);
+
+      // 目标线路失败时自动尝试下一条，最多 2 条；全失败才进入错误态。
+      final attempts = _lineAttempts(targetLine);
+      String? actualLine;
+      for (final candidate in attempts) {
+        if (!mounted) return;
+        final ok = await _bootstrap(
+          seekToSaved: false,
+          saveOld: false,
+          lineOverride: candidate,
+          epOverride: targetEp,
+          resumeSeconds: resumeSeconds,
+          playOverride: wasPlaying,
+          commitLine: true,
+          reportFailure: false,
+        );
+        if (!mounted) return;
+        if (ok) {
+          actualLine = candidate;
+          break;
+        }
       }
-    } else {
-      setState(() {
-        _loading = false;
-        _loadingHint = null;
-        _error = true;
-        _errorText = '线路不可用，请重试或换线路';
-        _uiPosition = null;
-        _uiDuration = null;
-      });
-      _notifySourceFailed();
-    }
-    // 必须重建一次：否则控件与手势会停留在 _switchingLine=true 时的禁用状态。
-    if (mounted) {
-      setState(() => _switchingLine = false);
-    } else {
-      _switchingLine = false;
-    }
-    final pendingLine = _pendingLine;
-    final pendingEp = _pendingEp;
-    _pendingLine = null;
-    _pendingEp = null;
-    if (mounted && pendingLine != null) {
-      final ep = pendingEp ?? _ep;
-      if (pendingLine != _line) {
-        unawaited(_switchLine(pendingLine, ep));
-      } else if (ep != _ep) {
-        unawaited(_switchEpisodeFromParent(ep));
+
+      if (actualLine != null) {
+        setState(() {
+          _loadingHint = null;
+          _uiPosition = null;
+          _uiDuration = null;
+        });
+        _resetWatchdogClock();
+        _watchdogRetried = false;
+        _showControls();
+        fxToast(
+          context,
+          actualLine == targetLine ? '已切换线路' : '已自动切换到可用线路',
+        );
+        // 自动尝试下一条成功时同步外层高亮，避免 UI 仍指着失败线路。
+        widget.onLineFallback?.call(actualLine);
+      } else {
+        // 两条线路都失败：停在最后尝试的线路，错误页的重试按钮直接重试它。
+        final lastTried = attempts.isEmpty ? targetLine : attempts.last;
+        _line = lastTried;
+        setState(() {
+          _loading = false;
+          _loadingHint = null;
+          _loadedEp = null;
+          _error = true;
+          _errorText = '线路不可用，请重试或换线路';
+          _uiPosition = null;
+          _uiDuration = null;
+        });
+        _showControls();
+        fxToast(context, '线路切换失败，请重试');
+        widget.onLineFallback?.call(lastTried);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _switchingLine = false);
+      } else {
+        _switchingLine = false;
+      }
+      widget.onSwitchingChanged?.call(false);
+      // 切换期间点过的下一集：等本次切换结束再执行，不并发 open。
+      final pendingEp = _pendingEp;
+      _pendingEp = null;
+      if (mounted && pendingEp != null && pendingEp != _ep) {
+        unawaited(_switchEpisodeFromParent(pendingEp));
       }
     }
+  }
+
+  /// 当前线路 + 下一条线路（最多 2 条），用于失败后的自动兜底。
+  List<String> _lineAttempts(String targetLine) {
+    final lines = widget.detail?.lines ?? const <LineInfo>[];
+    final attempts = <String>[];
+    if (targetLine.isNotEmpty) attempts.add(targetLine);
+    var index = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].id == targetLine) {
+        index = i;
+        break;
+      }
+    }
+    for (var step = 0;
+        step < lines.length && attempts.length < _maxLineAttempts;
+        step++) {
+      final candidate =
+          index >= 0 ? lines[(index + 1 + step) % lines.length] : lines[step];
+      if (candidate.id.isEmpty || attempts.contains(candidate.id)) continue;
+      attempts.add(candidate.id);
+    }
+    return attempts.take(_maxLineAttempts).toList(growable: false);
   }
 
   @override
@@ -428,6 +455,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _unlockTimer?.cancel();
     _progressTimer?.cancel();
     _backgroundTimer?.cancel();
+    _watchdogTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
     _controller?.removeListener(_onVideoValue);
@@ -616,7 +644,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (!mounted || token != _loadToken) return false;
       final controller = FxPlayer.create();
       try {
-        await controller.open(url, headers: info.headers);
+        // 8 秒拿不到可播状态就判这条地址失败，避免黑屏一直转圈。
+        await controller
+            .open(url, headers: info.headers)
+            .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) {
           await controller.dispose();
           return false;
@@ -664,6 +695,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         });
         _sourceFailNotified = false;
         ok = true;
+        _resetWatchdogClock();
         widget.onPlaybackStarted?.call();
         _showControls();
         break;
@@ -715,6 +747,119 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     widget.onSourceFailed?.call();
   }
 
+  /* -------------------------------------------------------------- 看门狗 */
+
+  /// 播放中位置连续 12 秒不前进（仍在 buffering / 应该播放）时尝试自愈：
+  /// 先重新 open 当前地址一次，仍失败或再次报错则自动切下一条线路。
+  void _checkWatchdog() {
+    if (!mounted || _fullscreenActive || _watchdogBusy) return;
+    if (_loading || _error || _switchingLine || _backgrounded) {
+      _resetWatchdogClock();
+      return;
+    }
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) {
+      _resetWatchdogClock();
+      return;
+    }
+    final v = c.value;
+    if (v.isCompleted) {
+      _resetWatchdogClock();
+      return;
+    }
+    // ready 之后 hasError 也必须走看门狗，而不是直接锁死错误页。
+    if (v.hasError) {
+      unawaited(_recoverFromWatchdog());
+      return;
+    }
+    if (!v.isPlaying && !v.isBuffering) {
+      _resetWatchdogClock();
+      return;
+    }
+    // 位置前进了：播放恢复健康，播过自愈提示后重新计数。
+    if ((v.position - _watchdogLastPosition).abs() >
+        const Duration(milliseconds: 300)) {
+      _watchdogLastPosition = v.position;
+      _watchdogLastAdvance = DateTime.now();
+      _watchdogRetried = false;
+      if (_watchdogRecoverPending) {
+        _watchdogRecoverPending = false;
+        if (mounted) fxToast(context, '已自动恢复');
+      }
+      return;
+    }
+    _watchdogLastPosition = v.position;
+    if (DateTime.now().difference(_watchdogLastAdvance) < _watchdogStall) {
+      return;
+    }
+    unawaited(_recoverFromWatchdog());
+  }
+
+  void _resetWatchdogClock() {
+    _watchdogLastPosition = _controller?.value.position ?? Duration.zero;
+    _watchdogLastAdvance = DateTime.now();
+  }
+
+  Future<void> _recoverFromWatchdog() async {
+    if (!mounted || _watchdogBusy || _switchingLine) return;
+    if (_watchdogRetried) {
+      await _watchdogNextLine();
+      return;
+    }
+    final c = _controller;
+    if (c == null) return;
+    final resume = c.value.position;
+    _watchdogRetried = true;
+    _watchdogBusy = true;
+    try {
+      // 重新 open 当前线路（含备用地址），成功后等 position 前进再提示恢复。
+      final ok = await _bootstrap(
+        seekToSaved: false,
+        saveOld: false,
+        resumeSeconds: resume.inMilliseconds / 1000.0,
+        playOverride: true,
+        reportFailure: false,
+      );
+      if (!mounted) return;
+      if (ok) {
+        _watchdogRecoverPending = true;
+        _resetWatchdogClock();
+      } else {
+        await _watchdogNextLine();
+      }
+    } finally {
+      _watchdogBusy = false;
+    }
+  }
+
+  /// 看门狗自愈失败：切下一条线路；没有下一条才显示错误 + 重试。
+  Future<void> _watchdogNextLine() async {
+    if (!mounted) return;
+    final lines = widget.detail?.lines ?? const <LineInfo>[];
+    String? next;
+    if (lines.length > 1) {
+      final index = lines.indexWhere((l) => l.id == _line);
+      next = lines[(index < 0 ? 0 : index + 1) % lines.length].id;
+      if (next == _line) next = null;
+    }
+    if (next == null || next.isEmpty) {
+      setState(() {
+        _loading = false;
+        _loadingHint = null;
+        _loadedEp = null;
+        _error = true;
+        _errorText = '播放中断，自动恢复失败，请重试或切换线路';
+        _uiPosition = null;
+        _uiDuration = null;
+      });
+      _showControls();
+      return;
+    }
+    // 新线路有自己的自愈额度，避免一条坏线路反复重试。
+    _watchdogRetried = false;
+    await _switchLine(next, _ep);
+  }
+
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
@@ -723,11 +868,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (_fullscreenActive || _loading || _error) return;
     final v = c.value;
     if (v.hasError) {
-      setState(() {
-        _error = true;
-        _errorText = '播放中断，请重试或切换线路';
-      });
-      _notifySourceFailed();
+      // ready 后出错不直接锁死：交给看门狗重开当前地址 / 切线路。
+      unawaited(_recoverFromWatchdog());
       return;
     }
     if (!v.isInitialized) return;
@@ -1441,17 +1583,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   ),
                 ),
                 PGlassIcon(
-                  icon: Icons.cast_rounded,
-                  size: 31,
-                  iconSize: 18,
-                  onTap: () => fxToast(context, '正在搜索附近投屏设备…'),
-                ),
-                const SizedBox(width: 6),
-                PGlassIcon(
                   icon: Icons.tv_rounded,
                   size: 31,
                   iconSize: 18,
-                  onTap: () => fxToast(context, 'TV 投屏：暂无可用设备'),
+                  tooltip: '投屏',
+                  onTap: () => fxToast(context, '投屏：暂无可用设备'),
                 ),
                 const SizedBox(width: 6),
                 PGlassIcon(
