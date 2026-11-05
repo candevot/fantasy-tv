@@ -138,7 +138,8 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   int _seenCount = 0;
   String _lastMessageKey = '';
 
-  bool _fillScreen = true;
+  /// 撑满全屏：默认关（contain 完整显示）；打开才 cover。
+  bool _fillScreen = false;
 
   @override
   void initState() {
@@ -570,7 +571,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 child: FxPlayerSurface(
                   key: ValueKey<int>(widget.videoEpoch),
                   player: player,
-                  fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+                  fit: fxFullscreenFit(_fillScreen),
                   subtitleBottom: controlsHeight + 12,
                 ),
               ),
@@ -585,7 +586,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 duration: const Duration(milliseconds: 200),
                 child: RawImage(
                   image: widget.frozenFrame,
-                  fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+                  fit: fxFullscreenFit(_fillScreen),
                   filterQuality: FilterQuality.low,
                 ),
               ),

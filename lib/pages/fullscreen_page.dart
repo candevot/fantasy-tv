@@ -31,7 +31,7 @@ class FullPlayerResult {
     this.qualityKey,
     this.loaded = false,
     this.requestLineChange = false,
-    this.fillScreen = true,
+    this.fillScreen = false,
   });
 
   /// 退出时的集数
@@ -59,7 +59,7 @@ class FullPlayerResult {
   /// 全屏错误页点了「换线路」：退出后由竖屏页负责切下一条线路。
   final bool requestLineChange;
 
-  /// 退出时「撑满全屏」开关的状态，交回竖屏继续记住。
+  /// 退出时「撑满全屏」开关的状态，交回竖屏继续记住（默认 contain）。
   final bool fillScreen;
 }
 
@@ -84,7 +84,7 @@ class FullPlayerPage extends StatefulWidget {
     this.rate = 1.0,
     this.qualityKey,
     this.canChangeLine = false,
-    this.fillScreen = true,
+    this.fillScreen = false,
   });
 
   /// 竖屏播放页正在使用的播放器实例（全屏直接复用）
@@ -116,7 +116,7 @@ class FullPlayerPage extends StatefulWidget {
   /// 竖屏是否还有其它线路可换（错误页展示「换线路」）
   final bool canChangeLine;
 
-  /// 全屏画面是否撑满屏幕（默认开）；关掉后 contain。
+  /// 全屏是否撑满（默认关、contain）；打开才 cover。
   final bool fillScreen;
 
   @override
@@ -242,8 +242,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 跳过片头片尾默认关，只记住开关，不自动跳（产品硬性要求）。
   bool _skipIntroOutro = false;
 
-  /// 撑满全屏：默认开（cover）；关掉后 contain。
-  bool _fillScreen = true;
+  /// 撑满全屏：默认关（contain 完整显示）；打开才 cover。
+  bool _fillScreen = false;
 
   Timer? _sleepTimer;
 
@@ -1940,12 +1940,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         children: [
           const ColoredBox(color: Colors.black),
           if (showVideo)
-            // 默认撑满：等比缩放裁掉多余边缘，不拉伸变形；
-            // 关闭「撑满全屏」后回到 contain（完整显示，可能上下留黑边）。
+            // 默认 contain：完整显示、不裁字幕，可能有细黑边；
+            // 只有打开「撑满全屏」才 cover（等比裁边、不拉伸变形）。
             FxPlayerSurface(
               key: ValueKey<int>(_videoEpoch),
               player: c,
-              fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+              fit: fxFullscreenFit(_fillScreen),
               subtitleBottom: controlsHeight + 12,
             ),
           // 切集 / 切清晰度：最后一帧垫在黑底上，首帧就绪后 200ms 淡出。
@@ -1954,7 +1954,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               child: FxSnapshotLayer(
                 bytes: _frozenFrame,
                 opaque: _freezeOpaque,
-                fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+                fit: fxFullscreenFit(_fillScreen),
               ),
             ),
         ],

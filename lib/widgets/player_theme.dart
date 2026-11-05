@@ -104,6 +104,16 @@ double? fxBufferedPercent(Duration buffered, Duration duration) {
 /// 字幕距播放器底部的安全距离：至少 96dp，始终高过底部控件区。
 const double fxSubtitleMinBottom = 96;
 
+/// 播放器默认画面适配：contain —— 等比完整显示，不裁字幕，可能有细黑边。
+const BoxFit kPlayerFit = BoxFit.contain;
+
+/// 「撑满全屏」打开后的画面适配：cover —— 等比撑满，裁掉多余边缘，不变形。
+const BoxFit kPlayerFillFit = BoxFit.cover;
+
+/// 按「撑满全屏」开关取全屏画面适配：默认 contain，只有开关打开才 cover。
+BoxFit fxFullscreenFit(bool fillScreen) =>
+    fillScreen ? kPlayerFillFit : kPlayerFit;
+
 /// 播放器画面：固定等比完整显示，并把字幕抬到控件区上方。
 ///
 /// [subtitleBottom] 必须不小于 [fxSubtitleMinBottom]；全屏时传
@@ -112,7 +122,7 @@ class FxPlayerSurface extends StatelessWidget {
   const FxPlayerSurface({
     super.key,
     required this.player,
-    this.fit = BoxFit.contain,
+    this.fit = kPlayerFit,
     this.subtitleBottom = fxSubtitleMinBottom,
   });
 
@@ -168,16 +178,27 @@ Future<void> fxSaveProgress(String videoId, int ep, double seconds) async {
   }
 }
 
-/// 「撑满全屏」开关的存储 key。默认开：全屏用 cover 裁边不变形；
-/// 关掉后全屏回到 contain（完整显示，可能上下留黑边）。
+/// 「撑满全屏」开关的存储 key。默认关：全屏 contain 完整显示（可能留细黑边）；
+/// 只有用户明确打开后才用 cover 撑满裁边。
 const String fxFillScreenKey = 'player_fill_screen';
+
+/// 画面适配默认值迁移标记：旧版本默认 cover（true），升级后首次读取时
+/// 把旧值强制重置为 contain（false）一次，之后尊重用户在开关里的选择。
+const String fxFillScreenMigratedKey = 'player_fill_screen_contain_migrated_v1';
 
 Future<bool> fxLoadFillScreen() async {
   try {
     final sp = await SharedPreferences.getInstance();
-    return sp.getBool(fxFillScreenKey) ?? true;
+    if (!(sp.getBool(fxFillScreenMigratedKey) ?? false)) {
+      // 升级后首次启动：老版本可能存过 cover，一律回到 contain。
+      // 迁移只做一次，写入标记后不再覆盖用户之后的开关选择。
+      await sp.setBool(fxFillScreenKey, false);
+      await sp.setBool(fxFillScreenMigratedKey, true);
+      return false;
+    }
+    return sp.getBool(fxFillScreenKey) ?? false;
   } catch (_) {
-    return true;
+    return false;
   }
 }
 
@@ -185,6 +206,8 @@ Future<void> fxSaveFillScreen(bool value) async {
   try {
     final sp = await SharedPreferences.getInstance();
     await sp.setBool(fxFillScreenKey, value);
+    // 用户显式设置过就视为已完成迁移，避免下次启动被重置。
+    await sp.setBool(fxFillScreenMigratedKey, true);
   } catch (_) {
     // 本地存储失败不影响播放
   }

@@ -167,8 +167,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 进入全屏时随结果带回的真实倍速，切集时沿用。
   double _rate = 1.0;
 
-  /// 全屏画面是否撑满（cover）。默认开；关掉后全屏 contain。
-  bool _fillScreen = true;
+  /// 全屏画面是否撑满（cover）。默认关（全屏 contain）；打开才 cover。
+  bool _fillScreen = false;
 
   bool _openingFullscreen = false;
   bool _fullscreenActive = false;
