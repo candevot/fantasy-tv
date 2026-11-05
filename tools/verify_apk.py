@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -268,6 +269,41 @@ def verify_elf(gate, zf, names):
                              ', '.join(aligns))
 
 
+def verify_zip_alignment(gate, apk, zf):
+    """纯 Python 校验：未压缩 .so 在 zip 内的数据偏移必须 16KB 对齐。
+
+    zipalign -P 16 是同一件事，但旧版 zipalign 没有 -P；这里不依赖它，
+    保证本地/CI 都能验证 APK 本身，而不是只验证工具输出。
+    """
+    short_names = []
+    with open(apk, 'rb') as handle:
+        for info in zf.infolist():
+            name = info.filename
+            if not (name.startswith('lib/arm64-v8a/') and
+                    name.endswith('.so')):
+                continue
+            short = name.split('/')[-1]
+            short_names.append(short)
+            if info.compress_type != zipfile.ZIP_STORED:
+                gate.fail('%s stored uncompressed' % short,
+                          'compress_type=%d' % info.compress_type)
+                continue
+            handle.seek(info.header_offset)
+            header = handle.read(30)
+            if len(header) != 30:
+                gate.fail('%s local zip header' % short)
+                continue
+            fields = struct.unpack('<IHHHHHIIIHH', header)
+            name_len, extra_len = fields[-2], fields[-1]
+            data_offset = info.header_offset + 30 + name_len + extra_len
+            gate.require('%s zip offset 16KB aligned' % short,
+                         data_offset % 0x4000 == 0,
+                         '0x%x (mod 0x4000=%d)'
+                         % (data_offset, data_offset % 0x4000))
+    if not short_names:
+        gate.fail('arm64 .so entries for zip alignment check')
+
+
 def verify_signature(gate, apk):
     apksigner = find_tool('apksigner')
     if apksigner is None:
@@ -286,6 +322,12 @@ def verify_zipalign(gate, apk):
     zipalign = find_tool('zipalign')
     if zipalign is None:
         gate.skip('zipalign -P 16', 'zipalign not found')
+        return
+    help_out = run([zipalign, '-h'], echo=False)
+    if re.search(r'(^|\s)-P(\s|$|<)', help_out.stdout) is None:
+        gate.skip('zipalign -P 16',
+                  'this zipalign build has no -P option; the pure-Python '
+                  '16KB offset check above is authoritative')
         return
     proc = run([zipalign, '-c', '-P', '16', '-v', '4', apk], echo=False)
     tail = [line for line in proc.stdout.splitlines() if line.strip()][-3:]
@@ -306,6 +348,7 @@ def main():
 
     zf = verify_zip(gate, apk)
     if zf is not None:
+        verify_zip_alignment(gate, apk, zf)
         verify_elf(gate, zf, zf.namelist())
         zf.close()
     verify_manifest(gate, apk)
