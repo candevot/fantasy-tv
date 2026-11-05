@@ -671,6 +671,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               headers: source.headers,
               play: true,
               waitForWarm: waitForWarm,
+              direct: source.direct && source.isHls,
             )
             .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) return;
@@ -730,6 +731,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     required Map<String, String> headers,
     required Duration resume,
     required bool wasPlaying,
+    bool direct = false,
   }) async {
     final c = _controller;
     if (c == null) return false;
@@ -740,7 +742,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _firstFrame = false;
     try {
       await c
-          .open(url, headers: headers, play: wasPlaying)
+          .open(
+            url,
+            headers: headers,
+            play: wasPlaying,
+            direct: direct,
+          )
           .timeout(_openReadyTimeout);
       if (!mounted) return false;
       final duration = c.value.duration;
@@ -881,6 +888,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           headers: headersFor(url),
           resume: resume,
           wasPlaying: wasPlaying,
+          direct: info.direct && info.isHls,
         )) {
           ok = true;
           break;
@@ -906,6 +914,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             headers: headersFor(url),
             resume: resume,
             wasPlaying: wasPlaying,
+            direct: info.direct && info.isHls,
           )) {
             restored = true;
             if (oldUrl == null || url != oldUrl) restoredKey = null;
@@ -1090,6 +1099,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       headers: _watchdogHeaders(url),
       resume: resume,
       wasPlaying: true,
+      direct: (_info?.direct ?? false) && (_info?.isHls ?? false),
     );
     _watchdogBusy = false;
     if (!mounted) return;
@@ -1295,6 +1305,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       headers: headers,
       resume: resume,
       wasPlaying: true,
+      direct: (_info?.direct ?? false) && (_info?.isHls ?? false),
     );
     if (!mounted || token != _loadToken) return;
     if (!ok) {

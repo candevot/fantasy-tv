@@ -836,6 +836,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               headers: info.headers,
               play: shouldPlay,
               waitForWarm: waitForWarm,
+              direct: info.direct && info.isHls,
             )
             .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) {

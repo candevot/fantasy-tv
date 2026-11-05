@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../api.dart';
 import '../models.dart';
+import 'local_hls_proxy.dart';
 
 /// FxPlayer 打开/播放失败时抛出的异常，调用方可据此尝试备用地址。
 class FxPlayerException implements Exception {
@@ -234,6 +235,9 @@ class FxPlayer implements Listenable {
   /// 本集是否已经把起播小缓冲提升到稳定值。
   bool _cacheRaised = false;
 
+  /// 直链 HLS 的本地分片代理；只在 direct 模式下懒创建。
+  LocalHlsProxy? _hlsProxy;
+
   /// 底层 media_kit Player，需要高级能力（音轨/字幕/属性）时可直接使用。
   Player get player => _player;
 
@@ -299,21 +303,24 @@ class FxPlayer implements Listenable {
   /// [headers] 会透传给 libmpv（Referer / User-Agent 等）。
   /// [play] 为 true 时 open 后立即起播（首帧优先），不等待全部 metadata；
   /// 默认 false 保持旧调用方（一起看等）先 seek 再播的语义。
+  /// [direct] 为 true（调用方已确认是 HLS 直链）时，先走本地分片
+  /// 代理（多连接 Range 下载 + 预取）；代理启动失败自动回退直连。
   /// 打不开、解码失败或超时会抛出 [FxPlayerException]，方便上层切换备用地址。
   Future<void> open(
     String url, {
     Map<String, String> headers = const <String, String>{},
     bool play = false,
     bool waitForWarm = false,
+    bool direct = false,
   }) {
     if (_disposed) {
       return Future<void>.error(const FxPlayerException('播放器已释放'));
     }
-    final key = _openKey(url, headers);
+    final key = _openKey(url, headers, direct);
     final pending = _opening;
     // 同一 url + headers 正在打开：忽略重复请求，复用同一个结果。
     if (pending != null && pending.key == key) return pending.future;
-    final future = _openInternal(url, headers, play, waitForWarm);
+    final future = _openInternal(url, headers, play, waitForWarm, direct);
     final request = _OpenRequest(key, future);
     _opening = request;
     return future.whenComplete(() {
@@ -321,13 +328,18 @@ class FxPlayer implements Listenable {
     });
   }
 
-  static String _openKey(String url, Map<String, String> headers) {
-    if (headers.isEmpty) return url;
+  static String _openKey(
+    String url,
+    Map<String, String> headers,
+    bool direct,
+  ) {
+    final suffix = direct ? '|direct=1' : '';
+    if (headers.isEmpty) return '$url$suffix';
     final entries = headers.entries
         .map((entry) => '${entry.key}=${entry.value}')
         .toList()
       ..sort();
-    return '$url|${entries.join('&')}';
+    return '$url$suffix|${entries.join('&')}';
   }
 
   Future<void> _openInternal(
@@ -335,6 +347,7 @@ class FxPlayer implements Listenable {
     Map<String, String> headers,
     bool play,
     bool waitForWarm,
+    bool direct,
   ) async {
     final token = ++_openToken;
     _cacheRaised = false;
@@ -346,13 +359,44 @@ class FxPlayer implements Listenable {
     // 避免出现未处理的异步异常。
     unawaited(ready.future.catchError((Object _) {}));
     try {
-      // 1) 先预热 m3u8（GET master playlist，解析并预热子 playlist 后立刻 open）。
-      //    预热有硬预算且失败静默；缓存命中时只后台预热、不拖慢起播。
-      final warmup = _FxHlsWarmup.prepare(url, headers);
-      if (waitForWarm) {
-        await warmup;
-      } else {
-        unawaited(warmup);
+      // 1) 直链 HLS：本机代理把分片切成多连接 Range 下载并预取。
+      //    代理失败（端口占用 / 拉列表失败 / 超时）就回退直连。
+      var playbackUrl = url;
+      var playbackHeaders = headers;
+      var proxied = false;
+      if (direct) {
+        final proxy = _hlsProxy ??= LocalHlsProxy(log: debugPrint);
+        try {
+          final localUrl = await proxy
+              .proxy(url, headers)
+              .timeout(const Duration(seconds: 4));
+          if (_disposed || token != _openToken) return;
+          if (localUrl.isNotEmpty) {
+            playbackUrl = localUrl;
+            playbackHeaders = const <String, String>{};
+            proxied = true;
+          }
+        } catch (error) {
+          debugPrint('FxPlayer: 本地 HLS 代理启动失败，回退直连: $error');
+          // 只有当前这次 open 仍是“最新”时才销毁代理；快速连切时旧 open
+          // 的失败不能把新 open 正在用的代理关掉。
+          if (!_disposed && token == _openToken) {
+            final failed = _hlsProxy;
+            _hlsProxy = null;
+            unawaited(failed?.dispose());
+          }
+        }
+      }
+      if (_disposed || token != _openToken) return;
+
+      // 2) 非代理路径保留原有 m3u8 预热；代理路径本身已经拉过列表并预取。
+      if (!proxied) {
+        final warmup = _FxHlsWarmup.prepare(url, headers);
+        if (waitForWarm) {
+          await warmup;
+        } else {
+          unawaited(warmup);
+        }
       }
       if (_disposed || token != _openToken) return;
       // 3) 新一集回到 12MB 小缓冲起步，首帧后再升到 32MB。
@@ -360,8 +404,8 @@ class FxPlayer implements Listenable {
       await _player
           .open(
             Media(
-              url,
-              httpHeaders: headers.isEmpty ? null : headers,
+              playbackUrl,
+              httpHeaders: playbackHeaders.isEmpty ? null : playbackHeaders,
             ),
             // 5) 立即解除暂停，先出画面，不等 duration / 全部元数据。
             play: play,
@@ -472,10 +516,18 @@ class FxPlayer implements Listenable {
     }
     _subscriptions.clear();
     _listeners.clear();
+    final hlsProxy = _hlsProxy;
+    _hlsProxy = null;
+    hlsProxy?.cancelPrefetch();
     try {
       await _player.dispose();
     } catch (_) {
       // 释放失败不影响页面退出。
+    }
+    try {
+      await hlsProxy?.dispose();
+    } catch (_) {
+      // 本地代理关闭失败不影响页面退出。
     }
   }
 

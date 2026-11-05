@@ -484,6 +484,10 @@ class PlayInfo {
   final List<String> backup;
   final Map<String, String> headers;
 
+  /// 服务端是否已解析出可直接播放的直链（此时 m3u8 才能走本地分片代理）；
+  /// 老服务端没这个字段时保持 false，行为与升级前一致。
+  final bool direct;
+
   PlayInfo({
     required this.url,
     required this.type,
@@ -492,7 +496,12 @@ class PlayInfo {
     required this.headers,
     required this.parsePage,
     required this.lineName,
+    this.direct = false,
   });
+
+  /// 是否是 HLS 播放列表（平台线路的地址常是 /api/fyplay 这类无 .m3u8
+  /// 后缀的包装地址，必须看 type，不能只看 URL）。
+  bool get isHls => type.trim().toLowerCase() == 'hls';
 
   factory PlayInfo.fromJson(Map<String, dynamic> j) {
     final url = _asStr(j['url']);
@@ -518,6 +527,7 @@ class PlayInfo {
       quality: quality,
       backup: _asStrList(j['backup']),
       headers: _playHeaders(url, _asMap(j['headers'])),
+      direct: j['direct'] == true,
     );
   }
 }
