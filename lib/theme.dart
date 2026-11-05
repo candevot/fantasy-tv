@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import 'api.dart';
+
 /// 大字体上限：跟随系统字号，但最多放大到 1.3 倍。
 /// 超过 1.3 倍的极端字号会把固定高度的卡片 / 导航撑破，统一在根部截断。
 TextScaler fxClampTextScaler(TextScaler scaler) =>
@@ -39,6 +41,198 @@ class FxTheme {
       ),
       splashFactory: InkSparkle.splashFactory,
     );
+  }
+}
+
+/* ========================================================================== */
+/*  网络图片：统一代理 / 微光占位 / 淡入                                      */
+/* ========================================================================== */
+
+const Color _fxImageBase = Color(0xFFE6E9EF);
+const Color _fxImageHighlight = Color(0xFFF4F6FA);
+
+/// 图片代理后的 [ImageProvider]；空地址 / 非法地址返回 null。
+///
+/// 与 [FxNetworkImage] 使用完全相同的 URL 和 cacheWidth，首页
+/// [precacheImage] 才能命中同一份缓存，不会重复请求。
+ImageProvider<Object>? fxImageProvider(
+  String url, {
+  int? cacheWidth,
+  int? cacheHeight,
+}) {
+  final src = Api.imgProxy(url);
+  if (src.isEmpty) return null;
+  return ResizeImage.resizeIfNeeded(
+    cacheWidth,
+    cacheHeight,
+    NetworkImage(src),
+  );
+}
+
+/// 灰底 + 渐变微光的加载占位，1.2s 循环。
+/// TickerMode 关闭（页面被盖住 / Tab 切走 / 应用退到后台）时自动暂停。
+class FxShimmer extends StatefulWidget {
+  const FxShimmer({super.key});
+
+  @override
+  State<FxShimmer> createState() => _FxShimmerState();
+}
+
+class _FxShimmerState extends State<FxShimmer>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1200),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          final t = _controller.value;
+          return Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment(-2.4 + 4.8 * t, 0),
+                end: Alignment(0.4 + 4.8 * t, 0),
+                colors: const <Color>[
+                  _fxImageBase,
+                  _fxImageHighlight,
+                  _fxImageBase,
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// 图片失败 / 地址无效占位：灰底 + 影片图标（不出现纯白块）。
+class FxImageFallback extends StatelessWidget {
+  const FxImageFallback({
+    super.key,
+    this.icon = Icons.movie_outlined,
+    this.iconSize = 30,
+    this.iconColor = const Color(0xFF98A4B5),
+  });
+
+  final IconData icon;
+  final double iconSize;
+  final Color iconColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: _fxImageBase,
+      child: Center(
+        child: Icon(icon, size: iconSize, color: iconColor),
+      ),
+    );
+  }
+}
+
+/// 首帧 150ms 淡入：占位切到图片时不闪。
+class FxFadeIn extends StatelessWidget {
+  const FxFadeIn({
+    super.key,
+    required this.child,
+    this.duration = const Duration(milliseconds: 150),
+  });
+
+  final Widget child;
+  final Duration duration;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: duration,
+      curve: Curves.easeOut,
+      child: child,
+      builder: (context, value, child) => Opacity(opacity: value, child: child),
+    );
+  }
+}
+
+/// 统一网络图组件：
+/// - 地址统一走 [Api.imgProxy]，本站 / 本机地址直连；
+/// - 加载中灰底微光，失败显示图标，首帧 150ms 淡入；
+/// - 同一 URL 复用 ImageProvider 缓存，列表回收不重复请求。
+class FxNetworkImage extends StatelessWidget {
+  const FxNetworkImage({
+    super.key,
+    required this.url,
+    this.fit = BoxFit.cover,
+    this.width,
+    this.height,
+    this.cacheWidth,
+    this.cacheHeight,
+    this.filterQuality = FilterQuality.low,
+    this.fallback,
+    this.fallbackIcon = Icons.movie_outlined,
+    this.fallbackIconSize = 30,
+    this.semanticLabel,
+  });
+
+  final String url;
+  final BoxFit fit;
+  final double? width;
+  final double? height;
+  final int? cacheWidth;
+  final int? cacheHeight;
+  final FilterQuality filterQuality;
+  final Widget? fallback;
+  final IconData fallbackIcon;
+  final double fallbackIconSize;
+  final String? semanticLabel;
+
+  Widget _fallback() {
+    final custom = fallback;
+    if (custom != null) return custom;
+    return FxImageFallback(
+      icon: fallbackIcon,
+      iconSize: fallbackIconSize,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = fxImageProvider(
+      url,
+      cacheWidth: cacheWidth,
+      cacheHeight: cacheHeight,
+    );
+    Widget image;
+    if (provider == null) {
+      image = _fallback();
+    } else {
+      image = Image(
+        image: provider,
+        width: width,
+        height: height,
+        fit: fit,
+        filterQuality: filterQuality,
+        semanticLabel: semanticLabel,
+        frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+          if (wasSynchronouslyLoaded) return child;
+          if (frame == null) return const FxShimmer();
+          return FxFadeIn(child: child);
+        },
+        errorBuilder: (context, error, stackTrace) => _fallback(),
+      );
+    }
+    if (width == null && height == null) return image;
+    return SizedBox(width: width, height: height, child: image);
   }
 }
 

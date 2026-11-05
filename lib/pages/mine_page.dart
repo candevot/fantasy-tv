@@ -447,14 +447,14 @@ class _MinePageState extends State<MinePage> {
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) => _avatarFallback(user),
       );
-    } else if (user != null && user.avatar.startsWith('http')) {
-      content = Image.network(
-        user.avatar,
+    } else if (user != null && user.avatar.trim().isNotEmpty) {
+      content = FxNetworkImage(
+        url: user.avatar,
         width: 64,
         height: 64,
         cacheWidth: cacheWidth,
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _avatarFallback(user),
+        fallback: _avatarFallback(user),
       );
     } else {
       content = _avatarFallback(user);

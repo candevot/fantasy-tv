@@ -132,6 +132,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _error = null;
         _bannerPage.value = 0;
       });
+      _precacheFirstCovers(_arrangeSections(data.sections), channel);
       _restartAuto();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _bannerCtrl.hasClients) {
@@ -160,6 +161,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 96),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
     ));
+  }
+
+  /// 首页只预热前 6 张海报封面，其余（含横幅）按需懒加载。
+  /// 宽度按 FxSectionRow 的 4 列布局计算，保证 precache 与 FxCover
+  /// 使用同一个 ImageProvider 缓存键，不会各请求一次。
+  void _precacheFirstCovers(List<HomeSection> sections, String channel) {
+    final covers = <String>[
+      for (final section in sections)
+        for (final item in section.items) item.cover,
+    ];
+    if (covers.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _channel != channel) return;
+      final media = MediaQuery.maybeOf(context);
+      if (media == null) return;
+      final contentWidth = media.size.width - media.padding.horizontal;
+      // 与 FxSectionRow 默认值一致：horizontalPadding 16、gap 8、visibleCount 4。
+      final posterWidth = (contentWidth - 16 * 2 - 8 * 3) / 4;
+      if (!posterWidth.isFinite || posterWidth <= 0) return;
+      final cacheWidth =
+          (posterWidth * media.devicePixelRatio).round().clamp(64, 4096);
+      final seen = <String>{};
+      var count = 0;
+      for (final cover in covers) {
+        if (count >= 6) break;
+        final src = Api.imgProxy(cover);
+        if (src.isEmpty || !seen.add(src)) continue;
+        final provider = fxImageProvider(cover, cacheWidth: cacheWidth);
+        if (provider == null) continue;
+        count++;
+        unawaited(precacheImage(
+          provider,
+          context,
+          onError: (Object error, StackTrace? stackTrace) {},
+        ));
+      }
+    });
   }
 
   Future<void> _loadLive() async {

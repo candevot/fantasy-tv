@@ -28,21 +28,14 @@ String fxCategoryName(String key) {
   }
 }
 
-/// 封面地址：相对代理地址补全，协议相对地址补 https，data: 地址原样返回。
-String fxCoverUrl(String url) {
-  final u = url.trim();
-  if (u.isEmpty) return '';
-  if (u.startsWith('data:')) return u;
-  // 协议相对地址（//pic.example/a.jpg）必须补 https，否则 Api.abs 会拼成 host//...
-  if (u.startsWith('//')) return 'https:$u';
-  return Api.abs(u);
-}
+/// 封面地址：统一走 [Api.imgProxy]；本站 / 本机 http 地址直连。
+String fxCoverUrl(String url) => Api.imgProxy(url);
 
 /// 封面是否可用：空串 / data: 占位图 / 非 http(s)、协议相对、站内相对地址都算无效。
 /// 无效时 FxCover 统一显示灰底 + 影片图标的占位图。
 bool fxUsableCover(String url) {
   final u = url.trim();
-  if (u.isEmpty) return false;
+  if (u.isEmpty || u.startsWith('data:')) return false;
   if (u.startsWith('//')) return true;
   final lower = u.toLowerCase();
   if (lower.startsWith('http://') || lower.startsWith('https://')) return true;
@@ -50,7 +43,8 @@ bool fxUsableCover(String url) {
   return false;
 }
 
-/// 网络封面：加载失败 / 空地址 / 非法 URL 时统一显示灰底影片图标占位
+/// 网络封面：统一走图片代理；加载中灰底微光，失败 / 空地址 / 非法 URL
+/// 显示灰底影片图标，首帧 150ms 淡入。
 class FxCover extends StatelessWidget {
   const FxCover({
     super.key,
@@ -69,54 +63,30 @@ class FxCover extends StatelessWidget {
   final bool big;
   final bool showText;
 
-  /// 统一占位图：灰底 + 影片图标。不再按片名生成彩色块。
-  /// 空地址、data: 占位图、非法 URL 都走这里。
-  Widget _placeholder() {
-    final iconSize = big ? 44.0 : 30.0;
-    return ColoredBox(
-      color: const Color(0xFFE6E9EF),
-      child: Center(
-        child: Icon(
-          Icons.movie_outlined,
-          size: iconSize,
-          color: const Color(0xFF98A4B5),
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final usable = fxUsableCover(url);
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: LayoutBuilder(
         builder: (context, constraints) {
           // 按真实显示宽度 × 屏幕像素比解码：同一张 2K 海报在 4 列网格里
-          // 只解码到 ~360px，滚动时内存和 GPU 上传都小一个数量级。
+          // 只解码到实际像素宽度，滚动时内存和 GPU 上传都小一个数量级。
+          // 首页 precache 用同一宽度，预加载和正式加载共享缓存。
           final dpr = MediaQuery.devicePixelRatioOf(context);
           final width = constraints.maxWidth;
           final cacheWidth = width.isFinite && width > 0
               ? (width * dpr).round().clamp(64, 4096).toInt()
               : null;
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              _placeholder(),
-              if (usable)
-                Image.network(
-                  fxCoverUrl(url),
-                  fit: fit,
-                  cacheWidth: cacheWidth,
-                  gaplessPlayback: true,
-                  filterQuality: big ? FilterQuality.medium : FilterQuality.low,
-                  loadingBuilder: (context, child, progress) {
-                    if (progress == null) return child;
-                    return _placeholder();
-                  },
-                  errorBuilder: (context, error, stack) => _placeholder(),
-                ),
-            ],
+          return ColoredBox(
+            color: const Color(0xFFE6E9EF),
+            child: FxNetworkImage(
+              url: url,
+              fit: fit,
+              cacheWidth: cacheWidth,
+              filterQuality: big ? FilterQuality.medium : FilterQuality.low,
+              fallbackIconSize: big ? 44 : 30,
+              semanticLabel: title.trim().isEmpty ? null : title,
+            ),
           );
         },
       ),

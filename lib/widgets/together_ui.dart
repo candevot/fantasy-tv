@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../api.dart';
 import '../theme.dart';
+import 'fx_cards.dart';
 
 /// 一起看房间页统一的时间常量。
 ///
@@ -255,15 +256,15 @@ class TogetherAvatar extends StatelessWidget {
     final trimmed = name.trim();
     final initial = trimmed.isEmpty ? '影' : trimmed.characters.first;
     final image = avatar.startsWith('http://') || avatar.startsWith('https://')
-        ? Image.network(
-            avatar,
+        ? FxNetworkImage(
+            url: avatar,
             width: size,
             height: size,
             cacheWidth: (size * MediaQuery.devicePixelRatioOf(context))
                 .round()
                 .clamp(24, 512),
             fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => _fallback(initial, color),
+            fallback: _fallback(initial, color),
           )
         : _fallback(initial, color);
 
@@ -336,7 +337,8 @@ class TogetherAvatar extends StatelessWidget {
   }
 }
 
-/// 海报封面。真实 http 图直接加载，data URI / 空值统一降级为品牌渐变色块。
+/// 海报封面：与首页 / 分类共用 [FxCover]，统一走图片代理，
+/// 加载中灰底微光、失败灰底影片图标。
 class TogetherCover extends StatelessWidget {
   const TogetherCover({
     super.key,
@@ -357,89 +359,14 @@ class TogetherCover extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = togetherCoverUrl(cover);
-    final isHttp = url.startsWith('http://') || url.startsWith('https://');
-    final child = isHttp
-        ? Image.network(
-            url,
-            width: width,
-            height: height,
-            cacheWidth: width == null
-                ? null
-                : (width! * MediaQuery.devicePixelRatioOf(context))
-                    .round()
-                    .clamp(48, 2048),
-            fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => _fallback(),
-            loadingBuilder: (_, child, progress) =>
-                progress == null ? child : _fallback(),
-          )
-        : _fallback();
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(radius),
-      child: child,
+    final image = FxCover(
+      url: cover,
+      title: title,
+      radius: radius,
+      big: height != null && height! >= 160,
     );
-  }
-
-  Widget _fallback() {
-    final color = togetherColor(title.isEmpty ? cover : title);
-    return Container(
-      width: width,
-      height: height,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            color,
-            Color.lerp(color, const Color(0xFF1B2430), .35) ?? color
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      ),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          Positioned(
-            right: -18,
-            top: -20,
-            child: Container(
-              width: 74,
-              height: 74,
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(.14),
-                shape: BoxShape.circle,
-              ),
-            ),
-          ),
-          Center(
-            child: Text(
-              title.trim().isEmpty ? '影' : title.trim().characters.first,
-              style: TextStyle(
-                color: Colors.white.withOpacity(.92),
-                fontSize: (height == null || height! <= 0) ? 30 : height! * .3,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-          if (showTitle && title.isNotEmpty)
-            Positioned(
-              left: 6,
-              right: 6,
-              bottom: 5,
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 8.5,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
+    if (width == null && height == null) return image;
+    return SizedBox(width: width, height: height, child: image);
   }
 }
 

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
 import 'player_theme.dart';
@@ -766,15 +765,15 @@ class DetailCommentTile extends StatelessWidget {
     final url = item.avatar.trim();
     if (url.isEmpty || url.startsWith('data:')) return fallback;
     return ClipOval(
-      child: Image.network(
-        Api.abs(url),
+      child: FxNetworkImage(
+        url: url,
         width: 34,
         height: 34,
         cacheWidth: (34 * MediaQuery.devicePixelRatioOf(context))
             .round()
             .clamp(34, 256),
         fit: BoxFit.cover,
-        errorBuilder: (context, error, stack) => fallback,
+        fallback: fallback,
       ),
     );
   }
