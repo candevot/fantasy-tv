@@ -31,6 +31,7 @@ class FullPlayerResult {
     this.qualityKey,
     this.loaded = false,
     this.requestLineChange = false,
+    this.fillScreen = true,
   });
 
   /// 退出时的集数
@@ -57,6 +58,9 @@ class FullPlayerResult {
 
   /// 全屏错误页点了「换线路」：退出后由竖屏页负责切下一条线路。
   final bool requestLineChange;
+
+  /// 退出时「撑满全屏」开关的状态，交回竖屏继续记住。
+  final bool fillScreen;
 }
 
 /// 全屏横屏播放页
@@ -79,6 +83,7 @@ class FullPlayerPage extends StatefulWidget {
     this.rate = 1.0,
     this.qualityKey,
     this.canChangeLine = false,
+    this.fillScreen = true,
   });
 
   /// 竖屏播放页正在使用的播放器实例（全屏直接复用）
@@ -106,6 +111,9 @@ class FullPlayerPage extends StatefulWidget {
 
   /// 竖屏是否还有其它线路可换（错误页展示「换线路」）
   final bool canChangeLine;
+
+  /// 全屏画面是否撑满屏幕（默认开）；关掉后 contain。
+  final bool fillScreen;
 
   @override
   State<FullPlayerPage> createState() => _FullPlayerPageState();
@@ -179,6 +187,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 跳过片头片尾默认关，只记住开关，不自动跳（产品硬性要求）。
   bool _skipIntroOutro = false;
+
+  /// 撑满全屏：默认开（cover）；关掉后 contain。
+  bool _fillScreen = true;
+
   Timer? _sleepTimer;
 
   /// 全屏截图：截取整个播放器层（含控制条）。
@@ -319,6 +331,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _controller = c;
     _info = widget.playInfo;
     _qualityKey = widget.qualityKey ?? _qualityKeyFor(widget.playInfo);
+    _fillScreen = widget.fillScreen;
     _rate = widget.rate > 0 ? widget.rate : (c.rate > 0 ? c.rate : 1.0);
     _loadedEp = c.value.isInitialized ? _ep : null;
     _loading = !c.value.isInitialized;
@@ -1300,6 +1313,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!_showQuality) _wake();
   }
 
+  void _setFillScreen(bool value) {
+    if (_fillScreen == value) return;
+    setState(() => _fillScreen = value);
+    unawaited(fxSaveFillScreen(value));
+  }
+
   Future<void> _openMorePanel() async {
     _hideTimer?.cancel();
     if (mounted) setState(() => _controls = true);
@@ -1307,6 +1326,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       context,
       loopMode: _loopMode,
       skipIntroOutro: _skipIntroOutro,
+      fillScreen: _fillScreen,
+      onFillChanged: _setFillScreen,
       onLoopChanged: (mode) {
         if (!mounted) return;
         setState(() => _loopMode = mode);
@@ -1406,6 +1427,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         info: _info,
         rate: _rate,
         qualityKey: _qualityKey,
+        fillScreen: _fillScreen,
         // 只有这一集真的打开成功（未处于错误态）才允许竖屏同步集数。
         loaded:
             _loadedEp == _ep && !_error && (c != null && c.value.isInitialized),
@@ -1541,12 +1563,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 再留 12dp 间距，字幕层就不会压在进度条/按钮上。
     final controlsHeight =
         26.0 + 40.0 + 4.0 + 34.0 + 6.0 + MediaQuery.paddingOf(context).bottom;
-    // 画面固定自适应：等比完整显示并居中，不裁剪、不变形。
+    // 默认撑满：等比缩放裁掉多余边缘，不拉伸变形；
+    // 关闭「撑满全屏」后回到 contain（完整显示，可能上下留黑边）。
     return ClipRect(
       child: SizedBox.expand(
         child: FxPlayerSurface(
           player: c,
-          fit: BoxFit.contain,
+          fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
           subtitleBottom: controlsHeight + 12,
         ),
       ),

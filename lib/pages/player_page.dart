@@ -139,6 +139,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 跳过片头片尾默认关，只记住开关，不自动跳（产品硬性要求）。
   bool _skipIntroOutro = false;
 
+  /// 全屏画面是否撑满（cover）。默认开；关掉后全屏 contain。
+  bool _fillScreen = true;
+
   Timer? _sleepTimer;
 
   bool _openingFullscreen = false;
@@ -198,7 +201,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       unawaited(_saveProgress());
     });
     _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
+    unawaited(_loadFillScreen());
     _bootstrap(seekToSaved: true, saveOld: false);
+  }
+
+  Future<void> _loadFillScreen() async {
+    final value = await fxLoadFillScreen();
+    if (!mounted) return;
+    setState(() => _fillScreen = value);
+  }
+
+  void _setFillScreen(bool value) {
+    if (_fillScreen == value) return;
+    setState(() => _fillScreen = value);
+    unawaited(fxSaveFillScreen(value));
   }
 
   @override
@@ -1061,6 +1077,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       context,
       loopMode: _loopMode,
       skipIntroOutro: _skipIntroOutro,
+      fillScreen: _fillScreen,
+      onFillChanged: _setFillScreen,
       onLoopChanged: (mode) {
         if (!mounted) return;
         setState(() => _loopMode = mode);
@@ -1175,6 +1193,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             rate: realRate,
             qualityKey: _qualityKey,
             canChangeLine: widget.onChangeLine != null,
+            fillScreen: _fillScreen,
           ),
           transitionsBuilder: (context, animation, secondaryAnimation, child) {
             return FadeTransition(opacity: animation, child: child);
@@ -1196,6 +1215,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _info = result.info ?? _info;
       }
       _qualityKey = result.qualityKey;
+      if (result.fillScreen != _fillScreen) {
+        _fillScreen = result.fillScreen;
+        unawaited(fxSaveFillScreen(_fillScreen));
+      }
       if (result.rate > 0) {
         _rate = result.rate;
         try {

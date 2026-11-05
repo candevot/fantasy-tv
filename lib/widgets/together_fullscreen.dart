@@ -7,13 +7,16 @@ import 'package:flutter/material.dart';
 
 import '../services/fx_player.dart';
 import '../theme.dart';
+import 'fs_panels.dart';
+import 'player_more_panel.dart';
+import 'player_theme.dart';
 import 'together_chat.dart';
 import 'together_ui.dart';
 
 /// 一起看 · 全屏播放。
 ///
-/// 横屏铺满视频，控件 3 秒自动隐藏；聊天以半透明玻璃气泡悬浮在视频上，
-/// 可拖动、可收起，新消息会浮出提示并累计未读角标。
+/// 横屏铺满视频，控件 3 秒自动隐藏；聊天默认收起为左下角一个 32dp 小圆钮，
+/// 点开是半透明玻璃小面板（靠左下、内含消息与输入框），有新消息只亮红点。
 class TogetherFullscreenView extends StatefulWidget {
   const TogetherFullscreenView({
     super.key,
@@ -32,6 +35,11 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.onSeek,
     required this.onHostOnly,
     required this.onShowMembers,
+    required this.onEpisodes,
+    required this.onNext,
+    required this.onQuality,
+    required this.onInvite,
+    required this.onExitRoom,
     required this.onSendChat,
   });
 
@@ -52,6 +60,11 @@ class TogetherFullscreenView extends StatefulWidget {
   final ValueChanged<double> onSeek;
   final VoidCallback onHostOnly;
   final VoidCallback onShowMembers;
+  final VoidCallback onEpisodes;
+  final VoidCallback onNext;
+  final VoidCallback onQuality;
+  final VoidCallback onInvite;
+  final VoidCallback onExitRoom;
 
   /// 返回 false 表示发送失败，输入框会保留文字。
   final bool Function(String text) onSendChat;
@@ -64,13 +77,25 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   static const Duration _autoHide = Duration(seconds: 3);
 
   bool _controls = true;
+  bool _locked = false;
   Timer? _hideTimer;
-  double? _dragPosition;
+  double _rate = 1.0;
+
+  /// 全屏默认撑满（cover）；关掉「撑满全屏」后 contain。
+  bool _fillScreen = true;
 
   @override
   void initState() {
     super.initState();
+    _rate = widget.controller?.rate ?? 1.0;
     _scheduleHide();
+    unawaited(_loadFillScreen());
+  }
+
+  Future<void> _loadFillScreen() async {
+    final value = await fxLoadFillScreen();
+    if (!mounted) return;
+    setState(() => _fillScreen = value);
   }
 
   @override
@@ -88,18 +113,60 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   }
 
   void _showControls({bool autoHide = true}) {
+    if (_locked) return;
     _hideTimer?.cancel();
     if (!_controls) setState(() => _controls = true);
     if (autoHide) _scheduleHide();
   }
 
   void _toggleControls() {
+    if (_locked) return;
     if (_controls) {
       _hideTimer?.cancel();
       setState(() => _controls = false);
     } else {
       _showControls();
     }
+  }
+
+  void _lock() {
+    _hideTimer?.cancel();
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _locked = true;
+      _controls = false;
+    });
+  }
+
+  void _unlock() {
+    setState(() {
+      _locked = false;
+      _controls = true;
+    });
+    _scheduleHide();
+  }
+
+  Future<void> _openSpeed() async {
+    if (!widget.isHost) {
+      _act(widget.onHostOnly);
+      return;
+    }
+    final rate = await showFxSpeedSheet(context, _rate);
+    if (!mounted || rate == null) return;
+    setState(() => _rate = rate);
+    final controller = widget.controller;
+    if (controller != null) {
+      unawaited(controller.setRate(rate));
+    }
+    _showControls();
+  }
+
+  void _onQualityTap() {
+    if (!widget.isHost) {
+      _act(widget.onHostOnly);
+      return;
+    }
+    _act(widget.onQuality);
   }
 
   void _act(VoidCallback action) {
@@ -117,12 +184,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         fit: StackFit.expand,
         children: [
           if (ready)
-            Center(
-              child: AspectRatio(
-                aspectRatio: controller.value.aspectRatio > 0
-                    ? controller.value.aspectRatio
-                    : 16 / 9,
-                child: controller.buildVideo(),
+            Positioned.fill(
+              child: FxPlayerSurface(
+                player: controller,
+                fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+                // 字幕避开底部控件，也不压到聊天面板（面板被限制在字幕带上方）。
+                subtitleBottom: 92,
               ),
             )
           else
@@ -130,46 +197,50 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
           Positioned.fill(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: _toggleControls,
+              onTap: _locked ? null : _toggleControls,
             ),
           ),
           AnimatedOpacity(
-            opacity: _controls ? 1 : 0,
+            opacity: _controls && !_locked ? 1 : 0,
             duration: const Duration(milliseconds: 220),
             curve: Curves.easeOut,
             child: IgnorePointer(
-              ignoring: !_controls,
+              ignoring: !_controls || _locked,
               child: _buildControls(context, controller, ready),
             ),
           ),
-          Positioned.fill(
-            child: ValueListenableBuilder<List<TogetherChatMessage>>(
-              valueListenable: widget.chat,
-              builder: (context, messages, _) => TogetherFloatingChat(
-                messages: messages,
-                members: widget.members,
-                online: widget.online,
+          // 锁屏后只留解锁钮，聊天也一并收起。
+          if (_locked)
+            Positioned.fill(
+              child: SafeArea(
+                child: Align(
+                  alignment: const Alignment(-.96, 0),
+                  child: Opacity(
+                    opacity: .66,
+                    child: _glassButton(
+                      Icons.lock_rounded,
+                      _unlock,
+                      size: 42,
+                      iconSize: 20,
+                      tooltip: '点击解锁',
+                    ),
+                  ),
+                ),
               ),
             ),
-          ),
-          _buildComposer(context),
+          if (!_locked)
+            Positioned.fill(
+              child: ValueListenableBuilder<List<TogetherChatMessage>>(
+                valueListenable: widget.chat,
+                builder: (context, messages, _) => TogetherFloatingChat(
+                  messages: messages,
+                  members: widget.members,
+                  online: widget.online,
+                  onSendChat: widget.onSendChat,
+                ),
+              ),
+            ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildComposer(BuildContext context) {
-    final media = MediaQuery.of(context);
-    final bottom = media.viewInsets.bottom + media.padding.bottom + 44;
-    return Positioned(
-      left: media.padding.left + 16,
-      right: media.padding.right + 16,
-      bottom: bottom,
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
-          child: _TogetherFullscreenComposer(onSend: widget.onSendChat),
-        ),
       ),
     );
   }
@@ -226,8 +297,24 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
           ),
         ),
         SafeArea(
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 12),
+              child: _glassButton(
+                Icons.lock_outline_rounded,
+                _lock,
+                size: 38,
+                iconSize: 18,
+                tooltip: '锁定屏幕',
+              ),
+            ),
+          ),
+        ),
+        SafeArea(
+          bottom: false,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(8, 4, 12, 6),
+            padding: const EdgeInsets.fromLTRB(8, 4, 12, 0),
             child: Column(
               children: [
                 _buildTopBar(context),
@@ -238,8 +325,30 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 ),
                 ValueListenableBuilder<double>(
                   valueListenable: widget.position,
-                  builder: (context, position, _) =>
-                      _buildBottomBar(position),
+                  builder: (context, position, _) => FsBottomBar(
+                    position: Duration(
+                      milliseconds: (position * 1000).round(),
+                    ),
+                    duration: Duration(
+                      milliseconds:
+                          (widget.duration.clamp(0, 86400) * 1000).round(),
+                    ),
+                    playing: controller?.value.isPlaying == true,
+                    rate: _rate,
+                    qualityLabel: _qualityLabel(controller),
+                    onSeek: (d) {
+                      _showControls();
+                      widget.onSeek(d.inMilliseconds / 1000.0);
+                    },
+                    onTogglePlay: () => _act(widget.onTogglePlay),
+                    onNext: () => _act(widget.onNext),
+                    onSpeed: () => unawaited(_openSpeed()),
+                    onQuality: _onQualityTap,
+                    onEpisodes: () => _act(widget.onEpisodes),
+                    onExit: () => _act(widget.onExit),
+                    compact: MediaQuery.sizeOf(context).width < 700,
+                    bottomInset: MediaQuery.paddingOf(context).bottom,
+                  ),
                 ),
               ],
             ),
@@ -290,8 +399,29 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         _buildStatusChip(),
         const SizedBox(width: 6),
         _buildMembersChip(),
+        const SizedBox(width: 6),
+        _glassButton(
+          Icons.group_add_rounded,
+          () => _act(widget.onInvite),
+          size: 28,
+          iconSize: 15,
+          tooltip: '邀请好友',
+        ),
+        const SizedBox(width: 4),
+        _glassButton(
+          Icons.logout_rounded,
+          () => _act(widget.onExitRoom),
+          size: 28,
+          iconSize: 15,
+          tooltip: '退出房间',
+        ),
       ],
     );
+  }
+
+  String _qualityLabel(FxPlayer? controller) {
+    final label = fxPlayerQuality(controller);
+    return label.isEmpty ? '清晰度' : label;
   }
 
   Widget _buildStatusChip() {
@@ -392,74 +522,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     );
   }
 
-  Widget _buildBottomBar(double position) {
-    final duration = widget.duration > 0 ? widget.duration : 0.0;
-    final shown = (_dragPosition ?? position)
-        .clamp(0.0, duration <= 0 ? 0.0 : duration)
-        .toDouble();
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Row(
-          children: [
-            Text(
-              togetherFmt(shown),
-              style: _timeStyle,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _FsSeekBar(
-                position: shown,
-                duration: duration,
-                enabled: widget.isHost,
-                onBlocked: () => _act(widget.onHostOnly),
-                onScrub: (value) {
-                  if (!mounted) return;
-                  setState(() => _dragPosition = value);
-                  _showControls();
-                },
-                onSeek: (value) {
-                  _showControls();
-                  widget.onSeek(value);
-                },
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              togetherFmt(duration),
-              style: _timeStyle,
-            ),
-            const SizedBox(width: 8),
-            _glassButton(
-              Icons.fullscreen_exit_rounded,
-              () => _act(widget.onExit),
-              size: 30,
-              iconSize: 17,
-              tooltip: '退出全屏',
-            ),
-          ],
-        ),
-        if (!widget.isHost)
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Text(
-              '跟随房主 · 进度由房主统一控制',
-              style: TextStyle(
-                fontSize: 8.5,
-                color: Colors.white.withOpacity(.62),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
-  static const TextStyle _timeStyle = TextStyle(
-    fontSize: 9.5,
-    fontWeight: FontWeight.w600,
-    color: Color(0xD9FFFFFF),
-  );
-
   Widget _glassButton(
     IconData icon,
     VoidCallback onTap, {
@@ -486,42 +548,50 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   }
 }
 
-/// 全屏时浮在视频上的聊天玻璃气泡。
+/// 全屏聊天：收起时只在左下角留一个 32dp 玻璃圆钮（未读亮红点）；
+/// 点开后弹出小面板，宽 ≤ 屏宽 40%、高 ≤ 屏高 45%，靠左下，
+/// 面板内含消息列表和输入框，可拖动、再点圆钮收起。
 class TogetherFloatingChat extends StatefulWidget {
   const TogetherFloatingChat({
     super.key,
     required this.messages,
     required this.members,
     required this.online,
+    required this.onSendChat,
   });
 
   final List<TogetherChatMessage> messages;
   final List<TogetherMember> members;
   final bool online;
 
+  /// 返回 false 表示发送失败，输入框会保留文字。
+  final bool Function(String text) onSendChat;
+
   @override
   State<TogetherFloatingChat> createState() => _TogetherFloatingChatState();
 }
 
 class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
+  /// 默认收起后画面上只剩这个 32dp 小圆钮。
+  static const double _fabSize = 32;
+
+  /// 展开面板宽高上限（同时不超过屏宽 40% / 屏高 45%）。
+  static const double _panelWidthMax = 340;
+  static const double _panelHeightMax = 340;
+
   final ScrollController _scroll = ScrollController();
 
-  bool _collapsed = false;
+  bool _open = false;
   int _unread = 0;
-  Offset? _offset;
 
+  /// 面板拖动后的左上角；null 表示停在默认的左下角。
+  Offset? _offset;
   String _signature = '';
-  String _hintUser = '';
-  String _hintText = '';
-  String _hintAvatar = '';
-  bool _hintVisible = false;
-  Timer? _hintTimer;
 
   @override
   void initState() {
     super.initState();
     _signature = _lastSignature(widget.messages);
-    _scrollToBottom(jump: true);
   }
 
   @override
@@ -533,16 +603,16 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     if (widget.messages.isEmpty) return;
     final message = widget.messages.last;
     if (message.system) {
-      _scrollToBottom();
+      if (_open) _scrollToBottom();
       return;
     }
-    if (message.mine) {
-      if (!_collapsed) _scrollToBottom();
+    if (!_open) {
+      // 收起时新消息只在圆钮上显示红点，不弹任何遮挡画面的提示。
+      if (!message.mine) setState(() => _unread++);
       return;
     }
-    final wasNearBottom = _nearBottom;
-    _showHint(message, countUnread: _collapsed || !wasNearBottom);
-    if (!_collapsed && wasNearBottom) _scrollToBottom();
+    // 展开时跟随新消息；用户正翻旧消息就不抢滚动。
+    if (_nearBottom) _scrollToBottom();
   }
 
   /// 当前是否贴着底部；用户在翻旧消息时不抢滚动。
@@ -555,7 +625,6 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
 
   @override
   void dispose() {
-    _hintTimer?.cancel();
     _scroll.dispose();
     super.dispose();
   }
@@ -567,25 +636,9 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
         '${last.text}|${last.system}';
   }
 
-  void _showHint(TogetherChatMessage message, {bool countUnread = false}) {
-    if (message.text.trim().isEmpty) return;
-    _hintTimer?.cancel();
-    setState(() {
-      _hintUser = message.user.isEmpty ? '影迷' : message.user;
-      _hintText = message.text;
-      _hintAvatar = message.avatar;
-      _hintVisible = true;
-      if (countUnread) _unread++;
-    });
-    _hintTimer = Timer(const Duration(milliseconds: 2800), () {
-      if (!mounted) return;
-      setState(() => _hintVisible = false);
-    });
-  }
-
   void _scrollToBottom({bool jump = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _collapsed || !_scroll.hasClients) return;
+      if (!mounted || !_open || !_scroll.hasClients) return;
       final target = _scroll.position.maxScrollExtent;
       if (jump) {
         _scroll.jumpTo(target);
@@ -599,14 +652,36 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     });
   }
 
-  void _toggleCollapsed() {
-    _hintTimer?.cancel();
+  void _toggleOpen() {
     setState(() {
-      _collapsed = !_collapsed;
-      _hintVisible = false;
-      if (!_collapsed) _unread = 0;
+      _open = !_open;
+      if (_open) {
+        _unread = 0;
+        _offset = null;
+      }
     });
-    if (!_collapsed) _scrollToBottom(jump: true);
+    if (_open) {
+      _scrollToBottom(jump: true);
+    } else {
+      FocusManager.instance.primaryFocus?.unfocus();
+    }
+  }
+
+  void _drag(
+    Offset delta, {
+    required double minLeft,
+    required double maxLeft,
+    required double minTop,
+    required double maxTop,
+  }) {
+    final current = _offset ?? Offset(minLeft, maxTop);
+    final next = current + delta;
+    setState(() {
+      _offset = Offset(
+        next.dx.clamp(minLeft, maxLeft).toDouble(),
+        next.dy.clamp(minTop, maxTop).toDouble(),
+      );
+    });
   }
 
   @override
@@ -617,20 +692,32 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final size = Size(constraints.maxWidth, constraints.maxHeight);
-        final width = math.min(320.0, math.max(240.0, size.width * .34));
-        final expandedHeight =
-            math.min(320.0, math.max(150.0, size.height * .66));
-        final height = _collapsed ? 46.0 : expandedHeight;
-        final minLeft = pad.left + 10;
-        final minTop = pad.top + 10;
-        final maxLeft = math.max(minLeft, size.width - pad.right - width - 10);
-        // 底部给聊天浮动输入条 / 进度条留出空间。
-        final maxTop = math.max(
-          minTop,
-          size.height - pad.bottom - keyboard - height - 108,
+        final width = math.min(_panelWidthMax, size.width * .40);
+        // 圆钮靠左下，抬到底部控制栏（进度条 + 按钮行）上方，避免互相遮挡。
+        final fabBottom = pad.bottom + 104;
+        // 面板默认在圆钮上方；键盘弹出时抬到键盘上方，输入框不被挡。
+        final openBottom = keyboard > 0
+            ? math.max(pad.bottom + 144, keyboard + 8)
+            : pad.bottom + 144;
+        final height = math.min(
+          _panelHeightMax,
+          math.min(
+            size.height * .45,
+            math.max(
+              96.0,
+              size.height - openBottom - pad.top - 8,
+            ),
+          ),
         );
 
-        var offset = _offset ?? Offset(maxLeft, maxTop);
+        final minLeft = pad.left + 8;
+        final minTop = pad.top + 8;
+        final maxLeft = math.max(minLeft, size.width - pad.right - width - 8);
+        final maxTop = math.max(
+          minTop,
+          size.height - openBottom - height,
+        );
+        var offset = _offset ?? Offset(minLeft, maxTop);
         offset = Offset(
           offset.dx.clamp(minLeft, maxLeft).toDouble(),
           offset.dy.clamp(minTop, maxTop).toDouble(),
@@ -639,35 +726,24 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
 
         return Stack(
           children: [
-            Positioned(
-              left: offset.dx,
-              top: offset.dy,
-              width: width,
-              child: _buildBubble(
-                minLeft: minLeft,
-                maxLeft: maxLeft,
-                minTop: minTop,
-                maxTop: maxTop,
-                expandedHeight: expandedHeight,
-              ),
-            ),
-            Positioned(
-              left: pad.left + 16,
-              right: pad.right + 16,
-              top: pad.top + 56,
-              child: IgnorePointer(
-                ignoring: !_hintVisible,
-                child: AnimatedOpacity(
-                  opacity: _hintVisible ? 1 : 0,
-                  duration: const Duration(milliseconds: 180),
-                  child: AnimatedSlide(
-                    offset: _hintVisible ? Offset.zero : const Offset(0, -.28),
-                    duration: const Duration(milliseconds: 220),
-                    curve: Curves.easeOut,
-                    child: Center(child: _buildHint()),
-                  ),
+            if (_open)
+              Positioned(
+                left: offset.dx,
+                top: offset.dy,
+                width: width,
+                child: _buildPanel(
+                  width: width,
+                  height: height,
+                  minLeft: minLeft,
+                  maxLeft: maxLeft,
+                  minTop: minTop,
+                  maxTop: maxTop,
                 ),
               ),
+            Positioned(
+              left: pad.left + 14,
+              bottom: fabBottom,
+              child: _buildFab(),
             ),
           ],
         );
@@ -675,14 +751,76 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     );
   }
 
-  Widget _buildBubble({
+  Widget _buildFab() {
+    return Semantics(
+      button: true,
+      label: _open ? '收起聊天' : '打开聊天',
+      child: Tooltip(
+        message: _open ? '收起聊天' : '聊天',
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _toggleOpen,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                width: _fabSize,
+                height: _fabSize,
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(.42),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white.withOpacity(.24)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(.25),
+                      blurRadius: 10,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  _open
+                      ? Icons.close_rounded
+                      : Icons.chat_bubble_outline_rounded,
+                  size: 16,
+                  color: Colors.white.withOpacity(.94),
+                ),
+              ),
+              if (_unread > 0 && !_open)
+                Positioned(
+                  right: -1,
+                  top: -1,
+                  child: Container(
+                    width: 9,
+                    height: 9,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFF4D4F),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: Colors.black.withOpacity(.55),
+                        width: 1.2,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPanel({
+    required double width,
+    required double height,
     required double minLeft,
     required double maxLeft,
     required double minTop,
     required double maxTop,
-    required double expandedHeight,
   }) {
     return Container(
+      width: width,
+      height: height,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(18),
         boxShadow: [
@@ -698,7 +836,6 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
           child: Container(
-            height: _collapsed ? null : expandedHeight,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(18),
               gradient: const LinearGradient(
@@ -712,7 +849,6 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
               border: Border.all(color: Colors.white.withOpacity(.24)),
             ),
             child: Column(
-              mainAxisSize: _collapsed ? MainAxisSize.min : MainAxisSize.max,
               children: [
                 _buildHeader(
                   minLeft: minLeft,
@@ -720,14 +856,20 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                   minTop: minTop,
                   maxTop: maxTop,
                 ),
-                if (!_collapsed) ...[
-                  Divider(
-                    height: 1,
-                    thickness: 1,
-                    color: Colors.white.withOpacity(.12),
-                  ),
-                  Expanded(child: _buildMessages()),
-                ],
+                Divider(
+                  height: 1,
+                  thickness: 1,
+                  color: Colors.white.withOpacity(.12),
+                ),
+                Expanded(child: _buildMessages()),
+                Divider(
+                  height: 1,
+                  thickness: 1,
+                  color: Colors.white.withOpacity(.12),
+                ),
+                _TogetherFullscreenComposer(
+                  onSend: widget.onSendChat,
+                ),
               ],
             ),
           ),
@@ -744,32 +886,28 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
   }) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: _toggleCollapsed,
-      onPanUpdate: (details) {
-        final current = _offset ?? Offset(maxLeft, maxTop);
-        final next = current + details.delta;
-        setState(() {
-          _offset = Offset(
-            next.dx.clamp(minLeft, maxLeft).toDouble(),
-            next.dy.clamp(minTop, maxTop).toDouble(),
-          );
-        });
-      },
+      onPanUpdate: (details) => _drag(
+        details.delta,
+        minLeft: minLeft,
+        maxLeft: maxLeft,
+        minTop: minTop,
+        maxTop: maxTop,
+      ),
       child: SizedBox(
-        height: 46,
+        height: 38,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 9),
           child: Row(
             children: [
               Icon(
                 Icons.drag_indicator_rounded,
-                size: 15,
+                size: 14,
                 color: Colors.white.withOpacity(.42),
               ),
-              const SizedBox(width: 4),
+              const SizedBox(width: 2),
               Container(
-                width: 7,
-                height: 7,
+                width: 6,
+                height: 6,
                 decoration: BoxDecoration(
                   color: widget.online
                       ? const Color(0xFF57D3A3)
@@ -777,16 +915,16 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                   shape: BoxShape.circle,
                 ),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 5),
               const Text(
                 '聊天',
                 style: TextStyle(
-                  fontSize: 11.5,
+                  fontSize: 11,
                   fontWeight: FontWeight.w700,
                   color: Colors.white,
                 ),
               ),
-              const SizedBox(width: 5),
+              const SizedBox(width: 4),
               Text(
                 '${widget.members.length}人',
                 style: TextStyle(
@@ -795,43 +933,17 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                 ),
               ),
               const Spacer(),
-              if (_unread > 0) _buildUnreadBadge(),
-              if (_unread > 0) const SizedBox(width: 5),
-              Icon(
-                _collapsed
-                    ? Icons.keyboard_arrow_up_rounded
-                    : Icons.keyboard_arrow_down_rounded,
-                size: 18,
-                color: Colors.white.withOpacity(.72),
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _toggleOpen,
+                child: Icon(
+                  Icons.keyboard_arrow_down_rounded,
+                  size: 18,
+                  color: Colors.white.withOpacity(.72),
+                ),
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildUnreadBadge() {
-    return Container(
-      constraints: const BoxConstraints(minWidth: 18),
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        gradient: Fx.brand,
-        borderRadius: BorderRadius.circular(9),
-        boxShadow: [
-          BoxShadow(
-            color: Fx.accent.withOpacity(.40),
-            blurRadius: 8,
-          ),
-        ],
-      ),
-      child: Text(
-        _unread > 99 ? '99+' : '$_unread',
-        style: const TextStyle(
-          fontSize: 8.5,
-          fontWeight: FontWeight.w800,
-          color: Colors.white,
         ),
       ),
     );
@@ -843,7 +955,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
         child: Text(
           '还没有人说话，来打个招呼吧',
           style: TextStyle(
-            fontSize: 10.5,
+            fontSize: 10,
             color: Colors.white.withOpacity(.56),
           ),
         ),
@@ -851,7 +963,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     }
     return ListView.builder(
       controller: _scroll,
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       itemCount: widget.messages.length,
       itemBuilder: (context, index) {
@@ -863,11 +975,11 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
   Widget _buildMessageRow(TogetherChatMessage message) {
     if (message.system) {
       return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(vertical: 3),
         child: Align(
           alignment: Alignment.center,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
             decoration: BoxDecoration(
               color: Colors.white.withOpacity(.10),
               borderRadius: BorderRadius.circular(8),
@@ -878,7 +990,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 8.5,
+                fontSize: 8,
                 height: 1.35,
                 color: Colors.white.withOpacity(.62),
               ),
@@ -891,16 +1003,16 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     final name =
         message.mine ? '我' : (message.user.isEmpty ? '影迷' : message.user);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           TogetherAvatar(
             name: name,
             avatar: message.avatar,
-            size: 24,
+            size: 22,
           ),
-          const SizedBox(width: 7),
+          const SizedBox(width: 6),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -913,7 +1025,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 9.5,
+                          fontSize: 9,
                           fontWeight: FontWeight.w700,
                           color: message.mine
                               ? const Color(0xFFB9D0FF)
@@ -921,11 +1033,11 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                         ),
                       ),
                     ),
-                    const SizedBox(width: 5),
+                    const SizedBox(width: 4),
                     Text(
                       togetherClock(message.time),
                       style: TextStyle(
-                        fontSize: 8,
+                        fontSize: 7.5,
                         color: Colors.white.withOpacity(.38),
                       ),
                     ),
@@ -934,7 +1046,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                 const SizedBox(height: 2),
                 Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                      const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
                   decoration: BoxDecoration(
                     color: message.mine
                         ? Fx.accent.withOpacity(.36)
@@ -952,7 +1064,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                   child: Text(
                     message.text,
                     style: const TextStyle(
-                      fontSize: 11,
+                      fontSize: 10.5,
                       height: 1.4,
                       color: Colors.white,
                     ),
@@ -965,73 +1077,9 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
       ),
     );
   }
-
-  Widget _buildHint() {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        _hintTimer?.cancel();
-        setState(() {
-          _collapsed = false;
-          _unread = 0;
-          _hintVisible = false;
-        });
-        _scrollToBottom(jump: true);
-      },
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 460),
-        padding: const EdgeInsets.fromLTRB(8, 6, 12, 6),
-        decoration: BoxDecoration(
-          color: const Color(0xD9161C26),
-          borderRadius: BorderRadius.circular(22),
-          border: Border.all(color: Colors.white.withOpacity(.20)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(.34),
-              blurRadius: 18,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TogetherAvatar(
-              name: _hintUser,
-              avatar: _hintAvatar,
-              size: 24,
-            ),
-            const SizedBox(width: 7),
-            Flexible(
-              child: Text.rich(
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      text: '$_hintUser：',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                      ),
-                    ),
-                    TextSpan(
-                      text: _hintText,
-                      style: TextStyle(color: Colors.white.withOpacity(.84)),
-                    ),
-                  ],
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 10.5),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
-/// 全屏聊天输入浮动条：输入失败保留文字，右侧出现「重试」。
+/// 聊天面板内部输入条：窄面板里单行显示，发送失败保留文字并可重试。
 class _TogetherFullscreenComposer extends StatefulWidget {
   const _TogetherFullscreenComposer({required this.onSend});
 
@@ -1093,29 +1141,16 @@ class _TogetherFullscreenComposerState
     final hasText = _text.text.trim().isNotEmpty;
     final canSend = _failed || hasText;
     return Container(
-      height: 44,
-      padding: const EdgeInsets.fromLTRB(6, 3, 6, 3),
+      height: 36,
+      margin: const EdgeInsets.fromLTRB(7, 6, 7, 7),
+      padding: const EdgeInsets.fromLTRB(9, 0, 3, 0),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.52),
-        borderRadius: BorderRadius.circular(22),
+        color: Colors.black.withOpacity(.42),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(color: Colors.white.withOpacity(.22)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(.30),
-            blurRadius: 18,
-            offset: const Offset(0, 6),
-          ),
-        ],
       ),
       child: Row(
         children: [
-          const SizedBox(width: 6),
-          Icon(
-            Icons.chat_bubble_outline_rounded,
-            size: 16,
-            color: Colors.white.withOpacity(.66),
-          ),
-          const SizedBox(width: 6),
           Expanded(
             child: TextField(
               controller: _text,
@@ -1132,18 +1167,18 @@ class _TogetherFullscreenComposerState
                 maxLength,
               }) =>
                   null,
-              style: const TextStyle(fontSize: 12.5, color: Colors.white),
+              style: const TextStyle(fontSize: 11, color: Colors.white),
               cursorColor: Colors.white,
               decoration: InputDecoration(
                 isDense: true,
                 counterText: '',
-                hintText: '发条弹幕和房主聊聊…',
+                hintText: '发条弹幕…',
                 hintStyle: TextStyle(
-                  fontSize: 12,
+                  fontSize: 11,
                   color: Colors.white.withOpacity(.44),
                 ),
                 border: InputBorder.none,
-                contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                contentPadding: const EdgeInsets.symmetric(vertical: 9),
               ),
             ),
           ),
@@ -1152,40 +1187,26 @@ class _TogetherFullscreenComposerState
               behavior: HitTestBehavior.opaque,
               onTap: _submit,
               child: Container(
-                height: 30,
-                padding: const EdgeInsets.symmetric(horizontal: 9),
+                width: 24,
+                height: 24,
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
                   color: Colors.white.withOpacity(.14),
-                  borderRadius: BorderRadius.circular(15),
+                  shape: BoxShape.circle,
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      Icons.refresh_rounded,
-                      size: 14,
-                      color: Colors.white,
-                    ),
-                    const SizedBox(width: 3),
-                    const Text(
-                      '重试',
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
+                child: const Icon(
+                  Icons.refresh_rounded,
+                  size: 14,
+                  color: Colors.white,
                 ),
               ),
             ),
-          const SizedBox(width: 4),
+          const SizedBox(width: 3),
           GestureDetector(
             onTap: canSend ? _submit : null,
             child: Container(
-              width: 32,
-              height: 32,
+              width: 28,
+              height: 28,
               alignment: Alignment.center,
               decoration: BoxDecoration(
                 gradient: canSend ? Fx.brand : null,
@@ -1194,144 +1215,13 @@ class _TogetherFullscreenComposerState
               ),
               child: Icon(
                 _failed ? Icons.refresh_rounded : Icons.arrow_upward_rounded,
-                size: 17,
+                size: 15,
                 color: canSend ? Colors.white : Colors.white.withOpacity(.42),
               ),
             ),
           ),
         ],
       ),
-    );
-  }
-}
-
-/// 全屏底部进度条：细线 + 白色圆点，只有房主可以拖动。
-class _FsSeekBar extends StatefulWidget {
-  const _FsSeekBar({
-    required this.position,
-    required this.duration,
-    required this.enabled,
-    required this.onSeek,
-    required this.onBlocked,
-    required this.onScrub,
-  });
-
-  final double position;
-  final double duration;
-  final bool enabled;
-  final ValueChanged<double> onSeek;
-  final VoidCallback onBlocked;
-  final ValueChanged<double?> onScrub;
-
-  @override
-  State<_FsSeekBar> createState() => _FsSeekBarState();
-}
-
-class _FsSeekBarState extends State<_FsSeekBar> {
-  double? _drag;
-
-  @override
-  Widget build(BuildContext context) {
-    final max = widget.duration > 0 ? widget.duration : 0.0;
-    final shown =
-        (_drag ?? widget.position).clamp(0.0, max <= 0 ? 1.0 : max).toDouble();
-    return LayoutBuilder(
-      builder: (context, box) {
-        final width = box.maxWidth <= 0 ? 1.0 : box.maxWidth;
-        final ratio = max <= 0 ? 0.0 : (shown / max).clamp(0.0, 1.0);
-
-        double valueAt(double dx) {
-          if (max <= 0) return 0;
-          return (dx / width).clamp(0.0, 1.0) * max;
-        }
-
-        void scrub(double value) {
-          setState(() => _drag = value);
-          widget.onScrub(value);
-        }
-
-        void finish() {
-          final value = _drag;
-          setState(() => _drag = null);
-          widget.onScrub(null);
-          if (value != null) widget.onSeek(value);
-        }
-
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.enabled ? null : widget.onBlocked,
-          onTapUp: widget.enabled
-              ? (details) {
-                  final value = valueAt(details.localPosition.dx);
-                  setState(() => _drag = null);
-                  widget.onScrub(null);
-                  widget.onSeek(value);
-                }
-              : null,
-          onHorizontalDragStart: widget.enabled
-              ? (details) => scrub(valueAt(details.localPosition.dx))
-              : null,
-          onHorizontalDragUpdate: widget.enabled
-              ? (details) => scrub(valueAt(details.localPosition.dx))
-              : null,
-          onHorizontalDragEnd: widget.enabled ? (_) => finish() : null,
-          onHorizontalDragCancel: widget.enabled
-              ? () {
-                  setState(() => _drag = null);
-                  widget.onScrub(null);
-                }
-              : null,
-          child: SizedBox(
-            height: 22,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Container(
-                    height: 3,
-                    width: width,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(.26),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: FractionallySizedBox(
-                    widthFactor: ratio.toDouble(),
-                    child: Container(
-                      height: 3,
-                      decoration: BoxDecoration(
-                        gradient: Fx.brand,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                ),
-                Align(
-                  alignment: Alignment(ratio * 2 - 1, 0),
-                  child: Container(
-                    width: 9,
-                    height: 9,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(.30),
-                          blurRadius: 4,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
     );
   }
 }

@@ -140,6 +140,28 @@ Future<void> fxSaveProgress(String videoId, int ep, double seconds) async {
   }
 }
 
+/// 「撑满全屏」开关的存储 key。默认开：全屏用 cover 裁边不变形；
+/// 关掉后全屏回到 contain（完整显示，可能上下留黑边）。
+const String fxFillScreenKey = 'player_fill_screen';
+
+Future<bool> fxLoadFillScreen() async {
+  try {
+    final sp = await SharedPreferences.getInstance();
+    return sp.getBool(fxFillScreenKey) ?? true;
+  } catch (_) {
+    return true;
+  }
+}
+
+Future<void> fxSaveFillScreen(bool value) async {
+  try {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool(fxFillScreenKey, value);
+  } catch (_) {
+    // 本地存储失败不影响播放
+  }
+}
+
 /// 白玻璃提示，不抢播放器控件的焦点
 void fxToast(BuildContext context, String message) {
   final messenger = ScaffoldMessenger.maybeOf(context);

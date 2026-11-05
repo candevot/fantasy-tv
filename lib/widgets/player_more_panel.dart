@@ -21,13 +21,15 @@ enum FxLoopMode {
 
 /// 腾讯播放设置样式的「更多」面板：
 /// 图标行（画中画 / 定时关闭 / 下载 / 倍速 / 后台播放）
-/// + 列表行（循环播放 / 跳过片头片尾 / 问题反馈）。
+/// + 列表行（循环播放 / 跳过片头片尾 / 撑满全屏 / 问题反馈）。
 Future<void> showFxMorePanel(
   BuildContext context, {
   required FxLoopMode loopMode,
   required bool skipIntroOutro,
+  required bool fillScreen,
   required ValueChanged<FxLoopMode> onLoopChanged,
   required ValueChanged<bool> onSkipChanged,
+  required ValueChanged<bool> onFillChanged,
   required VoidCallback onPip,
   required VoidCallback onSleepTimer,
   required VoidCallback onDownload,
@@ -42,6 +44,7 @@ Future<void> showFxMorePanel(
     builder: (sheetContext) {
       var loop = loopMode;
       var skip = skipIntroOutro;
+      var fill = fillScreen;
       return StatefulBuilder(
         builder: (context, setSheetState) {
           void closeThen(VoidCallback action) {
@@ -153,6 +156,19 @@ Future<void> showFxMorePanel(
                       skip = v;
                       setSheetState(() {});
                       onSkipChanged(v);
+                    },
+                  ),
+                ),
+                _MoreRow(
+                  icon: Icons.fit_screen_rounded,
+                  title: '撑满全屏',
+                  trailing: Switch.adaptive(
+                    value: fill,
+                    activeColor: Fx.accent,
+                    onChanged: (v) {
+                      fill = v;
+                      setSheetState(() {});
+                      onFillChanged(v);
                     },
                   ),
                 ),

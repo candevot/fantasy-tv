@@ -71,6 +71,9 @@ class _TogetherPageState extends State<TogetherPage>
   bool _restoreAfterResume = false;
   bool _fullscreen = false;
 
+  /// 竖屏房间预览的控制层显隐：点画面只切换控件，暂停只走中央按钮。
+  bool _roomControls = true;
+
   bool _online = false;
   bool _isHost = false;
 
@@ -103,6 +106,8 @@ class _TogetherPageState extends State<TogetherPage>
   List<Episode> _episodes = const <Episode>[];
   List<LineInfo> _videoLines = const <LineInfo>[];
   String _linesVideoId = '';
+  PlayInfo? _playInfo;
+  String? _qualityKey;
   final TextEditingController _joinCtrl = TextEditingController();
   String _loadedKey = '';
   String _loadingKey = '';
@@ -851,6 +856,10 @@ class _TogetherPageState extends State<TogetherPage>
     if (changed) setState(() {});
   }
 
+  void _toggleRoomControls() {
+    setState(() => _roomControls = !_roomControls);
+  }
+
   void _togglePlay() {
     if (!_isHost) {
       _hostOnlyToast();
@@ -1030,9 +1039,10 @@ class _TogetherPageState extends State<TogetherPage>
       }
       if (!mounted || seq != _videoSeq) return;
       if (play.type.trim().toLowerCase() == 'parse') continue;
+      _playInfo = play;
 
       final urls = <String>[];
-      final primary = play.url.trim();
+      final primary = _qualityUrl(play);
       if (primary.isNotEmpty) urls.add(primary);
       for (final raw in play.backup) {
         final url = raw.trim();
@@ -1378,7 +1388,21 @@ class _TogetherPageState extends State<TogetherPage>
   }
 
   void _hostOnlyToast() {
-    togetherToast(context, '仅房主可操作');
+    togetherToast(context, '跟随房主');
+  }
+
+  /// 当前选中的清晰度地址；没选或该线路没有这一档时回落到主地址。
+  String _qualityUrl(PlayInfo play) {
+    final key = _qualityKey;
+    if (key != null) {
+      for (final q in play.quality) {
+        if (q.key == key) {
+          final url = q.url.trim();
+          if (url.isNotEmpty) return url;
+        }
+      }
+    }
+    return play.url.trim();
   }
 
   void _showMembers() {
@@ -1547,8 +1571,7 @@ class _TogetherPageState extends State<TogetherPage>
         _confirmExit();
       },
       child: Scaffold(
-        backgroundColor:
-            _fullscreen ? Colors.black : const Color(0xFFF6F8FC),
+        backgroundColor: _fullscreen ? Colors.black : const Color(0xFFF6F8FC),
         resizeToAvoidBottomInset: !_fullscreen,
         body: _fullscreen
             ? _buildFullscreen()
@@ -1564,6 +1587,137 @@ class _TogetherPageState extends State<TogetherPage>
               ),
       ),
     );
+  }
+
+  void _nextEpisode() {
+    if (!_isHost) {
+      _hostOnlyToast();
+      return;
+    }
+    if (_episodes.isEmpty) {
+      togetherToast(context, '暂无剧集信息');
+      return;
+    }
+    final main = _episodes.where((e) => !fxIsExtraEpisode(e.name)).toList();
+    final list = main.isEmpty ? _episodes : main;
+    int? next;
+    for (final e in list) {
+      if (e.n > _ep) {
+        next = e.n;
+        break;
+      }
+    }
+    if (next == null) {
+      togetherToast(context, '已是最后一集');
+      return;
+    }
+    if (!_online) {
+      togetherToast(context, '未连接服务器，请稍后重试');
+      return;
+    }
+    _client.sendEpisode(next, line: _videoLine);
+  }
+
+  Future<void> _pickEpisode() async {
+    if (!_isHost) {
+      _hostOnlyToast();
+      return;
+    }
+    if (_episodes.isEmpty) {
+      togetherToast(context, '暂无剧集信息');
+      return;
+    }
+    final episode = await showTogetherEpisodePicker(
+      context,
+      episodes: _episodes,
+      current: _ep,
+      title: _videoTitle,
+    );
+    if (!mounted || episode == null || episode == _ep) return;
+    if (!_online) {
+      togetherToast(context, '未连接服务器，请稍后重试');
+      return;
+    }
+    _client.sendEpisode(episode, line: _videoLine);
+  }
+
+  Future<void> _pickQuality() async {
+    if (!_isHost) {
+      _hostOnlyToast();
+      return;
+    }
+    final info = _playInfo;
+    final list = info?.quality ?? const <QualityItem>[];
+    if (list.length < 2) {
+      togetherToast(context, '当前线路暂无更多清晰度');
+      return;
+    }
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => SafeArea(
+        top: false,
+        child: Container(
+          margin: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 10),
+          decoration: const BoxDecoration(
+            color: Color(0xFFF9FBFF),
+            borderRadius: BorderRadius.all(Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '清晰度',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: Fx.ink,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              for (final q in list)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(
+                    q.name.trim().isEmpty ? q.key : q.name,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Fx.ink,
+                    ),
+                  ),
+                  trailing: q.key == _qualityKey
+                      ? const Icon(Icons.check_rounded,
+                          size: 18, color: Fx.accent)
+                      : null,
+                  onTap: () => Navigator.of(ctx).pop(q.key),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted || picked == null || picked == _qualityKey) return;
+    if (!_captureResume()) {
+      togetherToast(context, '视频还没准备好');
+      return;
+    }
+    _qualityKey = picked;
+    _loadedKey = '';
+    _loadingKey = '';
+    _syncVideo();
+    togetherToast(context, '正在切换清晰度…');
+  }
+
+  Future<void> _exitRoomFromFullscreen() async {
+    await _exitFullscreen();
+    if (!mounted) return;
+    await _confirmExit();
   }
 
   Widget _buildFullscreen() {
@@ -1590,6 +1744,11 @@ class _TogetherPageState extends State<TogetherPage>
       onSeek: _seekTo,
       onHostOnly: _hostOnlyToast,
       onShowMembers: _showMembers,
+      onEpisodes: () => unawaited(_pickEpisode()),
+      onNext: _nextEpisode,
+      onQuality: () => unawaited(_pickQuality()),
+      onInvite: () => unawaited(_showInvite()),
+      onExitRoom: () => unawaited(_exitRoomFromFullscreen()),
       onSendChat: _sendChat,
     );
   }
@@ -1731,8 +1890,8 @@ class _TogetherPageState extends State<TogetherPage>
                           ),
                           focusedBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(15),
-                            borderSide: const BorderSide(
-                                color: Fx.accent, width: 1.2),
+                            borderSide:
+                                const BorderSide(color: Fx.accent, width: 1.2),
                           ),
                         ),
                       ),
@@ -1976,8 +2135,7 @@ class _TogetherPageState extends State<TogetherPage>
     final title = _videoTitle.isNotEmpty
         ? _videoTitle
         : (_roomTitle.isNotEmpty ? _roomTitle : '一起看');
-    final invite =
-        '我在幻想影视一起看《$title》，房间号 $_roomCode，打开 App 输入房间号加入';
+    final invite = '我在幻想影视一起看《$title》，房间号 $_roomCode，打开 App 输入房间号加入';
     var copied = false;
     await showDialog<void>(
       context: context,
@@ -2063,9 +2221,7 @@ class _TogetherPageState extends State<TogetherPage>
               const SizedBox(height: 14),
               GradButton(
                 text: copied ? '已复制' : '复制邀请文案',
-                icon: copied
-                    ? Icons.check_rounded
-                    : Icons.copy_all_rounded,
+                icon: copied ? Icons.check_rounded : Icons.copy_all_rounded,
                 height: 44,
                 onTap: () async {
                   await Clipboard.setData(ClipboardData(text: invite));
@@ -2158,27 +2314,38 @@ class _TogetherPageState extends State<TogetherPage>
                     _buildVideoPlaceholder(),
                   Positioned(left: 8, top: 8, child: _buildSyncChip()),
                   if (ready) ...[
+                    // 点画面只显隐控件，绝不暂停；暂停只通过中央播放按钮。
                     Positioned.fill(
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onTap: _togglePlay,
+                        onTap: _toggleRoomControls,
                       ),
                     ),
                     Positioned.fill(
                       child: IgnorePointer(
-                        child: Center(child: _buildCenterIcon(controller)),
+                        ignoring: !_roomControls,
+                        child: AnimatedOpacity(
+                          opacity: _roomControls ? 1 : 0,
+                          duration: const Duration(milliseconds: 180),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Center(child: _buildCenterButton(controller)),
+                              Positioned(
+                                left: 10,
+                                right: 10,
+                                bottom: 5,
+                                child: _buildProgress(controller),
+                              ),
+                              Positioned(
+                                right: 8,
+                                top: 8,
+                                child: _buildFullscreenButton(),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
-                    ),
-                    Positioned(
-                      left: 10,
-                      right: 10,
-                      bottom: 5,
-                      child: _buildProgress(controller),
-                    ),
-                    Positioned(
-                      right: 8,
-                      top: 8,
-                      child: _buildFullscreenButton(),
                     ),
                     // 已就绪后播放中途出错（hasError）也要能看到错误条 + 重试。
                     if (_videoError.isNotEmpty)
@@ -2220,22 +2387,26 @@ class _TogetherPageState extends State<TogetherPage>
     );
   }
 
-  Widget _buildCenterIcon(FxPlayer controller) {
+  Widget _buildCenterButton(FxPlayer controller) {
     final playing = controller.value.isPlaying;
-    return Container(
-      width: 42,
-      height: 42,
-      decoration: BoxDecoration(
-        color: Colors.black.withOpacity(.34),
-        shape: BoxShape.circle,
-        border: Border.all(color: Colors.white.withOpacity(.32)),
-      ),
-      child: Icon(
-        _isHost
-            ? (playing ? Icons.pause_rounded : Icons.play_arrow_rounded)
-            : Icons.lock_outline_rounded,
-        size: 22,
-        color: Colors.white.withOpacity(.94),
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _isHost ? _togglePlay : _hostOnlyToast,
+      child: Container(
+        width: 42,
+        height: 42,
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(.34),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white.withOpacity(.32)),
+        ),
+        child: Icon(
+          _isHost
+              ? (playing ? Icons.pause_rounded : Icons.play_arrow_rounded)
+              : Icons.lock_outline_rounded,
+          size: 22,
+          color: Colors.white.withOpacity(.94),
+        ),
       ),
     );
   }
