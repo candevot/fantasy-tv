@@ -7,6 +7,7 @@ import '../api.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
+import '../widgets/player_theme.dart';
 import '../widgets/together_chat.dart';
 import '../widgets/together_client.dart';
 import '../widgets/together_fullscreen.dart';
@@ -120,6 +121,11 @@ class _TogetherPageState extends State<TogetherPage>
   Timer? _ticker;
   Timer? _heartbeat;
   Timer? _enterTimer;
+
+  /// 切后台 3 秒后才暂停；通知栏 / 截屏只到 inactive，不打断播放。
+  Timer? _backgroundTimer;
+  bool _backgrounded = false;
+  bool _pausedByBackground = false;
   bool _downReported = false;
   bool _foreground = true;
 
@@ -154,6 +160,7 @@ class _TogetherPageState extends State<TogetherPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _stopTimers();
+    _backgroundTimer?.cancel();
     _enterTimer?.cancel();
     _joinCtrl.dispose();
     _enterTimer = null;
@@ -178,23 +185,68 @@ class _TogetherPageState extends State<TogetherPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
-    final active = state == AppLifecycleState.resumed;
-    if (active == _foreground) return;
-    _foreground = active;
-    if (active) {
-      _startTimers();
-      _client.resumeHeartbeat();
-      if (_client.connected) {
-        // 回到前台先要一次服务端权威状态，再按服务器时间重算进度。
-        _client.refreshRoom();
-      } else {
-        _client.connect();
-      }
-      _resyncAfterResume();
-    } else {
-      _stopTimers();
-      _client.pauseHeartbeat();
+    switch (state) {
+      case AppLifecycleState.inactive:
+        // 下拉通知栏 / 截屏 / 多任务预览都只到 inactive：不暂停。
+        return;
+      case AppLifecycleState.paused:
+        _backgrounded = true;
+        _backgroundTimer?.cancel();
+        _backgroundTimer = Timer(fxBackgroundPauseDelay, _enterBackground);
+        return;
+      case AppLifecycleState.resumed:
+        _backgrounded = false;
+        _backgroundTimer?.cancel();
+        _backgroundTimer = null;
+        if (!_foreground) unawaited(_leaveBackground());
+        return;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        return;
     }
+  }
+
+  /// 离开超过 3 秒：停掉房间同步定时器 / 心跳，并暂停本地播放。
+  void _enterBackground() {
+    _backgroundTimer = null;
+    if (!mounted || !_backgrounded || !_foreground) return;
+    _foreground = false;
+    _stopTimers();
+    _client.pauseHeartbeat();
+    final c = _controller;
+    if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
+    final position = c.value.position.inMilliseconds / 1000.0;
+    _pausedByBackground = true;
+    c.pause().catchError((_) {});
+    if (_isHost) {
+      if (_online) _client.sendState('pause', position);
+      _markRemote('pause', position);
+      setState(() {});
+    }
+  }
+
+  /// 回前台：恢复定时器 / 心跳；后台被系统暂停过就继续播放。
+  Future<void> _leaveBackground() async {
+    _foreground = true;
+    _startTimers();
+    _client.resumeHeartbeat();
+    if (_pausedByBackground) {
+      _pausedByBackground = false;
+      final c = _controller;
+      if (_isHost && c != null && c.value.isInitialized) {
+        try {
+          await c.play();
+        } catch (_) {}
+      }
+    }
+    if (!mounted) return;
+    if (_client.connected) {
+      // 回到前台先要一次服务端权威状态，再按服务器时间重算进度。
+      _client.refreshRoom();
+    } else {
+      _client.connect();
+    }
+    _resyncAfterResume();
   }
 
   void _startTimers() {
@@ -209,6 +261,13 @@ class _TogetherPageState extends State<TogetherPage>
     _heartbeat?.cancel();
     _ticker = null;
     _heartbeat = null;
+  }
+
+  String _epLabel(int n) {
+    for (final e in _episodes) {
+      if (e.n == n) return fxEpisodeLabel(e.n, e.name);
+    }
+    return fxEpisodeLabel(n);
   }
 
   void _resyncAfterResume() {
@@ -1159,7 +1218,7 @@ class _TogetherPageState extends State<TogetherPage>
                 '选集',
                 _episodes.isEmpty
                     ? '暂无剧集信息'
-                    : '当前第 $_ep 集，共 ${_episodes.length} 集',
+                    : '当前 ${_epLabel(_ep)}，共 ${fxMainEpisodeCount(_episodes)} 集',
                 _episodes.isEmpty
                     ? null
                     : () => Navigator.of(ctx).pop('episode'),
@@ -2409,7 +2468,7 @@ class _TogetherPageState extends State<TogetherPage>
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '第 $_ep 集${_episodes.isNotEmpty ? ' / 共 ${_episodes.length} 集' : ''}',
+                  '${_epLabel(_ep)}${_episodes.isNotEmpty ? ' / 共 ${fxMainEpisodeCount(_episodes)} 集' : ''}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(

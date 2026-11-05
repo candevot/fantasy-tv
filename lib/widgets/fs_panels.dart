@@ -569,6 +569,13 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
     });
   }
 
+  String _labelFor(int n) {
+    for (final e in widget.episodes) {
+      if (e.n == n) return fxEpisodeLabel(e.n, e.name);
+    }
+    return fxEpisodeLabel(n);
+  }
+
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
@@ -576,7 +583,8 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
     final width = size.width;
     final columns = (width / 86).floor().clamp(4, 9);
     final current = widget.current;
-    final count = widget.episodes.length;
+    final total = widget.episodes.length;
+    final count = fxMainEpisodeCount(widget.episodes);
     return Container(
       height: height,
       decoration: const BoxDecoration(
@@ -612,7 +620,7 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    '${fxEpisodeLabel(current)} · 共 $count 集',
+                    '${_labelFor(current)} · 共 $count 集',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 11.5, color: Fx.sub),
@@ -631,7 +639,7 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
           ),
           const Divider(height: 1, color: Color(0xFFEDF1F8)),
           Expanded(
-            child: count == 0
+            child: total == 0
                 ? const Center(
                     child: Text(
                       '暂无剧集信息',
@@ -641,7 +649,7 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                 : GridView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.fromLTRB(16, 14, 16, 22),
-                    itemCount: count,
+                    itemCount: total,
                     gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                       crossAxisCount: columns,
                       mainAxisExtent: _itemExtent,
@@ -651,8 +659,7 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                     itemBuilder: (context, i) {
                       final e = widget.episodes[i];
                       final active = e.n == current;
-                      final label =
-                          e.name.isNotEmpty ? e.name : fxEpisodeLabel(e.n);
+                      final label = fxEpisodeLabel(e.n, e.name);
                       return GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: () => Navigator.of(context).pop(e.n),

@@ -238,7 +238,7 @@ class _DetailPageState extends State<DetailPage>
 
   String get _currentEpLabel {
     for (final e in _episodes) {
-      if (e.n == _ep && e.name.isNotEmpty) return detailEpisodeLabel(e);
+      if (e.n == _ep) return detailEpisodeLabel(e);
     }
     return fxEpisodeLabel(_ep);
   }
@@ -251,7 +251,7 @@ class _DetailPageState extends State<DetailPage>
       if (RegExp(r'^全\s*\d+\s*集$').hasMatch(s)) return '已完结';
       return s;
     }
-    final n = _episodes.length;
+    final n = fxMainEpisodeCount(_episodes);
     return n > 0 ? '更新至$n集' : '';
   }
 
@@ -856,7 +856,8 @@ class _DetailPageState extends State<DetailPage>
 
   Widget _videoTab(VideoDetail d) {
     final episodes = _episodes;
-    final total = episodes.isNotEmpty ? episodes.length : d.episodes;
+    final total =
+        episodes.isNotEmpty ? fxMainEpisodeCount(episodes) : d.episodes;
     final related = _relatedList;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

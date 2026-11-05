@@ -102,6 +102,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 每 10 秒把观看进度回写历史，App 被杀也能保留大致位置。
   Timer? _progressTimer;
 
+  /// 切后台 3 秒后才暂停；通知栏 / 截屏只到 inactive，不打断播放。
+  Timer? _backgroundTimer;
+  bool _backgrounded = false;
+  bool _pausedByBackground = false;
+
   bool _holding2x = false;
   double _rate = 1.0;
   double _rateBeforeHold = 1.0;
@@ -136,7 +141,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   String _epLabelFor(int n) {
     for (final e in _episodeList) {
-      if (e.n == n && e.name.isNotEmpty) return e.name;
+      if (e.n == n) return fxEpisodeLabel(e.n, e.name);
     }
     return fxEpisodeLabel(n);
   }
@@ -373,13 +378,47 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // 全屏期间由全屏页负责保存进度与暂停，避免同一实例被重复处理。
     if (_fullscreenActive) return;
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      // 来电 / 切后台：长按 2x 必须复位。
-      _endHold2x();
-      unawaited(_saveProgress());
-      unawaited(_controller?.pause());
+    switch (state) {
+      case AppLifecycleState.inactive:
+        // 下拉通知栏 / 截屏 / 多任务预览都只到 inactive：不暂停。
+        return;
+      case AppLifecycleState.paused:
+        // 来电 / 切后台：长按 2x 必须复位；先记进度，3 秒内回前台就不暂停。
+        _backgrounded = true;
+        _endHold2x();
+        unawaited(_saveProgress());
+        _backgroundTimer?.cancel();
+        _backgroundTimer = Timer(fxBackgroundPauseDelay, _pauseForBackground);
+        return;
+      case AppLifecycleState.resumed:
+        _backgrounded = false;
+        _backgroundTimer?.cancel();
+        _backgroundTimer = null;
+        _resumeAfterBackground();
+        return;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        return;
     }
+  }
+
+  void _pauseForBackground() {
+    _backgroundTimer = null;
+    if (!mounted || !_backgrounded || _fullscreenActive) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
+    _pausedByBackground = true;
+    unawaited(_saveProgress());
+    unawaited(c.pause());
+  }
+
+  void _resumeAfterBackground() {
+    if (!_pausedByBackground) return;
+    _pausedByBackground = false;
+    if (!mounted || _fullscreenActive || _loading || _error || _covered) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    unawaited(c.play());
   }
 
   @override
@@ -388,6 +427,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _hideTimer?.cancel();
     _unlockTimer?.cancel();
     _progressTimer?.cancel();
+    _backgroundTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
     _controller?.removeListener(_onVideoValue);
@@ -729,7 +769,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _uiDuration = null;
     });
     widget.onEpChange?.call(next);
-    if (auto) fxToast(context, '即将播放 ${fxEpisodeLabel(next)}');
+    if (auto) fxToast(context, '即将播放 ${_epLabelFor(next)}');
     await _bootstrap(
       seekToSaved: true,
       saveOld: false,
@@ -1593,7 +1633,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   String _epNameFor(VideoDetail d, int n) {
     for (final e in d.allEpisodes) {
-      if (e.n == n && e.name.isNotEmpty) return e.name;
+      if (e.n == n) return fxEpisodeLabel(e.n, e.name);
     }
     return fxEpisodeLabel(n);
   }
@@ -1698,7 +1738,7 @@ class _PlayerPageState extends State<PlayerPage> {
                                 ),
                               ),
                               child: Text(
-                                e.name.isEmpty ? fxEpisodeLabel(e.n) : e.name,
+                                fxEpisodeLabel(e.n, e.name),
                                 style: TextStyle(
                                   color: _ep == e.n
                                       ? Colors.white

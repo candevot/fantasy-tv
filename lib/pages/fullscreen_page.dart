@@ -157,6 +157,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _controls = true;
   Timer? _hideTimer;
   Timer? _progressTimer;
+
+  /// 切后台 3 秒后才暂停；通知栏 / 截屏只到 inactive，不打断播放。
+  Timer? _backgroundTimer;
+  bool _backgrounded = false;
+  bool _pausedByBackground = false;
   bool _locked = false;
   bool _rotationLocked = false;
 
@@ -300,7 +305,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   String _epLabelFor(int n) {
     for (final e in _episodes) {
-      if (e.n == n && e.name.isNotEmpty) return e.name;
+      if (e.n == n) return fxEpisodeLabel(e.n, e.name);
     }
     return fxEpisodeLabel(n);
   }
@@ -346,6 +351,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _unlockTimer?.cancel();
     _uiHoldTimer?.cancel();
     _progressTimer?.cancel();
+    _backgroundTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
     // 播放器实例属于竖屏页面，退出全屏只移除监听，不能 dispose。
@@ -356,14 +362,47 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      // 来电 / 切后台：长按 2 倍速必须复位，不能把 2x 留在后台。
-      _endHold2x();
-      unawaited(_saveProgress());
-      final c = _controller;
-      if (c != null) unawaited(c.pause());
+    switch (state) {
+      case AppLifecycleState.inactive:
+        // 下拉通知栏 / 截屏 / 多任务预览都只到 inactive：不暂停。
+        return;
+      case AppLifecycleState.paused:
+        // 来电 / 切后台：长按 2 倍速必须复位；先记进度，3 秒内回前台就不暂停。
+        _backgrounded = true;
+        _endHold2x();
+        unawaited(_saveProgress());
+        _backgroundTimer?.cancel();
+        _backgroundTimer = Timer(fxBackgroundPauseDelay, _pauseForBackground);
+        return;
+      case AppLifecycleState.resumed:
+        _backgrounded = false;
+        _backgroundTimer?.cancel();
+        _backgroundTimer = null;
+        _resumeAfterBackground();
+        return;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        return;
     }
+  }
+
+  void _pauseForBackground() {
+    _backgroundTimer = null;
+    if (!mounted || !_backgrounded) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
+    _pausedByBackground = true;
+    unawaited(_saveProgress());
+    unawaited(c.pause());
+  }
+
+  void _resumeAfterBackground() {
+    if (!_pausedByBackground) return;
+    _pausedByBackground = false;
+    if (!mounted || _loading || _error) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    unawaited(c.play());
   }
 
   /* ------------------------------------------------------------------ 系统 */
@@ -852,7 +891,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _loadedEp = null;
       _error = false;
     });
-    if (auto) fxToast(context, '即将播放 ${fxEpisodeLabel(next)}');
+    if (auto) fxToast(context, '即将播放 ${_epLabelFor(next)}');
     await _bootstrap(seekToSaved: true, saveOld: false);
     if (!mounted) return;
     _wake();

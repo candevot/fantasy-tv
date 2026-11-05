@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'player_theme.dart';
 
 /* ========================================================================== */
 /*  详情页专用白玻璃组件（只被 detail_page.dart 使用）                        */
@@ -120,14 +121,9 @@ class _DetailMarqueeTextState extends State<DetailMarqueeText>
   }
 }
 
-/// 集数文案：把接口的「第1集」规范成「第01集」，自定义名字原样保留。
-String detailEpisodeLabel(Episode e) {
-  final name = e.name.trim();
-  final pad = '第${e.n.toString().padLeft(2, '0')}集';
-  if (name.isEmpty) return pad;
-  if (RegExp(r'^第\s*\d+\s*集$').hasMatch(name)) return pad;
-  return name;
-}
+/// 集数文案：非「第N集」统一规范成「第N集」，
+/// 预告 / 花絮 / 拉片 / 解说显示原名前 8 字 + 序号。
+String detailEpisodeLabel(Episode e) => fxEpisodeLabel(e.n, e.name);
 
 /// 公告条 / 跑马灯提示条。
 ///
@@ -1068,7 +1064,7 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                         color: Fx.ink)),
                 const SizedBox(width: 8),
                 Text(
-                  '共 ${widget.episodes.length} 集',
+                  '共 ${fxMainEpisodeCount(widget.episodes)} 集',
                   style: const TextStyle(fontSize: 11, color: Fx.sub),
                 ),
                 const Spacer(),

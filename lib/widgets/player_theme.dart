@@ -5,12 +5,41 @@ import 'dart:ui' show ImageFilter;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models.dart';
 import '../theme.dart';
 
 /// 播放器通用小工具：时间格式、进度持久化、白玻璃控件。
 String fxPad2(int n) => n.toString().padLeft(2, '0');
 
-String fxEpisodeLabel(int n) => '第${fxPad2(n)}集';
+/// 切后台后等待多久才真正暂停：通知栏预览 / 截屏只到 inactive，
+/// 短暂离开不打断播放。
+const Duration fxBackgroundPauseDelay = Duration(seconds: 3);
+
+/// 预告 / 花絮 / 拉片 / 解说这类片段单独占一集，但不是正片。
+const List<String> fxExtraEpisodeKeys = <String>['预告', '花絮', '拉片', '解说'];
+
+bool fxIsExtraEpisode(String name) {
+  final s = name.trim();
+  if (s.isEmpty) return false;
+  return fxExtraEpisodeKeys.any(s.contains);
+}
+
+/// 正片集数：不把预告 / 花絮 / 拉片 / 解说算进去。
+int fxMainEpisodeCount(Iterable<Episode> episodes) =>
+    episodes.where((e) => !fxIsExtraEpisode(e.name)).length;
+
+/// 集名规范化：
+/// - 空名或不是「第N集」形式 → 统一显示「第N集」；
+/// - 预告 / 花絮 / 拉片 / 解说 → 原名前 8 字 + 序号（如「拉片 2」）。
+String fxEpisodeLabel(int ep, [String? name]) {
+  final s = (name ?? '').trim();
+  if (s.isEmpty) return '第${fxPad2(ep)}集';
+  if (fxIsExtraEpisode(s)) {
+    final head = s.characters.take(8).toString().trim();
+    return '$head $ep';
+  }
+  return '第${fxPad2(ep)}集';
+}
 
 String fxTime(Duration d) {
   final total = d.inSeconds < 0 ? 0 : d.inSeconds;

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'player_theme.dart';
 import 'together_ui.dart';
 
 /// 一起看 · 选片弹层：搜索 / 从热门选。
@@ -448,6 +449,13 @@ class _TogetherEpisodePicker extends StatelessWidget {
   final int current;
   final String title;
 
+  String _labelFor(int n) {
+    for (final e in episodes) {
+      if (e.n == n) return fxEpisodeLabel(e.n, e.name);
+    }
+    return fxEpisodeLabel(n);
+  }
+
   @override
   Widget build(BuildContext context) {
     return FractionallySizedBox(
@@ -498,7 +506,7 @@ class _TogetherEpisodePicker extends StatelessWidget {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            '共 ${episodes.length} 集 · 当前第 $current 集',
+                            '共 ${fxMainEpisodeCount(episodes)} 集 · 当前 ${_labelFor(current)}',
                             style: const TextStyle(
                               fontSize: 10.5,
                               color: Fx.sub,
@@ -556,11 +564,14 @@ class _TogetherEpisodePicker extends StatelessWidget {
                                 ),
                               ),
                               child: Text(
-                                '${ep.n}',
+                                fxEpisodeLabel(ep.n, ep.name),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight:
-                                      active ? FontWeight.w700 : FontWeight.w500,
+                                  fontSize: 12,
+                                  fontWeight: active
+                                      ? FontWeight.w700
+                                      : FontWeight.w500,
                                   color: active ? Colors.white : Fx.ink,
                                 ),
                               ),
