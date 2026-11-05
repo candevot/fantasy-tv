@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'api.dart';
 import 'auth.dart';
@@ -16,40 +20,137 @@ import 'pages/search_page.dart';
 import 'pages/together_page.dart';
 import 'pages/player_page.dart';
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  // 启动兜底：播放内核初始化 / 配置读取失败也不许白屏闪退，
-  // 记日志后照常 runApp，让用户至少能进首页并看到提示。
-  try {
-    MediaKit.ensureInitialized();
-  } catch (e, st) {
-    debugPrint('[boot] MediaKit.ensureInitialized failed: $e\n$st');
+void main() {
+  // 所有 Dart 异步异常的最后一道网；Framework / 平台异常另行接管。
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    _installErrorHandlers();
+    try {
+      await Boot.run();
+    } catch (e, st) {
+      // 兜底中的兜底：无论启动流程发生什么，都必须进入主界面。
+      AppLog.write('boot', e, st);
+    }
+    runApp(const FantasyApp());
+  }, (error, stack) {
+    AppLog.write('zone', error, stack);
+  });
+}
+
+/// 全局异常兜底：框架异常、平台异常、渲染异常都落日志 + 友好占位。
+void _installErrorHandlers() {
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    AppLog.write('flutter', details.exception, details.stack);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    AppLog.write('platform', error, stack);
+    // 已记录并展示兜底 UI，不再让引擎直接崩掉。
+    return true;
+  };
+  // 任何 build / layout / paint 异常都渲染友好占位，而不是灰色 ErrorWidget。
+  ErrorWidget.builder = (_) => const FxFatalErrorView();
+}
+
+/// 启动流程：每一步都容错，失败只标记状态，绝不阻塞进入主界面。
+class Boot {
+  Boot._();
+
+  /// 非空时首页顶部展示启动失败提示 + 重试入口。
+  static final ValueNotifier<String?> failure = ValueNotifier<String?>(null);
+
+  static bool _running = false;
+
+  static Future<void> run() async {
+    if (_running) return;
+    _running = true;
+    String? failed;
+
+    try {
+      MediaKit.ensureInitialized();
+    } catch (e, st) {
+      AppLog.write('boot.media_kit', e, st);
+    }
+
+    try {
+      await Api.init().timeout(const Duration(seconds: 5));
+    } catch (e, st) {
+      AppLog.write('boot.api', e, st);
+      failed = '配置加载失败，已使用默认线路';
+    }
+
+    try {
+      await Auth.instance.init().timeout(const Duration(seconds: 5));
+    } catch (e, st) {
+      AppLog.write('boot.auth', e, st);
+      failed ??= '登录状态读取失败，部分功能可能不可用';
+    }
+
+    try {
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.dark,
+        systemNavigationBarColor: Colors.transparent,
+        systemNavigationBarDividerColor: Colors.transparent,
+        systemNavigationBarIconBrightness: Brightness.dark,
+        systemStatusBarContrastEnforced: false,
+        systemNavigationBarContrastEnforced: false,
+      ));
+    } catch (e, st) {
+      AppLog.write('boot.chrome', e, st);
+    }
+
+    failure.value = failed;
+    _running = false;
   }
-  try {
-    await Api.init();
-  } catch (e, st) {
-    debugPrint('[boot] Api.init failed: $e\n$st');
+}
+
+/// 本地崩溃日志：`<ApplicationSupport>/logs/app.log`，只保留最近 200 条。
+class AppLog {
+  AppLog._();
+
+  static const int maxEntries = 200;
+  static Future<void> _queue = Future<void>.value();
+
+  /// 日志本身绝不抛异常，避免二次崩溃；写入串行排队防止并发截断。
+  static void write(String scope, Object error, [StackTrace? stack]) {
+    final buffer = StringBuffer()
+      ..write(DateTime.now().toIso8601String())
+      ..write(' [')
+      ..write(scope)
+      ..write('] ')
+      ..write(_oneLine('$error'));
+    if (stack != null) {
+      buffer
+        ..write(' | ')
+        ..write(_oneLine('$stack'));
+    }
+    var entry = buffer.toString();
+    if (entry.length > 4000) entry = '${entry.substring(0, 4000)}…';
+    _queue = _queue.then((_) => _appendSafe(entry));
   }
-  try {
-    await Auth.instance.init();
-  } catch (e, st) {
-    debugPrint('[boot] Auth.init failed: $e\n$st');
+
+  static String _oneLine(String text) =>
+      text.replaceAll('\r', ' ').replaceAll('\n', ' ⏎ ');
+
+  static Future<void> _appendSafe(String entry) async {
+    try {
+      final support = await getApplicationSupportDirectory();
+      final dir = Directory('${support.path}/logs');
+      if (!await dir.exists()) await dir.create(recursive: true);
+      final file = File('${dir.path}/app.log');
+      var lines = <String>[];
+      if (await file.exists()) lines = await file.readAsLines();
+      lines.add(entry);
+      if (lines.length > maxEntries) {
+        lines = lines.sublist(lines.length - maxEntries);
+      }
+      await file.writeAsString('${lines.join('\n')}\n', flush: true);
+    } catch (_) {
+      // 存储不可用时静默放弃，不影响 App 运行。
+    }
   }
-  try {
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.dark,
-      systemNavigationBarColor: Colors.transparent,
-      systemNavigationBarDividerColor: Colors.transparent,
-      systemNavigationBarIconBrightness: Brightness.dark,
-      systemStatusBarContrastEnforced: false,
-      systemNavigationBarContrastEnforced: false,
-    ));
-  } catch (e, st) {
-    debugPrint('[boot] SystemChrome setup failed: $e\n$st');
-  }
-  runApp(const FantasyApp());
 }
 
 class FantasyApp extends StatelessWidget {
@@ -282,7 +383,32 @@ class _RootShellState extends State<RootShell> {
     return Scaffold(
       extendBody: true,
       body: FxBackground(
-        child: IndexedStack(index: _i, children: pages),
+        child: Stack(
+          children: [
+            IndexedStack(index: _i, children: pages),
+            if (_i == 0)
+              Positioned(
+                top: 0,
+                left: 14,
+                right: 14,
+                child: SafeArea(
+                  bottom: false,
+                  child: ValueListenableBuilder<String?>(
+                    valueListenable: Boot.failure,
+                    builder: (_, message, __) {
+                      if (message == null) {
+                        return const SizedBox.shrink();
+                      }
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: _BootRetryBanner(message: message),
+                      );
+                    },
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
       bottomNavigationBar: Padding(
         padding: EdgeInsets.only(
@@ -332,6 +458,35 @@ class _RootShellState extends State<RootShell> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _BootRetryBanner extends StatefulWidget {
+  const _BootRetryBanner({required this.message});
+
+  final String message;
+
+  @override
+  State<_BootRetryBanner> createState() => _BootRetryBannerState();
+}
+
+class _BootRetryBannerState extends State<_BootRetryBanner> {
+  bool _retrying = false;
+
+  Future<void> _retry() async {
+    if (_retrying) return;
+    setState(() => _retrying = true);
+    await Boot.run();
+    if (mounted) setState(() => _retrying = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FxErrorBanner(
+      message: widget.message,
+      onRetry: _retry,
+      retrying: _retrying,
     );
   }
 }

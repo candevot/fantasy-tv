@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -9,7 +11,9 @@ import 'models.dart';
 class Api {
   static String base = 'http://47.96.0.112:8787/api';
   static String wsBase = 'ws://47.96.0.112:8787/ws/together';
-  static const Duration _timeout = Duration(seconds: 10);
+  /// 所有接口统一 8 秒超时；失败最多重试 1 次。
+  static const Duration _timeout = Duration(seconds: 8);
+  static const Duration _retryDelay = Duration(milliseconds: 500);
 
   /// 登录 token（由 Auth 维护）；存在时所有请求都带 Bearer。
   static String token = '';
@@ -43,17 +47,57 @@ class Api {
         if (token.isNotEmpty) 'Authorization': 'Bearer $token',
       };
 
+  /// HTTP 层统一兜底：8 秒超时，失败按指数退避重试 1 次。
+  /// 超时 / 断网 / 5xx 都转成带友好文案的 [ApiException]，
+  /// 页面只需要展示 `e.message` 并提供重试入口，不会因为异常崩掉。
+  static Future<http.Response> _send(
+    Future<http.Response> Function() request,
+  ) async {
+    ApiException? failure;
+    for (var attempt = 0; attempt <= 1; attempt++) {
+      if (attempt > 0) {
+        // 指数退避：唯一一次重试前等 500ms。
+        await Future<void>.delayed(
+          Duration(
+              milliseconds:
+                  _retryDelay.inMilliseconds * (1 << (attempt - 1))),
+        );
+      }
+      try {
+        final r = await request().timeout(_timeout);
+        if (r.statusCode >= 500) {
+          failure = ApiException.server(r.statusCode);
+          continue;
+        }
+        return r;
+      } on TimeoutException {
+        failure = ApiException.timeout();
+      } on SocketException {
+        failure = ApiException.network();
+      } on HandshakeException {
+        failure =
+            ApiException.network(message: '安全连接失败，请检查网络后重试');
+      } on http.ClientException {
+        failure = ApiException.network();
+      } catch (e) {
+        if (e is ApiException) rethrow;
+        failure =
+            ApiException('网络请求失败，请稍后重试', kind: ApiErrorKind.network);
+      }
+    }
+    throw failure ?? ApiException.network();
+  }
+
   static Map<String, dynamic> _decode(http.Response r) {
+    if (r.statusCode >= 500) throw ApiException.server(r.statusCode);
     dynamic j;
     try {
       j = jsonDecode(utf8.decode(r.bodyBytes));
     } catch (_) {
-      throw ApiException('服务器返回异常（HTTP ${r.statusCode}）',
-          code: r.statusCode);
+      throw _httpException(r.statusCode);
     }
     if (j is! Map) {
-      throw ApiException('服务器返回异常（HTTP ${r.statusCode}）',
-          code: r.statusCode);
+      throw _httpException(r.statusCode);
     }
     final code = j['code'];
     final ok = code == 0 || code == '0';
@@ -65,30 +109,39 @@ class Api {
     return d is Map<String, dynamic> ? d : <String, dynamic>{'data': d};
   }
 
+  /// 非业务错误（4xx / 脏数据 / 空响应）的统一友好文案。
+  static ApiException _httpException(int status) {
+    if (status == 401) {
+      return ApiException('登录已过期，请重新登录', code: status);
+    }
+    if (status >= 500) return ApiException.server(status);
+    if (status >= 200 && status < 300) {
+      return ApiException('服务器返回异常，请稍后重试',
+          code: status, kind: ApiErrorKind.server);
+    }
+    return ApiException('请求失败（HTTP $status），请稍后重试',
+        code: status, kind: ApiErrorKind.server);
+  }
+
   static Future<Map<String, dynamic>> _get(String path,
       [Map<String, dynamic>? q]) async {
-    final r = await http.get(_u(path, q), headers: _headers()).timeout(_timeout);
+    final r = await _send(() => http.get(_u(path, q), headers: _headers()));
     return _decode(r);
   }
 
-  /// [timeout] 只给上传头像这类大 body 用，普通接口沿用 [_timeout]。
   static Future<Map<String, dynamic>> _post(String path,
-      [Map<String, dynamic>? body, Duration? timeout]) async {
-    final r = await http
-        .post(_u(path),
-            headers: _headers(json: true),
-            body: jsonEncode(body ?? const <String, dynamic>{}))
-        .timeout(timeout ?? _timeout);
+      [Map<String, dynamic>? body]) async {
+    final r = await _send(() => http.post(_u(path),
+        headers: _headers(json: true),
+        body: jsonEncode(body ?? const <String, dynamic>{})));
     return _decode(r);
   }
 
   static Future<Map<String, dynamic>> _put(String path,
       [Map<String, dynamic>? body]) async {
-    final r = await http
-        .put(_u(path),
-            headers: _headers(json: true),
-            body: jsonEncode(body ?? const <String, dynamic>{}))
-        .timeout(_timeout);
+    final r = await _send(() => http.put(_u(path),
+        headers: _headers(json: true),
+        body: jsonEncode(body ?? const <String, dynamic>{})));
     return _decode(r);
   }
 
@@ -115,8 +168,7 @@ class Api {
   /// 新接口可能直接返回 items（不带 code/data 包装），这里不走 _decode，
   /// 两种结构都兼容；404、空结构、脏数据一律按空列表处理，由页面展示空态。
   static Future<List<LiveChannel>> live() async {
-    final r =
-        await http.get(_u('/live'), headers: _headers()).timeout(_timeout);
+    final r = await _send(() => http.get(_u('/live'), headers: _headers()));
     if (r.statusCode == 404) return const <LiveChannel>[];
     dynamic j;
     try {
@@ -186,17 +238,15 @@ class Api {
     // 这里不走 _get/_decode：需要解析的线路会返回
     // `{code:1, msg:'unresolved', data:{url, type:'parse', ...}}`，
     // 它是正常的业务响应而不是请求失败，必须单独取原始 body 再判断。
-    final r = await http
-        .get(_u('/play', {'id': id, 'ep': ep, 'line': line}),
-            headers: _headers())
-        .timeout(_timeout);
+    final r = await _send(() => http.get(
+        _u('/play', {'id': id, 'ep': ep, 'line': line}),
+        headers: _headers()));
     Map<String, dynamic> body = const <String, dynamic>{};
     try {
       final j = jsonDecode(utf8.decode(r.bodyBytes));
       if (j is Map) body = Map<String, dynamic>.from(j);
     } catch (_) {
-      throw ApiException('服务器返回异常（HTTP ${r.statusCode}）',
-          code: r.statusCode);
+      throw _httpException(r.statusCode);
     }
     final code = body['code'];
     final msg = '${body['msg'] ?? ''}'.trim().toLowerCase();
@@ -214,10 +264,7 @@ class Api {
       throw ApiException('${body['msg'] ?? '请求失败'}',
           code: code is num ? code.toInt() : r.statusCode);
     }
-    if (d == null) {
-      throw ApiException('服务器返回异常（HTTP ${r.statusCode}）',
-          code: r.statusCode);
-    }
+    if (d == null) throw _httpException(r.statusCode);
     return _playInfo(d);
   }
 
@@ -305,11 +352,10 @@ class Api {
   /// `POST /api/user/avatar`：`{dataBase64}` → 服务器落盘后返回绝对头像地址。
   /// 只接受 jpg/png，解码后 ≤ 2MB（客户端上传前已压缩到 200KB 以内）。
   static Future<String> uploadAvatar(String dataBase64) async {
+    // 统一走 8 秒超时；压缩后 ≤200KB，弱网超时会提示重试。
     final d = await _post(
       '/user/avatar',
       <String, dynamic>{'dataBase64': dataBase64},
-      // 200KB 图片转 base64 后约 270KB，弱网下 10s 不够。
-      const Duration(seconds: 30),
     );
     final url = '${d['avatar'] ?? d['url'] ?? ''}'.trim();
     if (url.isEmpty) throw ApiException('服务器未返回头像地址');
@@ -341,10 +387,36 @@ class Api {
   }
 }
 
+/// 请求失败的类型，页面可据此决定是否展示「重试」。
+enum ApiErrorKind { network, timeout, server, business }
+
 class ApiException implements Exception {
-  ApiException(this.message, {this.code = 0});
+  ApiException(this.message,
+      {this.code = 0, this.kind = ApiErrorKind.business});
+
+  /// 无网络 / 连接失败：文案必须能直接引导用户检查网络。
+  factory ApiException.network({String message = '请检查网络连接'}) =>
+      ApiException(message, kind: ApiErrorKind.network);
+
+  factory ApiException.timeout() =>
+      ApiException('请求超时，请稍后重试', kind: ApiErrorKind.timeout);
+
+  factory ApiException.server(int status) => ApiException(
+        '服务器开小差了（HTTP $status），请稍后重试',
+        code: status,
+        kind: ApiErrorKind.server,
+      );
+
   final String message;
   final int code;
+  final ApiErrorKind kind;
+
+  /// 网络 / 超时 / 服务端错误都可以让用户点重试。
+  bool get retryable =>
+      kind == ApiErrorKind.network ||
+      kind == ApiErrorKind.timeout ||
+      kind == ApiErrorKind.server;
+
   @override
   String toString() => message;
 }

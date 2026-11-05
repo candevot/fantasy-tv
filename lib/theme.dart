@@ -285,3 +285,208 @@ class FxAppBar extends StatelessWidget implements PreferredSizeWidget {
     );
   }
 }
+
+/* ========================================================================== */
+/*  全局兜底错误组件（main.dart / ErrorWidget.builder 使用）                    */
+/* ========================================================================== */
+
+/// 渲染错误兜底：不依赖 MaterialApp / Theme / MediaQuery / Scaffold，
+/// 即使 build 阶段抛错、或错误发生在 App 之外，也不会出现灰屏。
+class FxFatalErrorView extends StatelessWidget {
+  const FxFatalErrorView({
+    super.key,
+    this.title = '页面开小差了',
+    this.message = '这部分内容没能显示出来，返回上一页再试试',
+  });
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final card = Container(
+      constraints: const BoxConstraints(maxWidth: 340),
+      padding: const EdgeInsets.fromLTRB(24, 26, 24, 22),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(.94),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF50729F).withOpacity(.14),
+            blurRadius: 30,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 58,
+            height: 58,
+            decoration: BoxDecoration(
+              color: Fx.accent.withOpacity(.10),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.sentiment_dissatisfied_rounded,
+                size: 28, color: Fx.accent),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            title,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: Fx.ink,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 12,
+              height: 1.5,
+              color: Fx.sub,
+            ),
+          ),
+        ],
+      ),
+    );
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Material(
+        color: const Color(0xFFF6F8FC),
+        child: LayoutBuilder(
+          builder: (_, constraints) {
+            final minHeight = constraints.maxHeight.isFinite
+                ? math.max(0.0, constraints.maxHeight - 32)
+                : 0.0;
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: minHeight),
+                child: Center(child: card),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// 启动失败提示条：首页顶部显示，带「重试」入口，不阻塞其它页面。
+class FxErrorBanner extends StatelessWidget {
+  const FxErrorBanner({
+    super.key,
+    required this.message,
+    this.title = '部分服务未就绪',
+    this.onRetry,
+    this.retrying = false,
+  });
+
+  final String title;
+  final String message;
+  final VoidCallback? onRetry;
+  final bool retrying;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 11, 10, 11),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(.94),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFFFD9A8)),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF50729F).withOpacity(.14),
+            blurRadius: 22,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: Fx.gold.withOpacity(.12),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.cloud_off_rounded,
+                size: 19, color: Fx.gold),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: Fx.ink,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  message,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    height: 1.35,
+                    color: Fx.sub,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (onRetry != null) ...[
+            const SizedBox(width: 8),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: retrying ? null : onRetry,
+              child: Container(
+                constraints: const BoxConstraints(minWidth: 52),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Fx.accent.withOpacity(.10),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: retrying
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.8,
+                          color: Fx.accent,
+                        ),
+                      )
+                    : const Text(
+                        '重试',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: Fx.accent,
+                        ),
+                      ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
