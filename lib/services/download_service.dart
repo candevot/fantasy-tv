@@ -7,6 +7,9 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api.dart';
+import 'app_settings.dart';
+import 'download_storage.dart';
+import 'network_status.dart';
 
 /// 离线缓存任务状态。
 enum DownloadStatus { queued, downloading, paused, completed, failed }
@@ -207,8 +210,10 @@ String _safeSegment(String value) {
 /// 本地离线缓存：顺序下载 HLS 分片 / MP4 直链，队列持久化到
 /// SharedPreferences，UI 通过 [ChangeNotifier] 实时刷新。
 ///
-/// 目录策略：目标目录为 `Directory.systemTemp/fxdl`（Android 下即应用私有
-/// cache 目录），不需要 path_provider；系统清理缓存或卸载 App 后文件会丢失。
+/// 目录策略（见 [DownloadStorage]）：默认「手机存储」优先写
+/// `/storage/emulated/0/Download/幻想影视`；Android 分区存储不允许直接
+/// 写入时自动退回 `getExternalStorageDirectory()`，也可在设置里切换到
+/// 应用私有目录。任何情况下都不再使用 systemTemp 存放新缓存。
 class DownloadService extends ChangeNotifier {
   DownloadService._();
 
@@ -231,8 +236,34 @@ class DownloadService extends ChangeNotifier {
   Timer? _persistTimer;
   DateTime _lastNotify = DateTime.fromMillisecondsSinceEpoch(0);
 
+  DownloadLocation _location = DownloadLocation.phone;
+  DownloadStorageInfo? _storageInfo;
+  Directory? _rootDirCache;
+  int _usedBytes = 0;
+  bool _usageLoading = false;
+
   /// 服务是否已从 SharedPreferences 恢复完成。
   bool get ready => _ready;
+
+  /// 当前下载位置（设置里的选择）。
+  DownloadLocation get location => _location;
+
+  /// 当前下载位置的展示名。
+  String get locationLabel => _location.label;
+
+  /// 当前实际使用的缓存根目录；尚未解析完成时返回公共目录常量。
+  String get rootPath => _storageInfo?.path ?? DownloadStorage.publicRootPath;
+
+  /// 实际目录的可读展示（把 /storage/emulated/0 换成「手机存储」）。
+  String get displayRootPath => DownloadStorage.displayPath(rootPath);
+
+  /// 选择「手机存储」但系统不允许写公共 Download，已退回应用专属目录。
+  bool get storageFallback => _storageInfo?.fallback ?? false;
+
+  /// 所有缓存目录的真实占用（含旧版本 systemTemp 遗留文件）。
+  int get usedBytes => _usedBytes;
+
+  bool get usageLoading => _usageLoading;
 
   /// 只读任务列表（按加入时间排序，与持久化顺序一致）。
   List<DownloadTask> get tasks => List<DownloadTask>.unmodifiable(_tasks);
@@ -242,6 +273,9 @@ class DownloadService extends ChangeNotifier {
 
   Future<void> _load() async {
     try {
+      await AppSettings.instance.init();
+      _location = AppSettings.instance.downloadLocation;
+      _storageInfo = await DownloadStorage.resolve(_location);
       final sp = await SharedPreferences.getInstance();
       final raw = sp.getString(queuePrefsKey);
       if (raw != null && raw.trim().isNotEmpty) {
@@ -273,7 +307,42 @@ class DownloadService extends ChangeNotifier {
     } finally {
       _ready = true;
       notifyListeners();
+      unawaited(refreshUsage());
       _kick();
+    }
+  }
+
+  /// 切换下载目录。已经在下载的任务会继续写入原目录，新任务使用新目录；
+  /// 已完成的文件按绝对路径记录，切换后依旧可以播放。
+  Future<void> setLocation(DownloadLocation value) async {
+    await init();
+    if (_location == value) return;
+    _location = value;
+    _rootDirCache = null;
+    _storageInfo = null;
+    await AppSettings.instance.setDownloadLocation(value);
+    _storageInfo = await DownloadStorage.resolve(value);
+    await _rootDir();
+    _notifyNow();
+    await refreshUsage();
+  }
+
+  /// 重新统计真实磁盘占用；设置页进入或清理后调用。
+  Future<void> refreshUsage() async {
+    if (_usageLoading) return;
+    _usageLoading = true;
+    try {
+      final bytes = await DownloadStorage.usedBytes();
+      _usageLoading = false;
+      if (_usedBytes == bytes) {
+        _notifyNow();
+        return;
+      }
+      _usedBytes = bytes;
+      _notifyNow();
+    } catch (e) {
+      _usageLoading = false;
+      debugPrint('DownloadService: refreshUsage failed: $e');
     }
   }
 
@@ -449,6 +518,7 @@ class DownloadService extends ChangeNotifier {
     _notifyNow();
     await _persist();
     await _deleteTaskFiles(task);
+    await refreshUsage();
   }
 
   /// 清空全部任务与缓存文件。
@@ -460,6 +530,12 @@ class DownloadService extends ChangeNotifier {
     for (final task in old) {
       await _deleteTaskFiles(task);
     }
+    // 删除所有已知缓存目录里的残留（包括下载中断留下的 .part）。
+    await DownloadStorage.clearAllCaches();
+    _rootDirCache = null;
+    _storageInfo = await DownloadStorage.resolve(_location);
+    await _rootDir();
+    await refreshUsage();
   }
 
   /* -------------------------------------------------------------- worker */
@@ -525,6 +601,7 @@ class DownloadService extends ChangeNotifier {
     }
     var aborted = false;
     try {
+      await _ensureNetworkAllowed();
       final play = await _withRetry(
         () => Api.play(task.id, task.ep, task.line),
       );
@@ -579,6 +656,7 @@ class DownloadService extends ChangeNotifier {
       }
     } finally {
       _notifyNow();
+      unawaited(refreshUsage());
     }
     return aborted;
   }
@@ -587,6 +665,30 @@ class DownloadService extends ChangeNotifier {
   /// 否则刚拿到播放地址就会误 abort，任务永远原地重排。
   bool _shouldStop(DownloadTask task) =>
       !_tasks.contains(task) || task.status == DownloadStatus.paused;
+
+  /// 下载前检查真实网络类型：仅 Wi-Fi 开关打开时，移动网络直接失败并
+  /// 给出可读原因，连上 Wi-Fi 后可点重试。
+  Future<void> _ensureNetworkAllowed() async {
+    final kind = await NetworkStatus.detect();
+    if (kind == FxNetworkKind.offline) {
+      throw const _CacheException('网络不可用，请检查网络连接后重试');
+    }
+    if (AppSettings.instance.wifiOnlyDownload && kind.isMobile) {
+      throw const _CacheException(
+        '已开启「仅 Wi-Fi 下载」，当前为移动网络，连接 Wi-Fi 后可重试',
+      );
+    }
+  }
+
+  /// 给下载选集面板做预检；返回 null 表示允许下载，否则返回提示文案。
+  Future<String?> networkBlockReason() async {
+    final kind = await NetworkStatus.detect();
+    if (kind == FxNetworkKind.offline) return '当前无网络，请连接网络后重试';
+    if (AppSettings.instance.wifiOnlyDownload && kind.isMobile) {
+      return '已开启「仅 Wi-Fi 下载」，当前为移动网络';
+    }
+    return null;
+  }
 
   Future<void> _deleteQuietly(File file) async {
     try {
@@ -738,6 +840,7 @@ class DownloadService extends ChangeNotifier {
         ..updatedAt = DateTime.now().millisecondsSinceEpoch;
       _notifyNow();
       await _persist();
+      unawaited(refreshUsage());
     } finally {
       if (sink != null) {
         try {
@@ -857,6 +960,7 @@ class DownloadService extends ChangeNotifier {
         ..updatedAt = DateTime.now().millisecondsSinceEpoch;
       _notifyNow();
       await _persist();
+      unawaited(refreshUsage());
     } finally {
       if (sink != null) {
         try {
@@ -1001,19 +1105,26 @@ class DownloadService extends ChangeNotifier {
 
   /* --------------------------------------------------------- storage */
 
-  /// 目录策略：`Directory.systemTemp/fxdl`。Android 下 systemTemp 是应用
-  /// 私有 cache 目录（无需 path_provider），卸载或系统清缓存后会丢失。
+  /// 目录由 [DownloadStorage] 解析：默认公共 Download，系统限制时回退到
+  /// 应用专属外部目录；也可在设置里切换为应用私有目录。
   Future<Directory> _rootDir() async {
-    final dir = Directory('${Directory.systemTemp.path}/fxdl');
+    final cached = _rootDirCache;
+    if (cached != null) return cached;
+    _storageInfo ??= await DownloadStorage.resolve(_location);
+    final dir = Directory(_storageInfo!.path);
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
+    _rootDirCache = dir;
     return dir;
   }
 
+  String _taskDirName(DownloadTask task) =>
+      '${_safeSegment(task.id)}_${task.ep}';
+
   Future<Directory> _taskDir(DownloadTask task) async {
     final root = await _rootDir();
-    final dir = Directory('${root.path}/${_safeSegment(task.id)}_${task.ep}');
+    final dir = Directory('${root.path}/${_taskDirName(task)}');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
@@ -1026,28 +1137,47 @@ class DownloadService extends ChangeNotifier {
       if (await file.exists()) return file;
     }
     final root = await _rootDir();
-    final dir = Directory('${root.path}/${_safeSegment(task.id)}_${task.ep}');
+    final roots = <String>{root.path};
+    // 切换目录或升级前下载的文件可能留在旧目录里，逐个位置找回来。
+    try {
+      roots.addAll(await DownloadStorage.knownRootPaths());
+    } catch (_) {}
     final exts = <String>[
       if (task.ext.trim().isNotEmpty) task.ext.trim(),
       'ts',
       'mp4',
     ];
-    for (final ext in exts.toSet()) {
-      final file = File('${dir.path}/ep_${task.ep}.$ext');
-      if (await file.exists()) return file;
+    for (final rootPath in roots) {
+      final dir = Directory('$rootPath/${_taskDirName(task)}');
+      for (final ext in exts.toSet()) {
+        final file = File('${dir.path}/ep_${task.ep}.$ext');
+        if (await file.exists()) return file;
+      }
     }
     return null;
   }
 
   Future<void> _deleteTaskFiles(DownloadTask task) async {
+    final dirs = <Directory>{};
     try {
       final root = await _rootDir();
-      final dir = Directory('${root.path}/${_safeSegment(task.id)}_${task.ep}');
-      if (await dir.exists()) {
-        await dir.delete(recursive: true);
+      dirs.add(Directory('${root.path}/${_taskDirName(task)}'));
+    } catch (_) {}
+    try {
+      for (final rootPath in await DownloadStorage.knownRootPaths()) {
+        dirs.add(Directory('$rootPath/${_taskDirName(task)}'));
       }
-    } catch (e) {
-      debugPrint('DownloadService: delete files failed: $e');
+    } catch (_) {}
+    final filePath = task.filePath;
+    if (filePath != null && filePath.isNotEmpty) {
+      dirs.add(File(filePath).parent);
+    }
+    for (final dir in dirs) {
+      try {
+        if (await dir.exists()) await dir.delete(recursive: true);
+      } catch (e) {
+        debugPrint('DownloadService: delete ${dir.path} failed: $e');
+      }
     }
   }
 

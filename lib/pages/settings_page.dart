@@ -1,11 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../auth.dart';
+import '../services/app_info.dart';
+import '../services/app_settings.dart';
+import '../services/app_update_service.dart';
+import '../services/download_service.dart';
 import '../theme.dart';
+import 'about_page.dart';
 import 'category_page.dart';
 import 'change_password_page.dart';
+import 'download_settings_page.dart';
+import 'feedback_page.dart';
 import 'login_page.dart';
 
+/// 设置页：账号安全 / 播放设置 / 下载与缓存 / 关于 / 退出登录。
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
 
@@ -14,24 +23,56 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  final AppSettings _settings = AppSettings.instance;
+  final DownloadService _downloads = DownloadService.instance;
+
   bool _checking = false;
-  int _cacheBytes = 0;
+  bool _ready = false;
 
   @override
   void initState() {
     super.initState();
-    _cacheBytes = PaintingBinding.instance.imageCache.currentSizeBytes;
-    Auth.instance.addListener(_onAuth);
+    _settings.addListener(_onChanged);
+    _downloads.addListener(_onChanged);
+    Auth.instance.addListener(_onChanged);
+    _load();
   }
 
   @override
   void dispose() {
-    Auth.instance.removeListener(_onAuth);
+    _settings.removeListener(_onChanged);
+    _downloads.removeListener(_onChanged);
+    Auth.instance.removeListener(_onChanged);
     super.dispose();
   }
 
-  void _onAuth() {
+  void _onChanged() {
     if (mounted) setState(() {});
+  }
+
+  Future<void> _load() async {
+    try {
+      await _settings.init();
+      await AppInfo.load();
+      await _downloads.init();
+      await _downloads.refreshUsage();
+    } catch (e) {
+      debugPrint('SettingsPage: load failed: $e');
+    }
+    if (!mounted) return;
+    setState(() => _ready = true);
+  }
+
+  void _toast(String message) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(
+      content: Text(message),
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: const Color(0xEE1B2430),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ));
   }
 
   Future<void> _openChangePassword() async {
@@ -45,29 +86,192 @@ class _SettingsPageState extends State<SettingsPage> {
         .push(MaterialPageRoute(builder: (_) => const ChangePasswordPage()));
   }
 
-  void _toast(String msg) {
-    final m = ScaffoldMessenger.maybeOf(context);
-    if (m == null) return;
-    m.hideCurrentSnackBar();
-    m.showSnackBar(SnackBar(
-      content: Text(msg),
-      behavior: SnackBarBehavior.floating,
-      backgroundColor: const Color(0xEE1B2430),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-    ));
+  Future<void> _openDownloadSettings() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const DownloadSettingsPage()),
+    );
+    if (!mounted) return;
+    await _downloads.refreshUsage();
+    if (mounted) setState(() {});
   }
 
-  Future<void> _clearCache() async {
-    final before = PaintingBinding.instance.imageCache.currentSizeBytes;
+  Future<void> _openAbout() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const AboutPage()),
+    );
+  }
+
+  Future<void> _openFeedback() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const FeedbackPage()),
+    );
+  }
+
+  Future<void> _pickQuality() async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => _QualitySheet(current: _settings.defaultQuality),
+    );
+    if (selected == null || !mounted) return;
+    await _settings.setDefaultQuality(selected);
+    if (!mounted) return;
+    _toast('默认清晰度已设为「${_settings.defaultQualityLabel}」');
+  }
+
+  Future<void> _checkUpdate() async {
+    if (_checking) return;
+    setState(() => _checking = true);
+    try {
+      final info = await AppUpdateService.check();
+      if (!mounted) return;
+      if (info.hasUpdate) {
+        setState(() => _checking = false);
+        await _showUpdate(info);
+        return;
+      }
+      _toast('已是最新版本 ${AppInfo.displayVersion}');
+    } on AppUpdateException catch (e) {
+      if (mounted) _toast(e.message);
+    } catch (_) {
+      if (mounted) _toast('检查更新失败，请检查网络后重试');
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
+  }
+
+  Future<void> _showUpdate(AppUpdateInfo info) async {
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+        title: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: Fx.accent.withOpacity(.10),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(
+                Icons.system_update_rounded,
+                size: 20,
+                color: Fx.accent,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    '发现新版本',
+                    style: TextStyle(
+                      fontSize: 16.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '当前 ${AppInfo.displayVersion} → 最新 ${info.displayVersion}',
+                    style: const TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w400,
+                      color: Fx.sub,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (info.notes.trim().isNotEmpty) ...[
+              Text(
+                info.notes.trim(),
+                style: const TextStyle(
+                  fontSize: 12,
+                  height: 1.6,
+                  color: Fx.sub,
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            const Text(
+              '下载链接',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Fx.ink,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF4F7FC),
+                borderRadius: BorderRadius.circular(11),
+              ),
+              child: SelectableText(
+                info.downloadUrl,
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  height: 1.45,
+                  color: Fx.accent,
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '复制链接后可在浏览器中下载安装包。',
+              style: TextStyle(fontSize: 10, color: Color(0xFFA6B1C2)),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('稍后', style: TextStyle(color: Fx.sub)),
+          ),
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: info.downloadUrl));
+              if (!mounted) return;
+              Navigator.pop(ctx);
+              _toast('下载链接已复制，请在浏览器中打开');
+            },
+            child: const Text('复制链接', style: TextStyle(color: Fx.accent)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _logout() async {
+    if (Auth.instance.user == null) {
+      _toast('当前未登录');
+      return;
+    }
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-        title: const Text('清除缓存？',
-            style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
-        content: const Text('将清理临时图片缓存，不会影响收藏、观看历史与离线记录。',
-            style: TextStyle(fontSize: 12.5, height: 1.5, color: Fx.sub)),
+        title: const Text(
+          '退出登录？',
+          style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
+        ),
+        content: const Text(
+          '退出后本机观看记录、收藏与离线缓存仍会保留，下次登录可继续使用。',
+          style: TextStyle(fontSize: 12.5, height: 1.5, color: Fx.sub),
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -75,199 +279,155 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('清除', style: TextStyle(color: Fx.accent)),
+            child: const Text(
+              '退出',
+              style: TextStyle(color: Color(0xFFE05252)),
+            ),
           ),
         ],
       ),
     );
     if (ok != true) return;
-    PaintingBinding.instance.imageCache.clear();
-    PaintingBinding.instance.imageCache.clearLiveImages();
-    await Future<void>.delayed(const Duration(milliseconds: 300));
-    if (!mounted) return;
-    setState(() => _cacheBytes = 0);
-    _toast(before > 0 ? '已清理 ${fxBytes(before)} 缓存' : '缓存已清理');
-  }
-
-  Future<void> _checkUpdate() async {
-    if (_checking) return;
-    setState(() => _checking = true);
-    await Future<void>.delayed(const Duration(milliseconds: 850));
-    if (!mounted) return;
-    setState(() => _checking = false);
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 54,
-              height: 54,
-              decoration: BoxDecoration(
-                color: const Color(0xFF5BC8A8).withOpacity(.12),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.check_rounded,
-                  size: 28, color: Color(0xFF2FA985)),
-            ),
-            const SizedBox(height: 14),
-            const Text('已是最新版本',
-                style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: Fx.ink)),
-            const SizedBox(height: 6),
-            const Text('幻想影视 v1.0.0',
-                style: TextStyle(fontSize: 11.5, color: Fx.sub)),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('知道了', style: TextStyle(color: Fx.accent)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showAbout() {
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        padding: const EdgeInsets.fromLTRB(24, 10, 24, 22),
-        decoration: const BoxDecoration(
-          color: Color(0xFFFBFDFF),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-        ),
-        child: SafeArea(
-          top: false,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 38,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 20),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFDCE4F0),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              Container(
-                width: 68,
-                height: 68,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  gradient: Fx.brand,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Fx.accent.withOpacity(.30),
-                      blurRadius: 22,
-                      offset: const Offset(0, 8),
-                    ),
-                  ],
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: Image.asset(
-                  'assets/logo.png',
-                  fit: BoxFit.cover,
-                  errorBuilder: (context, error, stack) => const Icon(
-                      Icons.play_arrow_rounded,
-                      size: 36,
-                      color: Colors.white),
-                ),
-              ),
-              const SizedBox(height: 12),
-              const Text('幻想影视',
-                  style: TextStyle(
-                      fontSize: 19,
-                      fontWeight: FontWeight.w800,
-                      color: Fx.ink,
-                      letterSpacing: .5)),
-              const SizedBox(height: 4),
-              const Text('版本 1.0.0',
-                  style: TextStyle(fontSize: 11, color: Fx.sub)),
-              const SizedBox(height: 14),
-              const Text(
-                '纯净无广告的高清追剧应用，支持多线路播放、4K 画质与离线缓存。',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 11.5, height: 1.65, color: Fx.sub),
-              ),
-              const SizedBox(height: 15),
-              Wrap(
-                spacing: 7,
-                runSpacing: 7,
-                alignment: WrapAlignment.center,
-                children: [
-                  for (final t in ['无广告', '4K 高清', '多线路', 'AI 找片'])
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: Fx.accent.withOpacity(.07),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(t,
-                          style: const TextStyle(
-                              fontSize: 10, color: Fx.accent)),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              Text('© ${DateTime.now().year} 幻想影视',
-                  style: const TextStyle(
-                      fontSize: 9.5, color: Color(0xFFB3BECD))),
-            ],
-          ),
-        ),
-      ),
-    );
+    await Auth.instance.logout();
+    if (mounted) _toast('已退出登录');
   }
 
   @override
   Widget build(BuildContext context) {
+    final user = Auth.instance.user;
     return FxPageScaffold(
       title: '设置',
       child: ListView(
         physics: const BouncingScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 30),
         children: [
-          const Padding(
-            padding: EdgeInsets.only(left: 4, bottom: 8),
-            child: Text('通用',
-                style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Fx.sub)),
+          const _SectionTitle('账号安全'),
+          GlassCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            radius: 20,
+            child: _row(
+              icon: Icons.password_rounded,
+              color: const Color(0xFFE08A3C),
+              title: '修改密码',
+              subtitle: user == null
+                  ? '登录后可修改登录密码'
+                  : '已登录：${user.nickname.trim().isEmpty ? user.account : user.nickname}',
+              trailing: Text(
+                user == null ? '去登录' : '修改',
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  color: Color(0xFFA6B1C2),
+                ),
+              ),
+              onTap: _openChangePassword,
+            ),
           ),
+          const _SectionTitle('播放设置'),
           GlassCard(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
             radius: 20,
             child: Column(
               children: [
                 _row(
-                  icon: Icons.cleaning_services_rounded,
+                  icon: Icons.high_quality_rounded,
                   color: Fx.accent,
-                  title: '清除缓存',
-                  subtitle: '临时图片与运行缓存',
-                  trailing: Text(fxBytes(_cacheBytes),
-                      style: const TextStyle(fontSize: 11, color: Fx.sub)),
-                  onTap: _clearCache,
+                  title: '默认清晰度',
+                  subtitle: _qualityHint(_settings.defaultQuality),
+                  trailing: Text(
+                    _settings.defaultQualityLabel,
+                    style: const TextStyle(fontSize: 11, color: Fx.sub),
+                  ),
+                  onTap: _pickQuality,
                 ),
-                Padding(
-                  padding: const EdgeInsets.only(left: 48),
-                  child: Container(height: 1, color: Fx.ink.withOpacity(.05)),
+                _divider(),
+                _switchRow(
+                  icon: Icons.skip_next_rounded,
+                  color: const Color(0xFF8E6BFF),
+                  title: '自动下一集',
+                  subtitle: '当前集播完后自动播放下一集',
+                  value: _settings.autoNext,
+                  onChanged: (value) async {
+                    await _settings.setAutoNext(value);
+                    if (!mounted) return;
+                    _toast(value ? '已开启自动下一集' : '已关闭自动下一集');
+                  },
                 ),
+                _divider(),
+                _switchRow(
+                  icon: Icons.fast_forward_rounded,
+                  color: const Color(0xFF2FA985),
+                  title: '跳过片头片尾',
+                  subtitle: '默认关闭，开启后全屏与自动连播生效',
+                  value: _settings.skipIntroOutro,
+                  onChanged: (value) async {
+                    await _settings.setSkipIntroOutro(value);
+                    if (!mounted) return;
+                    _toast(value ? '已开启跳过片头片尾' : '已关闭跳过片头片尾');
+                  },
+                ),
+              ],
+            ),
+          ),
+          const _SectionTitle('下载与缓存'),
+          GlassCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            radius: 20,
+            child: _row(
+              icon: Icons.download_rounded,
+              color: const Color(0xFF5BC8A8),
+              title: '下载与缓存',
+              subtitle: _downloadHint(),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _ready ? fxBytes(_downloads.usedBytes) : '统计中…',
+                    style: const TextStyle(fontSize: 11, color: Fx.sub),
+                  ),
+                  const SizedBox(width: 2),
+                  const Icon(
+                    Icons.chevron_right_rounded,
+                    size: 18,
+                    color: Color(0xFFC3CDDA),
+                  ),
+                ],
+              ),
+              onTap: _openDownloadSettings,
+              showChevron: false,
+            ),
+          ),
+          const _SectionTitle('关于'),
+          GlassCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            radius: 20,
+            child: Column(
+              children: [
+                _row(
+                  icon: Icons.info_outline_rounded,
+                  color: Fx.accent2,
+                  title: '关于幻想影视',
+                  subtitle: _ready ? AppInfo.fullVersion : '正在读取版本…',
+                  trailing: Text(
+                    _ready ? AppInfo.displayVersion : '',
+                    style: const TextStyle(fontSize: 11, color: Fx.sub),
+                  ),
+                  onTap: _openAbout,
+                ),
+                _divider(),
+                _row(
+                  icon: Icons.feedback_outlined,
+                  color: const Color(0xFFFF7EA8),
+                  title: '意见反馈',
+                  subtitle: '提交问题或建议，我们会尽快查看',
+                  trailing: const SizedBox.shrink(),
+                  onTap: _openFeedback,
+                ),
+                _divider(),
                 _row(
                   icon: Icons.system_update_rounded,
-                  color: const Color(0xFF5BC8A8),
+                  color: const Color(0xFF2FA985),
                   title: '检查更新',
-                  subtitle: '当前版本 v1.0.0',
+                  subtitle: '当前 ${_ready ? AppInfo.displayVersion : '…'}',
                   trailing: _checking
                       ? const SizedBox(
                           width: 16,
@@ -278,71 +438,92 @@ class _SettingsPageState extends State<SettingsPage> {
                                 AlwaysStoppedAnimation<Color>(Fx.accent),
                           ),
                         )
-                      : const Text('已是最新',
+                      : const Text(
+                          '检查',
                           style: TextStyle(
-                              fontSize: 10.5, color: Color(0xFFA6B1C2))),
+                            fontSize: 10.5,
+                            color: Color(0xFFA6B1C2),
+                          ),
+                        ),
                   onTap: _checkUpdate,
                 ),
               ],
             ),
           ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(4, 22, 4, 8),
-            child: Text('账号与安全',
-                style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Fx.sub)),
-          ),
-          GlassCard(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-            radius: 20,
-            child: _row(
-              icon: Icons.password_rounded,
-              color: const Color(0xFFE08A3C),
-              title: '修改密码',
-              subtitle: Auth.instance.user == null
-                  ? '登录后可修改登录密码'
-                  : '旧密码验证，定期更换更安全',
-              trailing: Text(
-                  Auth.instance.user == null ? '去登录' : '修改',
-                  style: const TextStyle(fontSize: 10.5, color: Color(0xFFA6B1C2))),
-              onTap: _openChangePassword,
+          const SizedBox(height: 24),
+          _logoutButton(user != null),
+          const SizedBox(height: 18),
+          Center(
+            child: Text(
+              '${AppInfo.appName} ${_ready ? AppInfo.displayVersion : ''}',
+              style: const TextStyle(
+                fontSize: 10,
+                color: Color(0xFFB3BECD),
+                letterSpacing: .4,
+              ),
             ),
-          ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(4, 22, 4, 8),
-            child: Text('关于',
-                style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: Fx.sub)),
-          ),
-          GlassCard(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-            radius: 20,
-            child: _row(
-              icon: Icons.info_outline_rounded,
-              color: Fx.accent2,
-              title: '关于幻想影视',
-              subtitle: '版本 1.0.0',
-              trailing: const Text('1.0.0',
-                  style: TextStyle(fontSize: 11, color: Fx.sub)),
-              onTap: _showAbout,
-            ),
-          ),
-          const SizedBox(height: 26),
-          const Center(
-            child: Text('幻想影视 v1.0.0',
-                style: TextStyle(
-                    fontSize: 10,
-                    color: Color(0xFFB3BECD),
-                    letterSpacing: .4)),
           ),
         ],
       ),
     );
   }
+
+  String _qualityHint(String key) {
+    for (final option in AppSettings.qualityOptions) {
+      if (option.key == key) return option.hint;
+    }
+    return AppSettings.qualityOptions.first.hint;
+  }
+
+  String _downloadHint() {
+    if (!_ready) return '正在读取下载设置…';
+    final parts = <String>[
+      _downloads.locationLabel,
+      if (_downloads.storageFallback) '应用专属',
+      if (_settings.wifiOnlyDownload) '仅 Wi-Fi',
+    ];
+    return parts.join(' · ');
+  }
+
+  Widget _logoutButton(bool loggedIn) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _logout,
+      child: Container(
+        height: 48,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(.72),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFFFD7D7)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.logout_rounded,
+              size: 18,
+              color: loggedIn ? const Color(0xFFE05252) : Fx.sub,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '退出登录',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: loggedIn ? const Color(0xFFE05252) : Fx.sub,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _divider() => Padding(
+        padding: const EdgeInsets.only(left: 48),
+        child: Container(height: 1, color: Fx.ink.withOpacity(.05)),
+      );
 
   Widget _row({
     required IconData icon,
@@ -351,6 +532,7 @@ class _SettingsPageState extends State<SettingsPage> {
     required String subtitle,
     required Widget trailing,
     required VoidCallback onTap,
+    bool showChevron = true,
   }) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -373,21 +555,214 @@ class _SettingsPageState extends State<SettingsPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title,
-                      style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: Fx.ink)),
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Fx.ink,
+                    ),
+                  ),
                   const SizedBox(height: 2),
-                  Text(subtitle,
-                      style: const TextStyle(fontSize: 10.5, color: Fx.sub)),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+                  ),
                 ],
               ),
             ),
             trailing,
-            const SizedBox(width: 2),
-            const Icon(Icons.chevron_right_rounded,
-                size: 18, color: Color(0xFFC3CDDA)),
+            if (showChevron) ...[
+              const SizedBox(width: 2),
+              const Icon(
+                Icons.chevron_right_rounded,
+                size: 18,
+                color: Color(0xFFC3CDDA),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _switchRow({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: color.withOpacity(.11),
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(icon, size: 18, color: color),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: Fx.ink,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+                ),
+              ],
+            ),
+          ),
+          Switch.adaptive(
+            value: value,
+            activeColor: Fx.accent,
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionTitle extends StatelessWidget {
+  const _SectionTitle(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 18, 4, 8),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          color: Fx.sub,
+        ),
+      ),
+    );
+  }
+}
+
+class _QualitySheet extends StatelessWidget {
+  const _QualitySheet({required this.current});
+
+  final String current;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 10, 18, 22),
+      decoration: const BoxDecoration(
+        color: Color(0xFFFBFDFF),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 38,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 18),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFDCE4F0),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const Text(
+              '默认清晰度',
+              style: TextStyle(
+                fontSize: 16.5,
+                fontWeight: FontWeight.w700,
+                color: Fx.ink,
+              ),
+            ),
+            const SizedBox(height: 12),
+            for (final option in AppSettings.qualityOptions) ...[
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => Navigator.pop(context, option.key),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: current == option.key
+                        ? Fx.accent.withOpacity(.07)
+                        : Colors.white.withOpacity(.72),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: current == option.key
+                          ? Fx.accent.withOpacity(.45)
+                          : Colors.white,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              option.label,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color:
+                                    current == option.key ? Fx.accent : Fx.ink,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              option.hint,
+                              style: const TextStyle(
+                                fontSize: 10.5,
+                                color: Fx.sub,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Icon(
+                        current == option.key
+                            ? Icons.check_circle_rounded
+                            : Icons.radio_button_unchecked_rounded,
+                        size: 19,
+                        color: current == option.key
+                            ? Fx.accent
+                            : const Color(0xFFC3CDDA),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
           ],
         ),
       ),

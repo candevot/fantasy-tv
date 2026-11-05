@@ -154,6 +154,12 @@ class _DownloadSheetState extends State<DownloadSheet> {
 
   Future<void> _confirm() async {
     if (_selected.isEmpty || _saving) return;
+    final block = await _service.networkBlockReason();
+    if (!mounted) return;
+    if (block != null) {
+      _toast(block);
+      return;
+    }
     final picked = widget.episodes
         .where((e) => _selected.contains(e.n) && _selectable(_stateOf(e.n)))
         .toList(growable: false);
@@ -174,6 +180,18 @@ class _DownloadSheetState extends State<DownloadSheet> {
     final added = await _service.enqueue(requests);
     if (!mounted) return;
     Navigator.of(context).pop(added);
+  }
+
+  void _toast(String message) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(
+      content: Text(message),
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: const Color(0xEE1B2430),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ));
   }
 
   @override
@@ -333,7 +351,7 @@ class _DownloadSheetState extends State<DownloadSheet> {
                     SizedBox(width: 4),
                     Expanded(
                       child: Text(
-                        '仅缓存已获授权的公开片源；文件存于应用私有临时目录，清理缓存或卸载后会丢失。',
+                        '仅缓存已获授权的公开片源；文件保存到设置中的下载目录（默认 手机存储/Download/幻想影视），可在「设置 → 下载与缓存」查看和清理。',
                         maxLines: 2,
                         style: TextStyle(
                           fontSize: 9.5,
