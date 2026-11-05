@@ -21,6 +21,10 @@ dependencies:
   image_picker: ^1.1.2
   image: ^4.2.0
   path_provider: ^2.1.4
+  # 播放页上下滑手势：亮度 / 音量。两者都是 media_kit_video 的传递依赖，
+  # 这里固定成同一版本，避免 CI 解析出需要更高 compileSdk 的新版。
+  screen_brightness_platform_interface: ^2.1.2
+  volume_controller: ^3.4.4
 dev_dependencies:
   flutter_test:
     sdk: flutter

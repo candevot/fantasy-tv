@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -20,6 +22,22 @@ String fxTime(Duration d) {
 }
 
 String fxClock(DateTime t) => '${fxPad2(t.hour)}:${fxPad2(t.minute)}';
+
+/// 分辨率通俗标签：4K / 1080P / 720P / 标清。
+///
+/// 传入的 [width] 是视频原始宽度；有帧率信息时拼成「4K · 60帧」。
+String fxResolutionLabel(int? width, {num? fps}) {
+  if (width == null || width <= 0) return '';
+  final tier = width >= 3800
+      ? '4K'
+      : width >= 1800
+          ? '1080P'
+          : width >= 1200
+              ? '720P'
+              : '标清';
+  if (fps != null && fps > 0) return '$tier · ${fps.round()}帧';
+  return tier;
+}
 
 String fxProgressKey(String videoId, int ep) => 'pos_${videoId}_$ep';
 
@@ -101,7 +119,9 @@ class PGlassIcon extends StatelessWidget {
         width: size,
         height: size,
         decoration: BoxDecoration(
-          color: active ? Fx.accent.withOpacity(.82) : Colors.white.withOpacity(tint),
+          color: active
+              ? Fx.accent.withOpacity(.82)
+              : Colors.white.withOpacity(tint),
           shape: BoxShape.circle,
           border: Border.all(color: Colors.white.withOpacity(.32), width: 1),
           boxShadow: [
@@ -145,21 +165,40 @@ class PGlassPill extends StatelessWidget {
       child: child,
     );
     if (onTap == null) return box;
-    return GestureDetector(onTap: onTap, behavior: HitTestBehavior.opaque, child: box);
+    return GestureDetector(
+        onTap: onTap, behavior: HitTestBehavior.opaque, child: box);
   }
 }
 
-/// 播放器细进度条：表情把手 + 拖动
+/// 播放器加载文案里的产品名（需求指定，切集/换线路加载时展示）。
+const String fxPlayerBrand = '幻想腾讯4K';
+
+/// 「正在加载 幻想腾讯4K 第03集」
+String fxLoadingEpisodeText(int ep) =>
+    '正在加载 $fxPlayerBrand ${fxEpisodeLabel(ep)}';
+
+/// 播放器进度条。
+///
+/// 交互按腾讯视频：
+/// - 拖动过程中只更新高亮，**松手才真正 seek**；
+/// - 高亮跟手，不回弹；
+/// - 触摸热区固定 ≥32px，视觉条可单独加粗到 4–6px；
+/// - 拖动时通过 [onScrub] 把目标时间交给外层，实时刷新左右时间文案。
 class PProgressBar extends StatefulWidget {
   const PProgressBar({
     super.key,
     required this.position,
     required this.duration,
     required this.onSeek,
-    this.height = 3,
-    this.thumbSize = 17,
+    this.buffered = Duration.zero,
+    this.onScrub,
+    this.height = 4,
+    this.thumbSize = 16,
+    this.touchHeight = 36,
     this.showThumb = true,
+    this.enabled = true,
     this.trackColor,
+    this.bufferedColor,
     this.activeColors = const [Color(0xFF8E6BFF), Color(0xFF5B8CFF)],
     this.thumbColor = Fx.gold,
   });
@@ -167,10 +206,21 @@ class PProgressBar extends StatefulWidget {
   final Duration position;
   final Duration duration;
   final ValueChanged<Duration> onSeek;
+
+  /// 已缓冲的时长（媒体时间，非文件字节）。
+  final Duration buffered;
+
+  /// 拖动预览：目标时间；松手后为 null。
+  final ValueChanged<Duration?>? onScrub;
   final double height;
   final double thumbSize;
+
+  /// 触摸热区高度，最小 32。
+  final double touchHeight;
   final bool showThumb;
+  final bool enabled;
   final Color? trackColor;
+  final Color? bufferedColor;
   final List<Color> activeColors;
   final Color thumbColor;
 
@@ -189,10 +239,20 @@ class _PProgressBarState extends State<PProgressBar> {
     return f.clamp(0.0, 1.0).toDouble();
   }
 
+  double get _bufferedFraction {
+    if (!_hasDuration) return 0;
+    final end = widget.position.inMilliseconds + widget.buffered.inMilliseconds;
+    return (end / widget.duration.inMilliseconds).clamp(0.0, 1.0).toDouble();
+  }
+
+  Duration _targetFor(double fraction) => Duration(
+        milliseconds:
+            (widget.duration.inMilliseconds * fraction.clamp(0.0, 1.0)).round(),
+      );
+
   void _seekTo(double fraction) {
-    if (!_hasDuration) return;
-    final ms = (widget.duration.inMilliseconds * fraction).round();
-    widget.onSeek(Duration(milliseconds: ms));
+    if (!_hasDuration || !widget.enabled) return;
+    widget.onSeek(_targetFor(fraction));
   }
 
   @override
@@ -202,45 +262,85 @@ class _PProgressBarState extends State<PProgressBar> {
         final width = constraints.maxWidth;
         final f = (_drag ?? _fraction).clamp(0.0, 1.0).toDouble();
         final activeWidth = math.max(0.0, width * f);
+        final bufferedWidth = math.max(0.0, width * _bufferedFraction);
         final thumb = widget.thumbSize;
+        final touchHeight =
+            math.max(32.0, math.max(widget.touchHeight, thumb + 10));
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTapDown: (details) {
-            if (width <= 0) return;
-            _seekTo((details.localPosition.dx / width).clamp(0.0, 1.0).toDouble());
-          },
-          onHorizontalDragStart: (details) {
-            setState(() => _drag = _fraction);
-          },
-          onHorizontalDragUpdate: (details) {
-            if (width <= 0) return;
-            setState(
-              () => _drag = (details.localPosition.dx / width).clamp(0.0, 1.0).toDouble(),
-            );
-          },
-          onHorizontalDragEnd: (details) {
-            final value = _drag;
-            setState(() => _drag = null);
-            if (value != null) _seekTo(value);
-          },
-          onHorizontalDragCancel: () => setState(() => _drag = null),
+          // 单击松手才 seek；拖动过程中只跟手改高亮。
+          onTapUp: widget.enabled
+              ? (details) {
+                  if (width <= 0 || !_hasDuration) return;
+                  final target = (details.localPosition.dx / width)
+                      .clamp(0.0, 1.0)
+                      .toDouble();
+                  _seekTo(target);
+                }
+              : null,
+          onHorizontalDragStart: widget.enabled
+              ? (details) {
+                  widget.onScrub?.call(_targetFor(_fraction));
+                  setState(() => _drag = _fraction);
+                }
+              : null,
+          onHorizontalDragUpdate: widget.enabled
+              ? (details) {
+                  if (width <= 0 || !_hasDuration) return;
+                  final value = (details.localPosition.dx / width)
+                      .clamp(0.0, 1.0)
+                      .toDouble();
+                  widget.onScrub?.call(_targetFor(value));
+                  setState(() => _drag = value);
+                }
+              : null,
+          onHorizontalDragEnd: widget.enabled
+              ? (details) {
+                  final value = _drag;
+                  if (value != null) _seekTo(value);
+                  // 高亮保持到外层预览时间结束，避免 seek 完成前回弹。
+                  setState(() => _drag = null);
+                  widget.onScrub?.call(null);
+                }
+              : null,
+          onHorizontalDragCancel: widget.enabled
+              ? () {
+                  setState(() => _drag = null);
+                  widget.onScrub?.call(null);
+                }
+              : null,
           child: SizedBox(
-            height: math.max(28, thumb + 10),
+            height: touchHeight,
             child: Stack(
               alignment: Alignment.centerLeft,
               clipBehavior: Clip.none,
               children: [
+                // 底轨
                 Positioned(
                   left: 0,
                   right: 0,
                   child: Container(
                     height: widget.height,
                     decoration: BoxDecoration(
-                      color: widget.trackColor ?? Colors.white.withOpacity(.34),
+                      color: widget.trackColor ?? Colors.white.withOpacity(.28),
                       borderRadius: BorderRadius.circular(widget.height),
                     ),
                   ),
                 ),
+                // 已缓冲
+                Positioned(
+                  left: 0,
+                  child: Container(
+                    width: bufferedWidth,
+                    height: widget.height,
+                    decoration: BoxDecoration(
+                      color:
+                          widget.bufferedColor ?? Colors.white.withOpacity(.34),
+                      borderRadius: BorderRadius.circular(widget.height),
+                    ),
+                  ),
+                ),
+                // 已播放
                 Positioned(
                   left: 0,
                   child: Container(
@@ -254,7 +354,8 @@ class _PProgressBarState extends State<PProgressBar> {
                 ),
                 if (widget.showThumb)
                   Positioned(
-                    left: (width - thumb) * f,
+                    left: math.max(
+                        0.0, math.min(width - thumb, activeWidth - thumb / 2)),
                     child: Container(
                       width: thumb,
                       height: thumb,
@@ -282,6 +383,263 @@ class _PProgressBarState extends State<PProgressBar> {
           ),
         );
       },
+    );
+  }
+}
+
+/// 播放器通用进度行：左时间 + 进度条 + 右时间。
+///
+/// 拖动时左侧时间实时跟着手指走，松手后保持到真正 seek 完成，避免回弹。
+class FxSeekRow extends StatefulWidget {
+  const FxSeekRow({
+    super.key,
+    required this.position,
+    required this.duration,
+    required this.onSeek,
+    this.buffered = Duration.zero,
+    this.height = 4,
+    this.touchHeight = 36,
+    this.thumbSize = 16,
+    this.labelWidth = 46,
+    this.gap = 8,
+    this.timeFontSize = 11,
+    this.timeFontWeight = FontWeight.w600,
+    this.timeColor = Colors.white,
+    this.enabled = true,
+    this.showThumb = true,
+    this.activeColors = const [Color(0xFF8E6BFF), Color(0xFF5B8CFF)],
+  });
+
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<Duration> onSeek;
+  final Duration buffered;
+  final double height;
+  final double touchHeight;
+  final double thumbSize;
+  final double labelWidth;
+  final double gap;
+  final double timeFontSize;
+  final FontWeight timeFontWeight;
+  final Color timeColor;
+  final bool enabled;
+  final bool showThumb;
+  final List<Color> activeColors;
+
+  @override
+  State<FxSeekRow> createState() => _FxSeekRowState();
+}
+
+class _FxSeekRowState extends State<FxSeekRow> {
+  Duration? _preview;
+  Timer? _timer;
+
+  @override
+  void didUpdateWidget(covariant FxSeekRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final preview = _preview;
+    if (preview == null) return;
+    // 真实进度追上预览值就结束预览；seek 慢时由下方定时器兜底。
+    if ((widget.position - preview).abs() <= const Duration(seconds: 1)) {
+      _timer?.cancel();
+      _preview = null;
+    }
+  }
+
+  void _onScrub(Duration? target) {
+    _timer?.cancel();
+    if (target != null) {
+      if (!mounted) return;
+      setState(() => _preview = target);
+      return;
+    }
+    _timer = Timer(const Duration(milliseconds: 1600), () {
+      if (!mounted) return;
+      setState(() => _preview = null);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = _preview ?? widget.position;
+    final style = TextStyle(
+      color: widget.timeColor,
+      fontSize: widget.timeFontSize,
+      fontWeight: widget.timeFontWeight,
+      letterSpacing: .3,
+      shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
+    );
+    return Row(
+      children: [
+        SizedBox(
+          width: widget.labelWidth,
+          child: Text(fxTime(shown), style: style),
+        ),
+        SizedBox(width: widget.gap),
+        Expanded(
+          child: PProgressBar(
+            position: shown,
+            duration: widget.duration,
+            buffered: widget.buffered,
+            height: widget.height,
+            touchHeight: widget.touchHeight,
+            thumbSize: widget.thumbSize,
+            showThumb: widget.showThumb,
+            enabled: widget.enabled,
+            activeColors: widget.activeColors,
+            onSeek: widget.onSeek,
+            onScrub: _onScrub,
+          ),
+        ),
+        SizedBox(width: widget.gap),
+        SizedBox(
+          width: widget.labelWidth,
+          child: Text(fxTime(widget.duration),
+              style: style, textAlign: TextAlign.right),
+        ),
+      ],
+    );
+  }
+}
+
+/// 播放器加载 / 缓冲浮层。
+///
+/// - 切集、切线路：圆环 + 「正在加载 幻想腾讯4K 第03集」；
+/// - 播放中缓冲：圆环 + 「缓冲中 42%」（libmpv 的真实缓存百分比）。
+class FxLoadingOverlay extends StatelessWidget {
+  const FxLoadingOverlay({
+    super.key,
+    required this.title,
+    this.percent,
+    this.subtitle,
+    this.dim = true,
+    this.compact = false,
+  });
+
+  /// 主文案。
+  final String title;
+
+  /// 0–100；为 null 时圆环不确定进度。
+  final double? percent;
+
+  /// 副文案，如线路名。
+  final String? subtitle;
+  final bool dim;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = percent == null ? null : (percent! / 100).clamp(0.0, 1.0);
+    final ring = compact ? 44.0 : 62.0;
+    return IgnorePointer(
+      child: Container(
+        color: dim ? Colors.black.withOpacity(.26) : Colors.transparent,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipOval(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                child: Container(
+                  width: ring,
+                  height: ring,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withOpacity(.14),
+                    border: Border.all(
+                        color: Colors.white.withOpacity(.34), width: 1),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(.16),
+                        blurRadius: 18,
+                        offset: const Offset(0, 6),
+                      ),
+                    ],
+                  ),
+                  alignment: Alignment.center,
+                  child: SizedBox(
+                    width: ring * .72,
+                    height: ring * .72,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        CircularProgressIndicator(
+                          value: value,
+                          strokeWidth: compact ? 2.4 : 3,
+                          color: Colors.white,
+                          backgroundColor: Colors.white.withOpacity(.18),
+                        ),
+                        if (percent != null)
+                          Text(
+                            '${percent!.round()}%',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(.42),
+                borderRadius: BorderRadius.circular(16),
+                border:
+                    Border.all(color: Colors.white.withOpacity(.26), width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(.14),
+                    blurRadius: 14,
+                    offset: const Offset(0, 5),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: compact ? 11.5 : 12.5,
+                      fontWeight: FontWeight.w700,
+                      height: 1.35,
+                    ),
+                  ),
+                  if (subtitle != null && subtitle!.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle!,
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(.72),
+                        fontSize: 10,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

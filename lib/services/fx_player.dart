@@ -23,6 +23,8 @@ class FxPlayerValue {
     this.isInitialized = false,
     this.isPlaying = false,
     this.isBuffering = false,
+    this.bufferingPercentage = 0,
+    this.buffered = Duration.zero,
     this.isCompleted = false,
     this.hasError = false,
     this.errorText = '',
@@ -43,6 +45,12 @@ class FxPlayerValue {
 
   /// 是否正在缓冲。
   final bool isBuffering;
+
+  /// libmpv 的真实缓冲百分比（cache-buffering-state，0–100）。
+  final double bufferingPercentage;
+
+  /// 已缓冲 / 已解码的媒体时长（demuxer-cache-time）。
+  final Duration buffered;
 
   /// 是否已播放到结尾。
   final bool isCompleted;
@@ -94,6 +102,8 @@ class FxPlayerValue {
     bool? isInitialized,
     bool? isPlaying,
     bool? isBuffering,
+    double? bufferingPercentage,
+    Duration? buffered,
     bool? isCompleted,
     bool? hasError,
     String? errorText,
@@ -109,6 +119,8 @@ class FxPlayerValue {
       isInitialized: isInitialized ?? this.isInitialized,
       isPlaying: isPlaying ?? this.isPlaying,
       isBuffering: isBuffering ?? this.isBuffering,
+      bufferingPercentage: bufferingPercentage ?? this.bufferingPercentage,
+      buffered: buffered ?? this.buffered,
       isCompleted: isCompleted ?? this.isCompleted,
       hasError: hasError ?? this.hasError,
       errorText: errorText ?? this.errorText,
@@ -346,6 +358,16 @@ class FxPlayer implements Listenable {
     _subscriptions.add(
       _player.stream.buffering.listen((buffering) {
         _setValue(_value.copyWith(isBuffering: buffering));
+      }),
+    );
+    _subscriptions.add(
+      _player.stream.buffer.listen((buffered) {
+        _setValue(_value.copyWith(buffered: buffered));
+      }),
+    );
+    _subscriptions.add(
+      _player.stream.bufferingPercentage.listen((percentage) {
+        _setValue(_value.copyWith(bufferingPercentage: percentage));
       }),
     );
     _subscriptions.add(

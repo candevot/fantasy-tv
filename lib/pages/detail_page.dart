@@ -400,6 +400,16 @@ class _DetailPageState extends State<DetailPage>
     fxToast(context, '正在切换播放源…');
   }
 
+  /// 播放器切线路失败并已回退到原线路：把详情页的选中线路也改回去，
+  /// 避免 UI 指着新线路、实际播的却是旧线路。
+  void _onLineFallback(String oldLineId) {
+    if (!mounted || oldLineId.isEmpty || oldLineId == _lineId) return;
+    final lines = _detail?.lines ?? const <LineInfo>[];
+    if (!lines.any((l) => l.id == oldLineId)) return;
+    setState(() => _lineId = oldLineId);
+    _saveHistory();
+  }
+
   /// 换线路；[auto] = 播放失败后自动切下一条（有限次）。
   /// [issue] 说明当前线路不可播的原因，用于选择文案与最终错误提示。
   void _switchNextLine({bool auto = false, SourceIssue? issue}) {
@@ -444,7 +454,7 @@ class _DetailPageState extends State<DetailPage>
   String _autoSwitchText(SourceIssue? issue, String name) {
     final label = name.isEmpty ? '下一线路' : '「$name」';
     return switch (issue) {
-      SourceIssue.parse => '该线路需解析，已为你切换$label',
+      SourceIssue.parse => '该线路暂不可直接播放，已为你切换$label',
       SourceIssue.empty => '该线路暂无播放地址，已为你切换$label',
       _ => '线路播放失败，已自动切换$label',
     };
@@ -456,7 +466,7 @@ class _DetailPageState extends State<DetailPage>
     final message = lines.isEmpty
         ? '暂无线路，请稍后刷新重试'
         : switch (issue) {
-            SourceIssue.parse => '所有线路都需解析，暂时无法播放，请重试或换线路',
+            SourceIssue.parse => '所有线路暂不可直接播放，请重试或换线路',
             SourceIssue.empty => '所有线路都没有可用播放地址，请稍后重试',
             _ => '所有线路都不可用，请重试或换线路',
           };
@@ -793,6 +803,7 @@ class _DetailPageState extends State<DetailPage>
           onSourceFailed: () => _reportLineIssue(SourceIssue.error),
           onSourceIssue: _reportLineIssue,
           onChangeLine: d.lines.length > 1 ? () => _switchNextLine() : null,
+          onLineFallback: _onLineFallback,
           onPlaybackStarted: _onPlaybackStarted,
           autoPlay: true,
         ),
@@ -864,47 +875,17 @@ class _DetailPageState extends State<DetailPage>
               separatorBuilder: (context, i) => const SizedBox(width: 8),
               itemBuilder: (context, i) {
                 final line = d.lines[i];
-                final needsParse = line.type.trim().toLowerCase() == 'parse';
+                // 所有线路统一展示，不再显示「需解析」角标。
                 return SizedBox(
                   width: 102,
                   height: 60,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      DetailLineCard(
-                        name: line.displayName.isEmpty
-                            ? '线路${i + 1}'
-                            : line.displayName,
-                        count: total,
-                        active: line.id == _lineId,
-                        onTap: () => _selectLine(line),
-                      ),
-                      if (needsParse)
-                        Positioned(
-                          top: 4,
-                          right: 4,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 3, vertical: 1),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFF4DF),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(
-                                color: Fx.gold.withOpacity(.48),
-                              ),
-                            ),
-                            child: const Text(
-                              '需解析',
-                              style: TextStyle(
-                                fontSize: 7.5,
-                                height: 1.1,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFFC77800),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
+                  child: DetailLineCard(
+                    name: line.displayName.isEmpty
+                        ? '线路${i + 1}'
+                        : line.displayName,
+                    count: total,
+                    active: line.id == _lineId,
+                    onTap: () => _selectLine(line),
                   ),
                 );
               },

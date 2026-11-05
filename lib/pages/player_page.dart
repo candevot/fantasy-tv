@@ -6,6 +6,8 @@ import '../api.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
+import '../widgets/fs_controls.dart';
+import '../widgets/player_gestures.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
 import 'history_page.dart' show FxStore;
@@ -33,6 +35,7 @@ class PlayerView extends StatefulWidget {
     this.onSourceIssue,
     this.onPlaybackStarted,
     this.onChangeLine,
+    this.onLineFallback,
     this.autoPlay = true,
   });
 
@@ -49,6 +52,9 @@ class PlayerView extends StatefulWidget {
   final ValueChanged<SourceIssue>? onSourceIssue;
   final VoidCallback? onPlaybackStarted;
   final VoidCallback? onChangeLine;
+
+  /// 手动切线路失败、已回退到原线路时回调，外层把线路 id 也改回去。
+  final ValueChanged<String>? onLineFallback;
   final bool autoPlay;
 
   @override
@@ -77,6 +83,21 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   bool _controls = true;
   Timer? _hideTimer;
+
+  // 锁屏
+  bool _locked = false;
+  bool _unlockVisible = false;
+  Timer? _unlockTimer;
+
+  /// 正在切换线路（防止重复点击并发 open）。
+  bool _switchingLine = false;
+  String? _pendingLine;
+  int? _pendingEp;
+
+  /// 切换期间锁住 UI 进度，避免新播放器 open 时进度归零。
+  Duration? _uiPosition;
+  Duration? _uiDuration;
+  String? _loadingHint;
 
   /// 每 10 秒把观看进度回写历史，App 被杀也能保留大致位置。
   Timer? _progressTimer;
@@ -120,6 +141,29 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     return fxEpisodeLabel(n);
   }
 
+  /// 当前画质名称（信息标签用）：原画 / 接口返回的真实码率名。
+  String get _qualityInfoLabel {
+    final info = _info;
+    if (info == null) return '';
+    final key = _qualityKey;
+    if (key != null) {
+      for (final q in info.quality) {
+        if (q.key == key) {
+          final name = q.name.trim();
+          return name.isEmpty ? q.key : name;
+        }
+      }
+    }
+    return '原画';
+  }
+
+  /// 分辨率通俗标签：4K / 1080P / 720P / 标清。
+  String get _resolutionLabel {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return '';
+    return fxResolutionLabel(c.value.videoWidth ?? c.value.width);
+  }
+
   /// 当前线路名：优先用接口返回的线路名，其次从详情线路表里按 id 查。
   String get _lineName {
     final infoName = _info?.lineName.trim() ?? '';
@@ -148,25 +192,181 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void didUpdateWidget(covariant PlayerView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.ep == _ep && widget.line == _line) return;
-    // 用实际已打开的集保存旧集进度，避免把旧 position 写进新集。
-    unawaited(_saveProgress());
-    // 父页面换了集/线路：立刻作废旧 bootstrap，并在本次 build 前进入
-    // loading + 清空 _loadedEp，防止旧请求晚到后把旧集进度记到新集上。
+    if (widget.line != _line) {
+      // 切线路：记住当前集+进度，就绪后 seek 回并恢复播放；失败回退原线路。
+      unawaited(_switchLine(widget.line, widget.ep));
+      return;
+    }
+    if (widget.ep != _ep) {
+      unawaited(_switchEpisodeFromParent(widget.ep));
+    }
+  }
+
+  Future<void> _switchEpisodeFromParent(int next) async {
+    if (_switchingLine) {
+      _pendingLine = widget.line;
+      _pendingEp = next;
+      return;
+    }
+    if (next == _ep) return;
+    await _saveProgress();
+    if (!mounted) return;
+    // 作废旧请求，防止旧集晚到的位置写进新集。
     _loadToken++;
     unawaited(_controller?.pause());
-    _ep = widget.ep;
-    _line = widget.line;
-    _loading = true;
-    _loadedEp = null;
-    _qualityKey = null;
-    _error = false;
-    _errorText = '';
-    _ended = false;
-    _sourceFailNotified = false;
-    Future.microtask(() {
-      if (!mounted) return;
-      _bootstrap(seekToSaved: true, saveOld: false);
+    setState(() {
+      _ep = next;
+      _loading = true;
+      _loadedEp = null;
+      _qualityKey = null;
+      _error = false;
+      _errorText = '';
+      _ended = false;
+      _sourceFailNotified = false;
+      _loadingHint = null;
+      _uiPosition = null;
+      _uiDuration = null;
     });
+    await _bootstrap(
+      seekToSaved: true,
+      saveOld: false,
+      epOverride: next,
+      playOverride: widget.autoPlay && !_covered,
+    );
+  }
+
+  Future<void> _switchLine(String targetLine, int targetEp) async {
+    if (_switchingLine) {
+      // 切换中又点了别的线路：记下来，等当前这一次结束再切，避免并发 open。
+      _pendingLine = targetLine;
+      _pendingEp = targetEp;
+      return;
+    }
+    _switchingLine = true;
+    final oldLine = _line;
+    final oldEp = _ep;
+    final oldLoadedEp = _loadedEp;
+    final oldInfo = _info;
+    final oldQualityKey = _qualityKey;
+    final old = _controller;
+    final healthy = old != null &&
+        old.value.isInitialized &&
+        !old.value.hasError &&
+        !_error;
+    final wasPlaying = healthy && old.value.isPlaying;
+    final resume = healthy ? old.value.position : Duration.zero;
+    final oldDuration = old?.value.duration;
+
+    // 先保存旧线路进度（此刻还没进入 loading，_saveProgress 才会生效）。
+    await _saveProgress();
+    if (!mounted) {
+      _switchingLine = false;
+      return;
+    }
+
+    var resumeSeconds = resume.inMilliseconds / 1000.0;
+    if (!healthy) {
+      resumeSeconds = await fxLoadProgress(widget.videoId, targetEp);
+      if (!mounted) {
+        _switchingLine = false;
+        return;
+      }
+    }
+
+    _loadToken++;
+    unawaited(old?.pause());
+    _hideTimer?.cancel();
+    setState(() {
+      _loading = true;
+      _loadingHint = '正在切换线路，请稍候';
+      _uiPosition = Duration(milliseconds: (resumeSeconds * 1000).round());
+      _uiDuration = oldDuration;
+      _error = false;
+      _errorText = '';
+      _sourceFailNotified = false;
+      _ended = false;
+    });
+
+    final ok = await _bootstrap(
+      seekToSaved: false,
+      saveOld: false,
+      lineOverride: targetLine,
+      epOverride: targetEp,
+      resumeSeconds: resumeSeconds,
+      playOverride: wasPlaying,
+      commitLine: true,
+      reportFailure: false,
+    );
+    if (!mounted) {
+      _switchingLine = false;
+      return;
+    }
+
+    if (ok) {
+      setState(() {
+        _loadingHint = null;
+        _uiPosition = null;
+        _uiDuration = null;
+      });
+      _showControls();
+      fxToast(context, '已切换线路');
+    } else if (healthy) {
+      // 新线路失败：旧片源还活着，seek 回原进度并按原状态继续播放。
+      try {
+        await old.seekTo(resume);
+        if (wasPlaying) await old.play();
+      } catch (_) {}
+      if (!mounted) {
+        _switchingLine = false;
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _loadingHint = null;
+        _error = false;
+        _ep = oldEp;
+        _loadedEp = oldLoadedEp;
+        _info = oldInfo;
+        _qualityKey = oldQualityKey;
+        _uiPosition = null;
+        _uiDuration = null;
+      });
+      _showControls();
+      fxToast(context, '切换线路失败，已回退原线路');
+      // 用户在切换期间又选了别的线路：保持外层的新选择，等下面接着切，
+      // 不能把详情页的线路 id 改成旧线路。
+      if (_pendingLine == null) {
+        widget.onLineFallback?.call(oldLine);
+      }
+    } else {
+      setState(() {
+        _loading = false;
+        _loadingHint = null;
+        _error = true;
+        _errorText = '线路不可用，请重试或换线路';
+        _uiPosition = null;
+        _uiDuration = null;
+      });
+      _notifySourceFailed();
+    }
+    // 必须重建一次：否则控件与手势会停留在 _switchingLine=true 时的禁用状态。
+    if (mounted) {
+      setState(() => _switchingLine = false);
+    } else {
+      _switchingLine = false;
+    }
+    final pendingLine = _pendingLine;
+    final pendingEp = _pendingEp;
+    _pendingLine = null;
+    _pendingEp = null;
+    if (mounted && pendingLine != null) {
+      final ep = pendingEp ?? _ep;
+      if (pendingLine != _line) {
+        unawaited(_switchLine(pendingLine, ep));
+      } else if (ep != _ep) {
+        unawaited(_switchEpisodeFromParent(ep));
+      }
+    }
   }
 
   @override
@@ -175,6 +375,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (_fullscreenActive) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
+      // 来电 / 切后台：长按 2x 必须复位。
+      _endHold2x();
       unawaited(_saveProgress());
       unawaited(_controller?.pause());
     }
@@ -184,6 +386,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    _unlockTimer?.cancel();
     _progressTimer?.cancel();
     _loadToken++;
     unawaited(_saveProgress());
@@ -281,14 +484,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     await _bootstrap(seekToSaved: true, saveOld: false);
   }
 
-  Future<void> _bootstrap({
+  Future<bool> _bootstrap({
     required bool seekToSaved,
     bool saveOld = true,
+    String? lineOverride,
+    int? epOverride,
+    double? resumeSeconds,
+    bool? playOverride,
+    bool commitLine = false,
+    bool reportFailure = true,
   }) async {
+    final line = lineOverride ?? _line;
+    final ep = epOverride ?? _ep;
     final token = ++_loadToken;
     _hideTimer?.cancel();
     if (saveOld) await _saveProgress();
-    if (!mounted || token != _loadToken) return;
+    if (!mounted || token != _loadToken) return false;
     unawaited(_controller?.pause());
     setState(() {
       _loading = true;
@@ -302,26 +513,36 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
     PlayInfo info;
     try {
-      info = await Api.play(widget.videoId, _ep, _line);
+      info = await Api.play(widget.videoId, ep, line);
     } catch (_) {
-      if (!mounted || token != _loadToken) return;
+      if (!mounted || token != _loadToken) return false;
       setState(() {
         _loading = false;
-        _error = true;
-        _errorText = '获取播放地址失败，请检查网络后重试';
+        _loadingHint = null;
+        if (reportFailure) {
+          _error = true;
+          _errorText = '获取播放地址失败，请检查网络后重试';
+        }
       });
-      _notifySourceFailed();
-      return;
+      if (reportFailure) _notifySourceFailed();
+      return false;
     }
-    if (!mounted || token != _loadToken) return;
+    if (!mounted || token != _loadToken) return false;
     _info = info;
 
     // TW 等线路可能返回一个需要解析器处理的播放页地址（type == 'parse'）。
     // 空 url 与解析页是两种不同情况，分开交给外层展示文案。
     final isParse = info.type.trim().toLowerCase() == 'parse';
     if (isParse) {
-      _emitSourceIssue(SourceIssue.parse);
-      return;
+      if (reportFailure) {
+        _emitSourceIssue(SourceIssue.parse);
+      } else {
+        setState(() {
+          _loading = false;
+          _loadingHint = null;
+        });
+      }
+      return false;
     }
 
     final all = <String>[
@@ -334,22 +555,31 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (!candidates.contains(u)) candidates.add(u);
     }
     if (candidates.isEmpty) {
-      _emitSourceIssue(SourceIssue.empty);
-      return;
+      if (reportFailure) {
+        _emitSourceIssue(SourceIssue.empty);
+      } else {
+        setState(() {
+          _loading = false;
+          _loadingHint = null;
+        });
+      }
+      return false;
     }
 
-    final saved = seekToSaved ? await fxLoadProgress(widget.videoId, _ep) : 0.0;
-    if (!mounted || token != _loadToken) return;
+    final saved = resumeSeconds ??
+        (seekToSaved ? await fxLoadProgress(widget.videoId, ep) : 0.0);
+    if (!mounted || token != _loadToken) return false;
+    final shouldPlay = playOverride ?? (widget.autoPlay && !_covered);
 
     var ok = false;
     for (final url in candidates) {
-      if (!mounted || token != _loadToken) return;
+      if (!mounted || token != _loadToken) return false;
       final controller = FxPlayer.create();
       try {
         await controller.open(url, headers: info.headers);
         if (!mounted || token != _loadToken) {
           await controller.dispose();
-          return;
+          return false;
         }
         await controller.setLooping(false);
         try {
@@ -365,22 +595,30 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             Duration(milliseconds: (resume * 1000).round()),
           );
         }
-        if (widget.autoPlay && !_covered) {
+        if (shouldPlay) {
           await controller.play();
+        } else {
+          // 暂停态也先拉一帧再暂停，切线路后不黑屏。
+          await controller.play();
+          await Future<void>.delayed(const Duration(milliseconds: 60));
+          await controller.pause();
         }
         // 初始化期间被新操作取代：释放新实例，不要把旧 controller 挂回。
         if (!mounted || token != _loadToken) {
           await controller.dispose();
-          return;
+          return false;
         }
         final previous = _controller;
         previous?.removeListener(_onVideoValue);
         _controller = controller;
-        _loadedEp = _ep;
+        _ep = ep;
+        if (commitLine) _line = line;
+        _loadedEp = ep;
         controller.addListener(_onVideoValue);
         unawaited(previous?.dispose());
         setState(() {
           _loading = false;
+          _loadingHint = null;
           _error = false;
           _errorText = '';
         });
@@ -397,14 +635,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
 
     if (!ok) {
-      if (!mounted || token != _loadToken) return;
+      if (!mounted || token != _loadToken) return false;
       setState(() {
         _loading = false;
-        _error = true;
-        _errorText = '播放失败：线路不可用，请重试或切换下方线路';
+        _loadingHint = null;
+        if (reportFailure) {
+          _error = true;
+          _errorText = '播放失败：线路不可用，请重试或切换下方线路';
+        }
       });
-      _notifySourceFailed();
+      if (reportFailure) _notifySourceFailed();
+      return false;
     }
+    return true;
   }
 
   void _emitSourceIssue(SourceIssue issue) {
@@ -418,7 +661,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _loading = false;
       _error = true;
       _errorText = switch (issue) {
-        SourceIssue.parse => '该线路需解析，暂时无法直接播放，请切换线路',
+        SourceIssue.parse => '该线路暂不可直接播放，请切换线路',
         SourceIssue.empty => '当前线路没有可用播放地址，请切换线路',
         SourceIssue.error => '线路播放失败，请切换线路',
       };
@@ -471,7 +714,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   Future<void> _switchEpisode(int next, {bool auto = false}) async {
-    if (next < 1) return;
+    if (next < 1 || _switchingLine) return;
     await _saveProgress();
     if (!mounted) return;
     setState(() {
@@ -481,10 +724,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _qualityKey = null;
       _error = false;
       _controls = true;
+      _loadingHint = null;
+      _uiPosition = null;
+      _uiDuration = null;
     });
     widget.onEpChange?.call(next);
     if (auto) fxToast(context, '即将播放 ${fxEpisodeLabel(next)}');
-    await _bootstrap(seekToSaved: true, saveOld: false);
+    await _bootstrap(
+      seekToSaved: true,
+      saveOld: false,
+      epOverride: next,
+      playOverride: !_covered,
+    );
   }
 
   /// 竖屏底部栏的下一集：中间只保留播放/暂停，不再放下一集
@@ -515,6 +766,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   /// 详情页「刷新」/错误重试可以调用
   Future<void> reload() async {
+    if (_switchingLine) return;
     await _saveProgress();
     if (!mounted) return;
     await _bootstrap(seekToSaved: true, saveOld: false);
@@ -534,7 +786,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   // ---------------------------------------------------------------- controls
 
   void _showControls() {
-    if (!mounted) return;
+    if (!mounted || _locked) return;
     setState(() => _controls = true);
     _startHideTimer();
   }
@@ -547,7 +799,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _startHideTimer();
         return;
       }
-      if (_loading || _error) return;
+      if (_locked || _loading || _error || _switchingLine) return;
       setState(() => _controls = false);
     });
   }
@@ -559,11 +811,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   void _touch() {
+    if (_locked) return;
     if (_controls) _startHideTimer();
   }
 
   void _onSurfaceTap() {
-    if (_loading || _error) return;
+    if (_locked || _loading || _error || _switchingLine) return;
     if (_controls) {
       _hideControls();
     } else {
@@ -571,9 +824,57 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
   }
 
+  /* -------------------------------------------------------------- 锁屏 */
+
+  void _lock() {
+    _unlockTimer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _locked = true;
+      _controls = false;
+      _unlockVisible = true;
+    });
+    _hideTimer?.cancel();
+    _startUnlockTimer();
+    fxToast(context, '已锁定，点击屏幕显示解锁按钮');
+  }
+
+  void _startUnlockTimer() {
+    _unlockTimer?.cancel();
+    _unlockTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted || !_locked) return;
+      setState(() => _unlockVisible = false);
+    });
+  }
+
+  void _onLockedTap() {
+    if (!mounted) return;
+    if (!_unlockVisible) setState(() => _unlockVisible = true);
+    _startUnlockTimer();
+    fxToast(context, '已锁定，点锁图标解锁');
+  }
+
+  void _unlock() {
+    if (!mounted) return;
+    _unlockTimer?.cancel();
+    setState(() {
+      _locked = false;
+      _unlockVisible = false;
+      _controls = true;
+    });
+    _showControls();
+  }
+
   void _togglePlay() {
     final c = _controller;
-    if (c == null || _loading || _error || !c.value.isInitialized) return;
+    if (_locked ||
+        _switchingLine ||
+        c == null ||
+        _loading ||
+        _error ||
+        !c.value.isInitialized) {
+      return;
+    }
     // 以播放器真实状态为准：交给 media_kit 切换，按钮图标随后续
     // player.stream.playing 事件刷新，不用本地布尔抢先改状态。
     unawaited(c.playOrPause());
@@ -582,14 +883,21 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   void _seek(Duration d) {
     final c = _controller;
-    if (c == null || _loading || _error) return;
+    if (_switchingLine || c == null || _loading || _error) return;
     c.seekTo(d);
     _touch();
   }
 
   void _startHold2x() {
     final c = _controller;
-    if (c == null || _loading || _error || !c.value.isInitialized) return;
+    if (_locked ||
+        _switchingLine ||
+        c == null ||
+        _loading ||
+        _error ||
+        !c.value.isInitialized) {
+      return;
+    }
     _rateBeforeHold = _rate;
     c.setRate(2.0);
     setState(() => _holding2x = true);
@@ -650,7 +958,21 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 2),
+                  if (_qualityInfoLabel.isNotEmpty ||
+                      _resolutionLabel.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        if (_qualityInfoLabel.isNotEmpty)
+                          ChipTag('画质 $_qualityInfoLabel', active: true),
+                        if (_resolutionLabel.isNotEmpty)
+                          ChipTag(_resolutionLabel),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 8),
                   const Text('播放速度',
                       style: TextStyle(
                           fontSize: 12.5,
@@ -703,6 +1025,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (c == null ||
         _openingFullscreen ||
         _holding2x ||
+        _locked ||
+        _switchingLine ||
         _loading ||
         _error ||
         !c.value.isInitialized) {
@@ -744,6 +1068,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             lineName: _info?.lineName ?? '',
             rate: realRate,
             qualityKey: _qualityKey,
+            canChangeLine: widget.onChangeLine != null,
           ),
           transitionsBuilder: (context, animation, secondaryAnimation, child) {
             return FadeTransition(opacity: animation, child: child);
@@ -772,6 +1097,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         } catch (_) {}
       }
       if (switched && result.loaded) widget.onEpChange?.call(result.ep);
+      if (result.requestLineChange) {
+        // 全屏错误页点了「换线路」：退出后切下一条线路。
+        widget.onChangeLine?.call();
+      }
     }
     // 先同步完集数/进度归属，再交回视频层并恢复监听，避免全屏里
     // 已经换集时把新位置记到旧集。
@@ -809,48 +1138,74 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   child: c.buildVideo(),
                 ),
               ),
-            Positioned.fill(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _onSurfaceTap,
-                onDoubleTap: () {
-                  _togglePlay();
-                  _showControls();
-                },
-                onLongPressStart: (_) => _startHold2x(),
-                onLongPressEnd: (_) => _endHold2x(),
-                child: const SizedBox.expand(),
+            // 手势层：双击暂停 / 横扫调进度 / 竖扫亮度音量 / 长按 2x。
+            if (!_locked && c != null)
+              Positioned.fill(
+                child: FxPlayerGestures(
+                  player: c,
+                  enabled: !_loading && !_error && !_switchingLine,
+                  onTap: _onSurfaceTap,
+                  onDoubleTap: () {
+                    _togglePlay();
+                    _showControls();
+                  },
+                  onSeek: _seek,
+                  onLongPressStart: _startHold2x,
+                  onLongPressEnd: _endHold2x,
+                  onGestureStart: _hideControls,
+                ),
               ),
-            ),
-            if (_loading && !_error) _buildLoading(),
             if (_error) _buildError(),
-            if (c != null && c.value.isInitialized && !_error)
+            // 播放中的缓冲：玻璃圆环 + 真实缓存百分比。
+            if (!_loading && !_error && c != null)
               Positioned.fill(
                 child: AnimatedBuilder(
                   animation: c,
                   builder: (context, _) {
                     final v = c.value;
-                    if (v.isBuffering && !_loading) {
-                      return const Center(
-                        child: SizedBox(
-                          width: 34,
-                          height: 34,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.4,
-                            color: Colors.white,
-                          ),
-                        ),
-                      );
+                    if (!v.isInitialized || !v.isBuffering) {
+                      return const SizedBox.shrink();
                     }
-                    return const SizedBox.shrink();
+                    final raw = v.bufferingPercentage.isFinite
+                        ? v.bufferingPercentage
+                        : 0.0;
+                    final percent = raw.clamp(0.0, 100.0).toDouble();
+                    return FxLoadingOverlay(
+                      title: '缓冲中 ${percent.round()}%',
+                      percent: percent,
+                      dim: false,
+                      compact: true,
+                    );
                   },
                 ),
               ),
-            if (_controls && !_error)
+            if (_locked)
+              Positioned.fill(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _onLockedTap,
+                      child: const SizedBox.expand(),
+                    ),
+                    if (_unlockVisible)
+                      SafeArea(
+                        child: FsUnlockButton(
+                          alignment: Alignment.topRight,
+                          size: 36,
+                          onUnlock: _unlock,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            if (_controls && !_error && !_locked)
               IgnorePointer(
-                ignoring: _loading,
+                ignoring: _loading || _switchingLine,
                 child: _buildControls(c),
               ),
+            if (_loading && !_error) _buildLoading(),
             if (_holding2x)
               Positioned(
                 top: 14,
@@ -884,33 +1239,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   Widget _buildLoading() {
     return Positioned.fill(
-      child: Container(
-        color: Colors.black.withOpacity(.22),
-        alignment: Alignment.center,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.16),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: Colors.white.withOpacity(.26)),
-          ),
-          child: const Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(
-                width: 17,
-                height: 17,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.white,
-                ),
-              ),
-              SizedBox(width: 9),
-              Text('正在加载线路…',
-                  style: TextStyle(color: Colors.white, fontSize: 12)),
-            ],
-          ),
-        ),
+      child: FxLoadingOverlay(
+        title: fxLoadingEpisodeText(_ep),
+        subtitle: _loadingHint ?? _lineName,
+        compact: true,
       ),
     );
   }
@@ -1087,6 +1419,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 ),
                 const SizedBox(width: 6),
                 PGlassIcon(
+                  icon: Icons.lock_outline_rounded,
+                  size: 31,
+                  iconSize: 18,
+                  tooltip: '锁定屏幕',
+                  onTap: _lock,
+                ),
+                const SizedBox(width: 6),
+                PGlassIcon(
                   icon: Icons.settings_rounded,
                   size: 31,
                   iconSize: 18,
@@ -1138,6 +1478,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     builder: (context, _) {
                       final v = c.value;
                       final playing = v.isInitialized && v.isPlaying;
+                      final shownPosition = _uiPosition ?? v.position;
+                      final shownDuration =
+                          (_uiDuration != null && _uiDuration! > Duration.zero)
+                              ? _uiDuration!
+                              : v.duration;
                       return Row(
                         children: [
                           PGlassIcon(
@@ -1149,36 +1494,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                             tint: .13,
                             onTap: _togglePlay,
                           ),
-                          const SizedBox(width: 7),
-                          Text(
-                            fxTime(v.position),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10.5,
-                              shadows: [
-                                Shadow(color: Colors.black54, blurRadius: 3),
-                              ],
-                            ),
-                          ),
                           const SizedBox(width: 6),
                           Expanded(
-                            child: PProgressBar(
-                              position: v.position,
-                              duration: v.duration,
+                            child: FxSeekRow(
+                              position: shownPosition,
+                              duration: shownDuration,
+                              buffered: v.buffered,
                               height: 3,
-                              thumbSize: 16,
+                              touchHeight: 34,
+                              thumbSize: 15,
+                              labelWidth: 40,
+                              gap: 6,
+                              timeFontSize: 10.5,
                               onSeek: _seek,
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            fxTime(v.duration),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10.5,
-                              shadows: [
-                                Shadow(color: Colors.black54, blurRadius: 3),
-                              ],
                             ),
                           ),
                           const SizedBox(width: 6),
@@ -1190,7 +1518,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                             tooltip: '下一集',
                             onTap: () => unawaited(_next()),
                           ),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: 4),
                           PGlassIcon(
                             icon: Icons.fullscreen_rounded,
                             size: 30,

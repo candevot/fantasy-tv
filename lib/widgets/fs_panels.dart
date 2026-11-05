@@ -60,9 +60,11 @@ class FsBottomBar extends StatelessWidget {
     super.key,
     required this.position,
     required this.duration,
+    this.buffered = Duration.zero,
     required this.playing,
     required this.rate,
     required this.qualityLabel,
+    this.qualityActive = false,
     required this.onSeek,
     required this.onTogglePlay,
     required this.onNext,
@@ -77,10 +79,15 @@ class FsBottomBar extends StatelessWidget {
 
   final Duration position;
   final Duration duration;
+  final Duration buffered;
   final bool playing;
   final double rate;
-  /// 当前清晰度（自动 / 真实码率名 / 原画）
+
+  /// 清晰度切换入口文案；空串时不显示入口。
   final String qualityLabel;
+
+  /// 当前选中的不是「原画」档时高亮入口。
+  final bool qualityActive;
   final ValueChanged<Duration> onSeek;
   final VoidCallback onTogglePlay;
   final VoidCallback onNext;
@@ -107,7 +114,18 @@ class FsBottomBar extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          FsProgressRow(position: position, duration: duration, onSeek: onSeek),
+          FxSeekRow(
+            position: position,
+            duration: duration,
+            buffered: buffered,
+            onSeek: onSeek,
+            height: 5,
+            touchHeight: 40,
+            thumbSize: 16,
+            labelWidth: 48,
+            timeFontSize: 11,
+            timeFontWeight: FontWeight.w600,
+          ),
           const SizedBox(height: 4),
           Row(
             children: [
@@ -139,13 +157,15 @@ class FsBottomBar extends StatelessWidget {
                 onTap: onSpeed,
               ),
               const SizedBox(width: 8),
-              FsTextAction(
-                text: qualityLabel,
-                size: s,
-                active: qualityLabel != '自动' && qualityLabel != '原画',
-                onTap: onQuality,
-              ),
-              const SizedBox(width: 8),
+              if (qualityLabel.isNotEmpty) ...[
+                FsTextAction(
+                  text: qualityLabel,
+                  size: s,
+                  active: qualityActive,
+                  onTap: onQuality,
+                ),
+                const SizedBox(width: 8),
+              ],
               FsTextAction(text: '选集', size: s, onTap: onEpisodes),
               const SizedBox(width: 8),
               PGlassIcon(
@@ -157,155 +177,6 @@ class FsBottomBar extends StatelessWidget {
                 onTap: onExit,
               ),
             ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 底部横滑剧集条：点击切换并保持全屏
-class FsEpisodeStrip extends StatefulWidget {
-  const FsEpisodeStrip({
-    super.key,
-    required this.episodes,
-    required this.current,
-    required this.onPick,
-    required this.onClose,
-  });
-
-  final List<Episode> episodes;
-  final int current;
-  final ValueChanged<int> onPick;
-  final VoidCallback onClose;
-
-  @override
-  State<FsEpisodeStrip> createState() => _FsEpisodeStripState();
-}
-
-class _FsEpisodeStripState extends State<FsEpisodeStrip> {
-  static const double _itemExtent = 78;
-  final ScrollController _scroll = ScrollController();
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToCurrent());
-  }
-
-  @override
-  void dispose() {
-    _scroll.dispose();
-    super.dispose();
-  }
-
-  void _jumpToCurrent() {
-    if (!mounted || !_scroll.hasClients) return;
-    final index = widget.episodes.indexWhere((e) => e.n == widget.current);
-    if (index < 0) return;
-    final max = _scroll.position.maxScrollExtent;
-    final target = index * _itemExtent -
-        _scroll.position.viewportDimension / 2 +
-        _itemExtent / 2;
-    _scroll.jumpTo(target.clamp(0.0, max).toDouble());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final count = widget.episodes.length;
-    return FsGlassCard(
-      padding: const EdgeInsets.fromLTRB(14, 10, 8, 12),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.video_library_rounded,
-                  size: 17, color: Fx.accent),
-              const SizedBox(width: 6),
-              const Text(
-                '选集',
-                style: TextStyle(
-                    fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '第${fxPad2(widget.current)}集 · 共 $count 集',
-                style: const TextStyle(fontSize: 11, color: Fx.sub),
-              ),
-              const Spacer(),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: widget.onClose,
-                child: const Padding(
-                  padding: EdgeInsets.all(4),
-                  child: Icon(Icons.close_rounded, size: 18, color: Fx.sub),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            height: 48,
-            child: count == 0
-                ? const Center(
-                    child: Text(
-                      '暂无剧集信息',
-                      style: TextStyle(fontSize: 11.5, color: Fx.sub),
-                    ),
-                  )
-                : ListView.separated(
-                    controller: _scroll,
-                    scrollDirection: Axis.horizontal,
-                    itemCount: count,
-                    separatorBuilder: (_, __) => const SizedBox(width: 8),
-                    itemBuilder: (context, i) {
-                      final e = widget.episodes[i];
-                      final active = e.n == widget.current;
-                      final label =
-                          e.name.isNotEmpty ? e.name : fxEpisodeLabel(e.n);
-                      return GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => widget.onPick(e.n),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 150),
-                          width: _itemExtent - 8,
-                          alignment: Alignment.center,
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          decoration: BoxDecoration(
-                            gradient: active ? Fx.brand : null,
-                            color: active ? null : Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: active
-                                  ? Colors.transparent
-                                  : const Color(0xFFE3E9F3),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color:
-                                    Fx.accent.withOpacity(active ? .30 : .05),
-                                blurRadius: 10,
-                                offset: const Offset(0, 3),
-                              ),
-                            ],
-                          ),
-                          child: Text(
-                            label,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              fontWeight:
-                                  active ? FontWeight.w700 : FontWeight.w500,
-                              color: active ? Colors.white : Fx.sub,
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
           ),
         ],
       ),
@@ -369,38 +240,63 @@ class FsSpeedPanel extends StatelessWidget {
   }
 }
 
-/// 清晰度弹层：自动 + 当前线路提供的全部码率
+/// 清晰度弹层。
+///
+/// 产品要求：只在线路提供 ≥2 个真实码率时出现；不再展示「自动」。
+/// 名称完整显示（如「臻彩视听 MAX 4K」），当前档高亮。
 class FsQualityPanel extends StatelessWidget {
   const FsQualityPanel({
     super.key,
     required this.items,
     required this.currentKey,
     required this.onPick,
+    this.showSource = false,
   });
 
   final List<QualityItem> items;
 
-  /// null 表示「自动」
+  /// null 表示当前使用主播放地址（原画）。
   final String? currentKey;
 
-  /// null 表示切回自动
+  /// null 表示切回主播放地址。
   final ValueChanged<String?> onPick;
 
-  String get _currentLabel {
-    if (currentKey == null) return '自动';
+  /// 主地址不在 items 里时，用「原画」这一真实档位代表它。
+  final bool showSource;
+
+  QualityItem? get _current {
     for (final q in items) {
-      if (q.key == currentKey) {
-        final name = q.name.trim();
-        return name.isEmpty ? q.key : name;
-      }
+      if (q.key == currentKey) return q;
     }
-    return '自动';
+    return null;
+  }
+
+  String get _currentLabel {
+    if (currentKey == null) return '原画';
+    final q = _current;
+    if (q == null) return '原画';
+    final name = q.name.trim();
+    return name.isEmpty ? q.key : name;
   }
 
   @override
   Widget build(BuildContext context) {
+    final options = <Widget>[
+      if (showSource)
+        _FsChip(
+          label: '原画',
+          active: currentKey == null,
+          onTap: () => onPick(null),
+        ),
+      for (final q in items)
+        _FsChip(
+          label: q.name.trim().isEmpty ? q.key : q.name.trim(),
+          active: currentKey == q.key,
+          onTap: () => onPick(q.key),
+        ),
+    ];
     return FsGlassCard(
-      width: 330,
+      width: 348,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -415,40 +311,27 @@ class FsQualityPanel extends StatelessWidget {
                 style: TextStyle(
                     fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
               ),
-              const Spacer(),
-              Text(
-                '当前 $_currentLabel',
-                style: const TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w700,
-                    color: Fx.accent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '当前 $_currentLabel',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.right,
+                  style: const TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      color: Fx.accent),
+                ),
               ),
             ],
           ),
           const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _FsChip(
-                label: '自动',
-                active: currentKey == null,
-                width: 76,
-                onTap: () => onPick(null),
-              ),
-              for (final q in items)
-                _FsChip(
-                  label: q.name.trim().isEmpty ? q.key : q.name.trim(),
-                  active: currentKey == q.key,
-                  width: 76,
-                  onTap: () => onPick(q.key),
-                ),
-            ],
-          ),
+          Wrap(spacing: 8, runSpacing: 8, children: options),
           const SizedBox(height: 9),
-          Text(
-            items.isEmpty ? '当前线路未提供多码率' : '切换后保持当前播放进度',
-            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+          const Text(
+            '切换后保持当前播放进度与播放状态',
+            style: TextStyle(fontSize: 10.5, color: Fx.sub),
           ),
         ],
       ),
@@ -482,17 +365,22 @@ class FsJumpPanel extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: 4),
+          const Text(
+            '自动跳过默认关闭，仅在点击下面按钮时手动跳转',
+            style: TextStyle(fontSize: 10.5, color: Fx.sub, height: 1.4),
+          ),
           const SizedBox(height: 6),
           _FsJumpTile(
             icon: Icons.fast_forward_rounded,
             title: '跳过片头',
-            subtitle: '直接前进 90 秒',
+            subtitle: '手动前进 90 秒',
             onTap: onIntro,
           ),
           _FsJumpTile(
             icon: Icons.skip_next_rounded,
             title: '跳到片尾',
-            subtitle: '跳到最后一分钟',
+            subtitle: '手动跳到最后一分钟',
             onTap: onOutro,
           ),
         ],
@@ -582,9 +470,9 @@ class _FsChip extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 140),
         width: width,
-        alignment: Alignment.center,
+        alignment: width == null ? null : Alignment.center,
         padding: EdgeInsets.symmetric(
-            horizontal: width == null ? 12 : 0, vertical: 8),
+            horizontal: width == null ? 13 : 0, vertical: 8),
         decoration: BoxDecoration(
           color: active ? Fx.accent : Colors.white,
           borderRadius: BorderRadius.circular(12),
@@ -600,14 +488,226 @@ class _FsChip extends StatelessWidget {
         ),
         child: Text(
           label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+          maxLines: width == null ? 2 : 1,
+          overflow:
+              width == null ? TextOverflow.visible : TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
           style: TextStyle(
             fontSize: 12,
+            height: 1.15,
             fontWeight: active ? FontWeight.w700 : FontWeight.w600,
             color: active ? Colors.white : Fx.sub,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 打开底部选集抽屉，返回选中的集数；取消返回 null。
+Future<int?> showFsEpisodeSheet(
+  BuildContext context, {
+  required List<Episode> episodes,
+  required int current,
+}) {
+  return showModalBottomSheet<int>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    isScrollControlled: true,
+    useSafeArea: true,
+    barrierColor: Colors.black.withOpacity(.38),
+    builder: (_) => FsEpisodeSheet(episodes: episodes, current: current),
+  );
+}
+
+/// 全屏底部选集抽屉：当前集高亮，打开时自动滚到可见位置。
+class FsEpisodeSheet extends StatefulWidget {
+  const FsEpisodeSheet({
+    super.key,
+    required this.episodes,
+    required this.current,
+  });
+
+  final List<Episode> episodes;
+  final int current;
+
+  @override
+  State<FsEpisodeSheet> createState() => _FsEpisodeSheetState();
+}
+
+class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
+  static const double _itemExtent = 44;
+  static const double _gap = 8;
+
+  final ScrollController _scroll = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollToCurrent();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _scrollToCurrent() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final width = MediaQuery.sizeOf(context).width;
+      final columns = (width / 86).floor().clamp(4, 9);
+      final index = widget.episodes.indexWhere((e) => e.n == widget.current);
+      if (index < 0) return;
+      final row = index ~/ columns;
+      final max = _scroll.position.maxScrollExtent;
+      final target = row * (_itemExtent + _gap) -
+          _scroll.position.viewportDimension / 2 +
+          _itemExtent / 2;
+      _scroll.jumpTo(target.clamp(0.0, max).toDouble());
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    final height = (size.height * .8).clamp(260.0, 560.0).toDouble();
+    final width = size.width;
+    final columns = (width / 86).floor().clamp(4, 9);
+    final current = widget.current;
+    final count = widget.episodes.length;
+    return Container(
+      height: height,
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 14, 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    gradient: Fx.brand,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.video_library_rounded,
+                      size: 17, color: Colors.white),
+                ),
+                const SizedBox(width: 9),
+                const Text(
+                  '选集',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: Fx.ink,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    '${fxEpisodeLabel(current)} · 共 $count 集',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11.5, color: Fx.sub),
+                  ),
+                ),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => Navigator.of(context).pop(),
+                  child: const Padding(
+                    padding: EdgeInsets.all(6),
+                    child: Icon(Icons.close_rounded, size: 20, color: Fx.sub),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: Color(0xFFEDF1F8)),
+          Expanded(
+            child: count == 0
+                ? const Center(
+                    child: Text(
+                      '暂无剧集信息',
+                      style: TextStyle(fontSize: 12, color: Fx.sub),
+                    ),
+                  )
+                : GridView.builder(
+                    controller: _scroll,
+                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 22),
+                    itemCount: count,
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: columns,
+                      mainAxisExtent: _itemExtent,
+                      crossAxisSpacing: _gap,
+                      mainAxisSpacing: _gap,
+                    ),
+                    itemBuilder: (context, i) {
+                      final e = widget.episodes[i];
+                      final active = e.n == current;
+                      final label =
+                          e.name.isNotEmpty ? e.name : fxEpisodeLabel(e.n);
+                      return GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => Navigator.of(context).pop(e.n),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 140),
+                          alignment: Alignment.center,
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          decoration: BoxDecoration(
+                            gradient: active ? Fx.brand : null,
+                            color: active ? null : const Color(0xFFF6F8FC),
+                            borderRadius: BorderRadius.circular(11),
+                            border: Border.all(
+                              color: active
+                                  ? Colors.transparent
+                                  : const Color(0xFFE3E9F3),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color:
+                                    Fx.accent.withOpacity(active ? .28 : .03),
+                                blurRadius: 10,
+                                offset: const Offset(0, 3),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              if (active) ...[
+                                const Icon(Icons.play_arrow_rounded,
+                                    size: 14, color: Colors.white),
+                                const SizedBox(width: 2),
+                              ],
+                              Flexible(
+                                child: Text(
+                                  label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    fontWeight: active
+                                        ? FontWeight.w700
+                                        : FontWeight.w500,
+                                    color: active ? Colors.white : Fx.sub,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
       ),
     );
   }

@@ -75,44 +75,6 @@ class FsTextAction extends StatelessWidget {
   }
 }
 
-/// 网速占位胶囊。
-///
-/// 说明：media_kit 未暴露实时下载码率，项目也没有引入测速插件，
-/// 这里只显示不带数字的「网速 --」，不再展示写死的假电量。
-class FsNetSpeedPill extends StatelessWidget {
-  const FsNetSpeedPill({super.key, this.size = 1});
-
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return PGlassPill(
-      padding: EdgeInsets.symmetric(horizontal: 9 * size, vertical: 5 * size),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.network_check_rounded,
-            size: 15 * size,
-            color: Colors.white,
-          ),
-          SizedBox(width: 3 * size),
-          Text(
-            '网速 --',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 11.5 * size,
-              fontWeight: FontWeight.w700,
-              letterSpacing: .2,
-              shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// 真实分辨率胶囊（取自 media_kit videoParams，如 1280x720）
 class FsResolutionPill extends StatelessWidget {
   const FsResolutionPill({
@@ -148,6 +110,55 @@ class FsResolutionPill extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 当前画质胶囊：纯信息展示，不可点击（切换入口在底部「清晰度」按钮）。
+class FsQualityPill extends StatelessWidget {
+  const FsQualityPill({
+    super.key,
+    required this.quality,
+    this.size = 1,
+    this.maxWidth = 190,
+  });
+
+  final String quality;
+  final double size;
+  final double maxWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth),
+      child: PGlassPill(
+        padding: EdgeInsets.symmetric(horizontal: 9 * size, vertical: 5 * size),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.high_quality_rounded,
+              size: 14 * size,
+              color: Colors.white,
+            ),
+            SizedBox(width: 3 * size),
+            Flexible(
+              child: Text(
+                quality,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 11.5 * size,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: .2,
+                  shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -202,7 +213,10 @@ class _FsClockPillState extends State<FsClockPill> {
   }
 }
 
-/// 顶部控制条：返回 · 片名/第xx集 —— 分辨率 · 网速 · 时间 · 旋转锁定 · 画中画 · 投屏 · 设置
+/// 顶部控制条：返回 · 片名/第xx集 —— 分辨率 · 时间 · 旋转锁定 · 画中画 · 投屏 · 设置
+///
+/// 不再展示「网速 --」占位：media_kit 没有暴露实时网络码率，
+/// 宁可不显示也不留假数据。
 class FsTopBar extends StatelessWidget {
   const FsTopBar({
     super.key,
@@ -215,14 +229,18 @@ class FsTopBar extends StatelessWidget {
     required this.onCast,
     required this.onSettings,
     this.resolution = '',
+    this.quality = '',
     this.compact = false,
   });
 
   final String title;
   final String epLabel;
 
-  /// 真实分辨率文本，空串则不显示
+  /// 分辨率通俗标签（4K / 1080P / 720P / 标清），空串则不显示
   final String resolution;
+
+  /// 当前画质名称（纯信息展示），空串则不显示
+  final String quality;
   final VoidCallback onBack;
   final VoidCallback onRotate;
   final bool rotationLocked;
@@ -296,8 +314,14 @@ class FsTopBar extends StatelessWidget {
             FsResolutionPill(resolution: resolution, size: s),
             gap,
           ],
-          FsNetSpeedPill(size: s),
-          gap,
+          if (quality.isNotEmpty) ...[
+            FsQualityPill(
+              quality: quality,
+              size: s,
+              maxWidth: compact ? 132 : 190,
+            ),
+            gap,
+          ],
           FsClockPill(size: s),
           const SizedBox(width: 8),
           PGlassIcon(
@@ -428,74 +452,34 @@ class FsSideControls extends StatelessWidget {
   }
 }
 
-/// 锁屏后唯一的解锁按钮（在横屏左侧黑边区域）
+/// 锁屏后唯一的解锁按钮：半透明小圆钮，3 秒后由页面负责隐藏。
 class FsUnlockButton extends StatelessWidget {
-  const FsUnlockButton({super.key, required this.onUnlock});
+  const FsUnlockButton({
+    super.key,
+    required this.onUnlock,
+    this.alignment = const Alignment(-.96, 0),
+    this.size = 40,
+  });
 
   final VoidCallback onUnlock;
+  final Alignment alignment;
+  final double size;
 
   @override
   Widget build(BuildContext context) {
     return Align(
-      alignment: const Alignment(-.96, 0),
-      child: PGlassIcon(
-        icon: Icons.lock_rounded,
-        size: 46,
-        iconSize: 22,
-        tint: .20,
-        tooltip: '点击解锁',
-        onTap: onUnlock,
+      alignment: alignment,
+      child: Opacity(
+        opacity: .62,
+        child: PGlassIcon(
+          icon: Icons.lock_rounded,
+          size: size,
+          iconSize: size * .48,
+          tint: .12,
+          tooltip: '点击解锁',
+          onTap: onUnlock,
+        ),
       ),
-    );
-  }
-}
-
-/// 播放进度行：当前时间 + 细进度条（表情把手）+ 总时长
-class FsProgressRow extends StatelessWidget {
-  const FsProgressRow({
-    super.key,
-    required this.position,
-    required this.duration,
-    required this.onSeek,
-  });
-
-  final Duration position;
-  final Duration duration;
-  final ValueChanged<Duration> onSeek;
-
-  static const TextStyle _timeStyle = TextStyle(
-    color: Colors.white,
-    fontSize: 11,
-    fontWeight: FontWeight.w600,
-    letterSpacing: .3,
-    shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
-  );
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        SizedBox(
-          width: 48,
-          child: Text(fxTime(position), style: _timeStyle),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: PProgressBar(
-            position: position,
-            duration: duration,
-            height: 3,
-            thumbSize: 17,
-            onSeek: onSeek,
-          ),
-        ),
-        const SizedBox(width: 8),
-        SizedBox(
-          width: 48,
-          child: Text(fxTime(duration),
-              style: _timeStyle, textAlign: TextAlign.right),
-        ),
-      ],
     );
   }
 }
