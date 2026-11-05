@@ -82,8 +82,10 @@ class FxPlayerValue {
 
   /// 形如 `1920x1080` 的分辨率文案；未就绪时返回空串。
   String get resolutionText {
-    final w = videoWidth ?? width ?? 0;
-    final h = videoHeight ?? height ?? 0;
+    final rawWidth = videoWidth ?? 0;
+    final rawHeight = videoHeight ?? 0;
+    final w = rawWidth > 0 ? rawWidth : (width ?? 0);
+    final h = rawHeight > 0 ? rawHeight : (height ?? 0);
     if (w <= 0 || h <= 0) return '';
     return '${w}x$h';
   }
@@ -222,13 +224,15 @@ class FxPlayer implements Listenable {
     // 避免出现未处理的异步异常。
     unawaited(ready.future.catchError((Object _) {}));
     try {
-      await _player.open(
-        Media(
-          url,
-          httpHeaders: headers.isEmpty ? null : headers,
-        ),
-        play: false,
-      );
+      await _player
+          .open(
+            Media(
+              url,
+              httpHeaders: headers.isEmpty ? null : headers,
+            ),
+            play: false,
+          )
+          .timeout(readyTimeout);
     } catch (error) {
       if (identical(_ready, ready)) _ready = null;
       _fail('$error');
@@ -349,8 +353,10 @@ class FxPlayer implements Listenable {
   }
 
   void _onVideoParams(VideoParams params) {
-    var width = params.dw ?? params.w;
-    var height = params.dh ?? params.h;
+    var width = params.dw;
+    var height = params.dh;
+    if (width == null || width <= 0) width = params.w;
+    if (height == null || height <= 0) height = params.h;
     final rotate = params.rotate ?? 0;
     if (width != null && height != null && (rotate == 90 || rotate == 270)) {
       final swap = width;
@@ -358,7 +364,11 @@ class FxPlayer implements Listenable {
       height = swap;
     }
     final hasSize = width != null && height != null && width > 0 && height > 0;
-    var aspect = params.aspect ?? _value.aspectRatio;
+    var aspect = _value.aspectRatio;
+    final reportedAspect = params.aspect;
+    if (reportedAspect != null && reportedAspect > 0) {
+      aspect = reportedAspect;
+    }
     if (hasSize) {
       aspect = width / height;
     }
@@ -367,8 +377,8 @@ class FxPlayer implements Listenable {
         isInitialized: _value.isInitialized || hasSize,
         width: width,
         height: height,
-        videoWidth: params.w,
-        videoHeight: params.h,
+        videoWidth: params.w ?? width,
+        videoHeight: params.h ?? height,
         aspectRatio: aspect,
       ),
     );
