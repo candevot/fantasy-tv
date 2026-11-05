@@ -88,6 +88,10 @@ class _TogetherPageState extends State<TogetherPage>
   final ValueNotifier<List<TogetherChatMessage>> _chat =
       ValueNotifier<List<TogetherChatMessage>>(const []);
 
+  /// 缓存的聊天列表子树：父级 setState 时不会重建（实例相同），
+  /// 只有 _chat 通知时才刷新。
+  late final Widget _chatView;
+
   /* 播放 */
   FxPlayer? _controller;
   String _videoId = '';
@@ -132,6 +136,10 @@ class _TogetherPageState extends State<TogetherPage>
       onClosed: _onClosed,
     );
     WidgetsBinding.instance.addObserver(this);
+    _chatView = ValueListenableBuilder<List<TogetherChatMessage>>(
+      valueListenable: _chat,
+      builder: (context, messages, _) => TogetherChatList(messages: messages),
+    );
     _startTimers();
     final videoId = (widget.videoId ?? '').trim();
     if (videoId.isNotEmpty) {
@@ -2401,11 +2409,7 @@ class _TogetherPageState extends State<TogetherPage>
         decoration: togetherGlass(radius: 20, opacity: .58),
         clipBehavior: Clip.antiAlias,
         // 只监听新消息，网络状态变化不重建聊天列表。
-        child: ValueListenableBuilder<List<TogetherChatMessage>>(
-          valueListenable: _chat,
-          builder: (context, messages, _) =>
-              TogetherChatList(messages: messages),
-        ),
+        child: _chatView,
       ),
     );
   }
