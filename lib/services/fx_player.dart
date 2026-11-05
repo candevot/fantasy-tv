@@ -842,6 +842,9 @@ class _FxHlsWarmup {
     Map<String, String> headers,
   ) {
     if (url.isEmpty || !_looksLikeHls(url)) return Future<void>.value();
+    // 离线缓存播的是本地 index.m3u8，不需要联网预热。
+    final scheme = Uri.tryParse(url)?.scheme ?? '';
+    if (scheme != 'http' && scheme != 'https') return Future<void>.value();
     final now = DateTime.now();
     final warmedAt = _warmed[url];
     if (warmedAt != null && now.difference(warmedAt) < _ttl) {

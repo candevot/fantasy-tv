@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../models.dart';
@@ -137,6 +139,15 @@ class _DownloadSheetState extends State<DownloadSheet> {
       .where((e) => _selectable(_stateOf(e.n)))
       .toList(growable: false);
 
+  /// 该剧总集数：按最大集号统计（花絮等分组不会把集数撑大）。
+  int get _seriesTotal {
+    var maxEp = 0;
+    for (final ep in widget.episodes) {
+      if (ep.n > maxEp) maxEp = ep.n;
+    }
+    return maxEp > 0 ? maxEp : widget.episodes.length;
+  }
+
   void _toggle(int ep) {
     final state = _stateOf(ep);
     if (!_selectable(state)) return;
@@ -157,6 +168,50 @@ class _DownloadSheetState extends State<DownloadSheet> {
           ..clear()
           ..addAll(all.map((e) => e.n));
       }
+    });
+  }
+
+  /// 仅更新集：只勾选还没下载、也没在缓存队列里的新集。
+  void _selectUpdates() {
+    final fresh = widget.episodes
+        .where((e) => _stateOf(e.n) == _EpState.available)
+        .map((e) => e.n);
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(fresh);
+    });
+  }
+
+  /// 区间选择：输入起止集号（如 1–58），一次勾选整段。
+  Future<void> _pickRange() async {
+    final candidates = _selectableEpisodes;
+    if (candidates.isEmpty) return;
+    var minEp = candidates.first.n;
+    var maxEp = candidates.first.n;
+    for (final ep in candidates) {
+      if (ep.n < minEp) minEp = ep.n;
+      if (ep.n > maxEp) maxEp = ep.n;
+    }
+    final range = await showDialog<List<int>>(
+      context: context,
+      builder: (_) => _RangeDialog(minEp: minEp, maxEp: maxEp),
+    );
+    if (range == null || !mounted) return;
+    final lo = math.min(range[0], range[1]);
+    final hi = math.max(range[0], range[1]);
+    final picked = candidates
+        .where((e) => e.n >= lo && e.n <= hi)
+        .map((e) => e.n)
+        .toSet();
+    if (picked.isEmpty) {
+      _toast('该区间内没有可下载的集');
+      return;
+    }
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(picked);
     });
   }
 
@@ -185,6 +240,7 @@ class _DownloadSheetState extends State<DownloadSheet> {
           lineName: widget.lineName,
           year: widget.year,
           isMovie: widget.isMovie,
+          totalEpisodes: _seriesTotal,
         ),
     ];
     final added = await _service.enqueue(requests);
@@ -361,7 +417,7 @@ class _DownloadSheetState extends State<DownloadSheet> {
                     SizedBox(width: 4),
                     Expanded(
                       child: Text(
-                        '仅缓存已获授权的公开片源；文件保存到设置中的下载目录（默认 手机存储/Download/幻想影视），可在「设置 → 下载与缓存」查看和清理。',
+                        '多集按顺序排队、每集内部多线程分片；仅缓存已获授权的公开片源，文件保存到设置中的下载目录（默认 手机存储/Download/幻想影视）。',
                         maxLines: 2,
                         style: TextStyle(
                           fontSize: 9.5,
@@ -375,61 +431,90 @@ class _DownloadSheetState extends State<DownloadSheet> {
                 const SizedBox(height: 10),
                 Row(
                   children: [
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: all.isEmpty ? null : _toggleAll,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: .86),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: const Color(0xFFE4EAF4)),
-                        ),
-                        child: Text(
-                          allSelected ? '取消全选' : '全选',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w600,
-                            color: all.isEmpty ? Fx.sub : Fx.ink,
-                          ),
-                        ),
-                      ),
+                    _quickChip(
+                      text: allSelected ? '取消全选' : '全选',
+                      enabled: all.isNotEmpty,
+                      onTap: _toggleAll,
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
+                    const SizedBox(width: 8),
+                    _quickChip(
+                      text: '区间',
+                      enabled: all.isNotEmpty,
+                      onTap: _pickRange,
+                    ),
+                    const SizedBox(width: 8),
+                    _quickChip(
+                      text: '仅更新集',
+                      enabled: widget.episodes
+                          .any((e) => _stateOf(e.n) == _EpState.available),
+                      onTap: _selectUpdates,
+                    ),
+                    const Spacer(),
+                    Flexible(
                       child: Text(
                         _selected.isEmpty
                             ? '未选择剧集'
                             : '已选 ${_selected.length} 集',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.right,
                         style: const TextStyle(
                           fontSize: 11,
                           color: Fx.sub,
                         ),
                       ),
                     ),
-                    Opacity(
-                      opacity: _selected.isEmpty || _saving ? .45 : 1,
-                      child: IgnorePointer(
-                        ignoring: _selected.isEmpty || _saving,
-                        child: GradButton(
-                          text: _saving
-                              ? '加入中…'
-                              : '加入缓存${_selected.isEmpty ? '' : '（${_selected.length}）'}',
-                          height: 40,
-                          icon: Icons.download_done_rounded,
-                          onTap: _confirm,
-                        ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Opacity(
+                  opacity: _selected.isEmpty || _saving ? .45 : 1,
+                  child: IgnorePointer(
+                    ignoring: _selected.isEmpty || _saving,
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: GradButton(
+                        text: _saving
+                            ? '加入中…'
+                            : '加入缓存${_selected.isEmpty ? '' : '（${_selected.length} 集）'}',
+                        height: 42,
+                        icon: Icons.download_done_rounded,
+                        onTap: _confirm,
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _quickChip({
+    required String text,
+    required bool enabled,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: enabled ? onTap : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: .86),
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(color: const Color(0xFFE4EAF4)),
+        ),
+        child: Text(
+          text,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: enabled ? Fx.ink : Fx.sub,
+          ),
+        ),
       ),
     );
   }
@@ -516,6 +601,115 @@ class _DownloadSheetState extends State<DownloadSheet> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 区间选择弹窗：输入起止集号，返回 [from, to]。
+class _RangeDialog extends StatefulWidget {
+  const _RangeDialog({required this.minEp, required this.maxEp});
+
+  final int minEp;
+  final int maxEp;
+
+  @override
+  State<_RangeDialog> createState() => _RangeDialogState();
+}
+
+class _RangeDialogState extends State<_RangeDialog> {
+  late final TextEditingController _from =
+      TextEditingController(text: '${widget.minEp}');
+  late final TextEditingController _to =
+      TextEditingController(text: '${widget.maxEp}');
+  String? _error;
+
+  @override
+  void dispose() {
+    _from.dispose();
+    _to.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final from = int.tryParse(_from.text.trim());
+    final to = int.tryParse(_to.text.trim());
+    if (from == null || to == null) {
+      setState(() => _error = '请输入有效的集数');
+      return;
+    }
+    Navigator.pop(context, <int>[from, to]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+      title: const Text('按区间选择',
+          style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '可选 ${widget.minEp}–${widget.maxEp} 集',
+            style: const TextStyle(fontSize: 11, color: Fx.sub),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _from,
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700),
+                  decoration: const InputDecoration(
+                    labelText: '起始集',
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 10),
+                child: Text('至',
+                    style: TextStyle(fontSize: 13, color: Fx.sub)),
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _to,
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w700),
+                  decoration: const InputDecoration(
+                    labelText: '结束集',
+                    isDense: true,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              style: const TextStyle(fontSize: 10, color: Color(0xFFE45C5C)),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消', style: TextStyle(color: Fx.sub)),
+        ),
+        TextButton(
+          onPressed: _submit,
+          child: const Text('确定', style: TextStyle(color: Fx.accent)),
+        ),
+      ],
     );
   }
 }

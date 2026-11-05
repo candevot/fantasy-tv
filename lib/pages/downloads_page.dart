@@ -3,18 +3,24 @@ import 'package:flutter/material.dart';
 import '../services/download_service.dart';
 import '../theme.dart';
 import 'category_page.dart';
+import 'download_series_page.dart';
 import 'offline_player_page.dart';
 
 /* ========================================================================== */
 /*  离线缓存                                                                   */
 /* ========================================================================== */
 
-class _DownloadSection {
-  const _DownloadSection(this.title, this.count, this.icon);
+/// 同一部剧的缓存任务聚合。下载页按剧展示一行，点进去再看具体集数。
+class _SeriesGroup {
+  _SeriesGroup(this.id, this.tasks);
 
-  final String title;
-  final int count;
-  final IconData icon;
+  final String id;
+  final List<DownloadTask> tasks;
+
+  DownloadTask get sample => tasks.first;
+
+  int get updatedAt =>
+      tasks.fold(0, (max, t) => t.updatedAt > max ? t.updatedAt : max);
 }
 
 class DownloadsPage extends StatefulWidget {
@@ -51,16 +57,17 @@ class _DownloadsPageState extends State<DownloadsPage> {
     super.dispose();
   }
 
-  List<DownloadTask> get _active {
-    final list = _service.activeTasks.toList();
-    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-    return list;
-  }
-
-  List<DownloadTask> get _completed {
-    final list = _service.completedTasks.toList();
-    list.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    return list;
+  /// 按剧聚合，按最近一次下载排序。
+  List<_SeriesGroup> get _groups {
+    final map = <String, List<DownloadTask>>{};
+    for (final task in _service.tasks) {
+      map.putIfAbsent(task.id, () => <DownloadTask>[]).add(task);
+    }
+    final groups = <_SeriesGroup>[
+      for (final entry in map.entries) _SeriesGroup(entry.key, entry.value),
+    ];
+    groups.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return groups;
   }
 
   bool get _hasActive => _service.tasks.any((t) =>
@@ -100,51 +107,21 @@ class _DownloadsPageState extends State<DownloadsPage> {
     _toast('已清空离线缓存');
   }
 
-  Future<void> _delete(DownloadTask task) async {
+  Future<void> _deleteSeries(_SeriesGroup group) async {
+    final count = group.tasks.length;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-        title: Text('删除「${task.epLabel}」缓存？',
-            style:
-                const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
-        content: const Text('本地缓存文件会一并删除。',
-            style: TextStyle(fontSize: 12.5, height: 1.5, color: Fx.sub)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消', style: TextStyle(color: Fx.sub)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除', style: TextStyle(color: Color(0xFFE45C5C))),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
-    await _service.remove(task);
-    if (!mounted) return;
-    _toast('已删除「${task.epLabel}」');
-  }
-
-  Future<void> _deleteSeries(DownloadTask task) async {
-    final count = _service.tasksForSeries(task.id).length;
-    if (count <= 1) {
-      await _delete(task);
-      return;
-    }
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-        title: Text('删除「${task.title}」整部缓存？',
-            style:
-                const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
+        title: Text(
+          count > 1 ? '删除「${group.sample.title}」整部缓存？' : '删除「${group.sample.epLabel}」缓存？',
+          style: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
+        ),
         content: Text(
-          '将删除全部 $count 集的本地文件与任务记录，不影响其它剧集。',
+          count > 1
+              ? '将删除全部 $count 集的本地文件与任务记录，不影响其它剧集。'
+              : '本地缓存文件会一并删除。',
           style: const TextStyle(fontSize: 12.5, height: 1.5, color: Fx.sub),
         ),
         actions: [
@@ -154,16 +131,18 @@ class _DownloadsPageState extends State<DownloadsPage> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child:
-                const Text('删除整剧', style: TextStyle(color: Color(0xFFE45C5C))),
+            child: Text(count > 1 ? '删除整剧' : '删除',
+                style: const TextStyle(color: Color(0xFFE45C5C))),
           ),
         ],
       ),
     );
     if (ok != true || !mounted) return;
-    final removed = await _service.removeSeries(task.id);
+    final removed = await _service.removeSeries(group.id);
     if (!mounted) return;
-    _toast('已删除「${task.title}」$removed 集缓存');
+    _toast(count > 1
+        ? '已删除「${group.sample.title}」$removed 集缓存'
+        : '已删除「${group.sample.epLabel}」');
   }
 
   Future<void> _play(DownloadTask task) async {
@@ -178,6 +157,35 @@ class _DownloadsPageState extends State<DownloadsPage> {
         builder: (_) => OfflinePlayerPage(task: task, file: file),
       ),
     );
+  }
+
+  Future<void> _openSeries(_SeriesGroup group) async {
+    // 单集电影：点卡片直接播放，其它情况都进集数列表。
+    if (group.sample.isMovie && group.tasks.length == 1) {
+      final only = group.tasks.first;
+      if (only.status == DownloadStatus.completed) {
+        await _play(only);
+        return;
+      }
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => DownloadSeriesPage(seriesId: group.id),
+      ),
+    );
+  }
+
+  /// 已缓存的整部剧：播放集号最小的一集，其余可从「集数」里选。
+  Future<void> _playFirstCompleted(_SeriesGroup group) async {
+    final done = group.tasks
+        .where((t) => t.status == DownloadStatus.completed)
+        .toList()
+      ..sort((a, b) => a.ep.compareTo(b.ep));
+    if (done.isEmpty) {
+      await _openSeries(group);
+      return;
+    }
+    await _play(done.first);
   }
 
   void _toast(String msg) {
@@ -209,25 +217,14 @@ class _DownloadsPageState extends State<DownloadsPage> {
 
   Widget _content() {
     if (_loading) return const FxLoadingView(label: '正在读取缓存…');
-    if (_service.tasks.isEmpty) {
+    final groups = _groups;
+    if (groups.isEmpty) {
       return const FxEmptyView(
         icon: Icons.download_rounded,
         title: '暂无离线缓存',
         subtitle: '在详情页点击「下载」并选择剧集，缓存任务会出现在这里',
       );
     }
-    final active = _active;
-    final completed = _completed;
-    // 任务可能很多：拍平成「分组头 / 任务」两类行，交给 builder
-    // 按需构建，避免一次性创建全部卡片。
-    final rows = <Object>[
-      if (active.isNotEmpty)
-        _DownloadSection('下载中', active.length, Icons.downloading_rounded),
-      ...active,
-      if (completed.isNotEmpty)
-        _DownloadSection('已完成', completed.length, Icons.offline_pin_rounded),
-      ...completed,
-    ];
     return Column(
       children: [
         Padding(
@@ -250,7 +247,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
               const Spacer(),
               Flexible(
                 child: Text(
-                  '${_service.tasks.length} 项 · ${fxBytes(_service.totalCachedBytes)}',
+                  '${groups.length} 部 · ${fxBytes(_service.totalCachedBytes)}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.right,
@@ -264,18 +261,11 @@ class _DownloadsPageState extends State<DownloadsPage> {
           child: ListView.builder(
             physics: const BouncingScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(18, 0, 18, 30),
-            itemCount: rows.length,
+            itemCount: groups.length,
             itemBuilder: (ctx, i) {
-              final row = rows[i];
-              if (row is _DownloadSection) {
-                return Padding(
-                  padding: EdgeInsets.only(top: i == 0 ? 0 : 8, bottom: 8),
-                  child: _section(row.title, row.count, row.icon),
-                );
-              }
               return Padding(
                 padding: const EdgeInsets.only(bottom: 10),
-                child: _card(row as DownloadTask),
+                child: _seriesCard(groups[i]),
               );
             },
           ),
@@ -319,61 +309,36 @@ class _DownloadsPageState extends State<DownloadsPage> {
     );
   }
 
-  Widget _section(String title, int count, IconData icon) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(2, 4, 2, 0),
-      child: Row(
-        children: [
-          Icon(icon, size: 13, color: Fx.accent),
-          const SizedBox(width: 5),
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w800,
-              color: Fx.ink,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-            decoration: BoxDecoration(
-              color: Fx.accent.withValues(alpha: .10),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text(
-              '$count',
-              style: const TextStyle(
-                fontSize: 9,
-                fontWeight: FontWeight.w700,
-                color: Fx.accent,
-              ),
-            ),
-          ),
-          const Expanded(
-            child: Divider(
-              height: 1,
-              thickness: 1,
-              indent: 8,
-              color: Color(0x0D1B2430),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget _seriesCard(_SeriesGroup group) {
+    final id = group.id;
+    final status = _service.seriesStatus(id);
+    final total = _service.seriesTotalEpisodes(id);
+    final cached = _service.seriesCachedCount(id);
+    final bytes = _service.seriesCachedBytes(id);
+    final progress = _service.seriesProgress(id);
+    final current = _service.seriesCurrentTask(id);
+    final failedCount =
+        group.tasks.where((t) => t.status == DownloadStatus.failed).length;
+    final completed = status == DownloadStatus.completed;
+    final paused = status == DownloadStatus.paused;
+    final failed = status == DownloadStatus.failed;
+    final downloading = status == DownloadStatus.downloading;
+    final queued = status == DownloadStatus.queued;
+    final active = downloading || queued;
 
-  Widget _card(DownloadTask task) {
-    final completed = task.status == DownloadStatus.completed;
-    final failed = task.status == DownloadStatus.failed;
-    final paused = task.status == DownloadStatus.paused;
-    final downloading = task.status == DownloadStatus.downloading;
+    final detail = completed
+        ? '全部已缓存'
+        : failed
+            ? '$failedCount 集下载失败'
+            : paused
+                ? '已暂停 · 已完成 ${(progress * 100).round()}%'
+                : '第 ${current?.ep ?? cached}/$total 集 · 已完成 ${(progress * 100).round()}%';
 
     return GlassCard(
       padding: const EdgeInsets.all(10),
       radius: 18,
       opacity: .62,
-      onTap: completed ? () => _play(task) : null,
+      onTap: () => _openSeries(group),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -383,9 +348,14 @@ class _DownloadsPageState extends State<DownloadsPage> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                FxCover(url: task.cover, title: task.title, radius: 11),
+                FxCover(
+                  url: group.sample.cover,
+                  title: group.sample.title,
+                  radius: 11,
+                ),
                 Positioned(
                   left: 5,
+                  right: 5,
                   bottom: 5,
                   child: Container(
                     padding:
@@ -395,11 +365,12 @@ class _DownloadsPageState extends State<DownloadsPage> {
                       borderRadius: BorderRadius.circular(5),
                     ),
                     child: Text(
-                      task.epLabel,
+                      '$cached/$total',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
                       style:
-                          const TextStyle(fontSize: 8.5, color: Colors.white),
+                          const TextStyle(fontSize: 8, color: Colors.white),
                     ),
                   ),
                 ),
@@ -428,7 +399,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    task.title,
+                    group.sample.title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
@@ -440,134 +411,93 @@ class _DownloadsPageState extends State<DownloadsPage> {
                   const SizedBox(height: 5),
                   Row(
                     children: [
-                      _statusChip(task),
+                      _statusChip(status),
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          task.lineName.trim().isEmpty
-                              ? task.epLabel
-                              : task.lineName.trim(),
+                          group.sample.isMovie
+                              ? '已缓存 · ${fxBytes(bytes)}'
+                              : '已缓存 $cached/$total 集 · ${fxBytes(bytes)}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(fontSize: 9.5, color: Fx.sub),
                         ),
                       ),
-                      const SizedBox(width: 4),
-                      Text(
-                        task.sizeLabel,
-                        style: const TextStyle(fontSize: 9.5, color: Fx.sub),
-                      ),
                     ],
                   ),
                   const SizedBox(height: 6),
-                  if (failed)
-                    Expanded(
-                      child: Text(
-                        task.error ?? '缓存失败，请重试',
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 9.5,
-                          height: 1.35,
-                          color: Color(0xFFE45C5C),
-                        ),
-                      ),
-                    )
-                  else ...[
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(3),
-                      child: LinearProgressIndicator(
-                        value: task.progressValue,
-                        minHeight: 3.5,
-                        backgroundColor: const Color(0xFFE8EDF5),
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          completed
-                              ? const Color(0xFF5BC8A8)
-                              : paused
-                                  ? Fx.gold
-                                  : Fx.accent,
-                        ),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(3),
+                    child: LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 3.5,
+                      backgroundColor: const Color(0xFFE8EDF5),
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        completed
+                            ? const Color(0xFF5BC8A8)
+                            : paused
+                                ? Fx.gold
+                                : failed
+                                    ? const Color(0xFFE45C5C)
+                                    : Fx.accent,
                       ),
                     ),
-                    const SizedBox(height: 3),
-                    Row(
-                      children: [
-                        Text(
-                          '${(task.progressValue * 100).round()}%',
-                          style: TextStyle(
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                            color: completed ? const Color(0xFF2FA985) : Fx.sub,
-                          ),
-                        ),
-                        const SizedBox(width: 5),
-                        Expanded(
-                          child: Text(
-                            task.progressDetail,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 9, color: Fx.sub),
-                          ),
-                        ),
-                        if (downloading)
-                          const Text(
-                            '下载中…',
-                            style: TextStyle(fontSize: 9, color: Fx.accent),
-                          ),
-                      ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    detail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: failed
+                          ? const Color(0xFFE45C5C)
+                          : completed
+                              ? const Color(0xFF2FA985)
+                              : Fx.sub,
                     ),
-                  ],
+                  ),
                   const Spacer(),
                   Row(
                     children: [
-                      if (completed)
-                        _action(
-                          icon: Icons.play_arrow_rounded,
-                          label: '离线播放',
-                          color: Fx.accent,
-                          onTap: () => _play(task),
-                        )
-                      else if (downloading ||
-                          task.status == DownloadStatus.queued)
+                      if (active)
                         _action(
                           icon: Icons.pause_rounded,
                           label: '暂停',
                           color: const Color(0xFFD68A00),
-                          onTap: () => _service.pause(task),
+                          onTap: () => _service.pauseSeries(id),
                         )
-                      else if (paused)
+                      else if (paused || failed)
                         _action(
                           icon: Icons.play_arrow_rounded,
                           label: '继续',
                           color: Fx.accent,
-                          onTap: () => _service.resume(task),
+                          onTap: () => _service.resumeSeries(id),
                         )
                       else
                         _action(
-                          icon: Icons.refresh_rounded,
-                          label: '重试',
-                          color: const Color(0xFFD68A00),
-                          onTap: () => _service.retry(task),
+                          icon: Icons.play_arrow_rounded,
+                          label: '播放',
+                          color: Fx.accent,
+                          onTap: () => _playFirstCompleted(group),
                         ),
                       const SizedBox(width: 6),
-                      if (_service.tasksForSeries(task.id).length > 1) ...[
-                        _action(
-                          icon: Icons.delete_sweep_outlined,
-                          label: '整剧',
-                          color: const Color(0xFFD68A00),
-                          onTap: () => _deleteSeries(task),
-                        ),
-                        const SizedBox(width: 6),
-                      ],
+                      _action(
+                        icon: Icons.format_list_bulleted_rounded,
+                        label: '集数',
+                        color: Fx.sub,
+                        onTap: () => _openSeries(group),
+                      ),
+                      const SizedBox(width: 6),
                       _action(
                         icon: Icons.delete_outline_rounded,
                         label: '删除',
                         color: const Color(0xFFE45C5C),
-                        onTap: () => _delete(task),
+                        onTap: () => _deleteSeries(group),
                       ),
                       const Spacer(),
                       Text(
-                        fxTimeAgo(task.updatedAt),
+                        fxTimeAgo(group.updatedAt),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -586,8 +516,8 @@ class _DownloadsPageState extends State<DownloadsPage> {
     );
   }
 
-  Widget _statusChip(DownloadTask task) {
-    final color = switch (task.status) {
+  Widget _statusChip(DownloadStatus status) {
+    final color = switch (status) {
       DownloadStatus.completed => const Color(0xFF2FA985),
       DownloadStatus.downloading => Fx.accent,
       DownloadStatus.queued => const Color(0xFF7C8AA0),
@@ -601,7 +531,11 @@ class _DownloadsPageState extends State<DownloadsPage> {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
-        task.statusLabel,
+        status == DownloadStatus.completed
+            ? '已缓存'
+            : status == DownloadStatus.queued
+                ? '排队中'
+                : status.label,
         style: TextStyle(
           fontSize: 9,
           fontWeight: FontWeight.w600,

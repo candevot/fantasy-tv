@@ -39,6 +39,7 @@ class DownloadRequest {
     required this.lineName,
     this.year = 0,
     this.isMovie = false,
+    this.totalEpisodes = 0,
   });
 
   final String id;
@@ -55,6 +56,10 @@ class DownloadRequest {
   /// 电影使用 `剧名.年份.1080P.mp4`，剧集使用
   /// `剧名.SxxExx.第N集.mp4`。
   final bool isMovie;
+
+  /// 该剧总集数（下载面板里的集数），用于「已缓存 12/58 集」统计；
+  /// 0 表示未知，按任务数兜底。
+  final int totalEpisodes;
 }
 
 /// 单集缓存任务（可变状态由 [DownloadService] 统一维护）。
@@ -70,6 +75,7 @@ class DownloadTask {
     required this.createdAt,
     this.year = 0,
     this.isMovie = false,
+    this.totalEpisodes = 0,
     this.status = DownloadStatus.queued,
   }) : updatedAt = createdAt;
 
@@ -83,6 +89,9 @@ class DownloadTask {
   final int createdAt;
   final int year;
   final bool isMovie;
+
+  /// 该剧总集数；0 表示旧任务未知，统计时按任务数 / 最大集号兜底。
+  int totalEpisodes;
 
   DownloadStatus status;
   double progress = 0;
@@ -104,6 +113,9 @@ class DownloadTask {
   int _speedAt = 0;
 
   String get key => '$id#$ep';
+
+  /// 新版本 HLS 缓存：成品是 `epNN/index.m3u8 + 分片`，不是单个 mp4。
+  bool get isHlsLocal => ext == 'm3u8';
 
   String get epLabel => epName.trim().isEmpty ? '第 $ep 集' : epName.trim();
 
@@ -185,6 +197,7 @@ class DownloadTask {
         'updatedAt': updatedAt,
         'year': year,
         'isMovie': isMovie,
+        'totalEpisodes': totalEpisodes,
         'status': status.name,
         'progress': progress,
         'bytes': bytes,
@@ -215,6 +228,7 @@ class DownloadTask {
       createdAt: _asInt(j['createdAt'], now),
       year: _asInt(j['year']),
       isMovie: j['isMovie'] == true,
+      totalEpisodes: _asInt(j['totalEpisodes']),
       status: status,
     )
       ..updatedAt = _asInt(j['updatedAt'], now)
@@ -517,7 +531,13 @@ class DownloadService extends ChangeNotifier {
             ..speed = 0
             ..updatedAt = now;
         } else {
-          final length = await file.length();
+          // 目录式 HLS 缓存的成品是 index.m3u8，体积要按整个目录统计。
+          var length = await file.length();
+          if (task.isHlsLocal) {
+            length = task.bytes > 0
+                ? task.bytes
+                : await DownloadStorage.directoryBytes(file.parent.path);
+          }
           if (length <= 0) {
             await _deleteQuietly(file);
             task
@@ -566,6 +586,91 @@ class DownloadService extends ChangeNotifier {
   List<DownloadTask> tasksForSeries(String id) =>
       _tasks.where((t) => t.id == id).toList(growable: false);
 
+  /// 该剧总集数：优先用下载面板记录的总集数，旧任务按最大集号兜底。
+  int seriesTotalEpisodes(String id) {
+    var total = 0;
+    var count = 0;
+    for (final t in _tasks) {
+      if (t.id != id) continue;
+      count++;
+      if (t.totalEpisodes > total) total = t.totalEpisodes;
+      if (t.ep > total) total = t.ep;
+    }
+    if (total <= 0) total = count;
+    return total < 1 ? 1 : total;
+  }
+
+  int seriesCachedCount(String id) {
+    var cached = 0;
+    for (final t in _tasks) {
+      if (t.id == id && t.status == DownloadStatus.completed) cached++;
+    }
+    return cached;
+  }
+
+  int seriesCachedBytes(String id) {
+    var bytes = 0;
+    for (final t in _tasks) {
+      if (t.id == id) bytes += t.bytes;
+    }
+    return bytes;
+  }
+
+  /// 整剧缓存进度 = 所有任务进度之和 / 总集数；只下了一部分时进度条
+  /// 停在「已缓存比例」上，和「已缓存 12/58 集」文案一致。
+  double seriesProgress(String id) {
+    final list = tasksForSeries(id);
+    if (list.isEmpty) return 0;
+    var sum = 0.0;
+    for (final t in list) {
+      sum += t.progressValue;
+    }
+    final total = seriesTotalEpisodes(id);
+    if (total <= 0) return 0;
+    return (sum / total).clamp(0.0, 1.0);
+  }
+
+  DownloadStatus seriesStatus(String id) {
+    final list = tasksForSeries(id);
+    if (list.isEmpty) return DownloadStatus.completed;
+    if (list.any((t) => t.status == DownloadStatus.downloading)) {
+      return DownloadStatus.downloading;
+    }
+    if (list.any((t) => t.status == DownloadStatus.queued)) {
+      return DownloadStatus.queued;
+    }
+    if (list.any((t) => t.status == DownloadStatus.paused)) {
+      return DownloadStatus.paused;
+    }
+    if (list.any((t) => t.status == DownloadStatus.failed)) {
+      return DownloadStatus.failed;
+    }
+    return DownloadStatus.completed;
+  }
+
+  /// 整部剧里正在下载（或排队最前）的集，用于「第 12/58 集」文案。
+  DownloadTask? seriesCurrentTask(String id) {
+    DownloadTask? queued;
+    DownloadTask? paused;
+    for (final t in _tasks) {
+      if (t.id != id) continue;
+      if (t.status == DownloadStatus.downloading) return t;
+      if (queued == null && t.status == DownloadStatus.queued) queued = t;
+      if (paused == null && t.status == DownloadStatus.paused) paused = t;
+    }
+    return queued ?? paused;
+  }
+
+  /// 该剧还没有任务记录（未缓存、未排队）的集号，用于「继续补下」。
+  List<int> seriesMissingEpisodes(String id) {
+    final total = seriesTotalEpisodes(id);
+    final existing = <int>{for (final t in tasksForSeries(id)) t.ep};
+    return <int>[
+      for (var n = 1; n <= total; n++)
+        if (!existing.contains(n)) n,
+    ];
+  }
+
   /// 解析任务对应的真实本地文件；文件已被清理时返回 null。
   Future<File?> fileFor(DownloadTask task) async {
     if (task.status != DownloadStatus.completed) return null;
@@ -605,6 +710,7 @@ class DownloadService extends ChangeNotifier {
           // 重试时用户可能已经换了线路：跟着用这次请求的线路，别沿用旧线路。
           ..line = req.line.isEmpty ? existing.line : req.line
           ..lineName = req.lineName.isEmpty ? existing.lineName : req.lineName
+          ..totalEpisodes = math.max(existing.totalEpisodes, req.totalEpisodes)
           ..status = DownloadStatus.queued
           ..progress = 0
           ..bytes = 0
@@ -631,6 +737,7 @@ class DownloadService extends ChangeNotifier {
         createdAt: now,
         year: req.year,
         isMovie: req.isMovie,
+        totalEpisodes: req.totalEpisodes,
       ));
       added++;
     }
@@ -699,6 +806,49 @@ class DownloadService extends ChangeNotifier {
     var changed = false;
     for (final task in _tasks) {
       if (task.status == DownloadStatus.paused) {
+        task
+          ..status = DownloadStatus.queued
+          ..error = null
+          ..speed = 0
+          ..updatedAt = now;
+        task.resetSpeed();
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    _notifyNow();
+    await _persist();
+    _kick();
+  }
+
+  /// 整部剧暂停：下载中的集立即中断，排队的集不再开始。
+  Future<void> pauseSeries(String id) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var changed = false;
+    for (final task in _tasks) {
+      if (task.id != id) continue;
+      if (task.status == DownloadStatus.downloading ||
+          task.status == DownloadStatus.queued) {
+        task
+          ..status = DownloadStatus.paused
+          ..speed = 0
+          ..updatedAt = now;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    _notifyNow();
+    await _persist();
+  }
+
+  /// 整部剧继续：暂停 / 失败的集重新排队，等当前集跑完再串行开始。
+  Future<void> resumeSeries(String id) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var changed = false;
+    for (final task in _tasks) {
+      if (task.id != id) continue;
+      if (task.status == DownloadStatus.paused ||
+          task.status == DownloadStatus.failed) {
         task
           ..status = DownloadStatus.queued
           ..error = null
@@ -997,20 +1147,6 @@ class DownloadService extends ChangeNotifier {
       playlist = fetched.text;
     }
 
-    final lines = playlist.split(RegExp(r'\r?\n'));
-    for (final line in lines) {
-      final value = line.trim();
-      if (value.startsWith('#EXT-X-KEY')) {
-        final match = RegExp(r'METHOD\s*=\s*([A-Za-z0-9-]+)').firstMatch(value);
-        final method = (match?.group(1) ?? '').toUpperCase();
-        if (method.isNotEmpty && method != 'NONE') {
-          throw const _CacheException('加密 HLS 暂不支持离线缓存');
-        }
-      }
-      if (value.startsWith('#EXT-X-BYTERANGE')) {
-        throw const _CacheException('按字节范围切片的 HLS 暂不支持离线缓存');
-      }
-    }
     if (playlist.contains('#EXT-X-STREAM-INF')) {
       throw const _CacheException('播放列表嵌套层级过多，暂不支持');
     }
@@ -1018,11 +1154,19 @@ class DownloadService extends ChangeNotifier {
       throw const _CacheException('直播或未完结的 HLS 暂不支持离线缓存');
     }
 
-    final mapUri = _parseMapUri(playlist, mediaUri);
-    final segments = _parseSegments(playlist, mediaUri);
-    if (segments.isEmpty) {
+    final parsed = _parseHlsPlaylist(playlist, mediaUri);
+    if (parsed.encrypted) {
+      // AES-128 加密片源（可带 EXT-X-MAP）：落成
+      // `epNN/index.m3u8 + seg00001.ts + key.bin`，交给 mpv 本地解密。
+      await _downloadHlsLocal(task, parsed, headers);
+      return;
+    }
+    if (parsed.segments.isEmpty) {
       throw const _CacheException('播放列表里没有分片');
     }
+
+    final mapUri = parsed.firstMapUri;
+    final segments = parsed.segmentUris;
 
     final steps = <Uri>[
       if (mapUri != null) mapUri,
@@ -1038,6 +1182,10 @@ class DownloadService extends ChangeNotifier {
     await _deleteDirQuietly(Directory('${target.path}.mp4_parts'));
     await _deleteDirQuietly(Directory('${target.path}.stream_parts'));
     await _deleteQuietly(File('${target.path}.stream_parts.part'));
+    // 换线路后可能从加密 HLS 目录切回单文件，清掉旧目录。
+    try {
+      await _deleteDirQuietly(await _episodeDirectory(task));
+    } catch (_) {}
 
     final reuse = await _hlsPartsMatch(partsDir, signature, total);
     if (!reuse) {
@@ -1083,9 +1231,9 @@ class DownloadService extends ChangeNotifier {
       task,
       steps,
       headers,
-      partsDir,
       done,
       total,
+      pathOf: (i) => _hlsSegmentPath(partsDir, i),
     );
 
     if (_shouldStop(task)) throw const _AbortDownload();
@@ -1127,6 +1275,184 @@ class DownloadService extends ChangeNotifier {
     await _deleteDirQuietly(partsDir);
   }
 
+  /* --------------------------------------------- hls local (aes-128) */
+
+  /// 集目录：`<剧名 (年份)>/ep01`。
+  Future<Directory> _episodeDirectory(DownloadTask task) async {
+    final series = await _seriesDirectory(task);
+    final ep = task.ep < 1 ? 1 : task.ep;
+    return Directory('${series.path}/ep${ep.toString().padLeft(2, '0')}');
+  }
+
+  /// 本地分片名：`seg00001.ts`（从 1 开始，和 m3u8 里的顺序一致）。
+  String _hlsLocalSegmentPath(Directory dir, int index) =>
+      '${dir.path}/seg${(index + 1).toString().padLeft(5, '0')}.ts';
+
+  /// 加密 HLS 的离线缓存：key / init / 分片全部落到同一目录，再写一份
+  /// 只有相对路径的 `index.m3u8`。离线播放直接打开 index.m3u8，由
+  /// libmpv（ffmpeg）负责用同目录的 key.bin 解密，App 不实现 AES。
+  Future<void> _downloadHlsLocal(
+    DownloadTask task,
+    _HlsPlaylist playlist,
+    Map<String, String> headers,
+  ) async {
+    final total = playlist.segments.length;
+    if (total <= 0) {
+      throw const _CacheException('播放列表里没有分片');
+    }
+    final dir = await _episodeDirectory(task);
+    final indexFile = File('${dir.path}/index.m3u8');
+    final manifestFile = File('${dir.path}/.fx_hls.json');
+    final signature = playlist.signature;
+
+    // 先撤掉可能半残的 index，避免播放器读到缺分片的播放列表；旧版本
+    // 拼接出来的 mp4 也一并清掉，避免同一集同时存在两种成品。
+    await _deleteQuietly(indexFile);
+    try {
+      await _deleteQuietly(await _expectedTarget(task));
+    } catch (_) {}
+
+    var reuse = false;
+    if (await manifestFile.exists()) {
+      try {
+        final decoded = jsonDecode(await manifestFile.readAsString());
+        reuse = decoded is Map &&
+            '${decoded['signature']}' == signature &&
+            _asInt(decoded['total']) == total;
+      } catch (_) {
+        reuse = false;
+      }
+    }
+    if (!reuse) {
+      await _deleteDirQuietly(dir);
+      await dir.create(recursive: true);
+      await manifestFile.writeAsString(jsonEncode(<String, dynamic>{
+        'version': 1,
+        'signature': signature,
+        'total': total,
+      }));
+    } else {
+      await dir.create(recursive: true);
+    }
+
+    // 1) 密钥：单 key 存 key.bin；轮换 key 依次 key1.bin / key2.bin。
+    final keyNames = <String, String>{};
+    final keyUris = playlist.keyUris;
+    for (var i = 0; i < keyUris.length; i++) {
+      final name = keyUris.length == 1 ? 'key.bin' : 'key${i + 1}.bin';
+      keyNames[keyUris[i].toString()] = name;
+      final file = File('${dir.path}/$name');
+      if (await file.exists() && await file.length() > 0) continue;
+      final bytes = await _fetchSegmentWithRetry(keyUris[i], headers);
+      await file.writeAsBytes(bytes, flush: true);
+      task
+        ..bytes += bytes.length
+        ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+      _notifyProgress();
+    }
+
+    // 2) EXT-X-MAP（fMP4 init）：下载到同目录，index 里指向本地文件。
+    final mapNames = <String, String>{};
+    final mapUris = playlist.mapUris;
+    for (var i = 0; i < mapUris.length; i++) {
+      final name = mapUris.length == 1 ? 'init.mp4' : 'init${i + 1}.mp4';
+      mapNames[mapUris[i].toString()] = name;
+      final file = File('${dir.path}/$name');
+      if (await file.exists() && await file.length() > 0) continue;
+      final bytes = await _fetchSegmentWithRetry(mapUris[i], headers);
+      await file.writeAsBytes(bytes, flush: true);
+      task
+        ..bytes += bytes.length
+        ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+      _notifyProgress();
+    }
+
+    // 3) 断点续传：已有且非空的分片直接复用。
+    final done = <int>{};
+    var bytes = 0;
+    for (var i = 0; i < total; i++) {
+      final file = File(_hlsLocalSegmentPath(dir, i));
+      if (!await file.exists()) continue;
+      final length = await file.length();
+      if (length <= 0) {
+        await _deleteQuietly(file);
+        continue;
+      }
+      done.add(i);
+      bytes += length;
+    }
+
+    task
+      ..ext = 'm3u8'
+      ..signature = signature
+      ..totalSegments = total
+      ..doneSegments = done.length
+      ..totalBytes = 0
+      ..bytes = bytes
+      ..progress = total <= 0 ? 0 : done.length / total
+      ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+    task.resetSpeed();
+    _notifyNow();
+    _persistSoon();
+
+    await _downloadHlsSegments(
+      task,
+      playlist.segmentUris,
+      headers,
+      done,
+      total,
+      pathOf: (i) => _hlsLocalSegmentPath(dir, i),
+    );
+
+    if (_shouldStop(task)) throw const _AbortDownload();
+
+    // 4) 校验：分片数量与 m3u8 一致、每个文件 >0；不一致整集清理并失败。
+    final broken = <int>[];
+    for (var i = 0; i < total; i++) {
+      final file = File(_hlsLocalSegmentPath(dir, i));
+      if (!await file.exists() || await file.length() <= 0) broken.add(i + 1);
+    }
+    if (broken.isNotEmpty) {
+      await _deleteDirQuietly(dir);
+      throw _CacheException(
+        '分片校验失败（${broken.length}/$total 个缺失），已清理缓存，请重试',
+      );
+    }
+
+    // 5) 写本地播放列表：全部相对路径，mpv 自己读 key.bin 解密。
+    if (_shouldStop(task)) throw const _AbortDownload();
+    final text = playlist.buildLocalPlaylist(
+      keyNames: keyNames,
+      mapNames: mapNames,
+    );
+    final tmp = File('${dir.path}/.index.m3u8.tmp');
+    await tmp.writeAsString(text, flush: true);
+    await tmp.rename(indexFile.path);
+
+    var totalBytes = 0;
+    await for (final entity in dir.list(followLinks: false)) {
+      if (entity is! File) continue;
+      try {
+        totalBytes += await entity.length();
+      } catch (_) {}
+    }
+    task
+      ..filePath = indexFile.path
+      ..status = DownloadStatus.completed
+      ..progress = 1
+      ..doneSegments = total
+      ..totalSegments = total
+      ..bytes = totalBytes
+      ..totalBytes = totalBytes
+      ..speed = 0
+      ..error = null
+      ..updatedAt = DateTime.now().millisecondsSinceEpoch;
+    _notifyNow();
+    await _persist();
+    await _deleteQuietly(manifestFile);
+    unawaited(refreshUsage());
+  }
+
   Future<bool> _hlsPartsMatch(
     Directory dir,
     String signature,
@@ -1151,10 +1477,10 @@ class DownloadService extends ChangeNotifier {
     DownloadTask task,
     List<Uri> steps,
     Map<String, String> headers,
-    Directory partsDir,
     Set<int> done,
-    int total,
-  ) async {
+    int total, {
+    required String Function(int index) pathOf,
+  }) async {
     final missing = <int>[
       for (var i = 0; i < total; i++)
         if (!done.contains(i)) i,
@@ -1175,7 +1501,7 @@ class DownloadService extends ChangeNotifier {
         try {
           final chunk = await _fetchSegmentWithRetry(steps[i], headers);
           if (!_tasks.contains(task)) return;
-          final file = File(_hlsSegmentPath(partsDir, i));
+          final file = File(pathOf(i));
           await file.writeAsBytes(chunk, flush: true);
           done.add(i);
           task
@@ -1215,6 +1541,9 @@ class DownloadService extends ChangeNotifier {
     await _deleteDirQuietly(Directory('${target.path}.hls_parts'));
     await _deleteDirQuietly(Directory('${target.path}.stream_parts'));
     await _deleteQuietly(File('${target.path}.stream_parts.part'));
+    try {
+      await _deleteDirQuietly(await _episodeDirectory(task));
+    } catch (_) {}
 
     final remote = await _probeRemote(uri, headers);
     if (remote.supportsRanges && remote.totalBytes > 0) {
@@ -1831,20 +2160,156 @@ class DownloadService extends ChangeNotifier {
     return out;
   }
 
-  Uri? _parseMapUri(String playlist, Uri base) {
-    final match = RegExp(r'#EXT-X-MAP:.*?URI="([^"]+)"').firstMatch(playlist);
-    if (match == null) return null;
-    return base.resolve(match.group(1)!);
-  }
+  /// 解析媒体播放列表：保留头部标签、分片顺序、EXTINF、KEY / MAP 变化。
+  _HlsPlaylist _parseHlsPlaylist(String playlist, Uri base) {
+    final headerLines = <String>[];
+    final segments = <_HlsSegment>[];
+    final keys = <_HlsKey>[];
+    final maps = <_HlsMap>[];
+    final keyMap = <String, _HlsKey>{};
+    final mapMap = <String, _HlsMap>{};
 
-  List<Uri> _parseSegments(String playlist, Uri base) {
-    final out = <Uri>[];
+    _HlsKey? currentKey;
+    _HlsMap? currentMap;
+    var pendingExtinf = '';
+    var pendingDiscontinuity = false;
+
     for (final raw in playlist.split(RegExp(r'\r?\n'))) {
       final line = raw.trim();
-      if (line.isEmpty || line.startsWith('#')) continue;
-      out.add(base.resolve(line));
+      if (line.isEmpty) continue;
+      if (line.startsWith('#')) {
+        if (line.startsWith('#EXT-X-BYTERANGE')) {
+          throw const _CacheException('按字节范围切片的 HLS 暂不支持离线缓存');
+        }
+        if (line.startsWith('#EXT-X-KEY:')) {
+          final parsed = _parseHlsKey(line, base);
+          if (parsed == null) {
+            currentKey = null;
+          } else {
+            final id = '${parsed.method}|${parsed.uri}|${parsed.iv ?? ''}';
+            currentKey = keyMap.putIfAbsent(id, () {
+              keys.add(parsed);
+              return parsed;
+            });
+          }
+          continue;
+        }
+        if (line.startsWith('#EXT-X-MAP:')) {
+          final parsed = _parseHlsMap(line, base);
+          if (parsed != null) {
+            final id = parsed.uri.toString();
+            currentMap = mapMap.putIfAbsent(id, () {
+              maps.add(parsed);
+              return parsed;
+            });
+          }
+          continue;
+        }
+        if (line == '#EXT-X-DISCONTINUITY') {
+          pendingDiscontinuity = true;
+          continue;
+        }
+        if (line.startsWith('#EXTINF:')) {
+          pendingExtinf = line;
+          continue;
+        }
+        if (_isPreservedHlsTag(line)) headerLines.add(line);
+        continue;
+      }
+
+      final uri = base.resolve(line);
+      if (uri.scheme != 'http' && uri.scheme != 'https') {
+        throw const _CacheException('分片地址不是 http/https 直链，暂不支持离线缓存');
+      }
+      segments.add(_HlsSegment(
+        uri: uri,
+        extinf: pendingExtinf,
+        duration: _extinfDuration(pendingExtinf),
+        key: currentKey,
+        map: currentMap,
+        discontinuity: pendingDiscontinuity,
+      ));
+      pendingExtinf = '';
+      pendingDiscontinuity = false;
+    }
+
+    return _HlsPlaylist(
+      headerLines: headerLines,
+      segments: segments,
+      keys: keys,
+      maps: maps,
+    );
+  }
+
+  _HlsKey? _parseHlsKey(String line, Uri base) {
+    final colon = line.indexOf(':');
+    if (colon < 0) return null;
+    final attrs = _hlsAttributes(line.substring(colon + 1));
+    final method = (attrs['METHOD'] ?? 'NONE').toUpperCase();
+    if (method.isEmpty || method == 'NONE') return null;
+    if (method != 'AES-128') {
+      throw _CacheException('暂不支持 $method 加密的 HLS 离线缓存');
+    }
+    final format = (attrs['KEYFORMAT'] ?? 'identity').toLowerCase();
+    if (format.isNotEmpty && format != 'identity') {
+      throw _CacheException('暂不支持 $format 密钥格式的 HLS 离线缓存');
+    }
+    final raw = attrs['URI'] ?? '';
+    if (raw.isEmpty) {
+      throw const _CacheException('加密播放列表缺少密钥地址');
+    }
+    final uri = base.resolve(raw);
+    if (uri.scheme != 'http' && uri.scheme != 'https') {
+      throw const _CacheException('密钥地址不是 http/https 直链，暂不支持离线缓存');
+    }
+    return _HlsKey(method: method, uri: uri, iv: attrs['IV']);
+  }
+
+  _HlsMap? _parseHlsMap(String line, Uri base) {
+    final colon = line.indexOf(':');
+    if (colon < 0) return null;
+    final attrs = _hlsAttributes(line.substring(colon + 1));
+    if ((attrs['BYTERANGE'] ?? '').isNotEmpty) {
+      throw const _CacheException('按字节范围切片的 HLS 暂不支持离线缓存');
+    }
+    final raw = attrs['URI'] ?? '';
+    if (raw.isEmpty) return null;
+    final uri = base.resolve(raw);
+    if (uri.scheme != 'http' && uri.scheme != 'https') {
+      throw const _CacheException('初始化分片地址不是 http/https 直链，暂不支持离线缓存');
+    }
+    return _HlsMap(uri);
+  }
+
+  Map<String, String> _hlsAttributes(String text) {
+    final out = <String, String>{};
+    final pattern = RegExp(r'([A-Za-z0-9-]+)=("[^"]*"|[^,]*)');
+    for (final match in pattern.allMatches(text)) {
+      final name = match.group(1)!.toUpperCase();
+      var value = match.group(2) ?? '';
+      if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+        value = value.substring(1, value.length - 1);
+      }
+      out[name] = value.trim();
     }
     return out;
+  }
+
+  double _extinfDuration(String extinf) {
+    final colon = extinf.indexOf(':');
+    if (colon < 0) return 0;
+    final comma = extinf.indexOf(',', colon);
+    final raw = comma < 0
+        ? extinf.substring(colon + 1)
+        : extinf.substring(colon + 1, comma);
+    return double.tryParse(raw.trim()) ?? 0;
+  }
+
+  bool _isPreservedHlsTag(String line) {
+    for (final tag in _hlsHeaderTags) {
+      if (line.startsWith(tag)) return true;
+    }
+    return false;
   }
 
   String _signature(List<Uri> segments) {
@@ -1967,6 +2432,11 @@ class DownloadService extends ChangeNotifier {
       if (await file.exists()) return file;
     }
     try {
+      if (task.isHlsLocal) {
+        final index =
+            File('${(await _episodeDirectory(task)).path}/index.m3u8');
+        if (await index.exists()) return index;
+      }
       final expected = await _expectedTarget(task);
       if (await expected.exists()) return expected;
     } catch (_) {}
@@ -1981,6 +2451,11 @@ class DownloadService extends ChangeNotifier {
     await _deleteDirQuietly(Directory('${target.path}.mp4_parts'));
     await _deleteQuietly(File('${target.path}.stream_parts.part'));
 
+    // 目录式 HLS：`epNN/` 里是 index.m3u8 + 分片 + key，整目录删除。
+    try {
+      await _deleteDirQuietly(await _episodeDirectory(task));
+    } catch (_) {}
+
     final filePath = task.filePath;
     if (filePath != null && filePath.isNotEmpty) {
       final file = File(filePath);
@@ -1989,6 +2464,10 @@ class DownloadService extends ChangeNotifier {
       await _deleteDirQuietly(Directory('${file.path}.hls_parts'));
       await _deleteDirQuietly(Directory('${file.path}.mp4_parts'));
       await _deleteQuietly(File('${file.path}.stream_parts.part'));
+      // 换过下载目录时，filePath 的父目录就是实际集目录。
+      if (file.path.endsWith('/index.m3u8')) {
+        await _deleteDirQuietly(file.parent);
+      }
     }
 
     // 旧版每集一个目录：整个目录可以安全删除。
@@ -2107,6 +2586,153 @@ class DownloadService extends ChangeNotifier {
 class _Variant {
   const _Variant(this.bandwidth, this.uri);
   final int bandwidth;
+  final Uri uri;
+}
+
+/// 生成离线 index.m3u8 时需要原样保留的头部标签。
+const List<String> _hlsHeaderTags = <String>[
+  '#EXT-X-VERSION:',
+  '#EXT-X-TARGETDURATION:',
+  '#EXT-X-MEDIA-SEQUENCE:',
+  '#EXT-X-DISCONTINUITY-SEQUENCE:',
+  '#EXT-X-PLAYLIST-TYPE:',
+  '#EXT-X-INDEPENDENT-SEGMENTS',
+  '#EXT-X-START:',
+  '#EXT-X-ALLOW-CACHE:',
+];
+
+/// 解析后的媒体播放列表；KEY / MAP 只保留不重复的对象。
+class _HlsPlaylist {
+  _HlsPlaylist({
+    required this.headerLines,
+    required this.segments,
+    required this.keys,
+    required this.maps,
+  });
+
+  final List<String> headerLines;
+  final List<_HlsSegment> segments;
+  final List<_HlsKey> keys;
+  final List<_HlsMap> maps;
+
+  bool get encrypted => keys.isNotEmpty;
+
+  Uri? get firstMapUri => maps.isEmpty ? null : maps.first.uri;
+
+  List<Uri> get segmentUris => <Uri>[for (final s in segments) s.uri];
+
+  /// 密钥文件去重：同一 key 地址配不同 IV 时只下载一份。
+  List<Uri> get keyUris {
+    final seen = <String>{};
+    return <Uri>[
+      for (final key in keys)
+        if (seen.add(key.uri.toString())) key.uri,
+    ];
+  }
+
+  List<Uri> get mapUris => <Uri>[for (final m in maps) m.uri];
+
+  /// 断点续传指纹：分片数量 / 首尾分片 / 密钥 / init 变化都会失效。
+  String get signature {
+    final first = segments.isEmpty ? '' : segments.first.uri.toString();
+    final last = segments.isEmpty ? '' : segments.last.uri.toString();
+    final keyList = keyUris.map((u) => u.toString()).join(',');
+    final mapList = mapUris.map((u) => u.toString()).join(',');
+    return '${segments.length}|$first|$last|$keyList|$mapList';
+  }
+
+  /// 生成本地播放列表：分片 / key / init 全部使用同目录相对路径。
+  String buildLocalPlaylist({
+    required Map<String, String> keyNames,
+    required Map<String, String> mapNames,
+  }) {
+    final out = StringBuffer('#EXTM3U\n');
+    for (final line in headerLines) {
+      out.writeln(line);
+    }
+    if (!headerLines.any((l) => l.startsWith('#EXT-X-TARGETDURATION'))) {
+      var longest = 0.0;
+      for (final segment in segments) {
+        if (segment.duration > longest) longest = segment.duration;
+      }
+      final target = longest.ceil();
+      out.writeln('#EXT-X-TARGETDURATION:${target < 1 ? 1 : target}');
+    }
+
+    _HlsKey? lastKey;
+    _HlsMap? lastMap;
+    var wroteKey = false;
+    for (var i = 0; i < segments.length; i++) {
+      final segment = segments[i];
+      if (segment.key != lastKey) {
+        final key = segment.key;
+        if (key == null) {
+          if (wroteKey) out.writeln('#EXT-X-KEY:METHOD=NONE');
+        } else {
+          final name = keyNames[key.uri.toString()];
+          if (name == null) {
+            throw const _CacheException('密钥文件缺失，请重新下载');
+          }
+          out.writeln(key.tag(name));
+        }
+        lastKey = key;
+        wroteKey = true;
+      }
+      if (segment.map != null && segment.map != lastMap) {
+        final name = mapNames[segment.map!.uri.toString()];
+        if (name != null) {
+          out.writeln('#EXT-X-MAP:URI="$name"');
+          lastMap = segment.map;
+        }
+      }
+      if (segment.discontinuity) out.writeln('#EXT-X-DISCONTINUITY');
+      if (segment.extinf.isNotEmpty) out.writeln(segment.extinf);
+      out.writeln('seg${(i + 1).toString().padLeft(5, '0')}.ts');
+    }
+    out.writeln('#EXT-X-ENDLIST');
+    return out.toString();
+  }
+}
+
+class _HlsSegment {
+  const _HlsSegment({
+    required this.uri,
+    required this.extinf,
+    required this.duration,
+    required this.key,
+    required this.map,
+    required this.discontinuity,
+  });
+
+  final Uri uri;
+  final String extinf;
+  final double duration;
+  final _HlsKey? key;
+  final _HlsMap? map;
+  final bool discontinuity;
+}
+
+class _HlsKey {
+  const _HlsKey({
+    required this.method,
+    required this.uri,
+    required this.iv,
+  });
+
+  final String method;
+  final Uri uri;
+  final String? iv;
+
+  String tag(String localName) {
+    final out = StringBuffer('#EXT-X-KEY:METHOD=$method,URI="$localName"');
+    final value = iv;
+    if (value != null && value.isNotEmpty) out.write(',IV=$value');
+    return out.toString();
+  }
+}
+
+class _HlsMap {
+  const _HlsMap(this.uri);
   final Uri uri;
 }
 
