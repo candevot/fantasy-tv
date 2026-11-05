@@ -136,6 +136,11 @@ class VideoCard {
   final int rank;
   final List<String> tags;
 
+  /// 片名下的来源标记（当前主线路的线路名，如「红牛」「幻想4K」）。
+  /// 列表接口可直接给 `source`；没给时用 `lines[0].name` 兜底，
+  /// 两者都没有就留空，卡片不渲染这一行。
+  final String sourceLabel;
+
   VideoCard({
     required this.id,
     required this.title,
@@ -151,6 +156,7 @@ class VideoCard {
     this.desc = '',
     this.rank = 0,
     this.tags = const [],
+    this.sourceLabel = '',
   });
 
   factory VideoCard.fromJson(Map<String, dynamic> j) => VideoCard(
@@ -168,7 +174,28 @@ class VideoCard {
         desc: _cleanDescription(j['desc']),
         rank: _asInt(j['rank']),
         tags: _asStrList(j['tags']),
+        sourceLabel: _cardSourceLabel(j['source'], j['lines']),
       );
+}
+
+/// 卡片来源标记：优先接口 `source`，其次 `lines[0]` 的线路名 / 来源站名。
+/// 列表接口两者都没给时返回空串，UI 不显示、也不占高度。
+String _cardSourceLabel(Object? source, Object? lines) {
+  final direct = _asStr(source).trim();
+  if (direct.isNotEmpty) return direct;
+  for (final e in _asList(lines)) {
+    if (e is Map) {
+      final m = _asMap(e);
+      final name = _asStr(m['name']).trim();
+      if (name.isNotEmpty) return name;
+      final src = _asStr(m['source']).trim();
+      if (src.isNotEmpty) return src;
+    } else if (e is String) {
+      final name = e.trim();
+      if (name.isNotEmpty) return name;
+    }
+  }
+  return '';
 }
 
 class BannerItem {
@@ -350,6 +377,16 @@ class VideoDetail {
   });
 
   List<Episode> get allEpisodes => [for (final g in groups) ...g.episodes];
+
+  /// 详情主线路的来源标记（线路名优先，空则退回 source），
+  /// 供榜单这类懒加载详情的卡片补上来源小字。
+  String get sourceLabel {
+    for (final line in lines) {
+      final name = line.displayName.trim();
+      if (name.isNotEmpty) return name;
+    }
+    return '';
+  }
 
   factory VideoDetail.fromJson(Map<String, dynamic> j) {
     // `related` 是 id 数组（也兼容直接给卡片对象），`relatedCards` 是旧字段。

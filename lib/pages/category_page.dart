@@ -802,7 +802,10 @@ class _CategoryPageState extends State<CategoryPage> {
                   crossAxisCount: 4,
                   crossAxisSpacing: 8,
                   mainAxisSpacing: 8,
-                  mainAxisExtent: itemWidth * 1.5 + fxPosterMetaExtent(context),
+                  mainAxisExtent: itemWidth * 1.5 +
+                      fxPosterMetaExtent(context,
+                          withSource: _items
+                              .any((e) => e.sourceLabel.trim().isNotEmpty)),
                 ),
                 delegate: SliverChildBuilderDelegate(
                   (ctx, i) {

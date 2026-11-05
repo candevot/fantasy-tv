@@ -50,6 +50,9 @@ class _RankPageState extends State<RankPage> {
 
   /// 榜单接口不返回简介：可见卡片按需拉一次详情补齐，失败就保持占位文案。
   final Map<String, String> _desc = <String, String>{};
+
+  /// 详情返回的线路名；列表接口没给 source 时用它给卡片补来源小字。
+  final Map<String, String> _source = <String, String>{};
   final Set<String> _descPending = <String>{};
   final List<String> _descQueue = <String>[];
   int _descActive = 0;
@@ -157,7 +160,11 @@ class _RankPageState extends State<RankPage> {
     try {
       final detail = await Api.detail(id);
       if (!mounted) return;
-      setState(() => _desc[id] = detail.desc);
+      setState(() {
+        _desc[id] = detail.desc;
+        final source = detail.sourceLabel;
+        if (source.isNotEmpty) _source[id] = source;
+      });
     } catch (_) {
       if (!mounted) return;
       // 记空串：不再重复请求，卡片显示「暂无简介」而不是留白。
@@ -521,6 +528,9 @@ class _RankPageState extends State<RankPage> {
     final badge = fxBadgeText(item);
     _ensureDesc(item);
     final desc = _descOf(item);
+    final source = item.sourceLabel.trim().isNotEmpty
+        ? item.sourceLabel.trim()
+        : (_source[item.id] ?? '');
     return GlassCard(
       padding: const EdgeInsets.all(10),
       radius: 18,
@@ -566,6 +576,10 @@ class _RankPageState extends State<RankPage> {
                         fontWeight: FontWeight.w600,
                         color: Fx.ink),
                   ),
+                  if (source.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    FxSourceLabel(source),
+                  ],
                   const SizedBox(height: 3),
                   Text(
                     meta.isEmpty ? '影视' : meta,

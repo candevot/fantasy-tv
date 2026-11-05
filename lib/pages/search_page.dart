@@ -874,8 +874,10 @@ class _SearchPageState extends State<SearchPage> {
                     crossAxisCount: 3,
                     crossAxisSpacing: 8,
                     mainAxisSpacing: 8,
-                    mainAxisExtent:
-                        itemWidth * 1.5 + fxPosterMetaExtent(context),
+                    mainAxisExtent: itemWidth * 1.5 +
+                        fxPosterMetaExtent(context,
+                            withSource: _results
+                                .any((e) => e.sourceLabel.trim().isNotEmpty)),
                   ),
                   delegate: SliverChildBuilderDelegate(
                     (ctx, i) {

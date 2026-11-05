@@ -124,11 +124,36 @@ class FxCover extends StatelessWidget {
   }
 }
 
-/// 海报下方「片名 + 状态」两行文字在当前系统字号下的高度。
+/// 海报下方「片名 + 来源 + 状态」文字在当前系统字号下的高度。
 /// 网格 / 横滑列表用它算 mainAxisExtent，1.3 倍大字体下也不会裁字。
-double fxPosterMetaExtent(BuildContext context) {
+/// [withSource] 为 true 时多留一行来源小字（10.5sp + 2dp 间距）；
+/// 列表里没有任何来源时保持原高度，不白占位。
+double fxPosterMetaExtent(BuildContext context, {bool withSource = false}) {
   final scaler = MediaQuery.textScalerOf(context);
-  return 8 + scaler.scale(12.5 * 1.3) + scaler.scale(11 * 1.2) + 3;
+  final source = withSource ? 2 + scaler.scale(10.5 * 1.2) : 0.0;
+  return 8 + scaler.scale(12.5 * 1.3) + source + scaler.scale(11 * 1.2) + 3;
+}
+
+/// 片名下的来源小字：10.5sp、灰 #8A8FA3、单行省略。
+class FxSourceLabel extends StatelessWidget {
+  const FxSourceLabel(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(
+        fontSize: 10.5,
+        height: 1.2,
+        fontWeight: FontWeight.w400,
+        color: Color(0xFF8A8FA3),
+      ),
+    );
+  }
 }
 
 /// 海报角标文案：新 / 更新至N集 / 全N集 / 已完结。
@@ -287,6 +312,10 @@ class FxPosterTile extends StatelessWidget {
                   color: Fx.ink,
                 ),
               ),
+              if (item.sourceLabel.trim().isNotEmpty) ...[
+                const SizedBox(height: 2),
+                FxSourceLabel(item.sourceLabel.trim()),
+              ],
             ],
             if (showStatus) ...[
               const SizedBox(height: 2),
@@ -420,8 +449,10 @@ class FxSectionRow extends StatelessWidget {
                 horizontalPadding * 2 -
                 gap * (visibleCount - 1);
             final itemWidth = available <= 0 ? 72.0 : available / visibleCount;
+            final withSource = list.any((e) => e.sourceLabel.trim().isNotEmpty);
             return SizedBox(
-              height: itemWidth * 1.5 + fxPosterMetaExtent(context),
+              height: itemWidth * 1.5 +
+                  fxPosterMetaExtent(context, withSource: withSource),
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
