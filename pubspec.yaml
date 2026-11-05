@@ -27,6 +27,9 @@ dependencies:
   # 显式声明以便与 media_kit_video 锁在同一大版本，避免解析出不兼容的新版。
   screen_brightness_platform_interface: ^2.1.2
   volume_controller: ^3.4.4
+  # DLNA/UPnP 投屏：SSDP 发现 + AVTransport / RenderingControl SOAP。
+  # 纯 Dart 实现，SDK >=3.8，与 Flutter 3.32.8 / Dart 3.8.1 匹配。
+  dlna_dart: ^0.1.2
 dev_dependencies:
   flutter_test:
     sdk: flutter

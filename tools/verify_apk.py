@@ -162,6 +162,12 @@ def verify_manifest(gate, apk):
         r"([^\n]*)", perms.stdout)
     gate.require('legacy storage permission in APK', storage is not None,
                  storage.group(0).strip() if storage else 'not found')
+    for name in ('ACCESS_WIFI_STATE', 'CHANGE_WIFI_MULTICAST_STATE'):
+        found = re.search(
+            r"uses-permission:\s*name='android\.permission\." + name + "'",
+            perms.stdout)
+        gate.require('%s permission in APK' % name, found is not None,
+                     found.group(0).strip() if found else 'not found')
 
     cleartext = ''
     for line in xmltree.stdout.splitlines():

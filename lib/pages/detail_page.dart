@@ -1317,7 +1317,12 @@ class _DetailPageState extends State<DetailPage>
   }
 
   void _cast() {
-    fxToast(context, '投屏：暂无可用设备');
+    final player = _playerKey.currentState;
+    if (player == null) {
+      fxToast(context, '播放器还没准备好');
+      return;
+    }
+    unawaited(player.openCastSheet());
   }
 
   Widget _sourceHint() {

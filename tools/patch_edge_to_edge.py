@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""把 CI 生成的 MainActivity / 主题补成 edge-to-edge，并保留 Android 8/9
-写公共 Download 目录所需的旧版存储权限请求。
+"""把 CI 生成的 MainActivity / 主题补成 edge-to-edge，保留 Android 8/9
+写公共 Download 目录所需的旧版存储权限请求，并注册 DLNA 投屏用的
+WifiManager.MulticastLock 通道（fantasy_tv/cast）。
 
 Flutter 3.32 模板 MainActivity 的写法是 `class MainActivity : FlutterActivity()`，
 冒号两侧都有空格；旧的内联 patch 只匹配 `MainActivity: FlutterActivity()`，
@@ -34,6 +35,47 @@ IMPORTS = (
     'import androidx.core.content.ContextCompat',
 )
 
+CAST_BLOCK = '''
+    private var castMulticastLock: android.net.wifi.WifiManager.MulticastLock? = null
+
+    override fun configureFlutterEngine(flutterEngine: io.flutter.embedding.engine.FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        io.flutter.plugin.common.MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fantasy_tv/cast"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "acquireMulticastLock" -> {
+                    try {
+                        val wifi = applicationContext.getSystemService(
+                            android.content.Context.WIFI_SERVICE
+                        ) as android.net.wifi.WifiManager
+                        val lock = castMulticastLock ?: wifi.createMulticastLock(
+                            "fantasy_tv_cast"
+                        ).also {
+                            it.setReferenceCounted(false)
+                            castMulticastLock = it
+                        }
+                        if (!lock.isHeld) lock.acquire()
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("cast_lock", e.message, null)
+                    }
+                }
+                "releaseMulticastLock" -> {
+                    try {
+                        castMulticastLock?.let { if (it.isHeld) it.release() }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("cast_lock", e.message, null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+'''
+
 ON_CREATE = '''
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,6 +95,19 @@ ON_CREATE = '''
             )
         }
     }'''
+
+
+def patch_cast(kt: str):
+    """在 MainActivity 里注册 MulticastLock 通道；已存在则不动。"""
+    if 'fantasy_tv/cast' in kt:
+        return kt, False
+    pattern = re.compile(
+        r'class\s+MainActivity\s*:\s*FlutterActivity\(\)\s*\{')
+    match = pattern.search(kt)
+    if not match:
+        return kt, False
+    kt = kt[:match.end()] + CAST_BLOCK + kt[match.end():]
+    return kt, True
 
 
 def main() -> int:
@@ -76,34 +131,45 @@ def main() -> int:
         return 1
     activity = candidates[0]
     kt = io.open(activity, encoding='utf-8').read()
-    if 'setDecorFitsSystemWindows' in kt:
-        print('keep %s' % activity)
-        return 0
+    edge_patched = 'setDecorFitsSystemWindows' not in kt
+    if edge_patched:
+        for imp in IMPORTS:
+            if imp not in kt:
+                kt = kt.replace(
+                    'import io.flutter.embedding.android.FlutterActivity',
+                    'import io.flutter.embedding.android.FlutterActivity\n' + imp,
+                    1)
 
-    for imp in IMPORTS:
-        if imp not in kt:
-            kt = kt.replace(
-                'import io.flutter.embedding.android.FlutterActivity',
-                'import io.flutter.embedding.android.FlutterActivity\n' + imp,
-                1)
+        # Flutter 3.32 模板: `class MainActivity : FlutterActivity()`（无花括号）。
+        pattern = re.compile(
+            r'class\s+MainActivity\s*:\s*FlutterActivity\(\)\s*(\{)?')
+        if not pattern.search(kt):
+            print('cannot find MainActivity class declaration in %s' % activity,
+                  file=sys.stderr)
+            return 1
 
-    # Flutter 3.32 模板: `class MainActivity : FlutterActivity()`（无花括号）。
-    pattern = re.compile(
-        r'class\s+MainActivity\s*:\s*FlutterActivity\(\)\s*(\{)?')
-    if not pattern.search(kt):
-        print('cannot find MainActivity class declaration in %s' % activity,
+        def repl(m):
+            head = 'class MainActivity : FlutterActivity() {'
+            if m.group(1):
+                return head + ON_CREATE
+            return head + ON_CREATE + '\n}'
+
+        kt = pattern.sub(repl, kt, count=1)
+
+    kt, cast_patched = patch_cast(kt)
+    if 'fantasy_tv/cast' not in kt:
+        print('cannot patch DLNA multicast lock channel in %s' % activity,
               file=sys.stderr)
         return 1
-
-    def repl(m):
-        head = 'class MainActivity : FlutterActivity() {'
-        if m.group(1):
-            return head + ON_CREATE
-        return head + ON_CREATE + '\n}'
-
-    kt = pattern.sub(repl, kt, count=1)
+    if kt.count('{') != kt.count('}'):
+        print('unbalanced braces after patching %s' % activity,
+              file=sys.stderr)
+        return 1
     io.open(activity, 'w', encoding='utf-8').write(kt)
-    print('patched %s' % activity)
+    if edge_patched or cast_patched:
+        print('patched %s' % activity)
+    else:
+        print('keep %s' % activity)
     return 0
 
 

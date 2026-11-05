@@ -8,8 +8,9 @@
 - compileSdk 36 / targetSdk 36 / minSdk 23
 - ndkVersion 27+（16KB 页）
 - AGP 8.13+ / Gradle 8.13+ / Kotlin 2.x
-- manifest 权限、明文流量、应用名
-- MainActivity 有 Android 8/9 存储权限请求与 edge-to-edge
+- manifest 权限（含 DLNA 的 ACCESS_WIFI_STATE / CHANGE_WIFI_MULTICAST_STATE）、
+  明文流量、应用名
+- MainActivity 有 Android 8/9 存储权限请求、edge-to-edge 与投屏 MulticastLock 通道
 """
 
 import io
@@ -117,6 +118,12 @@ def main() -> None:
         fail('manifest: Android 8 storage permission maxSdkVersion=28')
     print('ok manifest: Android 8 storage permission')
 
+    for name in ('android.permission.ACCESS_WIFI_STATE',
+                 'android.permission.CHANGE_WIFI_MULTICAST_STATE'):
+        if name not in permissions:
+            fail('manifest: %s (DLNA/SSDP multicast)' % name)
+        print('ok manifest: %s' % name)
+
     if app is None:
         fail('manifest: application element')
     if app.get(ns + 'usesCleartextTraffic') != 'true':
@@ -141,6 +148,10 @@ def main() -> None:
     if 'requestPermissions' not in kt or 'WRITE_EXTERNAL_STORAGE' not in kt:
         fail('MainActivity does not request legacy storage permission')
     print('ok MainActivity: Android 8/9 storage permission request')
+    if ('fantasy_tv/cast' not in kt or 'acquireMulticastLock' not in kt or
+            'releaseMulticastLock' not in kt):
+        fail('MainActivity does not expose DLNA multicast lock channel')
+    print('ok MainActivity: DLNA multicast lock channel')
 
     java_version = re.search(r'JavaVersion\.VERSION_(\d+)', g)
     if java_version:

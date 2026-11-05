@@ -7,8 +7,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cast_service.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
+import '../widgets/cast_sheet.dart';
 import '../widgets/detail_widgets.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_theme.dart';
@@ -93,6 +95,10 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    // 投屏会话属于本页：退出直播详情时停止电视。
+    if (CastService.instance.isOwnedBy(this)) {
+      unawaited(CastService.instance.stop());
+    }
     _openSeq++;
     final player = _player;
     _player = null;
@@ -401,6 +407,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
           line: _lineId,
           lineName: line?.qualityLabel ?? '',
           isLive: true,
+          castSource: _castSourceForCurrentLine(),
+          castOwner: this,
         ),
       ),
     );
@@ -463,7 +471,48 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     }
   }
 
-  void _cast() => fxToast(context, '投屏：暂无可用设备');
+  CastSource? _castSourceForCurrentLine() {
+    final url = _line?.url.trim() ?? '';
+    if (url.isEmpty) return null;
+    try {
+      return CastService.resolveSource(
+        url: url,
+        title: _channel.title,
+        isLive: true,
+        serverBase: Api.base,
+      );
+    } on CastException {
+      return null;
+    }
+  }
+
+  Future<void> _cast() async {
+    final source = _castSourceForCurrentLine();
+    if (source == null) {
+      fxToast(
+        context,
+        _loading || _error != null ? '直播还没准备好' : '当前线路暂无可投屏地址',
+      );
+      return;
+    }
+    final wasPlaying = _player?.value.isPlaying ?? false;
+    await showCastSheet(
+      context,
+      source: source,
+      owner: this,
+      onCastStarted: () async {
+        try {
+          await _player?.pause();
+        } catch (_) {}
+      },
+      onCastStopped: () async {
+        if (!wasPlaying || !mounted) return;
+        try {
+          await _player?.play();
+        } catch (_) {}
+      },
+    );
+  }
 
   Future<void> _together() async {
     if (_openingTogether) return;
@@ -475,6 +524,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     _openingTogether = true;
     _releasedForTogether = true;
     _hideTimer?.cancel();
+    if (CastService.instance.isOwnedBy(this)) {
+      await CastService.instance.stop();
+    }
     try {
       // 房间里只能有一个播放器：进房前彻底释放本页播放器（不能只 pause，
       // 否则同一路直播会同时开两台解码器、两条流，一旦 pause 失败就是双声）。

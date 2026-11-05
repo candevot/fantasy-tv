@@ -89,6 +89,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.7.15"
+  dlna_dart:
+    dependency: "direct main"
+    description:
+      name: dlna_dart
+      sha256: "9518eb36fa6b24eb1c237baa98c4c6d1a39e5a100b1a9d47651271ea7311413f"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.1.2"
   fake_async:
     dependency: transitive
     description:

@@ -8,6 +8,10 @@ manifest 只有 android:label="fantasy_tv"、没有 INTERNET / 明文流量。�
 - <uses-permission android:name="android.permission.INTERNET"/>
 - <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
                    android:maxSdkVersion="28"/>（Android 8/9 写公共 Download）
+- <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+- <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+  （DLNA/SSDP 组播；MulticastLock 在 MainActivity 的 fantasy_tv/cast 通道
+   里按需申请，二者都是 normal 权限，没有运行时弹窗）
 - <application android:usesCleartextTraffic="true" ...>
 - android:label="幻想影视"
 - android:icon 必须存在（由 Flutter 模板 / 图标步骤提供，缺失直接失败）
@@ -31,6 +35,10 @@ ICON_ATTR = A + 'icon'
 INTERNET = 'android.permission.INTERNET'
 STORAGE = 'android.permission.WRITE_EXTERNAL_STORAGE'
 STORAGE_MAX_SDK = '28'
+# DLNA/SSDP 投屏：读 WiFi 状态 + 使用组播（MulticastLock 在 MainActivity
+# 的 fantasy_tv/cast 通道里按需申请，二者都是 normal 权限，安装即授予）。
+WIFI_STATE = 'android.permission.ACCESS_WIFI_STATE'
+MULTICAST = 'android.permission.CHANGE_WIFI_MULTICAST_STATE'
 
 ET.register_namespace('android', ANDROID_NS)
 
@@ -97,6 +105,10 @@ def patch(root):
         notes.append('INTERNET %s' % what)
     for what in ensure_permission(root, STORAGE, STORAGE_MAX_SDK):
         notes.append('WRITE_EXTERNAL_STORAGE %s' % what)
+    for what in ensure_permission(root, WIFI_STATE):
+        notes.append('ACCESS_WIFI_STATE %s' % what)
+    for what in ensure_permission(root, MULTICAST):
+        notes.append('CHANGE_WIFI_MULTICAST_STATE %s' % what)
 
     if app.get(attr('usesCleartextTraffic')) != 'true':
         app.set(attr('usesCleartextTraffic'), 'true')
@@ -127,6 +139,13 @@ def validate(root):
     elif storage.get(attr('maxSdkVersion')) != STORAGE_MAX_SDK:
         problems.append('%s maxSdkVersion must be %s'
                         % (STORAGE, STORAGE_MAX_SDK))
+
+    for name in (WIFI_STATE, MULTICAST):
+        item = perms.get(name)
+        if item is None:
+            problems.append('missing uses-permission %s' % name)
+        elif item.get(attr('maxSdkVersion')) is not None:
+            problems.append('%s must not be limited by maxSdkVersion' % name)
 
     if app is None:
         problems.append('missing <application>')
@@ -222,6 +241,8 @@ def validate_ok_lines(root):
     app = application(root)
     yield '%s' % INTERNET
     yield '%s maxSdkVersion=%s' % (STORAGE, STORAGE_MAX_SDK)
+    yield '%s' % WIFI_STATE
+    yield '%s' % MULTICAST
     yield 'usesCleartextTraffic=%s' % app.get(attr('usesCleartextTraffic'))
     yield 'label=%s' % app.get(attr('label'))
     yield 'icon=%s' % app.get(ICON_ATTR)

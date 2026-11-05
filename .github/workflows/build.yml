@@ -55,10 +55,11 @@ jobs:
           # 写回后重新解析校验；缺 INTERNET / cleartext / label / icon 任一项
           # 都会打印 diff 并退出 1。
           python3 tools/patch_manifest.py
-      - name: Patch edge-to-edge and legacy storage permission
+      - name: Patch edge-to-edge, storage permission and DLNA multicast lock
         run: |
           # Flutter 3.32 模板是 `class MainActivity : FlutterActivity()`，
           # 冒号两侧带空格；用独立脚本匹配，避免 patch 静默失效。
+          # 同时注册 fantasy_tv/cast 通道，SSDP 搜索时申请 MulticastLock。
           python3 tools/patch_edge_to_edge.py
       - name: Check Android 8+ / 16KB compatibility
         run: |

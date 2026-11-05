@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cast_service.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
+import '../widgets/cast_sheet.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
@@ -83,6 +85,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   FxPlayer? _controller;
   PlayInfo? _info;
+
+  /// 当前真正 open 成功的地址（可能是 backup），投屏优先用它；
+  /// 切线路 / 切集时清空，避免把上一条地址投出去。
+  String? _activeCastUrl;
 
   late int _ep;
   late String _line;
@@ -208,6 +214,75 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final infoName = _info?.lineName.trim() ?? '';
     if (infoName.isNotEmpty) return infoName;
     return fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], _line);
+  }
+
+  /// 打开投屏面板。详情页底部动作栏的「投屏」也调用这里。
+  Future<void> openCastSheet() async {
+    final info = _info;
+    if (info == null || _loading || _error) {
+      fxToast(context, '播放地址还没准备好');
+      return;
+    }
+    final active = _activeCastUrl?.trim() ?? '';
+    final url = active.isNotEmpty ? active : _castUrl(info);
+    final headers = _castHeaders(url, info);
+    CastSource source;
+    try {
+      source = CastService.resolveSource(
+        url: url,
+        headers: headers,
+        title: '$_title · ${_epLabelFor(_ep)}',
+        direct: info.direct,
+        startAt: _controller?.value.position ?? Duration.zero,
+        serverBase: Api.base,
+      );
+    } on CastException catch (error) {
+      fxToast(context, error.message);
+      return;
+    }
+    final wasPlaying = _controller?.value.isPlaying ?? false;
+    await showCastSheet(
+      context,
+      source: source,
+      owner: this,
+      onCastStarted: () async {
+        try {
+          await _controller?.pause();
+        } catch (_) {}
+      },
+      onCastStopped: () async {
+        if (!wasPlaying || !mounted) return;
+        try {
+          await _controller?.play();
+        } catch (_) {}
+      },
+    );
+  }
+
+  String _castUrl(PlayInfo info) {
+    final key = _qualityKey;
+    if (key != null) {
+      for (final quality in info.quality) {
+        if (quality.key == key && quality.url.trim().isNotEmpty) {
+          return quality.url.trim();
+        }
+      }
+    }
+    final main = info.url.trim();
+    if (main.isNotEmpty) return main;
+    for (final url in info.backup) {
+      if (url.trim().isNotEmpty) return url.trim();
+    }
+    return '';
+  }
+
+  Map<String, String> _castHeaders(String url, PlayInfo info) {
+    for (final quality in info.quality) {
+      if (quality.url.trim() == url && quality.headers.isNotEmpty) {
+        return quality.headers;
+      }
+    }
+    return info.headers;
   }
 
   /// 本次加载请求的线路名：只按请求的 lineId 从详情线路表查，
@@ -588,6 +663,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _frozenOpaque = false;
     _loadToken++;
     unawaited(_saveProgress());
+    // 投屏会话属于本页：退出详情页时停止电视，避免关掉 App 后电视还在播。
+    if (CastService.instance.isOwnedBy(this)) {
+      unawaited(CastService.instance.stop());
+    }
     _controller?.removeListener(_onVideoValue);
     _controller?.dispose();
     _loadingPlayer = null;
@@ -660,6 +739,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 进入一起看房间前调用：暂停并彻底释放当前播放器，
   /// 避免房间内同时存在详情页播放器和一起看播放器（不是静音）。
   Future<void> pauseAndReleaseForTogether() async {
+    if (CastService.instance.isOwnedBy(this)) {
+      await CastService.instance.stop();
+    }
     _loadToken++;
     _hideTimer?.cancel();
     _clearFrozenFrame();
@@ -818,6 +900,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     if (!mounted || token != _loadToken) return false;
     _info = info;
+    _activeCastUrl = null;
 
     // TW 等线路可能返回一个需要解析器处理的播放页地址（type == 'parse'）。
     // 空 url 与解析页是两种不同情况，分开交给外层展示文案。
@@ -882,6 +965,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           await controller.dispose();
           return false;
         }
+        _activeCastUrl = url;
         await controller.setLooping(false);
         try {
           await controller.setRate(_rate);
@@ -1376,6 +1460,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             qualityKey: _qualityKey,
             canChangeLine: widget.onChangeLine != null,
             fillScreen: _fillScreen,
+            castOwner: this,
           ),
           transitionsBuilder: (context, animation, secondaryAnimation, child) {
             return FadeTransition(opacity: animation, child: child);
@@ -1657,7 +1742,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   size: 31,
                   iconSize: 18,
                   tooltip: '投屏',
-                  onTap: () => fxToast(context, '投屏：暂无可用设备'),
+                  onTap: () => unawaited(openCastSheet()),
                 ),
               ],
             ),

@@ -9,8 +9,10 @@ import 'package:path_provider/path_provider.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cast_service.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
+import '../widgets/cast_sheet.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
@@ -86,6 +88,8 @@ class FullPlayerPage extends StatefulWidget {
     this.canChangeLine = false,
     this.fillScreen = false,
     this.isLive = false,
+    this.castSource,
+    this.castOwner,
   });
 
   /// 竖屏播放页正在使用的播放器实例（全屏直接复用）
@@ -123,6 +127,13 @@ class FullPlayerPage extends StatefulWidget {
   /// 直播全屏：复用同一个播放器，但隐藏进度条 / 选集 / 倍速 / 下一集，
   /// 左右横滑不再 seek，底部常驻 LIVE。默认 false，不影响点播。
   final bool isLive;
+
+  /// 直播没有 PlayInfo，由直播详情页把当前线路地址带进来；点播为 null，
+  /// 全屏自己从 _info 解析。
+  final CastSource? castSource;
+
+  /// 投屏会话归属页（竖屏详情页 / 直播详情页），退出页面时停自己的投屏。
+  final Object? castOwner;
 
   @override
   State<FullPlayerPage> createState() => _FullPlayerPageState();
@@ -183,6 +194,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   FxPlayer? _controller;
   PlayInfo? _info;
+
+  /// 全屏内实际 open 成功的地址 / 请求头（切清晰度后投屏要跟着变）。
+  String? _activeCastUrl;
+  Map<String, String> _activeCastHeaders = const <String, String>{};
 
   late int _ep;
   late String _line;
@@ -310,6 +325,59 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 顶栏唯一的画质胶囊：按真实视频宽度分档，未就绪时为空。
   String get _qualityText => fxPlayerQuality(_controller);
+
+  /// 全屏顶栏「投屏」：复用竖屏解析好的当前清晰度 / 直播地址。
+  Future<void> _openCastSheet() async {
+    CastSource source;
+    final override = widget.castSource;
+    if (override != null) {
+      source = override;
+    } else {
+      try {
+        source = _buildCastSource();
+      } on CastException catch (error) {
+        fxToast(context, error.message);
+        return;
+      }
+    }
+    final wasPlaying = _controller?.value.isPlaying ?? false;
+    await showCastSheet(
+      context,
+      source: source,
+      owner: widget.castOwner ?? this,
+      onCastStarted: () async {
+        try {
+          await _controller?.pause();
+        } catch (_) {}
+      },
+      onCastStopped: () async {
+        if (!wasPlaying || !mounted) return;
+        try {
+          await _controller?.play();
+        } catch (_) {}
+      },
+    );
+  }
+
+  CastSource _buildCastSource() {
+    final info = _info;
+    if (info == null) throw const CastException('投屏地址还没准备好');
+    final active = _activeCastUrl?.trim() ?? '';
+    final url = active.isNotEmpty ? active : _watchdogUrl();
+    if (url == null) throw const CastException('当前没有可投屏的播放地址');
+    final headers =
+        active.isNotEmpty ? _activeCastHeaders : _watchdogHeaders(url);
+    return CastService.resolveSource(
+      url: url,
+      headers: headers,
+      title: _isLive ? _title : '$_title · $_epLabel',
+      isLive: _isLive,
+      direct: info.direct,
+      startAt:
+          _isLive ? Duration.zero : (_controller?.value.position ?? Duration.zero),
+      serverBase: Api.base,
+    );
+  }
 
   /// 底部清晰度按钮文案：单码率返回空串，直接隐藏入口。
   String get _qualityLabel {
@@ -827,6 +895,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       // open 成功不代表首帧已出（红屏/黑屏常见于这里）：超时仍未出画面
       // 就进入错误页，而不是一直干等。
       if (!_firstFrame) _armFirstFrameTimer();
+      _activeCastUrl = url;
+      _activeCastHeaders = headers;
       return true;
     } catch (_) {
       return false;
@@ -2192,7 +2262,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             quality: _isLive ? '' : _qualityText,
             compact: compact,
             onBack: () => unawaited(_exit()),
-            onCast: () => fxToast(context, '投屏：暂无可用设备'),
+            onCast: () => unawaited(_openCastSheet()),
             onScreenshot: () => unawaited(_screenshot()),
             onMore: () => unawaited(_openMorePanel()),
           ),
