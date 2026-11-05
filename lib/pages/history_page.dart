@@ -43,10 +43,22 @@ class FxStore {
 
   static Future<int> count(String key) async => (await read(key)).length;
 
+  /// 读-改-写串行队列：切集时详情页与播放器会同时回写历史，
+  /// 不加队列时后写会覆盖先写，集数与进度互相打架。
+  static Future<void> _pending = Future<void>.value();
+
+  static Future<void> _serialized(Future<void> Function() action) {
+    final next = _pending.then<void>((_) => action()).catchError((_) {});
+    _pending = next;
+    return next;
+  }
+
   /// 记录一次观看（同一作品去重，最多 100 条）。
   ///
   /// 只传 ep/line 时保留已有进度：详情页重新加载不该把播放器写入的
   /// position/duration 清零。线路存 id 供续播，name 仅用于展示。
+  /// [updateEpisode] = false 用于「打开详情页但还没真正播放」：只刷新
+  /// 标题/封面，不覆盖历史里的集数与进度。
   static Future<void> addHistory({
     required String id,
     required String title,
@@ -57,41 +69,54 @@ class FxStore {
     String lineName = '',
     int? position,
     int? duration,
+    bool updateEpisode = true,
   }) async {
     if (id.isEmpty) return;
-    final list = await read(historyKey);
-    Map<String, dynamic>? old;
-    for (final e in list) {
-      if ('${e['id']}' == id) {
-        old = e;
-        break;
+    await _serialized(() async {
+      final list = await read(historyKey);
+      Map<String, dynamic>? old;
+      for (final e in list) {
+        if ('${e['id']}' == id) {
+          old = e;
+          break;
+        }
       }
-    }
-    list.removeWhere((e) => '${e['id']}' == id);
-    final oldLineId =
-        old == null ? '' : _firstNonEmpty(old['lineId'], old['line']);
-    final oldLineName =
-        old == null ? '' : _firstNonEmpty(old['lineName'], old['line']);
-    final keepProgress = old != null && fxInt(old['ep'], 1) == ep;
-    list.insert(0, <String, dynamic>{
-      'id': id,
-      'title': title,
-      'cover': cover.isEmpty && old != null ? fxStr(old['cover']) : cover,
-      'ep': ep,
-      'epName': epName,
-      'lineId': lineId.isEmpty ? oldLineId : lineId,
-      'lineName': lineName.isEmpty ? oldLineName : lineName,
-      // 旧版本只认 line；保留它，避免回退时线路丢失。
-      'line': lineName.isEmpty ? oldLineName : lineName,
-      'position': position ?? (keepProgress ? fxInt(old['position']) : 0),
-      'duration': duration ?? (keepProgress ? fxInt(old['duration']) : 0),
-      'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      list.removeWhere((e) => '${e['id']}' == id);
+      final oldLineId =
+          old == null ? '' : _firstNonEmpty(old['lineId'], old['line']);
+      final oldLineName =
+          old == null ? '' : _firstNonEmpty(old['lineName'], old['line']);
+      final hasOld = old != null;
+      // 没播放过就不要动已有记录的集数/进度。
+      final keepOld = hasOld && !updateEpisode;
+      final oldEp = hasOld ? fxInt(old['ep'], 1) : ep;
+      final oldEpName = hasOld ? fxStr(old['epName']) : epName;
+      final keepProgress = hasOld &&
+          (keepOld || fxInt(old['ep'], 1) == (updateEpisode ? ep : oldEp));
+      final nextEp = keepOld ? oldEp : ep;
+      list.insert(0, <String, dynamic>{
+        'id': id,
+        'title': title,
+        'cover': cover.isEmpty && hasOld ? fxStr(old['cover']) : cover,
+        'ep': nextEp,
+        'epName': keepOld ? oldEpName : epName,
+        'lineId': keepOld || lineId.isEmpty ? oldLineId : lineId,
+        'lineName': keepOld || lineName.isEmpty ? oldLineName : lineName,
+        // 旧版本只认 line；保留它，避免回退时线路丢失。
+        'line': keepOld || lineName.isEmpty ? oldLineName : lineName,
+        'position': position ?? (keepProgress ? fxInt(old['position']) : 0),
+        'duration': duration ?? (keepProgress ? fxInt(old['duration']) : 0),
+        'updatedAt': DateTime.now().millisecondsSinceEpoch,
+      });
+      if (list.length > 100) list.removeRange(100, list.length);
+      await write(historyKey, list);
     });
-    if (list.length > 100) list.removeRange(100, list.length);
-    await write(historyKey, list);
   }
 
   /// 播放器回写：只更新已有历史记录，不凭空新增。
+  ///
+  /// 集数以 [addHistory] 为准；这里只有记录已经是这一集时才写进度，
+  /// 避免切集后旧集的迟到回写把新集进度覆盖掉。
   static Future<void> updateProgress({
     required String id,
     required int ep,
@@ -102,25 +127,27 @@ class FxStore {
     String lineName = '',
   }) async {
     if (id.isEmpty) return;
-    final list = await read(historyKey);
-    var found = false;
-    for (final e in list) {
-      if ('${e['id']}' != id) continue;
-      found = true;
-      e['ep'] = ep;
-      if (epName.isNotEmpty) e['epName'] = epName;
-      if (lineId.isNotEmpty) e['lineId'] = lineId;
-      if (lineName.isNotEmpty) {
-        e['lineName'] = lineName;
-        e['line'] = lineName;
+    await _serialized(() async {
+      final list = await read(historyKey);
+      var found = false;
+      for (final e in list) {
+        if ('${e['id']}' != id) continue;
+        if (fxInt(e['ep'], 1) != ep) return;
+        found = true;
+        if (epName.isNotEmpty) e['epName'] = epName;
+        if (lineId.isNotEmpty) e['lineId'] = lineId;
+        if (lineName.isNotEmpty) {
+          e['lineName'] = lineName;
+          e['line'] = lineName;
+        }
+        e['position'] = position < 0 ? 0 : position;
+        e['duration'] = duration < 0 ? 0 : duration;
+        e['updatedAt'] = DateTime.now().millisecondsSinceEpoch;
+        break;
       }
-      e['position'] = position < 0 ? 0 : position;
-      e['duration'] = duration < 0 ? 0 : duration;
-      e['updatedAt'] = DateTime.now().millisecondsSinceEpoch;
-      break;
-    }
-    if (!found) return;
-    await write(historyKey, list);
+      if (!found) return;
+      await write(historyKey, list);
+    });
   }
 
   /// 收藏一部作品（详情页可调用）

@@ -121,6 +121,7 @@ class _SearchPageState extends State<SearchPage> {
       final sp = await SharedPreferences.getInstance();
       await sp.remove(_historyKey);
     } catch (_) {}
+    if (!mounted) return;
     _toast('已清空搜索历史');
   }
 
@@ -250,6 +251,8 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   void _reset() {
+    // 作废在途请求：清空搜索后旧结果不许再回填（AI 搜索同样走 _req）。
+    _req++;
     _q.clear();
     setState(() {
       _mode = null;

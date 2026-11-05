@@ -155,12 +155,62 @@ class Api {
   }
 
   static Future<PlayInfo> play(String id, int ep, String line) async {
-    final d = await _get('/play', {'id': id, 'ep': ep, 'line': line});
-    // 解析线路可能返回 /api/proxy?u=... 相对地址，视频内核只认绝对地址。
-    d['url'] = abs('${d['url'] ?? ''}');
-    final backup = (d['backup'] ?? []) as List;
-    d['backup'] = <String>[for (final u in backup) abs('$u')];
-    return PlayInfo.fromJson(d);
+    // 这里不走 _get/_decode：需要解析的线路会返回
+    // `{code:1, msg:'unresolved', data:{url, type:'parse', ...}}`，
+    // 它是正常的业务响应而不是请求失败，必须单独取原始 body 再判断。
+    final r = await http
+        .get(_u('/play', {'id': id, 'ep': ep, 'line': line}),
+            headers: _headers())
+        .timeout(_timeout);
+    Map<String, dynamic> body = const <String, dynamic>{};
+    try {
+      final j = jsonDecode(utf8.decode(r.bodyBytes));
+      if (j is Map) body = Map<String, dynamic>.from(j);
+    } catch (_) {
+      throw ApiException('服务器返回异常（HTTP ${r.statusCode}）',
+          code: r.statusCode);
+    }
+    final code = body['code'];
+    final msg = '${body['msg'] ?? ''}'.trim().toLowerCase();
+    final data = body['data'];
+    final d = data is Map ? Map<String, dynamic>.from(data) : null;
+
+    if (code != 0 && code != '0') {
+      if ((code == 1 || code == '1') &&
+          msg == 'unresolved' &&
+          d != null &&
+          '${d['url'] ?? ''}'.trim().isNotEmpty) {
+        // 解析线路：播放页地址交给上层提示「该线路需解析」，不当作异常。
+        return _playInfo(d, type: 'parse');
+      }
+      throw ApiException('${body['msg'] ?? '请求失败'}',
+          code: code is num ? code.toInt() : r.statusCode);
+    }
+    if (d == null) {
+      throw ApiException('服务器返回异常（HTTP ${r.statusCode}）',
+          code: r.statusCode);
+    }
+    return _playInfo(d);
+  }
+
+  /// 播放地址统一转绝对地址（/api/proxy?u=… 是相对路径），并透传 headers。
+  static PlayInfo _playInfo(Map<String, dynamic> d, {String? type}) {
+    final info = <String, dynamic>{...d};
+    info['url'] = abs('${d['url'] ?? ''}');
+    info['backup'] = <String>[
+      for (final u in (d['backup'] ?? []) as List) abs('$u'),
+    ];
+    // 清晰度地址同样是相对代理地址，不转绝对播放器会打不开。
+    info['quality'] = <Map<String, dynamic>>[
+      for (final q in (d['quality'] ?? []) as List)
+        if (q is Map)
+          <String, dynamic>{
+            ...Map<String, dynamic>.from(q),
+            'url': abs('${q['url'] ?? ''}'),
+          },
+    ];
+    if (type != null) info['type'] = type;
+    return PlayInfo.fromJson(info);
   }
 
   static Future<List<CommentItem>> comments(String id, int page) async {

@@ -23,6 +23,7 @@ class FullPlayerResult {
     this.info,
     this.rate = 1.0,
     this.qualityKey,
+    this.loaded = false,
   });
 
   /// 退出时的集数
@@ -42,6 +43,10 @@ class FullPlayerResult {
 
   /// 退出时选择的清晰度 key；null = 自动
   final String? qualityKey;
+
+  /// 退出时 [ep] 是否真的加载成功并处于可播放状态。
+  /// 切集失败/播放出错时为 false，竖屏不能把它记成「已加载」。
+  final bool loaded;
 }
 
 /// 全屏画面适配档位。
@@ -520,6 +525,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final wasPlaying = c.value.isPlaying;
     final resume = c.value.position;
 
+    /// 清晰度地址可能带自己的请求头（防盗链），优先用它，其次用全局头。
+    Map<String, String> headersFor(String url) {
+      for (final q in list) {
+        if (q.url.trim() == url && q.headers.isNotEmpty) return q.headers;
+      }
+      return info.headers;
+    }
+
     _hideTimer?.cancel();
     setState(() {
       _showQuality = false;
@@ -540,7 +553,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       // 复用同一个播放器实例，只换地址，切清晰度后仍可交回竖屏继续用。
       if (await _openSource(
         url,
-        headers: info.headers,
+        headers: headersFor(url),
         resume: resume,
         wasPlaying: wasPlaying,
       )) {
@@ -565,7 +578,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (!mounted || token != _loadToken) return;
         if (await _openSource(
           url,
-          headers: info.headers,
+          headers: headersFor(url),
           resume: resume,
           wasPlaying: wasPlaying,
         )) {
@@ -1136,6 +1149,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 播放器交回竖屏继续使用：不 pause、不 dispose，保持进度与播放状态。
     await _restoreSystemUi();
     if (!mounted) return;
+    final c = _controller;
     Navigator.of(context).pop(
       FullPlayerResult(
         ep: _ep,
@@ -1144,6 +1158,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         info: _info,
         rate: _rate,
         qualityKey: _qualityKey,
+        // 只有这一集真的打开成功（未处于错误态）才允许竖屏同步集数。
+        loaded: _loadedEp == _ep &&
+            !_error &&
+            (c != null && c.value.isInitialized),
       ),
     );
   }

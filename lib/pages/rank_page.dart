@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../theme.dart';
+import '../widgets/player_theme.dart' show fxToast;
 import 'category_page.dart';
 import 'detail_page.dart';
 
@@ -91,10 +92,13 @@ class _RankPageState extends State<RankPage> {
       });
     } catch (e) {
       if (!mounted || req != _req) return;
+      final msg = fxErrorText(e);
       setState(() {
         _loading = false;
-        _error = fxErrorText(e);
+        _error = msg;
       });
+      // 已有榜单时不要整页报错：保留旧数据 + 顶部重试条，再轻提示一次。
+      if (_items.isNotEmpty) fxToast(context, '刷新失败：$msg');
     }
   }
 
@@ -138,8 +142,45 @@ class _RankPageState extends State<RankPage> {
       child: Column(
         children: [
           _header(),
+          if (_error != null && _items.isNotEmpty) _retryBar(),
           const SizedBox(height: 4),
           Expanded(child: _content()),
+        ],
+      ),
+    );
+  }
+
+  /// 刷新失败但还有旧榜单：顶部细条提示 + 重试，不整页报错。
+  Widget _retryBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline_rounded, size: 14, color: Fx.sub),
+          const SizedBox(width: 6),
+          const Expanded(
+            child: Text(
+              '刷新失败，当前为上次榜单',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11.5, color: Fx.sub),
+            ),
+          ),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _loading ? null : _load,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              child: Text(
+                '重试',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                  color: Fx.accent,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );

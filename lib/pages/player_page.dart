@@ -195,7 +195,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 保存进度。只写 controller 实际打开的集；新集加载期间直接跳过，
   /// 防止切集/双击下一集时把旧集的 position 写进新集。
   Future<void> _saveProgress({bool ended = false}) async {
-    if (_loading) return;
+    // loading / 播放出错时位置不可信（可能已归零），不要拿它覆盖历史进度。
+    if (_loading || _error) return;
     final c = _controller;
     final ep = _loadedEp;
     if (c == null || ep == null || !c.value.isInitialized) return;
@@ -755,11 +756,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (!mounted) return;
 
     if (result != null) {
-      // 全屏里切了集：同一个播放器实例已经打开新集，这里只同步状态，不再重建。
+      // 全屏里切了集且成功打开：同一个播放器实例已经加载新集，才同步集数；
+      // 打开失败时 result.loaded=false，不能把「没加载的集」记成已加载。
       final switched = result.ep != _ep;
-      _ep = result.ep;
-      _loadedEp = result.ep;
-      _info = result.info ?? _info;
+      if (result.loaded) {
+        _ep = result.ep;
+        _loadedEp = result.ep;
+        _info = result.info ?? _info;
+      }
       _qualityKey = result.qualityKey;
       if (result.rate > 0) {
         _rate = result.rate;
@@ -767,7 +771,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           await c.setRate(_rate);
         } catch (_) {}
       }
-      if (switched) widget.onEpChange?.call(result.ep);
+      if (switched && result.loaded) widget.onEpChange?.call(result.ep);
     }
     // 先同步完集数/进度归属，再交回视频层并恢复监听，避免全屏里
     // 已经换集时把新位置记到旧集。
@@ -1239,11 +1243,46 @@ class _PlayerPageState extends State<PlayerPage> {
     try {
       final detail = await Api.detail(widget.videoId);
       if (!mounted) return;
-      setState(() => _detail = detail);
+      // 传进来的集数可能超出详情实际集数（历史脏数据 / 集数变化），按详情收敛。
+      final eps = detail.allEpisodes.isNotEmpty
+          ? detail.allEpisodes
+          : <Episode>[
+              for (var i = 1; i <= detail.episodes; i++) Episode(i, '', 0)
+            ];
+      var ep = _ep;
+      if (eps.isNotEmpty && !eps.any((e) => e.n == ep)) {
+        ep = eps.first.n;
+      }
+      setState(() {
+        _detail = detail;
+        _ep = ep;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = '加载失败：$e');
     }
+  }
+
+  String _epNameFor(VideoDetail d, int n) {
+    for (final e in d.allEpisodes) {
+      if (e.n == n && e.name.isNotEmpty) return e.name;
+    }
+    return fxEpisodeLabel(n);
+  }
+
+  /// 换集后同步历史里的集数（进度由播放器通过 updateProgress 回写）。
+  Future<void> _onEpChanged(int n) async {
+    setState(() => _ep = n);
+    final d = _detail;
+    if (d == null) return;
+    await FxStore.addHistory(
+      id: widget.videoId,
+      title: d.title,
+      cover: d.cover,
+      ep: n,
+      epName: _epNameFor(d, n),
+      lineId: widget.line,
+    );
   }
 
   @override
@@ -1260,7 +1299,7 @@ class _PlayerPageState extends State<PlayerPage> {
                 ep: _ep,
                 line: widget.line,
                 detail: _detail,
-                onEpChange: (n) => setState(() => _ep = n),
+                onEpChange: _onEpChanged,
                 onChangeLine: () => Navigator.of(context).maybePop(),
               ),
             ),

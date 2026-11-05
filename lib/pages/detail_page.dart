@@ -12,7 +12,7 @@ import '../widgets/detail_widgets.dart';
 import '../widgets/download_sheet.dart';
 import '../widgets/player_theme.dart';
 import 'category_page.dart'
-    show FxEmptyView, FxErrorView, FxPosterCard, fxErrorText;
+    show FxEmptyView, FxErrorView, FxPosterCard, fxErrorText, fxInt;
 import 'history_page.dart' show FxStore;
 import 'player_page.dart';
 
@@ -54,6 +54,14 @@ class _DetailPageState extends State<DetailPage>
   int _autoLineTries = 0;
   int _relatedOffset = 0;
 
+  /// 真正播放成功后才允许回写历史集数/进度；只打开详情页不算。
+  bool _played = false;
+
+  /// 服务端 `related` 只有 id，按 id 补出来的「猜你喜欢」卡片。
+  List<VideoCard> _related = const <VideoCard>[];
+  bool _relatedLoading = false;
+  bool _relatedFetched = false;
+
   /// 本轮自动切线路已经失败过的线路，避免 A/B 反复乒乓。
   final Set<String> _failedLines = <String>{};
 
@@ -77,7 +85,38 @@ class _DetailPageState extends State<DetailPage>
       duration: const Duration(milliseconds: 260),
       value: 1,
     );
+    _init();
+  }
+
+  Future<void> _init() async {
+    // 先续上历史里的集数，再开始加载/播放，避免先用第 1 集播一下再切。
+    await _restoreSavedEp();
+    if (!mounted) return;
     _loadDetail();
+  }
+
+  /// 打开详情页时读 `his_<id>` / 历史记录里的集数作为当前集。
+  Future<void> _restoreSavedEp() async {
+    if (widget.ep > 1) return;
+    var saved = 0;
+    // 历史记录由详情页和独立播放页共同回写，比只写详情页的 his_ 更新，
+    // 所以优先读它；旧数据没有记录时再退回 his_<id>。
+    try {
+      for (final m in await FxStore.read(FxStore.historyKey)) {
+        if ('${m['id']}' == widget.id) {
+          saved = fxInt(m['ep'], 0);
+          break;
+        }
+      }
+    } catch (_) {}
+    if (saved <= 0) {
+      try {
+        final sp = await SharedPreferences.getInstance();
+        saved = sp.getInt('his_${widget.id}') ?? 0;
+      } catch (_) {}
+    }
+    if (!mounted || saved <= 0 || saved == _ep) return;
+    setState(() => _ep = saved);
   }
 
   @override
@@ -119,8 +158,13 @@ class _DetailPageState extends State<DetailPage>
         _error = null;
       });
 
+      if (d.related.isEmpty && d.relatedIds.isNotEmpty) {
+        unawaited(_loadRelatedCards(d.relatedIds));
+      }
       await _loadFavState();
+      if (!mounted) return;
       await _saveHistory();
+      if (!mounted) return;
       if (!_commentsLoaded && !_commentsLoading) {
         await _loadComments(reset: true, silent: true);
       }
@@ -130,6 +174,47 @@ class _DetailPageState extends State<DetailPage>
       setState(() => _error = msg);
       if (_detail != null) fxToast(context, msg);
     }
+  }
+
+  /// `related` 只是 id 数组：按 id 补卡片，最多补 8 个。
+  Future<void> _loadRelatedCards(List<String> ids) async {
+    if (_relatedLoading || _relatedFetched) return;
+    _relatedLoading = true;
+    final cards = <VideoCard>[];
+    Future<VideoDetail?> fetch(String id) async {
+      try {
+        return await Api.detail(id);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    try {
+      final details = await Future.wait(<Future<VideoDetail?>>[
+        for (final id in ids.take(8)) fetch(id),
+      ]);
+      for (final d in details) {
+        if (d == null) continue;
+        cards.add(VideoCard(
+          id: d.id,
+          title: d.title,
+          cover: d.cover,
+          rating: d.rating,
+          year: d.year,
+          status: d.status,
+          episodes: d.episodes,
+          category: d.category,
+          tags: d.tags,
+        ));
+      }
+    } finally {
+      _relatedLoading = false;
+    }
+    if (!mounted) return;
+    // 一张都没补到就别标记完成，下拉刷新时还能再试。
+    _relatedFetched = cards.isNotEmpty;
+    if (!_relatedFetched) return;
+    setState(() => _related = cards);
   }
 
   List<Episode> _episodesOf(VideoDetail d) {
@@ -179,7 +264,9 @@ class _DetailPageState extends State<DetailPage>
   }
 
   List<VideoCard> get _relatedList {
-    final src = _detail?.related ?? const <VideoCard>[];
+    final src = _related.isNotEmpty
+        ? _related
+        : (_detail?.related ?? const <VideoCard>[]);
     if (src.isEmpty) return const <VideoCard>[];
     final shift = _relatedOffset % src.length;
     if (shift == 0) return src;
@@ -204,8 +291,11 @@ class _DetailPageState extends State<DetailPage>
     final d = _detail;
     if (d == null) return;
     try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.setInt('his_${widget.id}', _ep);
+      // 没真正播放时只刷新标题/封面，不覆盖历史里的集数与进度。
+      if (_played) {
+        final sp = await SharedPreferences.getInstance();
+        await sp.setInt('his_${widget.id}', _ep);
+      }
       await FxStore.addHistory(
         id: widget.id,
         title: d.title,
@@ -214,6 +304,7 @@ class _DetailPageState extends State<DetailPage>
         epName: _currentEpLabel,
         lineId: _lineId,
         lineName: _lineName,
+        updateEpisode: _played,
       );
     } catch (_) {}
   }
@@ -249,7 +340,7 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Future<void> _loadComments({required bool reset, bool silent = false}) async {
-    if (_commentsLoading) return;
+    if (!mounted || _commentsLoading) return;
     final page = reset ? 1 : _commentPage + 1;
     setState(() {
       _commentsLoading = true;
@@ -388,6 +479,11 @@ class _DetailPageState extends State<DetailPage>
   /// 播放稳定 3 秒后才清空失败集合与自动重试预算，避免「能 open 但立刻报错」
   /// 的线路在 A/B 之间无限乒乓。
   void _onPlaybackStarted() {
+    // 真正出声了才算看过：这时才允许回写历史集数。
+    if (!_played) {
+      _played = true;
+      _saveHistory();
+    }
     _stableTimer?.cancel();
     _stableTimer = Timer(const Duration(seconds: 3), () {
       if (!mounted) return;
@@ -449,6 +545,7 @@ class _DetailPageState extends State<DetailPage>
     } else {
       await _loadDetail(silent: true);
     }
+    if (!mounted) return;
   }
 
   /// 详情 → 详情：新页面压栈前先暂停并保存当前播放进度，
@@ -459,6 +556,7 @@ class _DetailPageState extends State<DetailPage>
     try {
       final player = _playerKey.currentState;
       final wasPlaying = await player?.pauseAndSave() ?? false;
+      if (!mounted) return;
       try {
         if (!mounted) return;
         await Nav.detail(context, id);
@@ -474,6 +572,7 @@ class _DetailPageState extends State<DetailPage>
 
   Future<void> _refresh() async {
     await _loadDetail(silent: true);
+    if (!mounted) return;
     await _loadComments(reset: true, silent: true);
   }
 

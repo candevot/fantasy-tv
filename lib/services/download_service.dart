@@ -342,6 +342,9 @@ class DownloadService extends ChangeNotifier {
       if (existing != null) {
         if (existing.status != DownloadStatus.failed) continue;
         existing
+          // 重试时用户可能已经换了线路：跟着用这次请求的线路，别沿用旧线路。
+          ..line = req.line.isEmpty ? existing.line : req.line
+          ..lineName = req.lineName.isEmpty ? existing.lineName : req.lineName
           ..status = DownloadStatus.queued
           ..progress = 0
           ..bytes = 0
@@ -540,7 +543,7 @@ class DownloadService extends ChangeNotifier {
       if ((type == 'parse' || type == 'unresolved' || type == 'iframe') &&
           !looksHls &&
           !looksMp4) {
-        throw const _CacheException('当前线路为解析线路，暂不支持离线缓存，请切换直链线路');
+        throw const _CacheException('该线路需解析，暂不支持离线缓存，请切换直链线路');
       }
       if (play.lineName.trim().isNotEmpty) {
         task.lineName = play.lineName.trim();

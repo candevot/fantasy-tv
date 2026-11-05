@@ -104,6 +104,7 @@ class _TogetherPageState extends State<TogetherPage>
   String _linesVideoId = '';
   final TextEditingController _joinCtrl = TextEditingController();
   String _loadedKey = '';
+  String _loadingKey = '';
   bool _videoLoading = false;
   String _videoError = '';
   int _videoSeq = 0;
@@ -246,7 +247,11 @@ class _TogetherPageState extends State<TogetherPage>
       _online = true;
       if (me.id.isNotEmpty) _myId = me.id;
     });
-    if (!first && _entered) _appendSystem('已重新连接服务器');
+    if (!first && _entered) {
+      _appendSystem('已重新连接服务器');
+      // 断线期间视频可能加载失败（key 已清空）：重连后重新对齐一次。
+      _syncVideo();
+    }
   }
 
   void _onDown() {
@@ -469,6 +474,7 @@ class _TogetherPageState extends State<TogetherPage>
       _episodes = const <Episode>[];
       _ep = 1;
       _loadedKey = '';
+      _loadingKey = '';
       _videoLoading = false;
       _videoError = '';
       _roomTitle = '';
@@ -504,6 +510,7 @@ class _TogetherPageState extends State<TogetherPage>
     _ep = ep < 1 ? 1 : ep;
     _videoLine = 'l1';
     _loadedKey = '';
+    _loadingKey = '';
     _videoError = '';
     _online = _client.connected;
     _client.createRoom(
@@ -541,6 +548,7 @@ class _TogetherPageState extends State<TogetherPage>
     _episodes = const <Episode>[];
     _ep = 1;
     _loadedKey = '';
+    _loadingKey = '';
     _videoError = '';
     _online = _client.connected;
     if (!_client.joinRoom(code)) {
@@ -591,6 +599,7 @@ class _TogetherPageState extends State<TogetherPage>
       _ep = 1;
       _videoLine = 'l1';
       _loadedKey = '';
+      _loadingKey = '';
       _videoLoading = false;
       _videoError = '';
       _lastRev = -1;
@@ -895,12 +904,14 @@ class _TogetherPageState extends State<TogetherPage>
   void _syncVideo() {
     if (_videoId.isEmpty) return;
     final key = '$_videoId|$_ep|$_videoLine';
-    if (key == _loadedKey) return;
-    _loadedKey = key;
+    // 加载中和已加载都不要重复发请求；失败时 key 会被清空，下次同步可重试。
+    if (key == _loadedKey || key == _loadingKey) return;
     _loadVideo(_videoId, _ep, _videoLine);
   }
 
   Future<void> _loadVideo(String videoId, int ep, String line) async {
+    final key = '$videoId|$ep|$line';
+    _loadingKey = key;
     final seq = ++_videoSeq;
     _endedSent = false;
     if (_resumePos != null && _resumeKey != '$videoId|$ep|$line') {
@@ -941,6 +952,8 @@ class _TogetherPageState extends State<TogetherPage>
     }
     if (lines.isEmpty) {
       if (!mounted || seq != _videoSeq) return;
+      _loadingKey = '';
+      _loadedKey = '';
       setState(() {
         _videoLoading = false;
         _videoError = '房主暂未选择可播线路';
@@ -1026,6 +1039,8 @@ class _TogetherPageState extends State<TogetherPage>
           _controller = controller;
           controller.addListener(_onVideoValue);
           _rate = 1;
+          _loadingKey = '';
+          _loadedKey = key;
           setState(() {
             _videoLoading = false;
             _videoError = '';
@@ -1043,6 +1058,9 @@ class _TogetherPageState extends State<TogetherPage>
       }
     }
     if (!mounted || seq != _videoSeq) return;
+    // 全部线路都失败：清掉 key，让「重试」按钮 / 重连 / 下一次状态同步能再试。
+    _loadingKey = '';
+    _loadedKey = '';
     setState(() {
       _videoLoading = false;
       _videoError = '房主暂未选择可播线路';
@@ -1086,6 +1104,7 @@ class _TogetherPageState extends State<TogetherPage>
   void _retryVideo() {
     if (!mounted) return;
     _loadedKey = '';
+    _loadingKey = '';
     _videoError = '';
     _syncVideo();
   }
@@ -2102,6 +2121,14 @@ class _TogetherPageState extends State<TogetherPage>
                       top: 8,
                       child: _buildFullscreenButton(),
                     ),
+                    // 已就绪后播放中途出错（hasError）也要能看到错误条 + 重试。
+                    if (_videoError.isNotEmpty)
+                      Positioned(
+                        left: 8,
+                        right: 8,
+                        top: 34,
+                        child: _buildVideoErrorBar(),
+                      ),
                   ],
                 ],
               ),
@@ -2230,6 +2257,60 @@ class _TogetherPageState extends State<TogetherPage>
     );
   }
 
+  /// 播放已就绪后出错（hasError）：视频区顶部错误条，所有角色都能重试。
+  Widget _buildVideoErrorBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(.62),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: Colors.white.withOpacity(.18)),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.error_outline_rounded,
+            size: 13,
+            color: Color(0xFFFF8A80),
+          ),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              _videoError,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 9.5,
+                height: 1.2,
+                color: Color(0xE6FFFFFF),
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _retryVideo,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(.18),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text(
+                '重试',
+                style: TextStyle(
+                  fontSize: 9.5,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildVideoPlaceholder() {
     final String text;
     if (_videoLoading) {
@@ -2275,7 +2356,8 @@ class _TogetherPageState extends State<TogetherPage>
               ),
             ),
           ),
-          if (!_videoLoading && _videoError.isNotEmpty && _isHost)
+          // 非房主也会遇到视频加载失败（换线路/断线），必须一起给重试入口。
+          if (!_videoLoading && _videoError.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 5),
               child: GestureDetector(
