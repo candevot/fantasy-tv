@@ -47,6 +47,8 @@ class AppInfo {
       _loaded = true;
     } catch (e) {
       debugPrint('AppInfo: PackageInfo.fromPlatform failed: $e');
+      // 插件尚未就绪时允许下次重试，避免永久停留在兜底版本号。
+      _loading = null;
     }
   }
 }

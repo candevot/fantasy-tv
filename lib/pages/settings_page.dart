@@ -195,6 +195,8 @@ class _SettingsPageState extends State<SettingsPage> {
             if (info.notes.trim().isNotEmpty) ...[
               Text(
                 info.notes.trim(),
+                maxLines: 5,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   fontSize: 12,
                   height: 1.6,
@@ -221,6 +223,7 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               child: SelectableText(
                 info.downloadUrl,
+                maxLines: 3,
                 style: const TextStyle(
                   fontSize: 10.5,
                   height: 1.45,
