@@ -164,7 +164,7 @@ class _RankPageState extends State<RankPage> {
                           color: Fx.ink,
                           letterSpacing: -.3)),
                   SizedBox(height: 2),
-                  Text('发现此刻最热的片子',
+                  Text('发现此刻最热的剧集',
                       style: TextStyle(fontSize: 11, color: Fx.sub)),
                 ],
               ),

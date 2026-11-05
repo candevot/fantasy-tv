@@ -311,7 +311,7 @@ class _HomePageState extends State<HomePage> {
                           fontWeight: FontWeight.w800,
                           color: Fx.ink,
                           letterSpacing: .4)),
-                  Text('高清 · 免费 · 无广告',
+                  Text('高画质 · 免费 · 无广告',
                       style: TextStyle(
                           fontSize: 9,
                           color: Fx.sub.withOpacity(.9),

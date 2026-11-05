@@ -1110,7 +1110,7 @@ class _CategoryPageState extends State<CategoryPage> {
           const SizedBox(height: 3),
           Text(
             widget.initialTitle == null
-                ? '按类型、地区与年份，找到今晚想看的'
+                ? '精选好剧，随心看'
                 : '${widget.initialTitle} · 为你精选',
             style: const TextStyle(fontSize: 11.5, color: Fx.sub),
           ),

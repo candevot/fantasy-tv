@@ -256,7 +256,7 @@ class _MinePageState extends State<MinePage> {
                           color: Color(0xFF9AA6B8),
                           letterSpacing: .3)),
                   SizedBox(height: 4),
-                  Text('无广告 · 无会员 · 只为看好片',
+                  Text('无广告 · 无会员 · 只为看好剧',
                       style: TextStyle(
                           fontSize: 9.5, color: Color(0xFFB3BECD))),
                 ],

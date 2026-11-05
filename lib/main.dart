@@ -175,7 +175,7 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                     const SizedBox(height: 8),
                     Opacity(
                       opacity: fadeText,
-                      child: const Text('高清 · 免费 · 无广告',
+                      child: const Text('高画质 · 免费 · 无广告',
                           style: TextStyle(fontSize: 12, color: Fx.sub, letterSpacing: 1.5)),
                     ),
                   ],
