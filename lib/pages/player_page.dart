@@ -1653,6 +1653,17 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
+  /// 详情元信息：年份未知（0 / 越界）时直接省略，不显示 "· 0 ·"。
+  String _metaLine() {
+    final d = _detail;
+    if (d == null) return '';
+    return <String>[
+      d.status,
+      if (d.year > 0) '${d.year}',
+      d.area,
+    ].where((s) => s.trim().isNotEmpty).join(' · ');
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1711,7 +1722,7 @@ class _PlayerPageState extends State<PlayerPage> {
                     ),
                     const SizedBox(height: 5),
                     Text(
-                      '${_detail!.status} · ${_detail!.year} · ${_detail!.area}',
+                      _metaLine(),
                       style: const TextStyle(
                         color: Colors.white54,
                         fontSize: 11,

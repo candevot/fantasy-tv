@@ -241,6 +241,11 @@ class RatingBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 服务端已把未知评分输出 null（模型里退化成 0）；这里再兜底一次：
+    // 0 / 负数 / >10 都不渲染角标，避免出现假的 0.0 / 10.0。
+    if (!score.isFinite || score <= 0 || score > 10) {
+      return const SizedBox.shrink();
+    }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(

@@ -26,6 +26,80 @@ int _asInt(Object? v, {int fallback = 0}) {
   return fallback;
 }
 
+/// 评分：服务端可能给 null / 0 / 越界值。只保留 (0, 10]，其余按「无评分」处理，
+/// 卡片和详情都不再渲染评分角标（不要把 null 显示成 0.0 或 10.0）。
+num _asRating(Object? v) {
+  final r = _asNum(v);
+  if (!r.isFinite || r <= 0 || r > 10) return 0;
+  return r;
+}
+
+/// 年份：null / 0 / <1900 / >当前年+1 一律视为未知（0），UI 用 `year > 0` 隐藏。
+int _asYear(Object? v) {
+  final y = _asInt(v);
+  final maxYear = DateTime.now().year + 1;
+  return (y >= 1900 && y <= maxYear) ? y : 0;
+}
+
+const Map<String, String> _htmlEntities = <String, String>{
+  'amp': '&',
+  'lt': '<',
+  'gt': '>',
+  'quot': '"',
+  'apos': "'",
+  'nbsp': ' ',
+  '#39': "'",
+  '#34': '"',
+  'mdash': '—',
+  'ndash': '–',
+  'hellip': '…',
+  'middot': '·',
+};
+
+String _entityChar(int code) {
+  if (code <= 0 || code > 0x10FFFF) return '';
+  try {
+    return String.fromCharCode(code);
+  } catch (_) {
+    return '';
+  }
+}
+
+/// 简介兜底：老数据里可能还有 HTML 实体 / <p> 标签，展示前再解一次。
+String _decodeEntities(String input) {
+  var s = input;
+  if (!s.contains('&')) return s;
+  s = s.replaceAllMapped(RegExp(r'&#x([0-9a-fA-F]+);?'), (m) {
+    final code = int.tryParse(m.group(1) ?? '', radix: 16);
+    return code == null ? m.group(0)! : _entityChar(code);
+  });
+  s = s.replaceAllMapped(RegExp(r'&#(\d+);?'), (m) {
+    final code = int.tryParse(m.group(1) ?? '');
+    return code == null ? m.group(0)! : _entityChar(code);
+  });
+  s = s.replaceAllMapped(RegExp(r'&([a-zA-Z]+|#\d+);'), (m) {
+    final key = (m.group(1) ?? '').toLowerCase();
+    return _htmlEntities[key] ?? m.group(0)!;
+  });
+  return s;
+}
+
+String _cleanDescription(Object? v) {
+  var s = _asStr(v);
+  if (s.isEmpty) return '';
+  // 双重转义（&amp;lt;p&amp;gt;）也一起处理。
+  s = _decodeEntities(_decodeEntities(s));
+  s = s
+      .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+      .replaceAll(RegExp(r'</p\s*>', caseSensitive: false), '\n')
+      .replaceAll(RegExp(r'<[^>]*>'), ' ')
+      .replaceAll('\u00a0', ' ')
+      .replaceAll(RegExp(r'[ \t\f\v]+'), ' ')
+      .replaceAll(RegExp(r'\s*\n\s*'), '\n')
+      .trim();
+  return s;
+}
+
 /// 不是列表就当作空列表（对象 / 字符串 / null 都不再抛 cast 异常）。
 List<Object?> _asList(Object? v) => v is List ? v : const <Object?>[];
 
@@ -68,8 +142,8 @@ class VideoCard {
         id: _asStr(j['id']),
         title: _asStr(j['title']),
         cover: _asStr(j['cover']),
-        rating: _asNum(j['rating']),
-        year: _asInt(j['year']),
+        rating: _asRating(j['rating']),
+        year: _asYear(j['year']),
         status: _asStr(j['status']),
         episodes: _asInt(j['episodes']),
         category: _asStr(j['category']),
@@ -86,7 +160,7 @@ class BannerItem {
       _asStr(j['title']),
       _asStr(j['cover']),
       _asStr(j['desc']),
-      _asNum(j['rating']));
+      _asRating(j['rating']));
 }
 
 class HomeSection {
@@ -189,8 +263,8 @@ class Episode {
   final int n, duration;
   final String name;
   Episode(this.n, this.name, this.duration);
-  factory Episode.fromJson(Map<String, dynamic> j) => Episode(
-      _asInt(j['n']), _asStr(j['name']), _asInt(j['duration']));
+  factory Episode.fromJson(Map<String, dynamic> j) =>
+      Episode(_asInt(j['n']), _asStr(j['name']), _asInt(j['duration']));
 }
 
 class EpisodeGroup {
@@ -277,13 +351,13 @@ class VideoDetail {
       title: _asStr(j['title']),
       cover: cover,
       backdrop: _asStr(j['backdrop'], fallback: cover),
-      rating: _asNum(j['rating']),
-      year: _asInt(j['year']),
+      rating: _asRating(j['rating']),
+      year: _asYear(j['year']),
       area: _asStr(j['area']),
       category: _asStr(j['category']),
       status: _asStr(j['status']),
       episodes: _asInt(j['episodes']),
-      desc: _asStr(j['desc']),
+      desc: _cleanDescription(j['desc']),
       tags: _asStrList(j['tags']),
       director: _asStrList(j['director']),
       cast: _asStrList(j['cast']),

@@ -29,11 +29,26 @@ String fxCategoryName(String key) {
   }
 }
 
-/// 封面地址：相对代理地址补全，data: 地址原样返回
+/// 封面地址：相对代理地址补全，协议相对地址补 https，data: 地址原样返回。
 String fxCoverUrl(String url) {
-  if (url.isEmpty) return url;
-  if (url.startsWith('data:')) return url;
-  return Api.abs(url);
+  final u = url.trim();
+  if (u.isEmpty) return '';
+  if (u.startsWith('data:')) return u;
+  // 协议相对地址（//pic.example/a.jpg）必须补 https，否则 Api.abs 会拼成 host//...
+  if (u.startsWith('//')) return 'https:$u';
+  return Api.abs(u);
+}
+
+/// 封面是否可用：空串 / data: 占位图 / 非 http(s)、协议相对、站内相对地址都算无效。
+/// 无效时 FxCover 统一显示灰底 + 影片图标的占位图。
+bool fxUsableCover(String url) {
+  final u = url.trim();
+  if (u.isEmpty) return false;
+  if (u.startsWith('//')) return true;
+  final lower = u.toLowerCase();
+  if (lower.startsWith('http://') || lower.startsWith('https://')) return true;
+  if (u.startsWith('/')) return true;
+  return false;
 }
 
 int fxInt(Object? v, [int fallback = 0]) {
@@ -100,7 +115,7 @@ String fxTimeAgo(int ms) {
   return '${d.year}/${d.month}/${d.day}';
 }
 
-/// 网络封面：加载失败（含服务器的 data:image/svg+xml）时展示渐变占位
+/// 网络封面：加载失败 / 空地址 / 非法 URL 时统一显示灰底影片图标占位
 class FxCover extends StatelessWidget {
   const FxCover({
     super.key,
@@ -119,24 +134,31 @@ class FxCover extends StatelessWidget {
   final bool big;
   final bool showText;
 
-  static const List<List<Color>> _palettes = [
-    [Color(0xFFAFC8FF), Color(0xFF7C8CFF)],
-    [Color(0xFFC9BEFF), Color(0xFF8E6BFF)],
-    [Color(0xFFA4E4DE), Color(0xFF5B9BFF)],
-    [Color(0xFFFFD0DC), Color(0xFF9C7BFF)],
-    [Color(0xFFB8DCFF), Color(0xFF63C7C0)],
-  ];
+  /// 统一占位图：灰底 + 影片图标。不再按片名生成彩色块。
+  /// 空地址、data: 占位图、非法 URL 都走这里。
+  Widget _placeholder() {
+    final iconSize = big ? 44.0 : 30.0;
+    return ColoredBox(
+      color: const Color(0xFFE6E9EF),
+      child: Center(
+        child: Icon(
+          Icons.movie_outlined,
+          size: iconSize,
+          color: const Color(0xFF98A4B5),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final colors = _palettes[title.hashCode.abs() % _palettes.length];
-    final usable = url.isNotEmpty && !url.startsWith('data:');
+    final usable = fxUsableCover(url);
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: Stack(
         fit: StackFit.expand,
         children: [
-          _placeholder(colors),
+          _placeholder(),
           if (usable)
             Image.network(
               fxCoverUrl(url),
@@ -145,89 +167,10 @@ class FxCover extends StatelessWidget {
               filterQuality: FilterQuality.medium,
               loadingBuilder: (context, child, progress) {
                 if (progress == null) return child;
-                return _placeholder(colors);
+                return _placeholder();
               },
-              errorBuilder: (context, error, stack) => _placeholder(colors),
+              errorBuilder: (context, error, stack) => _placeholder(),
             ),
-        ],
-      ),
-    );
-  }
-
-  Widget _placeholder(List<Color> colors) {
-    final iconSize = big ? 46.0 : 32.0;
-    final titleSize = big ? 13.0 : 10.5;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: colors,
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-      ),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          Positioned(
-            top: -34,
-            right: -28,
-            child: Container(
-              width: 120,
-              height: 120,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withOpacity(.18),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: -40,
-            left: -30,
-            child: Container(
-              width: 130,
-              height: 130,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withOpacity(.10),
-              ),
-            ),
-          ),
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: iconSize,
-                    height: iconSize,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.white.withOpacity(.20),
-                      border: Border.all(color: Colors.white.withOpacity(.38)),
-                    ),
-                    child: Icon(Icons.play_arrow_rounded,
-                        color: Colors.white, size: iconSize * .58),
-                  ),
-                  if (showText && title.isNotEmpty) ...[
-                    const SizedBox(height: 7),
-                    Text(
-                      title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: titleSize,
-                        height: 1.25,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white.withOpacity(.94),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
         ],
       ),
     );
