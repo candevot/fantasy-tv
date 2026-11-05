@@ -649,10 +649,25 @@ class _DetailPageState extends State<DetailPage>
     if (_openingTogether) return;
     _openingTogether = true;
     try {
-      // 先暂停并释放详情页内嵌播放器，房间内只保留一起看自己的播放器。
-      await _playerKey.currentState?.pauseAndReleaseForTogether();
+      // 先读当前线路 / 集数 / 进度，再释放详情页内嵌播放器；
+      // 房间只保留一起看自己的播放器。
+      final state = _playerKey.currentState;
+      final line = (state?.currentLine.trim().isNotEmpty ?? false)
+          ? state!.currentLine
+          : _lineId;
+      final ep = state?.currentEp ?? _ep;
+      final position = state?.currentPosition ?? Duration.zero;
+      final playing = state?.currentPlaying ?? false;
+      await state?.pauseAndReleaseForTogether();
       if (!mounted) return;
-      await Nav.together(context, videoId: widget.id, ep: _ep);
+      await Nav.together(
+        context,
+        videoId: widget.id,
+        ep: ep,
+        line: line,
+        position: position.inMilliseconds / 1000.0,
+        playing: playing,
+      );
       if (!mounted) return;
       await _playerKey.currentState?.resumeAfterTogether();
     } finally {

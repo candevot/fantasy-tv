@@ -505,6 +505,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     );
   }
 
+  /// 当前实际播放线路 / 集数 / 进度：进入一起看时沿用，不能退回默认线路。
+  String get currentLine => _line;
+  int get currentEp => _ep;
+  Duration get currentPosition => _controller?.value.position ?? Duration.zero;
+  bool get currentPlaying => _controller?.value.isPlaying ?? false;
+
   /// 详情页被新页面覆盖前调用：暂停并保存，返回覆盖前是否正在播放。
   Future<bool> pauseAndSave() async {
     if (_fullscreenActive) return false;

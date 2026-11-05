@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
@@ -43,10 +44,16 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.canChangeQuality,
     required this.qualities,
     required this.rate,
+    required this.videoBoundaryKey,
+    required this.videoEpoch,
+    required this.frozenFrame,
+    required this.frozenFrameOpaque,
     required this.onExit,
     required this.onExitRoom,
     required this.onInvite,
     required this.onMembers,
+    required this.onSwitchLine,
+    required this.onChangeDrama,
     required this.onTogglePlay,
     required this.onSeek,
     required this.onSeekBy,
@@ -81,10 +88,20 @@ class TogetherFullscreenView extends StatefulWidget {
   final List<QualityItem> qualities;
   final double rate;
 
+  /// 视频最后一帧：切剧 / 切集 / 换线路时顶住黑屏，首帧就绪后淡出。
+  final GlobalKey videoBoundaryKey;
+  final int videoEpoch;
+  final ui.Image? frozenFrame;
+  final bool frozenFrameOpaque;
+
   final VoidCallback onExit;
   final VoidCallback onExitRoom;
   final VoidCallback onInvite;
   final VoidCallback onMembers;
+
+  /// 顶栏换源 / 换剧；页面统一做房主校验，成员点击提示「跟随房主」。
+  final VoidCallback onSwitchLine;
+  final VoidCallback onChangeDrama;
 
   /// 页面统一做房主校验；成员点击时页面提示「跟随房主」。
   final VoidCallback onTogglePlay;
@@ -442,7 +459,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 player: player,
                 enabled: widget.errorText.isEmpty,
                 onTap: _onSurfaceTap,
-                onDoubleTap: _togglePlay,
+                onDoubleTap: _wake,
                 onSeek: (value) => _seekTo(value.inMilliseconds / 1000.0),
                 onLongPressStart: _startHold,
                 onLongPressEnd: _endHold,
@@ -459,12 +476,14 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                   if (!value.isInitialized || !value.isBuffering) {
                     return const SizedBox.shrink();
                   }
-                  final raw = value.bufferingPercentage.isFinite
-                      ? value.bufferingPercentage
-                      : 0.0;
-                  final percent = raw.clamp(0.0, 100.0).toDouble();
+                  // 真实已缓冲位置 ÷ 总时长；时长未知时用不确定转圈，
+                  // 不能把 bufferingPercentage 当百分比直接写到 100%。
+                  final percent = fxBufferedPercent(
+                    value.buffered,
+                    value.duration,
+                  );
                   return FxLoadingOverlay(
-                    title: '缓冲中 ${percent.round()}%',
+                    title: percent == null ? '加载中…' : '缓冲中 ${percent.round()}%',
                     percent: percent,
                     dim: false,
                     compact: true,
@@ -521,10 +540,11 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   }
 
   Widget _buildVideo(FxPlayer? player, EdgeInsets pad, bool ready) {
-    if (player == null || !ready) {
-      return Stack(
-        fit: StackFit.expand,
-        children: [
+    final controlsHeight = 100.0 + pad.bottom;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (player == null || !ready) ...[
           const ColoredBox(color: Colors.black),
           if (widget.cover.startsWith('http'))
             IgnorePointer(
@@ -538,18 +558,36 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 ),
               ),
             ),
-        ],
-      );
-    }
-    final controlsHeight = 100.0 + pad.bottom;
-    return ClipRect(
-      child: SizedBox.expand(
-        child: FxPlayerSurface(
-          player: player,
-          fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
-          subtitleBottom: controlsHeight + 12,
-        ),
-      ),
+        ] else
+          ClipRect(
+            child: SizedBox.expand(
+              child: RepaintBoundary(
+                key: widget.videoBoundaryKey,
+                child: FxPlayerSurface(
+                  key: ValueKey<int>(widget.videoEpoch),
+                  player: player,
+                  fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+                  subtitleBottom: controlsHeight + 12,
+                ),
+              ),
+            ),
+          ),
+        // 切剧 / 切集 / 换线路：最后一帧淡出，真实画面淡入，不黑屏闪。
+        if (widget.frozenFrame != null)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: AnimatedOpacity(
+                opacity: widget.frozenFrameOpaque ? 1 : 0,
+                duration: const Duration(milliseconds: 300),
+                child: RawImage(
+                  image: widget.frozenFrame,
+                  fit: _fillScreen ? BoxFit.cover : BoxFit.contain,
+                  filterQuality: FilterQuality.low,
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -658,6 +696,22 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 ),
               ],
             ),
+          ),
+          const SizedBox(width: 7),
+          PGlassIcon(
+            icon: Icons.alt_route_rounded,
+            size: 32,
+            iconSize: 17,
+            tooltip: '换源',
+            onTap: widget.onSwitchLine,
+          ),
+          const SizedBox(width: 7),
+          PGlassIcon(
+            icon: Icons.movie_filter_rounded,
+            size: 32,
+            iconSize: 17,
+            tooltip: '换剧',
+            onTap: widget.onChangeDrama,
           ),
           if (widget.qualityLabel.isNotEmpty) ...[
             const SizedBox(width: 12),

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
@@ -14,7 +15,7 @@ import 'together_ui.dart';
 /* ========================================================================== */
 /*  一起看 · 竖屏房间页                                                       */
 /*                                                                            */
-/*  结构：顶部栏（返回/房间号/成员/邀请/换剧选集）→ 固定高度视频区 →            */
+/*  结构：顶部栏（返回/房间号/成员/邀请/换源/换剧）→ 固定高度视频区 →          */
 /*        剧名·集数·成员头像 → 聊天列表（占剩余高度）→ 底部输入条。            */
 /*  视频区高度只由屏幕高度决定，不随键盘变化；键盘只压缩聊天列表。             */
 /* ========================================================================== */
@@ -41,6 +42,13 @@ class TogetherRoomView extends StatefulWidget {
     required this.onInvite,
     required this.onMembers,
     required this.onMedia,
+    required this.onSwitchLine,
+    required this.onChangeDrama,
+    required this.onEpisodes,
+    required this.videoBoundaryKey,
+    required this.videoEpoch,
+    required this.frozenFrame,
+    required this.frozenFrameOpaque,
     required this.onTogglePlay,
     required this.onSeek,
     required this.onEnterFullscreen,
@@ -73,6 +81,17 @@ class TogetherRoomView extends StatefulWidget {
   final VoidCallback onMembers;
   final VoidCallback onMedia;
 
+  /// 顶栏「换源 / 换剧」和视频区「选集」；页面统一做房主校验。
+  final VoidCallback onSwitchLine;
+  final VoidCallback onChangeDrama;
+  final VoidCallback onEpisodes;
+
+  /// 切剧 / 切集 / 换线路时保留的最后一帧，首帧就绪后淡出。
+  final GlobalKey videoBoundaryKey;
+  final int videoEpoch;
+  final ui.Image? frozenFrame;
+  final bool frozenFrameOpaque;
+
   /// 页面统一做房主校验：成员点击时提示「跟随房主」。
   final VoidCallback onTogglePlay;
   final ValueChanged<double> onSeek;
@@ -94,7 +113,6 @@ class TogetherRoomView extends StatefulWidget {
 class _TogetherRoomViewState extends State<TogetherRoomView> {
   bool _controls = true;
   Timer? _hideTimer;
-  DateTime? _lastTapAt;
 
   @override
   void initState() {
@@ -139,20 +157,8 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
     if (show) _scheduleHide();
   }
 
-  /// 单击显隐控件；300ms 内第二次点击 = 双击播放/暂停（页面做房主校验）。
-  void _onSurfaceTapUp(TapUpDetails details) {
-    final now = DateTime.now();
-    final last = _lastTapAt;
-    if (last != null &&
-        now.difference(last) < const Duration(milliseconds: 300)) {
-      _lastTapAt = null;
-      widget.onTogglePlay();
-      _wake();
-      return;
-    }
-    _lastTapAt = now;
-    _toggleControls();
-  }
+  /// 点击画面只显隐控件，绝不播放 / 暂停。
+  void _onSurfaceTap() => _toggleControls();
 
   void _togglePlay() {
     widget.onTogglePlay();
@@ -296,11 +302,17 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           ),
           const SizedBox(width: 6),
           TogetherPill(
-            text: '换剧/选集',
-            icon: Icons.swap_horiz_rounded,
+            text: '换源',
             height: 30,
             locked: !widget.isHost,
-            onTap: widget.onMedia,
+            onTap: widget.onSwitchLine,
+          ),
+          const SizedBox(width: 6),
+          TogetherPill(
+            text: '换剧',
+            height: 30,
+            locked: !widget.isHost,
+            onTap: widget.onChangeDrama,
           ),
         ],
       ),
@@ -332,13 +344,32 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 ),
               ),
             if (ready)
-              FxPlayerSurface(
-                player: player,
-                fit: BoxFit.contain,
-                subtitleBottom: 76,
+              RepaintBoundary(
+                key: widget.videoBoundaryKey,
+                child: FxPlayerSurface(
+                  key: ValueKey<int>(widget.videoEpoch),
+                  player: player,
+                  fit: BoxFit.contain,
+                  subtitleBottom: 76,
+                ),
               )
             else
               _buildVideoPlaceholder(),
+            // 切剧 / 切集 / 换线路：最后一帧顶住，首帧就绪后淡出。
+            if (widget.frozenFrame != null)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: AnimatedOpacity(
+                    opacity: widget.frozenFrameOpaque ? 1 : 0,
+                    duration: const Duration(milliseconds: 300),
+                    child: RawImage(
+                      image: widget.frozenFrame,
+                      fit: BoxFit.contain,
+                      filterQuality: FilterQuality.low,
+                    ),
+                  ),
+                ),
+              ),
             if (widget.loading)
               const Positioned.fill(
                 child: FxLoadingOverlay(
@@ -346,12 +377,36 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   dim: false,
                   compact: true,
                 ),
+              )
+            else if (ready)
+              Positioned.fill(
+                child: AnimatedBuilder(
+                  animation: player,
+                  builder: (context, _) {
+                    final value = player.value;
+                    if (!value.isInitialized || !value.isBuffering) {
+                      return const SizedBox.shrink();
+                    }
+                    // 真实已缓冲位置 ÷ 时长；未就绪时只转圈，不写 100%。
+                    final percent = fxBufferedPercent(
+                      value.buffered,
+                      value.duration,
+                    );
+                    return FxLoadingOverlay(
+                      title:
+                          percent == null ? '加载中…' : '缓冲中 ${percent.round()}%',
+                      percent: percent,
+                      dim: false,
+                      compact: true,
+                    );
+                  },
+                ),
               ),
             if (ready)
               Positioned.fill(
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTapUp: _onSurfaceTapUp,
+                  onTap: _onSurfaceTap,
                   child: const SizedBox.expand(),
                 ),
               ),
@@ -409,6 +464,15 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   onSeek: _seekTo,
                   onBlocked: widget.onHostOnly,
                 ),
+              ),
+              const SizedBox(width: 6),
+              PGlassIcon(
+                icon: Icons.list_alt_rounded,
+                size: 32,
+                iconSize: 19,
+                tint: .20,
+                tooltip: '选集',
+                onTap: widget.onEpisodes,
               ),
               const SizedBox(width: 6),
               PGlassIcon(

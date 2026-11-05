@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
 import '../api.dart';
@@ -28,11 +30,23 @@ import '../widgets/together_ui.dart';
 enum _TogetherStage { entry, entering, room }
 
 class TogetherPage extends StatefulWidget {
-  const TogetherPage({super.key, this.videoId, this.ep = 1});
+  const TogetherPage({
+    super.key,
+    this.videoId,
+    this.ep = 1,
+    this.line = '',
+    this.position = 0,
+    this.playing = false,
+  });
 
   /// 从详情页进入时直接创建房间；为空时显示一起看入口。
   final String? videoId;
   final int ep;
+
+  /// 建房沿用详情页当前线路与进度，不再默认第一条线路。
+  final String line;
+  final double position;
+  final bool playing;
 
   @override
   State<TogetherPage> createState() => _TogetherPageState();
@@ -110,6 +124,17 @@ class _TogetherPageState extends State<TogetherPage>
   double? _resumePos;
   bool _resumePlaying = false;
 
+  /// 切剧 / 切集 / 换线路前抓下的最后一帧：新流首帧就绪前盖住黑屏，
+  /// 首帧出来后淡出，做到不黑屏闪。
+  final GlobalKey _videoBoundaryKey = GlobalKey();
+  ui.Image? _frozenFrame;
+  bool _frozenFrameOpaque = false;
+  Timer? _frozenFadeTimer;
+  Timer? _frozenFallbackTimer;
+
+  /// 回前台只重建 Video 输出层（换 key），播放器实例与进度不动。
+  int _videoEpoch = 0;
+
   final ValueNotifier<double> _position = ValueNotifier<double>(0);
 
   Timer? _ticker;
@@ -135,6 +160,11 @@ class _TogetherPageState extends State<TogetherPage>
     if (videoId.isNotEmpty) {
       _videoId = videoId;
       _ep = widget.ep < 1 ? 1 : widget.ep;
+      _videoLine = widget.line.trim().isEmpty ? 'l1' : widget.line.trim();
+      // 从详情页进入时沿用当前进度（0 也要带，表示从开头继续），
+      // 并沿用播放 / 暂停状态。
+      _resumePos = widget.position;
+      _resumePlaying = widget.playing;
       _createRoom(videoId, _ep);
     }
   }
@@ -148,6 +178,10 @@ class _TogetherPageState extends State<TogetherPage>
     _ticker = null;
     _heartbeat = null;
     _enterTimer = null;
+    _frozenFadeTimer?.cancel();
+    _frozenFallbackTimer?.cancel();
+    _frozenFrame?.dispose();
+    _frozenFrame = null;
     _joinCtrl.dispose();
     if (_fullscreen) {
       _fullscreen = false;
@@ -171,7 +205,12 @@ class _TogetherPageState extends State<TogetherPage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!mounted) return;
     if (state == AppLifecycleState.resumed) {
+      final wasBackground = !_foreground;
       _foreground = true;
+      // 回前台只接回画面：换 key 重挂 Video 层，不重新拉流、不重置进度。
+      if (wasBackground && _stage == _TogetherStage.room && mounted) {
+        setState(() => _videoEpoch++);
+      }
       if (_stage == _TogetherStage.room) {
         // 不断连：socket 还在就直接要一次权威状态，否则重连。
         if (_client.connected) {
@@ -262,7 +301,19 @@ class _TogetherPageState extends State<TogetherPage>
       _lastRevCode = '';
     });
     _downReported = false;
-    _position.value = 0;
+    // 建房沿用详情页当前位置 / 播放状态，并立刻广播给房间，成员加入
+    // 时就能按房主的 lineId 和进度拉流。
+    final startPosition = _resumePos ?? 0;
+    _position.value = startPosition;
+    if (_isHost && _online) {
+      _client.sendState(
+        _resumePlaying ? 'play' : 'pause',
+        startPosition,
+        videoId: _videoId,
+        ep: _ep,
+        line: _videoLine,
+      );
+    }
     _syncVideo();
   }
 
@@ -437,7 +488,7 @@ class _TogetherPageState extends State<TogetherPage>
     _stageText = '正在创建房间…';
     _videoId = videoId;
     _ep = ep < 1 ? 1 : ep;
-    _videoLine = 'l1';
+    if (_videoLine.trim().isEmpty) _videoLine = 'l1';
     _qualityKey = null;
     _playInfo = null;
     _detailVideoId = '';
@@ -810,7 +861,9 @@ class _TogetherPageState extends State<TogetherPage>
     final controller = _controller;
     if (controller == null || !mounted) return;
     final value = controller.value;
+    _maybeFadeFrozenFrame();
     if (value.hasError && _videoError.isEmpty) {
+      _clearFrozenFrame();
       setState(() => _videoError = '播放中断，点重试即可恢复');
       return;
     }
@@ -981,13 +1034,26 @@ class _TogetherPageState extends State<TogetherPage>
       togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
+    // 房主本地立即切到新片的第 1 集，再广播 room_state；其它成员收到后
+    // 重新拉流。最后一帧由 _loadVideo 抓取，切剧不黑屏。
     setState(() {
+      _videoId = card.id;
+      _ep = 1;
+      _videoLine = 'l1';
       _videoTitle = card.title;
       _videoCover = togetherCoverUrl(card.cover);
       _episodes = const <Episode>[];
+      _lines = const <LineInfo>[];
+      _detailVideoId = '';
       _qualityKey = null;
       _playInfo = null;
+      _videoError = '';
+      _resumePos = 0;
+      _resumePlaying = false;
+      _endedSent = false;
     });
+    _loadedKey = '';
+    _loadingKey = '';
     _client.sendState(
       'pause',
       0,
@@ -995,6 +1061,7 @@ class _TogetherPageState extends State<TogetherPage>
       ep: 1,
       line: 'l1',
     );
+    _syncVideo();
     togetherToast(context, '正在切换影片…');
   }
 
@@ -1093,6 +1160,10 @@ class _TogetherPageState extends State<TogetherPage>
     if (!_isHost) {
       _hostOnly();
       return;
+    }
+    if (_lines.isEmpty && _videoId.isNotEmpty) {
+      await _ensureDetail(_videoId);
+      if (!mounted) return;
     }
     final playable = _lines.where((line) => !line.needsParse).toList();
     if (playable.length < 2) {
@@ -1214,14 +1285,97 @@ class _TogetherPageState extends State<TogetherPage>
     unawaited(_loadVideo(_videoId, _ep, _videoLine));
   }
 
+  /* ------------------------------------------------------ 最后一帧 / 淡入 */
+
+  bool _hasFirstFrame(FxPlayerValue value) {
+    if (!value.isInitialized) return false;
+    final width = value.videoWidth ?? value.width ?? 0;
+    final height = value.videoHeight ?? value.height ?? 0;
+    return width > 0 && height > 0;
+  }
+
+  /// 抢在旧播放器释放前抓下当前画面；失败就返回 null，继续走原来的加载态。
+  Future<ui.Image?> _captureVideoFrame() async {
+    // 后台切集时没有新帧，等 endOfFrame 会卡住加载；直接跳过最后一帧。
+    if (!_foreground) return null;
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return null;
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      final boundary = _videoBoundaryKey.currentContext?.findRenderObject();
+      if (boundary is! RenderRepaintBoundary) return null;
+      if (boundary.debugNeedsPaint) {
+        await Future<void>.delayed(const Duration(milliseconds: 16));
+      }
+      return await boundary.toImage(pixelRatio: 1);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _showFrozenFrame(ui.Image frame) {
+    _frozenFadeTimer?.cancel();
+    _frozenFadeTimer = null;
+    _frozenFallbackTimer?.cancel();
+    final old = _frozenFrame;
+    _frozenFrame = frame;
+    _frozenFrameOpaque = true;
+    if (mounted) setState(() {});
+    // 旧帧可能还在淡出里，延后释放，避免正在绘制时被 dispose。
+    if (old != null) {
+      Future<void>.delayed(const Duration(milliseconds: 400), old.dispose);
+    }
+  }
+
+  /// 新流首帧就绪：淡出最后一帧，让真实画面淡入。
+  void _fadeOutFrozenFrame() {
+    if (!_frozenFrameOpaque || _frozenFrame == null) return;
+    _frozenFallbackTimer?.cancel();
+    _frozenFallbackTimer = null;
+    if (mounted) setState(() => _frozenFrameOpaque = false);
+    _frozenFadeTimer?.cancel();
+    _frozenFadeTimer = Timer(const Duration(milliseconds: 320), () {
+      _frozenFadeTimer = null;
+      _clearFrozenFrame();
+    });
+  }
+
+  void _maybeFadeFrozenFrame() {
+    final controller = _controller;
+    if (controller == null || !_hasFirstFrame(controller.value)) return;
+    _fadeOutFrozenFrame();
+  }
+
+  void _clearFrozenFrame() {
+    _frozenFadeTimer?.cancel();
+    _frozenFadeTimer = null;
+    _frozenFallbackTimer?.cancel();
+    _frozenFallbackTimer = null;
+    final frame = _frozenFrame;
+    _frozenFrame = null;
+    _frozenFrameOpaque = false;
+    if (mounted) setState(() {});
+    if (frame != null) {
+      Future<void>.delayed(const Duration(milliseconds: 60), frame.dispose);
+    }
+  }
+
   Future<void> _loadVideo(String videoId, int ep, String line) async {
     final key = '$videoId|$ep|$line';
     _loadingKey = key;
     final seq = ++_videoSeq;
     _endedSent = false;
 
-    // 先摘掉旧 controller 并进入加载态（页面先重建为占位/加载浮层），
-    // 再异步 pause → stop → dispose，避免旧画面在释放期间继续渲染。
+    // 先抓最后一帧再摘旧 controller：切剧/切集/换线路不露出黑屏。
+    final frozen = await _captureVideoFrame();
+    if (!mounted || seq != _videoSeq) {
+      frozen?.dispose();
+      return;
+    }
+    if (frozen != null) _showFrozenFrame(frozen);
+
+    // 摘掉旧 controller 并进入加载态，再异步 pause → stop → dispose，
+    // 避免旧画面在释放期间继续渲染；最后一帧顶住这段空窗。
     final previous = _controller;
     _controller = null;
     previous?.removeListener(_onVideoValue);
@@ -1336,10 +1490,21 @@ class _TogetherPageState extends State<TogetherPage>
           _controller = controller;
           controller.addListener(_onVideoValue);
           if (previous != null) unawaited(previous.dispose());
+          _maybeFadeFrozenFrame();
+          _frozenFallbackTimer?.cancel();
+          if (_frozenFrame != null) {
+            // 首帧参数迟迟不到（异常流）时兜底淡出，不能一直盖着。
+            _frozenFallbackTimer = Timer(
+              const Duration(seconds: 2),
+              _fadeOutFrozenFrame,
+            );
+          }
 
           _resumePos = null;
           _resumePlaying = false;
           _loadingKey = '';
+          // 当前线路不可用时沿 ordered 回退到备用线路；房间 lineId 仍保留
+          // 房主选择的线路，避免服务器旧状态回跳导致重复拉流。
           _loadedKey = key;
           if (mounted) {
             setState(() {
@@ -1365,6 +1530,7 @@ class _TogetherPageState extends State<TogetherPage>
     if (!mounted || seq != _videoSeq) return;
     _loadingKey = '';
     _loadedKey = '';
+    _clearFrozenFrame();
     setState(() {
       _videoLoading = false;
       _videoError = '暂时无法播放，请重试或让房主切换线路';
@@ -1559,10 +1725,16 @@ class _TogetherPageState extends State<TogetherPage>
       canChangeQuality: (_playInfo?.quality.length ?? 0) >= 2,
       qualities: _playInfo?.quality ?? const <QualityItem>[],
       rate: _isHost ? _hostRate : 1.0,
+      videoBoundaryKey: _videoBoundaryKey,
+      videoEpoch: _videoEpoch,
+      frozenFrame: _frozenFrame,
+      frozenFrameOpaque: _frozenFrameOpaque,
       onExit: () => unawaited(_exitFullscreen()),
       onExitRoom: () => unawaited(_confirmLeaveRoom()),
       onInvite: () => unawaited(_showInvite()),
       onMembers: () => unawaited(_showMembers()),
+      onSwitchLine: () => unawaited(_pickLine()),
+      onChangeDrama: () => unawaited(_pickDrama()),
       onTogglePlay: _togglePlay,
       onSeek: _seekTo,
       onSeekBy: _seekBy,
@@ -1592,6 +1764,10 @@ class _TogetherPageState extends State<TogetherPage>
       online: _online,
       loading: _videoLoading,
       errorText: _videoError,
+      videoBoundaryKey: _videoBoundaryKey,
+      videoEpoch: _videoEpoch,
+      frozenFrame: _frozenFrame,
+      frozenFrameOpaque: _frozenFrameOpaque,
       onBack: () => unawaited(_confirmLeaveRoom()),
       onCopyCode: () {
         if (_roomCode.isEmpty) return;
@@ -1600,6 +1776,9 @@ class _TogetherPageState extends State<TogetherPage>
       onInvite: () => unawaited(_showInvite()),
       onMembers: () => unawaited(_showMembers()),
       onMedia: () => unawaited(_showMediaSheet()),
+      onSwitchLine: () => unawaited(_pickLine()),
+      onChangeDrama: () => unawaited(_pickDrama()),
+      onEpisodes: () => unawaited(_pickEpisode()),
       onTogglePlay: _togglePlay,
       onSeek: _seekTo,
       onEnterFullscreen: () => unawaited(_enterFullscreen()),

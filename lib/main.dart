@@ -543,9 +543,22 @@ class Nav {
   static Future<void> search(BuildContext c) => Navigator.of(c)
       .push(MaterialPageRoute(builder: (_) => const SearchPage()));
 
-  static Future<void> together(BuildContext c, {String? videoId, int? ep}) =>
+  static Future<void> together(
+    BuildContext c, {
+    String? videoId,
+    int? ep,
+    String line = '',
+    double position = 0,
+    bool playing = false,
+  }) =>
       Navigator.of(c).push(MaterialPageRoute(
-          builder: (_) => TogetherPage(videoId: videoId, ep: ep ?? 1)));
+          builder: (_) => TogetherPage(
+                videoId: videoId,
+                ep: ep ?? 1,
+                line: line,
+                position: position,
+                playing: playing,
+              )));
 
   static Future<void> player(BuildContext c,
           {required String id, int ep = 1, String line = ''}) =>
