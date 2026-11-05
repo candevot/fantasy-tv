@@ -91,6 +91,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// controller 实际已经打开的集。进度只写这一集，loading 时不写。
   int? _loadedEp;
 
+  /// 正在打开的组合（line|ep）：同一组合重复请求直接复用，防重复 open。
+  String? _openingKey;
+  Future<bool>? _opening;
+
+  /// 当前集播放 30 秒后已预解析的下一集，避免 10 秒定时器重复请求。
+  bool _nextPrewarmed = false;
+  int? _prewarmEp;
+  DateTime? _prewarmAt;
+
+  /// 正在 open 的新播放器：loading 浮层据此显示真实缓冲进度，
+  /// 而不是复用旧 controller 的缓存百分比。
+  FxPlayer? _loadingPlayer;
+
+  /// 缓存命中 + 已有上一帧快照时跳过 loading 浮层，直接 open。
+  bool _suppressLoading = false;
+
   /// 全屏内选择的清晰度，退出全屏时随结果带回。
   String? _qualityKey;
 
@@ -211,6 +227,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       // 全屏期间由全屏页保存，避免把全屏切换后的位置记到旧集。
       if (!mounted || _fullscreenActive) return;
       unawaited(_saveProgress());
+      _maybePrewarmNext();
     });
     _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
     unawaited(_loadFillScreen());
@@ -556,6 +573,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     unawaited(_saveProgress());
     _controller?.removeListener(_onVideoValue);
     _controller?.dispose();
+    _loadingPlayer = null;
     super.dispose();
   }
 
@@ -664,9 +682,49 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     bool? playOverride,
     bool commitLine = false,
     bool reportFailure = true,
+    bool forcePlayInfo = false,
   }) async {
     final line = lineOverride ?? _line;
     final ep = epOverride ?? _ep;
+    // 同一 url+line+ep 正在打开时忽略重复请求（防抖），
+    // 避免 didUpdateWidget / 连点「下一集」并发 open 造成双播放器与内存翻倍。
+    final key = '$line|$ep';
+    final opening = _opening;
+    if (opening != null && _openingKey == key) return opening;
+    final future = _bootstrapSource(
+      seekToSaved: seekToSaved,
+      saveOld: saveOld,
+      line: line,
+      ep: ep,
+      resumeSeconds: resumeSeconds,
+      playOverride: playOverride,
+      commitLine: commitLine,
+      reportFailure: reportFailure,
+      forcePlayInfo: forcePlayInfo,
+    );
+    _opening = future;
+    _openingKey = key;
+    try {
+      return await future;
+    } finally {
+      if (identical(_opening, future)) {
+        _opening = null;
+        _openingKey = null;
+      }
+    }
+  }
+
+  Future<bool> _bootstrapSource({
+    required bool seekToSaved,
+    required bool saveOld,
+    required String line,
+    required int ep,
+    required bool commitLine,
+    required bool reportFailure,
+    required bool forcePlayInfo,
+    double? resumeSeconds,
+    bool? playOverride,
+  }) async {
     final token = ++_loadToken;
     _hideTimer?.cancel();
     // 先抓最后一帧，再换播放器：Video 在 open 期间会清空纹理，
@@ -676,8 +734,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return false;
     unawaited(_controller?.pause());
+    // 上一集已预解析 / 同一集重复打开：缓存命中就不等接口和 playlist，
+    // 有旧画面快照时连 loading 浮层都跳过。
+    final cacheHit =
+        !forcePlayInfo && FxPlayCache.peek(widget.videoId, ep, line) != null;
+    final waitForWarm = !cacheHit;
     setState(() {
       _loading = true;
+      _suppressLoading = cacheHit && _frozenFrame != null;
       _requestLine = line;
       _requestEp = ep;
       _loadedEp = null;
@@ -686,15 +750,26 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _errorText = '';
       _sourceFailNotified = false;
       _ended = false;
+      // 新一集重新计算预解析，避免沿用上一集的标记。
+      _nextPrewarmed = false;
+      _prewarmEp = null;
+      _prewarmAt = null;
     });
 
     PlayInfo info;
     try {
-      info = await Api.play(widget.videoId, ep, line);
+      // 命中下一集预解析缓存时不再等 /api/play，切集直接进 open。
+      info = await FxPlayCache.resolve(
+        widget.videoId,
+        ep,
+        line,
+        force: forcePlayInfo,
+      );
     } catch (_) {
       if (!mounted || token != _loadToken) return false;
       setState(() {
         _loading = false;
+        _suppressLoading = false;
         if (reportFailure) {
           _error = true;
           _errorText = '获取播放地址失败，请检查网络后重试';
@@ -752,10 +827,16 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     for (final url in candidates) {
       if (!mounted || token != _loadToken) return false;
       final controller = FxPlayer.create();
+      if (mounted) setState(() => _loadingPlayer = controller);
       try {
         // 8 秒拿不到可播状态就判这条地址失败，避免黑屏一直转圈。
         await controller
-            .open(url, headers: info.headers)
+            .open(
+              url,
+              headers: info.headers,
+              play: shouldPlay,
+              waitForWarm: waitForWarm,
+            )
             .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) {
           await controller.dispose();
@@ -798,6 +879,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         unawaited(previous?.dispose());
         setState(() {
           _loading = false;
+          _suppressLoading = false;
           _error = false;
           _errorText = '';
         });
@@ -826,10 +908,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       }
     }
 
+    if (mounted && _loadingPlayer != null) {
+      setState(() => _loadingPlayer = null);
+    }
+
     if (!ok) {
       if (!mounted || token != _loadToken) return false;
       setState(() {
         _loading = false;
+        _suppressLoading = false;
         if (reportFailure) {
           _error = true;
           _errorText = '播放失败：线路不可用，请重试或切换下方线路';
@@ -1061,12 +1148,42 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     return _ep + 1;
   }
 
+  /// 当前集播过 30 秒后，后台清空并预热下一集的 /api/play 与 m3u8。
+  /// 只请求、不 open，切集时复用缓存，省掉接口往返。
+  void _maybePrewarmNext() {
+    if (!mounted || _loading || _error || _fullscreenActive) return;
+    final c = _controller;
+    final loaded = _loadedEp;
+    if (c == null || loaded == null || loaded != _ep) return;
+    if (!c.value.isInitialized || c.value.hasError) return;
+    if (c.value.position < const Duration(seconds: 30)) return;
+    final next = _nextEpNumber();
+    if (next == null) return;
+    // 已预热同一集时每 5 分钟刷新一次，避免长剧集播完时地址已过期。
+    if (_nextPrewarmed && _prewarmEp == next) {
+      final at = _prewarmAt;
+      if (at != null &&
+          DateTime.now().difference(at) < const Duration(minutes: 5)) {
+        return;
+      }
+    }
+    _nextPrewarmed = true;
+    _prewarmEp = next;
+    _prewarmAt = DateTime.now();
+    FxPlayCache.prewarm(widget.videoId, next, _line);
+  }
+
   /// 详情页「刷新」/错误重试可以调用
   Future<void> reload() async {
     if (_switchingLine) return;
     await _saveProgress();
     if (!mounted) return;
-    await _bootstrap(seekToSaved: true, saveOld: false);
+    // 重试时强制刷新播放地址，避免复用已经失效的直链。
+    await _bootstrap(
+      seekToSaved: true,
+      saveOld: false,
+      forcePlayInfo: true,
+    );
   }
 
   /// 详情页试完全部线路仍不可播时调用，展示错误与重试/换线路按钮。
@@ -1307,10 +1424,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     if (!v.isInitialized || !v.isBuffering) {
                       return const SizedBox.shrink();
                     }
-                    final percent = fxBufferedPercent(
-                      v.buffered,
-                      v.duration,
-                    );
+                    final percent = v.bufferingPercent;
                     return FxLoadingOverlay(
                       title:
                           percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
@@ -1321,7 +1435,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   },
                 ),
               ),
-            if (_loading && !_error) _buildLoading(),
+            if (_loading && !_error && !_suppressLoading) _buildLoading(),
             // 控件层压在 loading / 缓冲之上：切集 8s 窗口里也能退出全屏。
             // 只按控件显隐禁用指针，不因 loading 整层失效。
             if (_controls && !_error) _buildControls(c),
@@ -1333,12 +1447,23 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   Widget _buildLoading() {
+    final title = fxLoadingLineText(_requestEp, _loadingLineName);
+    // 只显示本次 open 的新播放器缓存进度；新实例还没建好时用不确定圆环，
+    // 不能拿旧 controller 的百分比冒充新集进度。
+    final c = _loadingPlayer;
+    if (c == null) {
+      return Positioned.fill(
+        child: FxLoadingOverlay(title: title, compact: true),
+      );
+    }
     return Positioned.fill(
-      child: FxLoadingOverlay(
-        // 单行文案：线路名按本次请求的 lineId 从详情线路表查，
-        // 不能用上一次请求的 _info.lineName，否则换线路后会串台。
-        title: fxLoadingLineText(_requestEp, _loadingLineName),
-        compact: true,
+      child: AnimatedBuilder(
+        animation: c,
+        builder: (context, _) => FxLoadingOverlay(
+          title: title,
+          percent: c.value.bufferingPercent,
+          compact: true,
+        ),
       ),
     );
   }

@@ -7,6 +7,7 @@ import '../api.dart';
 import '../main.dart' show Nav;
 import '../models.dart';
 import '../services/download_service.dart';
+import '../services/fx_player.dart';
 import '../theme.dart';
 import '../widgets/detail_widgets.dart';
 import '../widgets/download_sheet.dart';
@@ -163,6 +164,12 @@ class _DetailPageState extends State<DetailPage>
         _ep = ep;
         _error = null;
       });
+      // 详情页一打开就后台预热当前线路 / 集（上次看的集优先）：
+      // PlayerView 的 open / 用户稍后点播放都能直接复用缓存，
+      // 不再从 0 等 /api/play 和 m3u8。
+      if (lineId.isNotEmpty) {
+        FxPlayCache.warm(widget.id, ep, lineId);
+      }
 
       if (d.related.isEmpty && d.relatedIds.isNotEmpty) {
         unawaited(_loadRelatedCards(d.relatedIds));

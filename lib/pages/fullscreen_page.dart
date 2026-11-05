@@ -192,6 +192,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// controller 实际已经打开的集；进度只写这一集，loading 时不写。
   int? _loadedEp;
 
+  /// 正在打开的组合（line|ep）：重复请求直接复用，防并发 open。
+  String? _openingKey;
+  Future<void>? _opening;
+
+  /// 当前集播过 30 秒后已预解析的下一集。
+  bool _nextPrewarmed = false;
+  int? _prewarmEp;
+  DateTime? _prewarmAt;
+
+  /// 缓存命中 + 已有上一帧快照时跳过 loading 浮层，直接 open。
+  bool _suppressLoadingOverlay = false;
+
   bool _loading = false;
   bool _error = false;
   String _errorText = '';
@@ -396,6 +408,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       if (!mounted) return;
       unawaited(_saveProgress());
+      _maybePrewarmNext();
     });
     _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
     _resetWatchdogClock();
@@ -543,6 +556,35 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<void> _bootstrap({
     required bool seekToSaved,
     bool saveOld = true,
+    bool forcePlayInfo = false,
+  }) async {
+    final c = _controller;
+    if (c == null) return;
+    // 同一 line+ep 正在打开时忽略重复请求（防抖）。
+    final key = '$_line|$_ep';
+    final opening = _opening;
+    if (opening != null && _openingKey == key) return opening;
+    final future = _bootstrapSource(
+      seekToSaved: seekToSaved,
+      saveOld: saveOld,
+      forcePlayInfo: forcePlayInfo,
+    );
+    _opening = future;
+    _openingKey = key;
+    try {
+      await future;
+    } finally {
+      if (identical(_opening, future)) {
+        _opening = null;
+        _openingKey = null;
+      }
+    }
+  }
+
+  Future<void> _bootstrapSource({
+    required bool seekToSaved,
+    required bool saveOld,
+    required bool forcePlayInfo,
   }) async {
     final c = _controller;
     if (c == null) return;
@@ -556,8 +598,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return;
     unawaited(c.pause());
+    // 缓存命中时不等接口与 playlist，直接用上一帧快照垫着 open。
+    final cacheHit =
+        !forcePlayInfo && FxPlayCache.peek(widget.videoId, _ep, _line) != null;
+    final waitForWarm = !cacheHit;
     setState(() {
       _loading = true;
+      _suppressLoadingOverlay = cacheHit && _frozenFrame != null;
       _loadedEp = null;
       _error = false;
       _errorText = '';
@@ -568,11 +615,20 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _uiDuration = null;
       _loadingHint = null;
       _firstFrame = false;
+      _nextPrewarmed = false;
+      _prewarmEp = null;
+      _prewarmAt = null;
     });
 
     PlayInfo source;
     try {
-      source = await Api.play(widget.videoId, _ep, _line);
+      // 命中竖屏/上一集预解析的缓存时不再等 /api/play。
+      source = await FxPlayCache.resolve(
+        widget.videoId,
+        _ep,
+        _line,
+        force: forcePlayInfo,
+      );
     } catch (_) {
       if (!mounted || token != _loadToken) return;
       _notifySourceFailed();
@@ -609,7 +665,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (!mounted || token != _loadToken) return;
       try {
         // 8 秒拿不到可播状态就判这条地址失败，避免黑屏一直转圈。
-        await c.open(url, headers: source.headers).timeout(_openReadyTimeout);
+        await c
+            .open(
+              url,
+              headers: source.headers,
+              play: true,
+              waitForWarm: waitForWarm,
+            )
+            .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) return;
         final durationMs = c.value.duration.inMilliseconds;
         var start = resume;
@@ -630,6 +693,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (!_firstFrame) _armFirstFrameTimer();
         setState(() {
           _loading = false;
+          _suppressLoadingOverlay = false;
           _error = false;
           _errorText = '';
           _loadingHint = null;
@@ -675,7 +739,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     _firstFrame = false;
     try {
-      await c.open(url, headers: headers).timeout(_openReadyTimeout);
+      await c
+          .open(url, headers: headers, play: wasPlaying)
+          .timeout(_openReadyTimeout);
       if (!mounted) return false;
       final duration = c.value.duration;
       var target = resume;
@@ -1200,8 +1266,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null) return;
     final url = _watchdogUrl();
     if (url == null) {
-      // 上次连播放地址都没拿到：只能重新走一次接口。
-      await _bootstrap(seekToSaved: true, saveOld: false);
+      // 上次连播放地址都没拿到：强制刷新播放地址再试一次。
+      await _bootstrap(
+        seekToSaved: true,
+        saveOld: false,
+        forcePlayInfo: true,
+      );
       return;
     }
     final resume = _positionBeforeError > Duration.zero
@@ -1316,6 +1386,30 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _wake();
       fxToast(context, '已播放完最后一集');
     }
+  }
+
+  /// 当前集播过 30 秒后后台预热下一集 /api/play 与 m3u8（只请求，不 open）。
+  void _maybePrewarmNext() {
+    if (!mounted || _loading || _error) return;
+    final c = _controller;
+    final loaded = _loadedEp;
+    if (c == null || loaded == null || loaded != _ep) return;
+    if (!c.value.isInitialized || c.value.hasError) return;
+    if (c.value.position < const Duration(seconds: 30)) return;
+    final next = _nextEpNumber();
+    if (next == null) return;
+    // 已预热同一集时每 5 分钟刷新一次，避免长剧集播完时地址已过期。
+    if (_nextPrewarmed && _prewarmEp == next) {
+      final at = _prewarmAt;
+      if (at != null &&
+          DateTime.now().difference(at) < const Duration(minutes: 5)) {
+        return;
+      }
+    }
+    _nextPrewarmed = true;
+    _prewarmEp = next;
+    _prewarmAt = DateTime.now();
+    FxPlayCache.prewarm(widget.videoId, next, _line);
   }
 
   int? _nextEpNumber() {
@@ -1871,15 +1965,23 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 首帧 / 加载 / 缓冲统一浮层。
   Widget _buildStatusOverlay(FxPlayer c) {
     final v = c.value;
+    // 缓存命中且已有上一帧快照：切集时连 loading 浮层都跳过，只留快照。
+    if (_loading && _suppressLoadingOverlay && _frozenFrame != null) {
+      return const SizedBox.shrink();
+    }
     // 首帧未出 / 正在加载：只显示单行文案，线路名按当前 lineId 查，
     // 不再叠一行旧线路名小字。
     final loading = _loadingHint ?? fxLoadingLineText(_ep, _lineName);
+    // 真实缓存进度：起播 / 切集阶段有 buffer 就显示，不拿假进度凑数。
     if (!_firstFrame || _loading) {
-      return FxLoadingOverlay(title: loading);
+      return FxLoadingOverlay(
+        title: loading,
+        percent: v.bufferingPercent,
+        dim: _frozenFrame == null,
+      );
     }
     if (!v.isBuffering) return const SizedBox.shrink();
-    // stream.buffer 是已缓冲位置（demuxer-cache-time），÷ 总时长即真实进度。
-    final percent = fxBufferedPercent(v.buffered, v.duration);
+    final percent = v.bufferingPercent;
     return FxLoadingOverlay(
       title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
       percent: percent,
