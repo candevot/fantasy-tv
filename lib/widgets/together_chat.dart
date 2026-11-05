@@ -3,7 +3,10 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import 'together_ui.dart';
 
-/// 一起看聊天消息。system = 居中系统行，mine = 右侧自己。
+/// 一起看聊天消息。
+///
+/// [system] 是房间系统提示（居中一行），[mine] 决定气泡靠右还是靠左；
+/// 无论左右，列表里都会展示头像、昵称、时间和内容。
 class TogetherChatMessage {
   const TogetherChatMessage({
     required this.text,
@@ -21,10 +24,7 @@ class TogetherChatMessage {
   final bool mine;
   final bool system;
 
-  factory TogetherChatMessage.system(
-    String text, {
-    DateTime? time,
-  }) =>
+  factory TogetherChatMessage.system(String text, {DateTime? time}) =>
       TogetherChatMessage(
         text: text,
         time: time ?? DateTime.now(),
@@ -36,7 +36,9 @@ class TogetherChatMessage {
     required bool mine,
   }) {
     final rawUser = j['user'];
-    final user = rawUser is Map ? Map<String, dynamic>.from(rawUser) : const <String, dynamic>{};
+    final user = rawUser is Map
+        ? Map<String, dynamic>.from(rawUser)
+        : const <String, dynamic>{};
     final at = j['at'];
     return TogetherChatMessage(
       text: '${j['text'] ?? ''}',
@@ -50,11 +52,23 @@ class TogetherChatMessage {
   }
 }
 
-/// 聊天流：系统行居中、别人居左、自己居右，新消息自动贴底。
+/// 聊天消息列表：空态、自动贴底、系统行、左右气泡。
+///
+/// 只依赖消息列表本身，房间页/全屏小面板共用；[compact] 时缩小头像、
+/// 字号和气泡最大宽度，适配 ≤40%×45% 的全屏聊天面板。
 class TogetherChatList extends StatefulWidget {
-  const TogetherChatList({super.key, required this.messages});
+  const TogetherChatList({
+    super.key,
+    required this.messages,
+    this.compact = false,
+    this.emptyText = togetherChatEmptyText,
+    this.padding,
+  });
 
   final List<TogetherChatMessage> messages;
+  final bool compact;
+  final String emptyText;
+  final EdgeInsets? padding;
 
   @override
   State<TogetherChatList> createState() => _TogetherChatListState();
@@ -82,14 +96,13 @@ class _TogetherChatListState extends State<TogetherChatList>
   String _signature(List<TogetherChatMessage> messages) {
     if (messages.isEmpty) return '';
     final last = messages.last;
-    // 消息上限会裁掉最旧一条：长度不变但最后一条变了也要贴底。
     return '${messages.length}|${last.time.microsecondsSinceEpoch}|'
         '${last.user}|${last.text}|${last.system}';
   }
 
   @override
   void didChangeMetrics() {
-    // 键盘弹出 / 收起时列表高度变化，保持最新消息可见。
+    // 键盘弹起 / 收起、面板高度变化时保持最新消息可见。
     _scrollToBottom();
   }
 
@@ -120,63 +133,80 @@ class _TogetherChatListState extends State<TogetherChatList>
   Widget build(BuildContext context) {
     if (widget.messages.isEmpty) {
       return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.chat_bubble_outline_rounded,
-              size: 28,
-              color: Fx.sub.withOpacity(.45),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '还没有人说话，来打个招呼吧',
-              style: TextStyle(fontSize: 11, color: Fx.sub.withOpacity(.75)),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.forum_outlined,
+                size: widget.compact ? 24 : 30,
+                color: Fx.sub.withOpacity(.42),
+              ),
+              SizedBox(height: widget.compact ? 6 : 8),
+              Text(
+                widget.emptyText,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: widget.compact ? 11 : 12,
+                  height: 1.4,
+                  color: Fx.sub.withOpacity(.78),
+                ),
+              ),
+            ],
+          ),
         ),
       );
     }
     return ListView.builder(
       controller: _scroll,
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      padding: widget.padding ??
+          EdgeInsets.fromLTRB(
+            widget.compact ? 8 : 12,
+            widget.compact ? 8 : 12,
+            widget.compact ? 8 : 12,
+            widget.compact ? 8 : 12,
+          ),
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       itemCount: widget.messages.length,
       itemBuilder: (context, i) {
         final message = widget.messages[i];
         return message.system
-            ? _SystemLine(message: message)
-            : _ChatBubble(message: message);
+            ? _SystemLine(message: message, compact: widget.compact)
+            : _ChatBubble(message: message, compact: widget.compact);
       },
     );
   }
 }
 
 class _SystemLine extends StatelessWidget {
-  const _SystemLine({required this.message});
+  const _SystemLine({required this.message, required this.compact});
 
   final TogetherChatMessage message;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
+    final maxWidth = MediaQuery.sizeOf(context).width * .82;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
+      padding: EdgeInsets.symmetric(vertical: compact ? 3 : 5),
       child: Center(
         child: Container(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * .82,
+          constraints: BoxConstraints(maxWidth: maxWidth),
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 8 : 10,
+            vertical: compact ? 4 : 5,
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(.42),
+            color: Colors.white.withOpacity(.46),
             borderRadius: BorderRadius.circular(11),
-            border: Border.all(color: Colors.white.withOpacity(.56)),
+            border: Border.all(color: Colors.white.withOpacity(.58)),
           ),
           child: Text(
             '${message.text}  ${togetherClock(message.time)}',
             textAlign: TextAlign.center,
             style: TextStyle(
-              fontSize: 9.5,
+              fontSize: compact ? 9 : 9.5,
               height: 1.4,
               color: Fx.sub.withOpacity(.9),
             ),
@@ -188,20 +218,29 @@ class _SystemLine extends StatelessWidget {
 }
 
 class _ChatBubble extends StatelessWidget {
-  const _ChatBubble({required this.message});
+  const _ChatBubble({required this.message, required this.compact});
 
   final TogetherChatMessage message;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final mine = message.mine;
-    final maxWidth = MediaQuery.of(context).size.width * .68;
+    final screen = MediaQuery.sizeOf(context).width;
+    // 全屏小面板宽度只有屏宽 40%，气泡最大宽度要跟着收。
+    final maxWidth = screen * (compact ? .28 : .68);
+    final avatarSize = compact ? 22.0 : 28.0;
+    final name =
+        mine ? '我' : (message.user.trim().isEmpty ? '影迷' : message.user);
     final bubble = Container(
       constraints: BoxConstraints(maxWidth: maxWidth),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 9 : 12,
+        vertical: compact ? 6 : 9,
+      ),
       decoration: BoxDecoration(
         gradient: mine ? Fx.brand : null,
-        color: mine ? null : Colors.white.withOpacity(.82),
+        color: mine ? null : Colors.white.withOpacity(.84),
         borderRadius: BorderRadius.only(
           topLeft: const Radius.circular(16),
           topRight: const Radius.circular(16),
@@ -224,7 +263,7 @@ class _ChatBubble extends StatelessWidget {
       child: Text(
         message.text,
         style: TextStyle(
-          fontSize: 13,
+          fontSize: compact ? 11.5 : 13,
           height: 1.42,
           color: mine ? Colors.white : Fx.ink,
         ),
@@ -232,65 +271,71 @@ class _ChatBubble extends StatelessWidget {
     );
 
     final meta = Text(
-      mine ? '我 · ${togetherClock(message.time)}' : '${message.user} · ${togetherClock(message.time)}',
+      '$name · ${togetherClock(message.time)}',
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       textAlign: mine ? TextAlign.right : TextAlign.left,
       style: TextStyle(
-        fontSize: 9,
+        fontSize: compact ? 8 : 9,
         color: Fx.sub.withOpacity(.72),
       ),
     );
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        mainAxisAlignment: mine ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
+    final avatar = TogetherAvatar(
+      name: name,
+      avatar: message.avatar,
+      size: avatarSize,
+      host: false,
+    );
+
+    final column = Flexible(
+      child: Column(
+        crossAxisAlignment:
+            mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
-          if (!mine) ...[
-            TogetherAvatar(
-              name: message.user,
-              avatar: message.avatar,
-              size: 28,
-            ),
-            const SizedBox(width: 7),
-          ],
-          Flexible(
-            child: Column(
-              crossAxisAlignment:
-                  mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 3),
-                  child: meta,
-                ),
-                const SizedBox(height: 3),
-                bubble,
-              ],
-            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 3),
+            child: meta,
           ),
+          const SizedBox(height: 3),
+          bubble,
         ],
+      ),
+    );
+
+    return Padding(
+      padding: EdgeInsets.symmetric(vertical: compact ? 3 : 5),
+      child: Row(
+        mainAxisAlignment:
+            mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: mine
+            ? [column, const SizedBox(width: 6), avatar]
+            : [avatar, const SizedBox(width: 6), column],
       ),
     );
   }
 }
 
-/// 底部聊天输入：表情 + 输入框「随便说点啥吧...」+ 发送。
+/// 底部聊天输入条：表情 + 输入框 + 发送。
+///
+/// [onSend] 返回 true 表示消息已发出，输入框才清空；返回 false 时保留文字，
+/// 发送键变成「重试」，避免弱网下丢消息。
 class TogetherComposer extends StatefulWidget {
   const TogetherComposer({
     super.key,
     required this.onSend,
     this.enabled = true,
     this.hint,
+    this.compact = false,
   });
 
-  /// 返回 true 表示已发出 / 已本地展示，输入框才清空。
   final bool Function(String text) onSend;
   final bool enabled;
-
-  /// 自定义输入提示（重连 / 在线文案不同）。
   final String? hint;
+
+  /// 全屏聊天面板里用紧凑尺寸（无外边距、两行表情）。
+  final bool compact;
 
   @override
   State<TogetherComposer> createState() => _TogetherComposerState();
@@ -298,9 +343,30 @@ class TogetherComposer extends StatefulWidget {
 
 class _TogetherComposerState extends State<TogetherComposer> {
   static const _emojis = <String>[
-    '😀', '😂', '🥰', '😍', '😎', '🤔', '😭', '😅',
-    '🤣', '😡', '👍', '👏', '🙌', '❤️', '🔥', '🌹',
-    '🍿', '🎉', '👀', '😴', '🤯', '🤝', '💯', '✨',
+    '😀',
+    '😂',
+    '🥰',
+    '😍',
+    '😎',
+    '🤔',
+    '😭',
+    '😅',
+    '🤣',
+    '😡',
+    '👍',
+    '👏',
+    '🙌',
+    '❤️',
+    '🔥',
+    '🌹',
+    '🍿',
+    '🎉',
+    '👀',
+    '😴',
+    '🤯',
+    '🤝',
+    '💯',
+    '✨',
   ];
 
   final TextEditingController _text = TextEditingController();
@@ -363,8 +429,8 @@ class _TogetherComposerState extends State<TogetherComposer> {
         _failed = false;
         _failedText = '';
       });
+      _focus.requestFocus();
     } else {
-      // 发送失败：输入内容原样保留，按钮变成「重试」。
       setState(() {
         _failed = true;
         _failedText = text;
@@ -375,34 +441,47 @@ class _TogetherComposerState extends State<TogetherComposer> {
 
   @override
   Widget build(BuildContext context) {
+    final compact = widget.compact;
     final hasText = _text.text.trim().isNotEmpty;
     final canSend = widget.enabled && hasText;
+    final actionSize = compact ? 30.0 : 38.0;
+    final emojis = compact ? _emojis.take(16).toList() : _emojis;
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-      padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
-      decoration: togetherGlass(radius: 25, opacity: .8),
+      margin: compact
+          ? const EdgeInsets.fromLTRB(6, 2, 6, 6)
+          : const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      padding: EdgeInsets.all(compact ? 4 : 6),
+      decoration: togetherGlass(radius: compact ? 16 : 25, opacity: .8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (_emojiOpen)
             Padding(
-              padding: const EdgeInsets.fromLTRB(6, 4, 6, 6),
+              padding: EdgeInsets.fromLTRB(
+                compact ? 2 : 6,
+                compact ? 2 : 4,
+                compact ? 2 : 6,
+                compact ? 3 : 6,
+              ),
               child: Wrap(
-                spacing: 2,
-                runSpacing: 2,
+                spacing: compact ? 1 : 2,
+                runSpacing: compact ? 1 : 2,
                 children: [
-                  for (final emoji in _emojis)
+                  for (final emoji in emojis)
                     GestureDetector(
                       onTap: () => _insert(emoji),
                       child: Container(
-                        width: 34,
-                        height: 32,
+                        width: compact ? 26 : 34,
+                        height: compact ? 24 : 32,
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
                           color: Colors.white.withOpacity(.42),
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(9),
                         ),
-                        child: Text(emoji, style: const TextStyle(fontSize: 19)),
+                        child: Text(
+                          emoji,
+                          style: TextStyle(fontSize: compact ? 14 : 19),
+                        ),
                       ),
                     ),
                 ],
@@ -415,8 +494,8 @@ class _TogetherComposerState extends State<TogetherComposer> {
                 behavior: HitTestBehavior.opaque,
                 onTap: _toggleEmoji,
                 child: Container(
-                  width: 38,
-                  height: 38,
+                  width: actionSize,
+                  height: actionSize,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     color: _emojiOpen
@@ -426,21 +505,21 @@ class _TogetherComposerState extends State<TogetherComposer> {
                   ),
                   child: Icon(
                     Icons.emoji_emotions_outlined,
-                    size: 21,
+                    size: compact ? 17 : 21,
                     color: widget.enabled
                         ? (_emojiOpen ? Fx.accent : Fx.ink.withOpacity(.72))
                         : Fx.sub.withOpacity(.4),
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
+              SizedBox(width: compact ? 2 : 4),
               Expanded(
                 child: TextField(
                   controller: _text,
                   focusNode: _focus,
                   enabled: widget.enabled,
                   minLines: 1,
-                  maxLines: 4,
+                  maxLines: compact ? 2 : 4,
                   textInputAction: TextInputAction.send,
                   onSubmitted: (_) => _submit(),
                   onTap: () {
@@ -454,34 +533,39 @@ class _TogetherComposerState extends State<TogetherComposer> {
                     maxLength,
                   }) =>
                       null,
-                  style: const TextStyle(fontSize: 13.5, color: Fx.ink),
+                  style: TextStyle(
+                    fontSize: compact ? 12 : 13.5,
+                    color: Fx.ink,
+                  ),
                   decoration: InputDecoration(
                     isDense: true,
                     counterText: '',
                     hintText: widget.hint ??
-                        (widget.enabled ? '随便说点啥吧...' : '正在重连，稍后可以聊天'),
+                        (widget.enabled ? '说点什么…' : '正在重连，稍后可以聊天'),
                     hintStyle: TextStyle(
-                      fontSize: 13,
+                      fontSize: compact ? 11.5 : 13,
                       color: Fx.sub.withOpacity(.7),
                     ),
                     border: InputBorder.none,
-                    contentPadding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: compact ? 7 : 10,
+                    ),
                   ),
                 ),
               ),
               if (_failed) ...[
-                const SizedBox(width: 4),
+                SizedBox(width: compact ? 2 : 4),
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: _submit,
                   child: Container(
-                    height: 38,
-                    padding: const EdgeInsets.symmetric(horizontal: 9),
+                    height: actionSize,
+                    padding: EdgeInsets.symmetric(horizontal: compact ? 6 : 9),
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
                       color: Fx.accent.withOpacity(.12),
-                      borderRadius: BorderRadius.circular(19),
+                      borderRadius: BorderRadius.circular(actionSize / 2),
                       border: Border.all(color: Fx.accent.withOpacity(.22)),
                     ),
                     child: Row(
@@ -492,26 +576,29 @@ class _TogetherComposerState extends State<TogetherComposer> {
                           size: 15,
                           color: Fx.accent,
                         ),
-                        const SizedBox(width: 3),
-                        const Text(
-                          '重试',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w700,
-                            color: Fx.accent,
+                        if (!compact) ...[
+                          const SizedBox(width: 3),
+                          const Text(
+                            '重试',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: Fx.accent,
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
                   ),
                 ),
               ],
-              const SizedBox(width: 4),
+              SizedBox(width: compact ? 2 : 4),
               GestureDetector(
+                behavior: HitTestBehavior.opaque,
                 onTap: (_failed || canSend) ? _submit : null,
                 child: Container(
-                  width: 38,
-                  height: 38,
+                  width: actionSize,
+                  height: actionSize,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     gradient: (_failed || canSend) ? Fx.brand : null,
@@ -533,7 +620,7 @@ class _TogetherComposerState extends State<TogetherComposer> {
                     _failed
                         ? Icons.refresh_rounded
                         : Icons.arrow_upward_rounded,
-                    size: 21,
+                    size: compact ? 17 : 21,
                     color: (_failed || canSend)
                         ? Colors.white
                         : Fx.sub.withOpacity(.5),

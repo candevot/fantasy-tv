@@ -4,6 +4,23 @@ import 'package:flutter/services.dart';
 import '../api.dart';
 import '../theme.dart';
 
+/// 一起看房间页统一的时间常量。
+///
+/// 覆盖控件 3 秒自动隐藏（房间页规格；播放页的 5 秒常量不在这里复用）；
+/// 锁屏后解锁钮同样只亮 3 秒。
+const Duration togetherControlsAutoHide = Duration(seconds: 3);
+const Duration togetherUnlockAutoHide = Duration(seconds: 3);
+
+/// 全屏一起看沿用播放器全屏的 5 秒自动隐藏；竖屏房间视频区用 3 秒。
+const Duration togetherFullscreenControlsAutoHide = Duration(seconds: 5);
+
+/// 竖屏房间视频区的固定高度：屏高 32%，不随键盘变化，最低 220dp。
+const double togetherRoomVideoRatio = .32;
+const double togetherRoomVideoMin = 220;
+
+/// 房间聊天空态文案（规格固定）。
+const String togetherChatEmptyText = '暂无消息，说点什么吧';
+
 /// 封面地址归一：服务器可能返回相对地址（/api/proxy?u=…），
 /// data URI 和已是绝对地址的保持原样。
 String togetherCoverUrl(String cover) {
@@ -77,7 +94,8 @@ BoxDecoration togetherGlass({
   return BoxDecoration(
     color: base.withOpacity(opacity),
     borderRadius: BorderRadius.circular(radius),
-    border: border ?? Border.all(color: Colors.white.withOpacity(.92), width: 1),
+    border:
+        border ?? Border.all(color: Colors.white.withOpacity(.92), width: 1),
     boxShadow: [
       BoxShadow(
         color: const Color(0xFF50729F).withOpacity(.10),
@@ -115,7 +133,8 @@ class TogetherCircleButton extends StatelessWidget {
       child: Container(
         width: size,
         height: size,
-        decoration: togetherGlass(radius: size / 2, opacity: active ? .92 : .72),
+        decoration:
+            togetherGlass(radius: size / 2, opacity: active ? .92 : .72),
         child: Icon(
           icon,
           size: iconSize,
@@ -240,6 +259,9 @@ class TogetherAvatar extends StatelessWidget {
             avatar,
             width: size,
             height: size,
+            cacheWidth: (size * MediaQuery.devicePixelRatioOf(context))
+                .round()
+                .clamp(24, 512),
             fit: BoxFit.cover,
             errorBuilder: (_, __, ___) => _fallback(initial, color),
           )
@@ -281,7 +303,8 @@ class TogetherAvatar extends StatelessWidget {
                     ),
                   ],
                 ),
-                child: const Text('👑', style: TextStyle(fontSize: 10, height: 1)),
+                child:
+                    const Text('👑', style: TextStyle(fontSize: 10, height: 1)),
               ),
             ),
         ],
@@ -341,6 +364,11 @@ class TogetherCover extends StatelessWidget {
             url,
             width: width,
             height: height,
+            cacheWidth: width == null
+                ? null
+                : (width! * MediaQuery.devicePixelRatioOf(context))
+                    .round()
+                    .clamp(48, 2048),
             fit: BoxFit.cover,
             errorBuilder: (_, __, ___) => _fallback(),
             loadingBuilder: (_, child, progress) =>
@@ -360,7 +388,10 @@ class TogetherCover extends StatelessWidget {
       height: height,
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: [color, Color.lerp(color, const Color(0xFF1B2430), .35) ?? color],
+          colors: [
+            color,
+            Color.lerp(color, const Color(0xFF1B2430), .35) ?? color
+          ],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
