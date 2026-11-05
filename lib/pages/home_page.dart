@@ -8,7 +8,7 @@ import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
-import 'live_detail_page.dart';
+import 'live_groups_page.dart';
 import 'search_page.dart';
 import 'together_page.dart';
 
@@ -56,9 +56,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _liveLoading = false;
   bool _liveLoaded = false;
 
-  /// 首页直播 Tab 直接展示频道（分组只作为副标题），点一次就进详情。
-  List<LiveChannel> get _liveChannels =>
-      <LiveChannel>[for (final group in _liveGroups) ...group.channels];
+  /// 直播首屏搜索：本地过滤全部频道，输入即出结果。
+  final TextEditingController _liveSearchCtrl = TextEditingController();
+  String _liveQuery = '';
+
+  List<LiveSection> get _liveSections => buildLiveSections(_liveGroups);
+
+  List<LiveChannel> get _liveAllChannels => <LiveChannel>[
+    for (final section in _liveSections) ...section.channels,
+  ];
 
   @override
   void initState() {
@@ -108,6 +114,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _timer?.cancel();
     _bannerCtrl.dispose();
     _bannerPage.dispose();
+    _liveSearchCtrl.dispose();
     super.dispose();
   }
 
@@ -159,13 +166,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final m = ScaffoldMessenger.maybeOf(context);
     if (m == null) return;
     m.hideCurrentSnackBar();
-    m.showSnackBar(SnackBar(
-      content: Text(msg),
-      behavior: SnackBarBehavior.floating,
-      backgroundColor: const Color(0xEE1B2430),
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 96),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-    ));
+    m.showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xEE1B2430),
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
+    );
   }
 
   /// 首页只预热前 6 张海报封面，其余（含横幅）按需懒加载。
@@ -185,8 +194,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // 与 FxSectionRow 默认值一致：horizontalPadding 16、gap 8、visibleCount 4。
       final posterWidth = (contentWidth - 16 * 2 - 8 * 3) / 4;
       if (!posterWidth.isFinite || posterWidth <= 0) return;
-      final cacheWidth =
-          (posterWidth * media.devicePixelRatio).round().clamp(64, 4096);
+      final cacheWidth = (posterWidth * media.devicePixelRatio).round().clamp(
+        64,
+        4096,
+      );
       final seen = <String>{};
       var count = 0;
       for (final cover in covers) {
@@ -196,11 +207,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final provider = fxImageProvider(cover, cacheWidth: cacheWidth);
         if (provider == null) continue;
         count++;
-        unawaited(precacheImage(
-          provider,
-          context,
-          onError: (Object error, StackTrace? stackTrace) {},
-        ));
+        unawaited(
+          precacheImage(
+            provider,
+            context,
+            onError: (Object error, StackTrace? stackTrace) {},
+          ),
+        );
       }
     });
   }
@@ -246,6 +259,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _selectChannel(String key) {
     if (_channel == key) return;
+    if (key == 'live' && _liveQuery.isNotEmpty) {
+      _liveSearchCtrl.clear();
+      _liveQuery = '';
+    }
     setState(() {
       _channel = key;
       _bannerPage.value = 0;
@@ -270,15 +287,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _openSearch({bool ai = false}) {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => SearchPage(openAi: ai)),
-    );
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => SearchPage(openAi: ai)));
   }
 
   void _openDetail(String id) {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => DetailPage(id: id)),
-    );
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => DetailPage(id: id)));
   }
 
   void _openCategory(String type, String title) {
@@ -369,8 +386,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         backgroundColor: Colors.white,
         onRefresh: () => _channel == 'live' ? _loadLive() : _load(force: true),
         child: CustomScrollView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           physics: const AlwaysScrollableScrollPhysics(
-              parent: BouncingScrollPhysics()),
+            parent: BouncingScrollPhysics(),
+          ),
           slivers: [
             SliverToBoxAdapter(child: _header()),
             ..._body(data),
@@ -437,11 +456,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 ),
               ),
               const SizedBox(height: 8),
-              const Text('已经到底啦 · 发现更多好片',
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w400,
-                      color: Color(0xFFA6B1C2))),
+              const Text(
+                '已经到底啦 · 发现更多好片',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                  color: Color(0xFFA6B1C2),
+                ),
+              ),
             ],
           ),
         ),
@@ -449,14 +471,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ];
   }
 
-  /// 直播频道：2 列卡片，点频道直接进入直播详情；接口为空 / 失败时展示
-  /// 占位空态，不影响其它频道。
+  /// 直播首屏：搜索 + 固定顺序的分组卡；输入台名时直接出频道结果。
   List<Widget> _liveBody() {
-    final channels = _liveChannels;
     if (_liveLoading && !_liveLoaded) {
       return const [SliverToBoxAdapter(child: _HomeSkeleton())];
     }
-    if (channels.isEmpty) {
+    final sections = _liveSections;
+    if (sections.isEmpty) {
       return [
         SliverFillRemaining(
           hasScrollBody: false,
@@ -470,33 +491,224 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ];
     }
+
+    final query = _liveQuery.trim();
+    final matches = query.isEmpty
+        ? const <LiveChannel>[]
+        : <LiveChannel>[
+            for (final channel in _liveAllChannels)
+              if (liveChannelMatches(channel, query)) channel,
+          ];
     return [
-      SliverPadding(
-        padding: const EdgeInsets.fromLTRB(16, 10, 16, 24),
-        sliver: SliverGrid(
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2,
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-            childAspectRatio: 1.05,
+      SliverToBoxAdapter(child: _liveSearchBar()),
+      if (query.isEmpty) ...[
+        SliverToBoxAdapter(child: _liveSectionHeader(sections)),
+        _liveSectionGrid(sections),
+      ] else if (matches.isEmpty)
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: FxEmptyView(
+            icon: Icons.search_off_rounded,
+            title: '没找到「$query」',
+            subtitle: '换个台名试试，如 CCTV5、湖南',
           ),
-          delegate: SliverChildBuilderDelegate(
-            (ctx, i) {
-              final channel = channels[i];
-              return _LiveChannelCard(
-                channel: channel,
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => LiveDetailPage(channel: channel),
+        )
+      else ...[
+        SliverToBoxAdapter(child: _liveSearchHeader(matches.length)),
+        _liveChannelGrid(matches),
+      ],
+    ];
+  }
+
+  void _clearLiveSearch() {
+    if (_liveQuery.isEmpty) return;
+    _liveSearchCtrl.clear();
+    setState(() => _liveQuery = '');
+    FocusScope.of(context).unfocus();
+  }
+
+  Widget _liveSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Container(
+        height: 44,
+        padding: const EdgeInsets.only(left: 13, right: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: .72),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: Colors.white),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF50729F).withValues(alpha: .08),
+              blurRadius: 18,
+              offset: const Offset(0, 6),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.search_rounded, size: 19, color: Fx.sub),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _liveSearchCtrl,
+                textInputAction: TextInputAction.search,
+                textAlignVertical: TextAlignVertical.center,
+                cursorColor: Fx.accent,
+                style: const TextStyle(fontSize: 13, color: Fx.ink),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.zero,
+                  hintText: '搜索台名，如 CCTV5 / 湖南',
+                  hintStyle: TextStyle(
+                    fontSize: 12.5,
+                    color: Color(0xFF9AA6B8),
                   ),
                 ),
-              );
-            },
-            childCount: channels.length,
-          ),
+                onChanged: (value) {
+                  final query = value.trim();
+                  if (query == _liveQuery) return;
+                  setState(() => _liveQuery = query);
+                },
+              ),
+            ),
+            if (_liveQuery.isNotEmpty)
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _clearLiveSearch,
+                child: const SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: Icon(Icons.close_rounded, size: 17, color: Fx.sub),
+                ),
+              ),
+          ],
         ),
       ),
-    ];
+    );
+  }
+
+  Widget _liveSectionHeader(List<LiveSection> sections) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          const Text(
+            '频道分组',
+            style: TextStyle(
+              fontSize: 16.5,
+              height: 1.2,
+              fontWeight: FontWeight.w800,
+              color: Fx.ink,
+            ),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            '${sections.length} 组',
+            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+          ),
+          const Spacer(),
+          Text(
+            '${_liveAllChannels.length} 台',
+            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _liveSearchHeader(int count) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          const Text(
+            '搜索结果',
+            style: TextStyle(
+              fontSize: 16.5,
+              height: 1.2,
+              fontWeight: FontWeight.w800,
+              color: Fx.ink,
+            ),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            '$count 台',
+            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+          ),
+          const Spacer(),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _clearLiveSearch,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+              child: Text(
+                '清空',
+                style: TextStyle(fontSize: 11.5, color: Fx.sub),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _liveSectionGrid(List<LiveSection> sections) {
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+      sliver: SliverLayoutBuilder(
+        builder: (context, constraints) {
+          final columns = constraints.crossAxisExtent >= 560 ? 3 : 2;
+          return SliverGrid(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              childAspectRatio: columns == 3 ? 1.45 : 1.25,
+            ),
+            delegate: SliverChildBuilderDelegate(
+              (context, i) => LiveGroupCard(
+                section: sections[i],
+                onTap: () => openLiveSection(context, sections[i]),
+              ),
+              childCount: sections.length,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _liveChannelGrid(List<LiveChannel> channels) {
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+      sliver: SliverLayoutBuilder(
+        builder: (context, constraints) {
+          final columns = constraints.crossAxisExtent >= 700 ? 3 : 2;
+          final itemWidth =
+              (constraints.crossAxisExtent - 12 * (columns - 1)) / columns;
+          final extent = (itemWidth - 12) * 9 / 16 + 58;
+          return SliverGrid(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              mainAxisExtent: extent,
+            ),
+            delegate: SliverChildBuilderDelegate(
+              (context, i) => LiveChannelCard(
+                channel: channels[i],
+                onTap: () => openLiveChannel(context, channels[i]),
+              ),
+              childCount: channels.length,
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Widget _header() {
@@ -537,29 +749,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text('幻想影视',
-                        style: TextStyle(
-                            fontSize: 20,
-                            height: 1.2,
-                            fontWeight: FontWeight.w600,
-                            color: Fx.ink)),
+                    const Text(
+                      '幻想影视',
+                      style: TextStyle(
+                        fontSize: 20,
+                        height: 1.2,
+                        fontWeight: FontWeight.w600,
+                        color: Fx.ink,
+                      ),
+                    ),
                     const SizedBox(height: 2),
-                    Text('高画 · 免费 · 无广',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w400,
-                            color: Fx.sub)),
+                    Text(
+                      '高画 · 免费 · 无广',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w400,
+                        color: Fx.sub,
+                      ),
+                    ),
                   ],
                 ),
               ),
               const SizedBox(width: 8),
               GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const TogetherPage()),
-                ),
+                onTap: () => Navigator.of(
+                  context,
+                ).push(MaterialPageRoute(builder: (_) => const TogetherPage())),
                 child: Tooltip(
                   message: '一起看',
                   child: Semantics(
@@ -574,7 +792,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         border: Border.all(color: Colors.white),
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(0xFF50729F).withValues(alpha: .08),
+                            color: const Color(
+                              0xFF50729F,
+                            ).withValues(alpha: .08),
                             blurRadius: 12,
                             offset: const Offset(0, 4),
                           ),
@@ -583,14 +803,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.groups_rounded,
-                              size: 16, color: Fx.accent),
+                          Icon(
+                            Icons.groups_rounded,
+                            size: 16,
+                            color: Fx.accent,
+                          ),
                           SizedBox(width: 5),
-                          Text('一起看',
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: Fx.ink)),
+                          Text(
+                            '一起看',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Fx.ink,
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -635,11 +861,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               onTap: () => _openSearch(),
               child: const Align(
                 alignment: Alignment.centerLeft,
-                child: Text('搜索片名、演员、导演',
-                    style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w400,
-                        color: Fx.sub)),
+                child: Text(
+                  '搜索片名、演员、导演',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w400,
+                    color: Fx.sub,
+                  ),
+                ),
               ),
             ),
           ),
@@ -655,14 +884,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               child: const Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.auto_awesome_rounded,
-                      size: 12, color: Colors.white),
+                  Icon(
+                    Icons.auto_awesome_rounded,
+                    size: 12,
+                    color: Colors.white,
+                  ),
                   SizedBox(width: 3),
-                  Text('AI 找片',
-                      style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white)),
+                  Text(
+                    'AI 找片',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -785,25 +1020,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   right: 10,
                                   child: Container(
                                     padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 4),
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
                                     decoration: BoxDecoration(
-                                      color: Colors.black.withValues(alpha: .32),
+                                      color: Colors.black.withValues(
+                                        alpha: .32,
+                                      ),
                                       borderRadius: BorderRadius.circular(12),
                                       border: Border.all(
-                                          color: Colors.white.withValues(alpha: .24)),
+                                        color: Colors.white.withValues(
+                                          alpha: .24,
+                                        ),
+                                      ),
                                     ),
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        const Icon(Icons.star_rounded,
-                                            size: 12, color: Fx.gold),
+                                        const Icon(
+                                          Icons.star_rounded,
+                                          size: 12,
+                                          color: Fx.gold,
+                                        ),
                                         const SizedBox(width: 2),
                                         Text(
                                           b.rating.toStringAsFixed(1),
                                           style: const TextStyle(
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w600,
-                                              color: Colors.white),
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w600,
+                                            color: Colors.white,
+                                          ),
                                         ),
                                       ],
                                     ),
@@ -819,16 +1065,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   children: [
                                     Container(
                                       padding: const EdgeInsets.symmetric(
-                                          horizontal: 7, vertical: 2),
+                                        horizontal: 7,
+                                        vertical: 2,
+                                      ),
                                       decoration: BoxDecoration(
                                         gradient: Fx.brand,
                                         borderRadius: BorderRadius.circular(6),
                                       ),
-                                      child: const Text('正在热播',
-                                          style: TextStyle(
-                                              fontSize: 9,
-                                              fontWeight: FontWeight.w600,
-                                              color: Colors.white)),
+                                      child: const Text(
+                                        '正在热播',
+                                        style: TextStyle(
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.w600,
+                                          color: Colors.white,
+                                        ),
+                                      ),
                                     ),
                                     const SizedBox(height: 6),
                                     Text(
@@ -836,10 +1087,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: const TextStyle(
-                                          fontSize: 20,
-                                          height: 1.2,
-                                          fontWeight: FontWeight.w600,
-                                          color: Colors.white),
+                                        fontSize: 20,
+                                        height: 1.2,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.white,
+                                      ),
                                     ),
                                     if (b.desc.isNotEmpty) ...[
                                       const SizedBox(height: 4),
@@ -848,11 +1100,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         maxLines: 2,
                                         overflow: TextOverflow.ellipsis,
                                         style: TextStyle(
-                                            fontSize: 12,
-                                            height: 1.45,
-                                            fontWeight: FontWeight.w400,
-                                            color:
-                                                Colors.white.withValues(alpha: .84)),
+                                          fontSize: 12,
+                                          height: 1.45,
+                                          fontWeight: FontWeight.w400,
+                                          color: Colors.white.withValues(
+                                            alpha: .84,
+                                          ),
+                                        ),
                                       ),
                                     ],
                                   ],
@@ -874,23 +1128,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           valueListenable: _bannerPage,
           builder: (context, index, _) => Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(
-              banners.length,
-              (i) {
-                final on = i == index % banners.length;
-                return AnimatedContainer(
-                  duration: const Duration(milliseconds: 240),
-                  width: on ? 18 : 6,
-                  height: 6,
-                  margin: const EdgeInsets.symmetric(horizontal: 3),
-                  decoration: BoxDecoration(
-                    gradient: on ? Fx.brand : null,
-                    color: on ? null : const Color(0xFFCBD6E6),
-                    borderRadius: BorderRadius.circular(3),
-                  ),
-                );
-              },
-            ),
+            children: List.generate(banners.length, (i) {
+              final on = i == index % banners.length;
+              return AnimatedContainer(
+                duration: const Duration(milliseconds: 240),
+                width: on ? 18 : 6,
+                height: 6,
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                decoration: BoxDecoration(
+                  gradient: on ? Fx.brand : null,
+                  color: on ? null : const Color(0xFFCBD6E6),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              );
+            }),
           ),
         ),
       ],
@@ -930,139 +1181,6 @@ class _HomeSkeleton extends StatelessWidget {
               const SizedBox(height: 22),
             ],
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 直播频道卡：封面（或渐变占位）+ 频道名 + 分组；点一次进直播详情。
-class _LiveChannelCard extends StatelessWidget {
-  const _LiveChannelCard({required this.channel, required this.onTap});
-
-  final LiveChannel channel;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final title = channel.title.trim().isEmpty ? '未命名频道' : channel.title.trim();
-    final group = channel.group.trim();
-    return RepaintBoundary(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.all(6),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: .72),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: Colors.white),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFF50729F).withValues(alpha: .08),
-                blurRadius: 14,
-                offset: const Offset(0, 5),
-              ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (channel.cover.trim().isEmpty)
-                      Container(
-                        decoration: BoxDecoration(
-                          gradient: Fx.brand,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Center(
-                          child: Icon(Icons.live_tv_rounded,
-                              color: Colors.white, size: 34),
-                        ),
-                      )
-                    else
-                      FxCover(
-                          url: channel.cover,
-                          title: title,
-                          radius: 10,
-                          showText: false),
-                    Positioned(
-                      top: 6,
-                      left: 6,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: .42),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.circle,
-                                size: 6, color: Color(0xFFFF5A5A)),
-                            SizedBox(width: 3),
-                            Text(
-                              'LIVE',
-                              style: TextStyle(
-                                fontSize: 9,
-                                height: 1.1,
-                                fontWeight: FontWeight.w700,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    if (channel.lines.length > 1)
-                      Positioned(
-                        right: 6,
-                        bottom: 6,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: .46),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            '${channel.lines.length} 条线路',
-                            style: const TextStyle(
-                              fontSize: 9,
-                              height: 1.1,
-                              fontWeight: FontWeight.w600,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 7),
-              Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: Fx.ink,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                group.isEmpty ? '直播中' : group,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 10, color: Fx.sub),
-              ),
-            ],
-          ),
         ),
       ),
     );

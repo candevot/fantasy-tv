@@ -27,10 +27,17 @@ class LiveDetailPage extends StatefulWidget {
     super.key,
     required this.channel,
     this.initialLineId = '',
+    this.groupName = '',
+    this.playlist = const <LiveChannel>[],
   });
 
   final LiveChannel channel;
   final String initialLineId;
+
+  /// 分组播放模式：顶部标题显示「分组名 · N 台」，下方出现频道选集。
+  /// 为空时保持原来的单频道直播页。
+  final String groupName;
+  final List<LiveChannel> playlist;
 
   @override
   State<LiveDetailPage> createState() => _LiveDetailPageState();
@@ -54,11 +61,16 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   /// 切线路进行中：线路卡禁用，避免并发 open 出两个播放器。
   bool _switchingLine = false;
 
+  /// 分组选集里正在切台：切台期间忽略重复点击。
+  bool _switchingChannel = false;
+
   int _openSeq = 0;
   String _lastPlayerKey = '';
   Timer? _hideTimer;
 
   List<LiveLine> get _lines => _channel.lines;
+
+  bool get _hasPlaylist => widget.playlist.isNotEmpty;
 
   LiveLine? get _line {
     for (final line in _lines) {
@@ -143,7 +155,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         await sp.setBool('fav_live_$id', fav);
       }
     } catch (_) {}
-    if (!mounted) return;
+    if (!mounted || _channel.id != id) return;
     setState(() => _fav = fav);
   }
 
@@ -306,8 +318,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   Future<void> _switchLine(String lineId) async {
     // 并发锁：加载中连点线路会同时发起多次 open，先发起者被覆盖后
     // 容易漏释放，最坏两路直播同时出声。这里直接忽略重复请求。
-    if (_switchingLine) {
-      if (mounted) fxToast(context, '正在切换线路，请稍候');
+    if (_switchingLine || _switchingChannel) {
+      if (mounted) fxToast(context, '正在切换，请稍候');
       return;
     }
     if (lineId == _lineId && _error == null) return;
@@ -317,6 +329,58 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       await _open(lineId);
     } finally {
       _switchingLine = false;
+      if (mounted) {
+        setState(() {});
+        _touch();
+      }
+    }
+  }
+
+  /// 分组播放页里点选集：换台后重新拉流，线路列表跟着当前台更新。
+  Future<void> _switchChannel(LiveChannel channel) async {
+    if (_switchingChannel ||
+        _switchingLine ||
+        _releasedForTogether ||
+        channel.id == _channel.id) {
+      return;
+    }
+    _switchingChannel = true;
+    _hideTimer?.cancel();
+    setState(() {
+      _channel = channel;
+      _lineId = channel.lines.isEmpty ? '' : channel.lines.first.id;
+      _fav = false;
+      _loading = true;
+      _error = null;
+      _controls = true;
+    });
+    unawaited(_loadFav());
+    try {
+      var next = channel;
+      if (next.lines.isEmpty) {
+        try {
+          next = await Api.liveChannel(next.id) ?? next;
+        } catch (_) {}
+        if (!mounted) return;
+        if (!identical(next, channel)) {
+          setState(() {
+            _channel = next;
+            _lineId = next.lines.isEmpty ? '' : next.lines.first.id;
+          });
+        }
+      }
+      if (next.lines.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _loading = false;
+            _error = '该频道暂无可用直播线路';
+          });
+        }
+        return;
+      }
+      await _open(_lineId);
+    } finally {
+      _switchingChannel = false;
       if (mounted) {
         setState(() {});
         _touch();
@@ -365,9 +429,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         );
       } else {
         final list = await FxStore.read(FxStore.favoriteKey);
-        list.removeWhere(
-          (e) => '${e['id']}' == id && '${e['kind']}' == 'live',
-        );
+        list.removeWhere((e) => '${e['id']}' == id && '${e['kind']}' == 'live');
         await FxStore.write(FxStore.favoriteKey, list);
       }
     } catch (_) {}
@@ -389,8 +451,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       await Share.share(
         body,
         subject: name,
-        sharePositionOrigin:
-            box is RenderBox ? box.localToGlobal(Offset.zero) & box.size : null,
+        sharePositionOrigin: box is RenderBox
+            ? box.localToGlobal(Offset.zero) & box.size
+            : null,
       );
     } catch (_) {
       // 系统分享不可用时退回复制，保证地址能发出去。
@@ -419,10 +482,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       if (!mounted) return;
       final result = await Navigator.of(context).push<TogetherExitResult>(
         MaterialPageRoute(
-          builder: (_) => TogetherPage.live(
-            liveChannel: _channel,
-            liveLineId: _lineId,
-          ),
+          builder: (_) =>
+              TogetherPage.live(liveChannel: _channel, liveLineId: _lineId),
         ),
       );
       if (!mounted) return;
@@ -465,7 +526,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
                   padding: const EdgeInsets.only(bottom: 30),
                   children: [
                     _buildPlayer(),
+                    _buildMeta(),
                     _buildActions(),
+                    _buildChannels(),
                     _buildLines(),
                     _buildHint(),
                   ],
@@ -479,9 +542,17 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   }
 
   Widget _buildTopBar() {
-    final title =
-        _channel.title.trim().isEmpty ? '电视直播' : _channel.title.trim();
+    final channelTitle = _channel.title.trim().isEmpty
+        ? '电视直播'
+        : _channel.title.trim();
     final group = _channel.group.trim();
+    final groupName = widget.groupName.trim();
+    final title = _hasPlaylist
+        ? '${groupName.isEmpty ? '直播' : groupName} · ${widget.playlist.length} 台'
+        : channelTitle;
+    final subtitle = _hasPlaylist
+        ? '$channelTitle · 直播中'
+        : (group.isEmpty ? '直播中 · 无回看' : '$group · 直播中');
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
       child: Row(
@@ -517,7 +588,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  group.isEmpty ? '直播中 · 无回看' : '$group · 直播中',
+                  subtitle,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 11, color: Fx.sub),
@@ -661,8 +732,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
             child: Row(
               children: [
                 PGlassIcon(
-                  icon:
-                      playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  icon: playing
+                      ? Icons.pause_rounded
+                      : Icons.play_arrow_rounded,
                   size: 30,
                   iconSize: 19,
                   tint: .13,
@@ -696,6 +768,127 @@ class _LiveDetailPageState extends State<LiveDetailPage>
           ),
         ),
       ],
+    );
+  }
+
+  /// 「来源：直播」+ 当前频道，和剧集详情页的元信息位置一致。
+  Widget _buildMeta() {
+    final group = _channel.group.trim();
+    final channelTitle = _channel.title.trim().isEmpty
+        ? '电视直播'
+        : _channel.title.trim();
+    final text = _hasPlaylist
+        ? '当前频道：$channelTitle'
+        : (group.isEmpty ? '电视直播' : group);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: Fx.accent.withValues(alpha: .10),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Fx.accent.withValues(alpha: .18)),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.sensors_rounded, size: 12, color: Fx.accent),
+                SizedBox(width: 4),
+                Text(
+                  '来源：直播',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                    color: Fx.accent,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11.5, color: Fx.sub),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 分组页的「选集」：频道 = 剧集，点哪个台就切到哪个台。
+  Widget _buildChannels() {
+    if (!_hasPlaylist) return const SizedBox.shrink();
+    final channels = widget.playlist;
+    final columns = MediaQuery.sizeOf(context).width >= 600 ? 5 : 3;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          DetailSectionTitle(
+            title: '选集',
+            trailing: Text(
+              '${channels.length} 个频道 · 点选切换',
+              style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+            ),
+          ),
+          const SizedBox(height: 10),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            padding: EdgeInsets.zero,
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+              mainAxisExtent: 40,
+            ),
+            itemCount: channels.length,
+            itemBuilder: (context, i) {
+              final channel = channels[i];
+              final active = channel.id == _channel.id;
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _switchingChannel || active
+                    ? null
+                    : () => unawaited(_switchChannel(channel)),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  alignment: Alignment.center,
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  decoration: BoxDecoration(
+                    color: active
+                        ? Fx.accent.withValues(alpha: .12)
+                        : Colors.white.withValues(alpha: .72),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: active ? Fx.accent : Colors.white,
+                      width: active ? 1.4 : 1,
+                    ),
+                  ),
+                  child: Text(
+                    channel.title.trim().isEmpty ? '直播' : channel.title.trim(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: active ? FontWeight.w700 : FontWeight.w600,
+                      color: active ? Fx.accent : Fx.ink,
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
     );
   }
 
@@ -772,7 +965,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
                   subtitle: line.subtitle(i),
                   width: 94,
                   active: line.id == _lineId,
-                  onTap: _switchingLine
+                  onTap: _switchingLine || _switchingChannel
                       ? null
                       : () => unawaited(_switchLine(line.id)),
                 );
@@ -797,15 +990,18 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         ),
         child: Row(
           children: [
-            Icon(Icons.wifi_tethering_rounded,
-                size: 16, color: Color(0xFF39B7B0).withValues(alpha: .9)),
+            Icon(
+              Icons.wifi_tethering_rounded,
+              size: 16,
+              color: Color(0xFF39B7B0).withValues(alpha: .9),
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
                 line == null
                     ? '直播流会持续更新，暂时无法回看。'
                     : '${line.name.isEmpty ? line.qualityLabel : line.name} · '
-                        '直播流持续更新，没有进度条与回看。',
+                          '直播流持续更新，没有进度条与回看。',
                 style: const TextStyle(
                   fontSize: 11,
                   height: 1.5,
@@ -929,7 +1125,9 @@ class _LiveBadge extends StatelessWidget {
       decoration: BoxDecoration(
         color: const Color(0xFFFF4D4F).withValues(alpha: .13),
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: const Color(0xFFFF6B6B).withValues(alpha: .45)),
+        border: Border.all(
+          color: const Color(0xFFFF6B6B).withValues(alpha: .45),
+        ),
       ),
       child: const Row(
         mainAxisSize: MainAxisSize.min,
