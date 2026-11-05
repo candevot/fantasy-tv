@@ -262,6 +262,9 @@ class FxPlayer implements Listenable {
   /// 播放器真实播放状态（libmpv 当前值），按钮图标以此为准。
   bool get isPlaying => _player.state.playing;
 
+  /// libmpv 当前真实倍速；跨页面交接时以此为准，避免本地状态落后。
+  double get rate => _player.state.rate;
+
   /// 播放状态流；页面可用它驱动播放 / 暂停图标。
   Stream<bool> get playingStream => _player.stream.playing;
 

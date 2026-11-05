@@ -20,6 +20,8 @@ class FullPlayerResult {
     required this.position,
     required this.playing,
     this.info,
+    this.rate = 1.0,
+    this.qualityKey,
   });
 
   /// 退出时的集数
@@ -33,6 +35,12 @@ class FullPlayerResult {
 
   /// 退出时对应的播放信息（全屏内切集后用于同步竖屏）
   final PlayInfo? info;
+
+  /// 退出时的播放倍速，交回竖屏继续使用
+  final double rate;
+
+  /// 退出时选择的清晰度 key；null = 自动
+  final String? qualityKey;
 }
 
 /// 全屏画面适配档位。
@@ -62,6 +70,8 @@ class FullPlayerPage extends StatefulWidget {
     this.playInfo,
     this.episodes = const <Episode>[],
     this.lineName = '',
+    this.rate = 1.0,
+    this.qualityKey,
   });
 
   /// 竖屏播放页正在使用的播放器实例（全屏直接复用）
@@ -80,6 +90,12 @@ class FullPlayerPage extends StatefulWidget {
 
   /// 线路名（仅用于设置面板展示）
   final String lineName;
+
+  /// 竖屏进入全屏时的真实倍速（来自 player.state.rate）
+  final double rate;
+
+  /// 竖屏上次在全屏选择的清晰度，重进时保持选中
+  final String? qualityKey;
 
   @override
   State<FullPlayerPage> createState() => _FullPlayerPageState();
@@ -112,6 +128,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   late List<Episode> _episodes;
 
   int _loadToken = 0;
+
+  /// controller 实际已经打开的集；进度只写这一集，loading 时不写。
+  int? _loadedEp;
+
   bool _loading = false;
   bool _error = false;
   String _errorText = '';
@@ -199,8 +219,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     final c = widget.player;
     _controller = c;
     _info = widget.playInfo;
+    _qualityKey = widget.qualityKey;
+    _rate = widget.rate > 0 ? widget.rate : (c.rate > 0 ? c.rate : 1.0);
+    _loadedEp = c.value.isInitialized ? _ep : null;
     _loading = !c.value.isInitialized;
     c.addListener(_onVideoValue);
+    if (c.value.isInitialized && (c.rate - _rate).abs() > .01) {
+      unawaited(_applyRate(_rate));
+    }
 
     WidgetsBinding.instance.addObserver(this);
     unawaited(_enterImmersive());
@@ -287,6 +313,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     unawaited(c.pause());
     setState(() {
       _loading = true;
+      _loadedEp = null;
       _error = false;
       _errorText = '';
       _ended = false;
@@ -348,14 +375,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           await c.seekTo(Duration(milliseconds: (start * 1000).round()));
         }
         await c.setLooping(false);
-        if (_rate != 1.0) {
-          try {
-            await c.setRate(_rate);
-          } catch (_) {}
-        }
+        try {
+          await c.setRate(_rate);
+        } catch (_) {}
         if (!mounted || token != _loadToken) return;
         await c.play();
         if (!mounted || token != _loadToken) return;
+        _loadedEp = _ep;
         setState(() {
           _loading = false;
           _error = false;
@@ -388,7 +414,39 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     fxToast(context, '当前线路播放失败，可返回竖屏切换线路');
   }
 
+  /// 用同一播放器实例打开一个地址，并恢复进度 / 倍速 / 播放状态。
+  /// open 或 play 抛出的异常都在这里兜住，返回是否成功。
+  Future<bool> _openSource(
+    String url, {
+    required Map<String, String> headers,
+    required Duration resume,
+    required bool wasPlaying,
+  }) async {
+    final c = _controller;
+    if (c == null) return false;
+    try {
+      await c.open(url, headers: headers);
+      if (!mounted) return false;
+      final duration = c.value.duration;
+      var target = resume;
+      if (duration > Duration.zero &&
+          target >= duration - const Duration(milliseconds: 1500)) {
+        target = Duration.zero;
+      }
+      if (target > Duration.zero) await c.seekTo(target);
+      await c.setLooping(false);
+      try {
+        await c.setRate(_rate);
+      } catch (_) {}
+      if (wasPlaying) await c.play();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 切换清晰度：真正换 networkUrl，并恢复切换前的进度 / 倍速 / 播放状态。
+  /// 新清晰度失败时回退打开原来的播放地址；连回退也失败才进入错误态。
   Future<void> _selectQuality(String? key) async {
     if (_loading) {
       fxToast(context, '正在加载，请稍候');
@@ -440,6 +498,16 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       fxToast(context, '播放器尚未就绪，请稍后再试');
       return;
     }
+    final oldQuality = _qualityKey;
+    String? oldUrl;
+    if (oldQuality != null) {
+      for (final q in list) {
+        if (q.key == oldQuality && q.url.trim().isNotEmpty) {
+          oldUrl = q.url.trim();
+          break;
+        }
+      }
+    }
     final wasPlaying = c.value.isPlaying;
     final resume = c.value.position;
 
@@ -460,35 +528,55 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     var ok = false;
     for (final url in urls) {
       if (!mounted || token != _loadToken) return;
-      try {
-        // 复用同一个播放器实例，只换地址，切清晰度后仍可交回竖屏继续用。
-        await c.open(url, headers: info.headers);
-        if (!mounted || token != _loadToken) return;
-        final duration = c.value.duration;
-        var target = resume;
-        if (duration > Duration.zero &&
-            target >= duration - const Duration(milliseconds: 1500)) {
-          target = Duration.zero;
-        }
-        if (target > Duration.zero) await c.seekTo(target);
-        await c.setLooping(false);
-        try {
-          await c.setRate(_holding2x ? 2.0 : _rate);
-        } catch (_) {}
-        if (wasPlaying) await c.play();
+      // 复用同一个播放器实例，只换地址，切清晰度后仍可交回竖屏继续用。
+      if (await _openSource(
+        url,
+        headers: info.headers,
+        resume: resume,
+        wasPlaying: wasPlaying,
+      )) {
         ok = true;
         break;
-      } catch (_) {
-        // 换下一条地址继续尝试
       }
     }
 
     if (!mounted || token != _loadToken) return;
     if (!ok) {
-      setState(() => _loading = false);
-      if (wasPlaying) unawaited(c.play());
+      // open 已经打断了原片源：必须把原来的地址重新打开并 seek 回原进度，
+      // 否则就是黑屏且不报错。回退也失败才置错误态，让用户点重试。
+      final fallback = <String>[];
+      if (oldUrl != null) fallback.add(oldUrl);
+      for (final u in <String>[info.url, ...info.backup]) {
+        final url = u.trim();
+        if (url.isNotEmpty && !fallback.contains(url)) fallback.add(url);
+      }
+      var restored = false;
+      var restoredKey = oldUrl == null ? null : oldQuality;
+      for (final url in fallback) {
+        if (!mounted || token != _loadToken) return;
+        if (await _openSource(
+          url,
+          headers: info.headers,
+          resume: resume,
+          wasPlaying: wasPlaying,
+        )) {
+          restored = true;
+          if (oldUrl == null || url != oldUrl) restoredKey = null;
+          break;
+        }
+      }
+      if (!mounted || token != _loadToken) return;
+      setState(() {
+        _loading = false;
+        _qualityKey = restored ? restoredKey : oldQuality;
+        _controls = true;
+        if (!restored) {
+          _error = true;
+          _errorText = '切换清晰度失败，播放器需要重试';
+        }
+      });
       _wake();
-      fxToast(context, '切换清晰度失败，请重试');
+      fxToast(context, restored ? '切换清晰度失败，已恢复原清晰度' : '切换清晰度失败，请重试');
       return;
     }
 
@@ -504,24 +592,29 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _showSeekHint('清晰度：$_qualityLabel');
   }
 
-  Future<double> _saveProgress() async {
+  Future<double> _saveProgress({bool ended = false}) async {
+    if (_loading || _error) return 0;
     final c = _controller;
-    if (c == null || !c.value.isInitialized) return 0;
+    final ep = _loadedEp;
+    if (c == null || ep == null || !c.value.isInitialized) return 0;
     final v = c.value;
-    var seconds = v.position.inMilliseconds / 1000.0;
-    if (v.duration.inMilliseconds > 0 &&
+    var seconds = ended ? 0.0 : v.position.inMilliseconds / 1000.0;
+    if (!ended &&
+        v.duration.inMilliseconds > 0 &&
         v.position.inMilliseconds >= v.duration.inMilliseconds - 1500) {
       seconds = 0;
     }
-    await fxSaveProgress(widget.videoId, _ep, seconds);
+    await fxSaveProgress(widget.videoId, ep, seconds);
     return seconds;
   }
 
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
+    // loading 期间的错误交给 _bootstrap / _openSource 的 try/catch 处理。
+    if (_loading || _error) return;
     final v = c.value;
-    if (v.hasError && !_error) {
+    if (v.hasError) {
       setState(() {
         _loading = false;
         _error = true;
@@ -531,7 +624,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return;
     }
     if (!v.isInitialized) return;
-    if (_loading) setState(() => _loading = false);
     if (!v.isCompleted) {
       _ended = false;
       return;
@@ -542,7 +634,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Future<void> _handleEnded() async {
-    await fxSaveProgress(widget.videoId, _ep, 0);
+    await _saveProgress(ended: true);
     if (!mounted) return;
     final next = _nextEpNumber();
     if (next != null) {
@@ -554,14 +646,16 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   int? _nextEpNumber() {
-    if (_episodes.isEmpty) return _ep + 1;
+    // 剧集列表为空时按单片处理，播完就停；不再无限跳第 02 集。
+    if (_episodes.isEmpty) return null;
     final index = _episodes.indexWhere((e) => e.n == _ep);
-    if (index < 0) return _ep + 1;
+    if (index < 0) return null;
     if (index + 1 >= _episodes.length) return null;
     return _episodes[index + 1].n;
   }
 
   Future<void> _switchEp(int next, {bool auto = false}) async {
+    if (_loading) return;
     if (next == _ep) {
       _closePanels();
       return;
@@ -575,6 +669,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showQuality = false;
       _controls = true;
       _loading = true;
+      _loadedEp = null;
       _error = false;
     });
     if (auto) fxToast(context, '即将播放 ${fxEpisodeLabel(next)}');
@@ -599,11 +694,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 3), () {
       if (!mounted) return;
-      if (_locked ||
-          _panelOpen ||
-          _holding2x ||
-          _loading ||
-          _error) {
+      if (_locked || _panelOpen || _holding2x || _loading || _error) {
         if (_holding2x) _startHideTimer();
         return;
       }
@@ -690,7 +781,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _togglePlay() {
     final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
+    if (c == null || _loading || _error || !c.value.isInitialized) return;
     // 直接让 media_kit 切换，图标由 player.stream.playing 驱动，避免本地态覆盖。
     unawaited(c.playOrPause());
     _wake();
@@ -884,8 +975,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                                 color: Fx.ink)),
                         const Spacer(),
                         IconButton(
-                          onPressed: () =>
-                              Navigator.of(sheetContext).pop(),
+                          onPressed: () => Navigator.of(sheetContext).pop(),
                           icon: const Icon(Icons.close_rounded,
                               color: Fx.sub, size: 22),
                         ),
@@ -1029,6 +1119,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         position: position,
         playing: playing,
         info: _info,
+        rate: _rate,
+        qualityKey: _qualityKey,
       ),
     );
   }
@@ -1102,7 +1194,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             if (!_locked)
               Positioned.fill(
                 child: IgnorePointer(
-                  ignoring: !_controls,
+                  ignoring: !_controls || _loading,
                   child: AnimatedOpacity(
                     opacity: _controls ? 1 : 0,
                     duration: const Duration(milliseconds: 200),

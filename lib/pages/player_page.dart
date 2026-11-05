@@ -9,6 +9,9 @@ import '../theme.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
 
+/// 当前线路不能直接播放的原因，交给外层决定换线路与提示文案。
+enum SourceIssue { parse, empty, error }
+
 /// 详情页内嵌播放器（16:9），也是独立播放页复用的播放控件。
 ///
 /// 控件布局：
@@ -26,7 +29,7 @@ class PlayerView extends StatefulWidget {
     this.onEpChange,
     this.onFullscreen,
     this.onSourceFailed,
-    this.onParseRequired,
+    this.onSourceIssue,
     this.onPlaybackStarted,
     this.onChangeLine,
     this.autoPlay = true,
@@ -40,8 +43,9 @@ class PlayerView extends StatefulWidget {
   final VoidCallback? onFullscreen;
   final VoidCallback? onSourceFailed;
 
-  /// 接口返回解析页（type == 'parse'）或没有直链地址时回调；由外层切下一线路。
-  final VoidCallback? onParseRequired;
+  /// 接口返回解析页（type == 'parse'）或没有直链地址时回调，
+  /// 由外层按原因切下一线路并展示对应文案。
+  final ValueChanged<SourceIssue>? onSourceIssue;
   final VoidCallback? onPlaybackStarted;
   final VoidCallback? onChangeLine;
   final bool autoPlay;
@@ -57,6 +61,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   late int _ep;
   late String _line;
   int _loadToken = 0;
+
+  /// controller 实际已经打开的集。进度只写这一集，loading 时不写。
+  int? _loadedEp;
+
+  /// 全屏内选择的清晰度，退出全屏时随结果带回。
+  String? _qualityKey;
 
   bool _loading = true;
   bool _error = false;
@@ -74,11 +84,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   bool _openingFullscreen = false;
   bool _fullscreenActive = false;
 
+  /// 详情页被另一层详情覆盖中：此时 bootstrap 完成后不要自动出声。
+  bool _covered = false;
+
   int get _episodeCount {
     final d = widget.detail;
     if (d == null) return 0;
     final n = d.allEpisodes.length;
     return n > 0 ? n : d.episodes;
+  }
+
+  /// 全屏和自动连播共用的剧集列表；只有集数没有名字时也补齐。
+  List<Episode> get _episodeList {
+    final d = widget.detail;
+    if (d == null) return const <Episode>[];
+    if (d.allEpisodes.isNotEmpty) return d.allEpisodes;
+    return <Episode>[for (var i = 1; i <= d.episodes; i++) Episode(i, '', 0)];
   }
 
   String get _title {
@@ -87,8 +108,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   String get _epLabel {
-    final list = widget.detail?.allEpisodes ?? const <Episode>[];
-    for (final e in list) {
+    for (final e in _episodeList) {
       if (e.n == _ep && e.name.isNotEmpty) return e.name;
     }
     return fxEpisodeLabel(_ep);
@@ -107,12 +127,21 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void didUpdateWidget(covariant PlayerView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.ep == _ep && widget.line == _line) return;
-    final pos = _controller?.value.position;
-    if (pos != null) {
-      fxSaveProgress(widget.videoId, _ep, pos.inMilliseconds / 1000.0);
-    }
+    // 用实际已打开的集保存旧集进度，避免把旧 position 写进新集。
+    unawaited(_saveProgress());
+    // 父页面换了集/线路：立刻作废旧 bootstrap，并在本次 build 前进入
+    // loading + 清空 _loadedEp，防止旧请求晚到后把旧集进度记到新集上。
+    _loadToken++;
+    unawaited(_controller?.pause());
     _ep = widget.ep;
     _line = widget.line;
+    _loading = true;
+    _loadedEp = null;
+    _qualityKey = null;
+    _error = false;
+    _errorText = '';
+    _ended = false;
+    _sourceFailNotified = false;
     Future.microtask(() {
       if (!mounted) return;
       _bootstrap(seekToSaved: true, saveOld: false);
@@ -125,8 +154,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (_fullscreenActive) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
-      _saveProgress();
-      _controller?.pause();
+      unawaited(_saveProgress());
+      unawaited(_controller?.pause());
     }
   }
 
@@ -135,21 +164,52 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _loadToken++;
-    _saveProgress();
+    unawaited(_saveProgress());
     _controller?.removeListener(_onVideoValue);
     _controller?.dispose();
     super.dispose();
   }
 
-  Future<void> _saveProgress() async {
+  /// 保存进度。只写 controller 实际打开的集；新集加载期间直接跳过，
+  /// 防止切集/双击下一集时把旧集的 position 写进新集。
+  Future<void> _saveProgress({bool ended = false}) async {
+    if (_loading) return;
     final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
+    final ep = _loadedEp;
+    if (c == null || ep == null || !c.value.isInitialized) return;
     final duration = c.value.duration.inMilliseconds;
-    var seconds = c.value.position.inMilliseconds / 1000.0;
-    if (duration > 0 && c.value.position.inMilliseconds >= duration - 1500) {
+    var seconds = ended ? 0.0 : c.value.position.inMilliseconds / 1000.0;
+    if (!ended &&
+        duration > 0 &&
+        c.value.position.inMilliseconds >= duration - 1500) {
       seconds = 0;
     }
-    await fxSaveProgress(widget.videoId, _ep, seconds);
+    await fxSaveProgress(widget.videoId, ep, seconds);
+  }
+
+  /// 详情页被新页面覆盖前调用：暂停并保存，返回覆盖前是否正在播放。
+  Future<bool> pauseAndSave() async {
+    if (_fullscreenActive) return false;
+    _covered = true;
+    final c = _controller;
+    final wasPlaying = c != null && c.value.isInitialized && c.value.isPlaying;
+    await _saveProgress();
+    try {
+      await c?.pause();
+    } catch (_) {}
+    return wasPlaying;
+  }
+
+  /// 从被覆盖的详情页返回后恢复播放；原本暂停的保持暂停。
+  Future<void> resumeAfterCover({required bool play}) async {
+    if (_fullscreenActive) return;
+    _covered = false;
+    if (!play) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized || _loading || _error) return;
+    try {
+      await c.play();
+    } catch (_) {}
   }
 
   /// 进入一起看房间前调用：暂停并彻底释放当前播放器，
@@ -160,6 +220,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     await _saveProgress();
     final controller = _controller;
     _controller = null;
+    _loadedEp = null;
     if (controller != null) {
       controller.removeListener(_onVideoValue);
       try {
@@ -191,9 +252,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _hideTimer?.cancel();
     if (saveOld) await _saveProgress();
     if (!mounted || token != _loadToken) return;
-    _controller?.pause();
+    unawaited(_controller?.pause());
     setState(() {
       _loading = true;
+      _loadedEp = null;
+      _qualityKey = null;
       _error = false;
       _errorText = '';
       _sourceFailNotified = false;
@@ -216,20 +279,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (!mounted || token != _loadToken) return;
     _info = info;
 
-    // TW 等线路可能返回一个需要解析器处理的播放页地址（type == 'parse'），
-    // 或干脆没有直链。这类线路不当作播放错误，交给外层自动切下一条线路。
+    // TW 等线路可能返回一个需要解析器处理的播放页地址（type == 'parse'）。
+    // 空 url 与解析页是两种不同情况，分开交给外层展示文案。
     final isParse = info.type.trim().toLowerCase() == 'parse';
-    if (isParse || info.url.trim().isEmpty) {
-      if (widget.onParseRequired != null) {
-        widget.onParseRequired!();
-      } else if (mounted && token == _loadToken) {
-        setState(() {
-          _loading = false;
-          _error = true;
-          _errorText = isParse ? '该线路需解析，暂时无法直接播放，请切换线路' : '当前线路没有可用播放地址，请切换线路';
-        });
-        _notifySourceFailed();
-      }
+    if (isParse) {
+      _emitSourceIssue(SourceIssue.parse);
       return;
     }
 
@@ -243,12 +297,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (!candidates.contains(u)) candidates.add(u);
     }
     if (candidates.isEmpty) {
-      setState(() {
-        _loading = false;
-        _error = true;
-        _errorText = '当前线路没有可用播放地址，请更换线路';
-      });
-      _notifySourceFailed();
+      _emitSourceIssue(SourceIssue.empty);
       return;
     }
 
@@ -265,11 +314,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           await controller.dispose();
           return;
         }
-        controller.addListener(_onVideoValue);
         await controller.setLooping(false);
-        if (_rate != 1.0) {
+        try {
           await controller.setRate(_rate);
-        }
+        } catch (_) {}
         final durationMs = controller.value.duration.inMilliseconds;
         var resume = saved;
         if (durationMs > 0 && resume >= durationMs / 1000.0 - 2) {
@@ -280,19 +328,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             Duration(milliseconds: (resume * 1000).round()),
           );
         }
-        _controller?.removeListener(_onVideoValue);
-        await _controller?.dispose();
-        // 释放/切换发生在初始化过程中时，不再把新 controller 挂回页面。
+        if (widget.autoPlay && !_covered) {
+          await controller.play();
+        }
+        // 初始化期间被新操作取代：释放新实例，不要把旧 controller 挂回。
         if (!mounted || token != _loadToken) {
-          controller.removeListener(_onVideoValue);
           await controller.dispose();
           return;
         }
+        final previous = _controller;
+        previous?.removeListener(_onVideoValue);
         _controller = controller;
-        if (widget.autoPlay) {
-          await controller.play();
-        }
-        if (!mounted || token != _loadToken) return;
+        _loadedEp = _ep;
+        controller.addListener(_onVideoValue);
+        unawaited(previous?.dispose());
         setState(() {
           _loading = false;
           _error = false;
@@ -305,8 +354,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         break;
       } catch (_) {
         try {
-          controller.removeListener(_onVideoValue);
-          await controller.dispose();
+          controller.dispose();
         } catch (_) {}
       }
     }
@@ -319,9 +367,26 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _errorText = '播放失败：线路不可用，请重试或切换下方线路';
       });
       _notifySourceFailed();
+    }
+  }
+
+  void _emitSourceIssue(SourceIssue issue) {
+    final callback = widget.onSourceIssue;
+    if (callback != null) {
+      callback(issue);
       return;
     }
-
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _error = true;
+      _errorText = switch (issue) {
+        SourceIssue.parse => '该线路需解析，暂时无法直接播放，请切换线路',
+        SourceIssue.empty => '当前线路没有可用播放地址，请切换线路',
+        SourceIssue.error => '线路播放失败，请切换线路',
+      };
+    });
+    _notifySourceFailed();
   }
 
   void _notifySourceFailed() {
@@ -333,10 +398,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
-    // 全屏期间由全屏页接管同一个播放器的事件（切集 / 结束 / 报错）。
-    if (_fullscreenActive) return;
+    // 全屏期间由全屏页接管同一个播放器的事件（切集 / 结束 / 报错）；
+    // loading 期间的错误由 _bootstrap 的 try/catch 处理。
+    if (_fullscreenActive || _loading || _error) return;
     final v = c.value;
-    if (v.hasError && !_error) {
+    if (v.hasError) {
       setState(() {
         _error = true;
         _errorText = '播放中断，请重试或切换线路';
@@ -351,15 +417,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     if (_ended) return;
     _ended = true;
-    _handleEnded();
+    unawaited(_handleEnded());
   }
 
   Future<void> _handleEnded() async {
-    await fxSaveProgress(widget.videoId, _ep, 0);
+    await _saveProgress(ended: true);
     if (!mounted) return;
-    final total = _episodeCount;
-    if (total == 0 || _ep < total) {
-      await _switchEpisode(_ep + 1, auto: true);
+    final next = _nextEpNumber();
+    if (next != null) {
+      await _switchEpisode(next, auto: true);
     } else {
       setState(() => _controls = true);
       _startHideTimer();
@@ -374,6 +440,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     setState(() {
       _ep = next;
       _loading = true;
+      _loadedEp = null;
+      _qualityKey = null;
       _error = false;
       _controls = true;
     });
@@ -394,7 +462,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   int? _nextEpNumber() {
-    final list = widget.detail?.allEpisodes ?? const <Episode>[];
+    final list = _episodeList;
     if (list.isNotEmpty) {
       final index = list.indexWhere((e) => e.n == _ep);
       if (index >= 0) {
@@ -403,7 +471,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       }
     }
     final total = _episodeCount;
-    if (total > 0 && _ep >= total) return null;
+    // 没有明确集数时按单片处理，播完就停，不再无限跳下一集。
+    if (total <= 0 || _ep >= total) return null;
     return _ep + 1;
   }
 
@@ -467,7 +536,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   void _togglePlay() {
     final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
+    if (c == null || _loading || _error || !c.value.isInitialized) return;
     // 以播放器真实状态为准：交给 media_kit 切换，按钮图标随后续
     // player.stream.playing 事件刷新，不用本地布尔抢先改状态。
     unawaited(c.playOrPause());
@@ -476,14 +545,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   void _seek(Duration d) {
     final c = _controller;
-    if (c == null) return;
+    if (c == null || _loading || _error) return;
     c.seekTo(d);
     _touch();
   }
 
   void _startHold2x() {
     final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
+    if (c == null || _loading || _error || !c.value.isInitialized) return;
     _rateBeforeHold = _rate;
     c.setRate(2.0);
     setState(() => _holding2x = true);
@@ -571,8 +640,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   const SizedBox(height: 8),
                   const ListTile(
                     contentPadding: EdgeInsets.zero,
-                    leading:
-                        Icon(Icons.info_outline_rounded, size: 20, color: Fx.sub),
+                    leading: Icon(Icons.info_outline_rounded,
+                        size: 20, color: Fx.sub),
                     title: Text('播放内核',
                         style: TextStyle(
                             fontSize: 13.5,
@@ -594,47 +663,91 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   Future<void> _openFullscreen() async {
     final c = _controller;
-    if (c == null || _openingFullscreen || !c.value.isInitialized) return;
+    if (c == null ||
+        _openingFullscreen ||
+        _holding2x ||
+        _loading ||
+        _error ||
+        !c.value.isInitialized) {
+      return;
+    }
     _openingFullscreen = true;
     _hideTimer?.cancel();
     // 进入全屏时复用同一个 FxPlayer / Player 实例：不重新 open，
     // 保持当前进度与播放/暂停状态；竖屏画面暂时让出视频输出。
+    final token = _loadToken;
+    final realRate = c.rate;
     await _saveProgress();
-    if (!mounted) {
+    // 等待保存期间可能开始切集/换线路，旧实例随时会被释放：
+    // 必须确认还是同一个已加载完成的 controller 才能交给全屏。
+    if (!mounted ||
+        token != _loadToken ||
+        _loading ||
+        !identical(c, _controller) ||
+        !c.value.isInitialized) {
       _openingFullscreen = false;
       return;
     }
     setState(() => _fullscreenActive = true);
 
-    final result = await Navigator.of(context).push<FullPlayerResult>(
-      PageRouteBuilder<FullPlayerResult>(
-        transitionDuration: const Duration(milliseconds: 260),
-        pageBuilder: (context, animation, secondaryAnimation) => FullPlayerPage(
-          player: c,
-          videoId: widget.videoId,
-          ep: _ep,
-          line: _line,
-          title: _title,
-          playInfo: _info,
-          episodes: widget.detail?.allEpisodes ?? const <Episode>[],
-          lineName: _info?.lineName ?? '',
+    FullPlayerResult? result;
+    try {
+      result = await Navigator.of(context).push<FullPlayerResult>(
+        PageRouteBuilder<FullPlayerResult>(
+          transitionDuration: const Duration(milliseconds: 260),
+          pageBuilder: (context, animation, secondaryAnimation) =>
+              FullPlayerPage(
+            player: c,
+            videoId: widget.videoId,
+            ep: _ep,
+            line: _line,
+            title: _title,
+            playInfo: _info,
+            episodes: _episodeList,
+            lineName: _info?.lineName ?? '',
+            rate: realRate,
+            qualityKey: _qualityKey,
+          ),
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            return FadeTransition(opacity: animation, child: child);
+          },
         ),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          return FadeTransition(opacity: animation, child: child);
-        },
-      ),
-    );
-    _openingFullscreen = false;
-    if (!mounted) return;
-    if (_fullscreenActive) setState(() => _fullscreenActive = false);
-
-    if (result != null && result.ep != _ep) {
-      // 全屏里切了集：同一个播放器实例已经打开新集，这里只同步状态，不再重建。
-      _ep = result.ep;
-      _info = result.info ?? _info;
-      widget.onEpChange?.call(result.ep);
+      );
+    } finally {
+      _openingFullscreen = false;
     }
-    _showControls();
+    if (!mounted) return;
+
+    if (result != null) {
+      // 全屏里切了集：同一个播放器实例已经打开新集，这里只同步状态，不再重建。
+      final switched = result.ep != _ep;
+      _ep = result.ep;
+      _loadedEp = result.ep;
+      _info = result.info ?? _info;
+      _qualityKey = result.qualityKey;
+      if (result.rate > 0) {
+        _rate = result.rate;
+        try {
+          await c.setRate(_rate);
+        } catch (_) {}
+      }
+      if (switched) widget.onEpChange?.call(result.ep);
+    }
+    // 先同步完集数/进度归属，再交回视频层并恢复监听，避免全屏里
+    // 已经换集时把新位置记到旧集。
+    if (mounted && _fullscreenActive) {
+      setState(() => _fullscreenActive = false);
+    }
+    if (c.value.hasError && !_error) {
+      // 全屏里播放器已坏，位置可能被重置为 0；不要再拿它覆盖原进度。
+      _loadedEp = null;
+      setState(() {
+        _error = true;
+        _errorText = '播放中断，请重试或切换线路';
+      });
+    } else {
+      _showControls();
+    }
   }
 
   // -------------------------------------------------------------------- build
@@ -693,7 +806,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   },
                 ),
               ),
-            if (_controls && !_error) _buildControls(c),
+            if (_controls && !_error)
+              IgnorePointer(
+                ignoring: _loading,
+                child: _buildControls(c),
+              ),
             if (_holding2x)
               Positioned(
                 top: 14,

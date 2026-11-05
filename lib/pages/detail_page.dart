@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -48,8 +50,15 @@ class _DetailPageState extends State<DetailPage>
   bool _noticeClosed = false;
   bool _fav = false;
   bool _openingTogether = false;
+  bool _openingRelated = false;
   int _autoLineTries = 0;
   int _relatedOffset = 0;
+
+  /// 本轮自动切线路已经失败过的线路，避免 A/B 反复乒乓。
+  final Set<String> _failedLines = <String>{};
+
+  /// 稳定播放 3 秒后才清零重试预算与失败集合。
+  Timer? _stableTimer;
 
   List<CommentItem> _comments = const <CommentItem>[];
   final Set<String> _liked = <String>{};
@@ -73,6 +82,7 @@ class _DetailPageState extends State<DetailPage>
 
   @override
   void dispose() {
+    _stableTimer?.cancel();
     _scroll.dispose();
     _fade.dispose();
     super.dispose();
@@ -287,6 +297,9 @@ class _DetailPageState extends State<DetailPage>
 
   void _selectLine(LineInfo line) {
     if (line.id == _lineId) return;
+    _stableTimer?.cancel();
+    // 用户手动选线路视为重新开始，允许重试这一条。
+    _failedLines.remove(line.id);
     setState(() {
       _lineId = line.id;
       _autoLineTries = 0;
@@ -296,48 +309,90 @@ class _DetailPageState extends State<DetailPage>
   }
 
   /// 换线路；[auto] = 播放失败后自动切下一条（有限次）。
-  /// [needsParse] 表示当前线路返回的是需要解析器的播放页。
-  void _switchNextLine({bool auto = false, bool needsParse = false}) {
+  /// [issue] 说明当前线路不可播的原因，用于选择文案与最终错误提示。
+  void _switchNextLine({bool auto = false, SourceIssue? issue}) {
+    _stableTimer?.cancel();
     final lines = _detail?.lines ?? const <LineInfo>[];
-    if (lines.length < 2) {
-      if (auto) {
-        _showPlaybackError(needsParse: needsParse);
-      } else {
-        fxToast(
-          context,
-          lines.isEmpty ? '暂无可用线路，请稍后重试' : '当前只有一条线路，请稍后重试',
-        );
-      }
+    if (lines.isEmpty) {
+      _showPlaybackError(issue: issue);
       return;
     }
     if (auto && _autoLineTries >= lines.length - 1) {
-      _showPlaybackError(needsParse: needsParse);
+      _showPlaybackError(issue: issue);
       return;
     }
     final index = lines.indexWhere((l) => l.id == _lineId);
-    final next = lines[(index + 1) % lines.length];
+    LineInfo? next;
+    for (var step = 1; step <= lines.length; step++) {
+      final candidate = lines[(index + step) % lines.length];
+      if (_failedLines.contains(candidate.id)) continue;
+      if (auto && candidate.id == _lineId) continue;
+      next = candidate;
+      break;
+    }
+    if (next == null) {
+      if (auto) {
+        _showPlaybackError(issue: issue);
+      } else {
+        fxToast(context, '暂无其他可用线路');
+      }
+      return;
+    }
     if (auto) {
       _autoLineTries++;
-      setState(() => _lineId = next.id);
+      final target = next;
+      setState(() => _lineId = target.id);
       _saveHistory();
-      fxToast(
-        context,
-        needsParse ? '该线路需解析，已为你切换下一线路' : '线路播放失败，已自动切换「${next.name}」',
-      );
+      fxToast(context, _autoSwitchText(issue, target.name));
     } else {
       _selectLine(next);
     }
   }
 
+  String _autoSwitchText(SourceIssue? issue, String name) {
+    final label = name.isEmpty ? '下一线路' : '「$name」';
+    return switch (issue) {
+      SourceIssue.parse => '该线路需解析，已为你切换$label',
+      SourceIssue.empty => '该线路暂无播放地址，已为你切换$label',
+      _ => '线路播放失败，已自动切换$label',
+    };
+  }
+
   /// 全部线路都试过仍不可播：在播放器里显示错误 + 重试/换线路按钮。
-  void _showPlaybackError({bool needsParse = false}) {
-    final message = needsParse ? '所有线路都需解析，暂时无法播放，请重试或换线路' : '所有线路都不可用，请重试或换线路';
+  void _showPlaybackError({SourceIssue? issue}) {
+    final lines = _detail?.lines ?? const <LineInfo>[];
+    final message = lines.isEmpty
+        ? '暂无线路，请稍后刷新重试'
+        : switch (issue) {
+            SourceIssue.parse => '所有线路都需解析，暂时无法播放，请重试或换线路',
+            SourceIssue.empty => '所有线路都没有可用播放地址，请稍后重试',
+            _ => '所有线路都不可用，请重试或换线路',
+          };
     final player = _playerKey.currentState;
     if (player != null) {
       player.showSourceError(message);
     } else {
       fxToast(context, message);
     }
+  }
+
+  /// PlayerView 报告当前线路不可播：记为失败并按原因切下一条。
+  void _reportLineIssue(SourceIssue issue) {
+    if (!mounted) return;
+    _stableTimer?.cancel();
+    if (_lineId.isNotEmpty) _failedLines.add(_lineId);
+    _switchNextLine(auto: true, issue: issue);
+  }
+
+  /// 播放稳定 3 秒后才清空失败集合与自动重试预算，避免「能 open 但立刻报错」
+  /// 的线路在 A/B 之间无限乒乓。
+  void _onPlaybackStarted() {
+    _stableTimer?.cancel();
+    _stableTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      _failedLines.clear();
+      _autoLineTries = 0;
+    });
   }
 
   void _onEpChange(int n) {
@@ -383,12 +438,36 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Future<void> _refreshPlayer() async {
+    _stableTimer?.cancel();
+    _failedLines.clear();
+    _autoLineTries = 0;
     fxToast(context, '正在刷新播放源…');
     final state = _playerKey.currentState;
     if (state != null) {
       await state.reload();
     } else {
       await _loadDetail(silent: true);
+    }
+  }
+
+  /// 详情 → 详情：新页面压栈前先暂停并保存当前播放进度，
+  /// 返回时只有原本在播放才恢复，避免两层播放器同时出声。
+  Future<void> _openRelated(String id) async {
+    if (_openingRelated) return;
+    _openingRelated = true;
+    try {
+      final player = _playerKey.currentState;
+      final wasPlaying = await player?.pauseAndSave() ?? false;
+      try {
+        if (!mounted) return;
+        await Nav.detail(context, id);
+      } finally {
+        if (mounted) {
+          await player?.resumeAfterCover(play: wasPlaying);
+        }
+      }
+    } finally {
+      _openingRelated = false;
     }
   }
 
@@ -611,10 +690,10 @@ class _DetailPageState extends State<DetailPage>
           line: _lineId,
           detail: d,
           onEpChange: _onEpChange,
-          onSourceFailed: () => _switchNextLine(auto: true),
-          onParseRequired: () => _switchNextLine(auto: true, needsParse: true),
+          onSourceFailed: () => _reportLineIssue(SourceIssue.error),
+          onSourceIssue: _reportLineIssue,
           onChangeLine: d.lines.length > 1 ? () => _switchNextLine() : null,
-          onPlaybackStarted: () => _autoLineTries = 0,
+          onPlaybackStarted: _onPlaybackStarted,
           autoPlay: true,
         ),
       ),
@@ -693,7 +772,9 @@ class _DetailPageState extends State<DetailPage>
                     fit: StackFit.expand,
                     children: [
                       DetailLineCard(
-                        name: line.name.isEmpty ? '线路${i + 1}' : line.name,
+                        name: line.displayName.isEmpty
+                            ? '线路${i + 1}'
+                            : line.displayName,
                         count: total,
                         active: line.id == _lineId,
                         onTap: () => _selectLine(line),
@@ -729,6 +810,9 @@ class _DetailPageState extends State<DetailPage>
               },
             ),
           ),
+        ] else ...[
+          const SizedBox(height: 16),
+          _noLinesHint(),
         ],
         if (episodes.isNotEmpty) ...[
           const SizedBox(height: 22),
@@ -956,6 +1040,32 @@ class _DetailPageState extends State<DetailPage>
     );
   }
 
+  Widget _noLinesHint() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(.72),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white),
+        ),
+        child: const Row(
+          children: [
+            Icon(Icons.wifi_off_rounded, size: 16, color: Fx.sub),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '暂无线路，请稍后刷新重试',
+                style: TextStyle(fontSize: 11.5, color: Fx.sub),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _episodeHeader(int total) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -1053,7 +1163,7 @@ class _DetailPageState extends State<DetailPage>
             item: v,
             width: 104,
             showSubtitle: false,
-            onTap: () => Nav.detail(context, v.id),
+            onTap: () => _openRelated(v.id),
           ),
           if (v.year > 0)
             Positioned(
