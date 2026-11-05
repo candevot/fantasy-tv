@@ -16,6 +16,7 @@ import io
 import os
 import re
 import sys
+import xml.etree.ElementTree as ET
 
 
 def fail(message: str) -> None:
@@ -94,20 +95,39 @@ def main() -> None:
         fail('Gradle=%s < 8.13' % m.group(1))
     print('ok Gradle=%s' % m.group(1))
 
-    manifest = read('android/app/src/main/AndroidManifest.xml')
-    checks = (
-        ('INTERNET permission',
-         'android.permission.INTERNET' in manifest),
-        ('Android 8 storage permission',
-         re.search(r'WRITE_EXTERNAL_STORAGE[^>]*maxSdkVersion="28"',
-                   manifest) is not None),
-        ('cleartext traffic', 'android:usesCleartextTraffic="true"' in manifest),
-        ('app label', 'android:label="幻想影视"' in manifest),
-    )
-    for label, ok in checks:
-        if not ok:
-            fail('manifest: %s' % label)
-        print('ok manifest: %s' % label)
+    manifest_path = 'android/app/src/main/AndroidManifest.xml'
+    try:
+        mroot = ET.parse(manifest_path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        fail('manifest: cannot parse %s: %s' % (manifest_path, exc))
+    ns = '{http://schemas.android.com/apk/res/android}'
+    permissions = {}
+    for item in mroot.findall('uses-permission'):
+        name = item.get(ns + 'name')
+        if name:
+            permissions[name] = item
+    app = mroot.find('application')
+
+    if 'android.permission.INTERNET' not in permissions:
+        fail('manifest: INTERNET permission')
+    print('ok manifest: INTERNET permission')
+
+    storage = permissions.get('android.permission.WRITE_EXTERNAL_STORAGE')
+    if storage is None or storage.get(ns + 'maxSdkVersion') != '28':
+        fail('manifest: Android 8 storage permission maxSdkVersion=28')
+    print('ok manifest: Android 8 storage permission')
+
+    if app is None:
+        fail('manifest: application element')
+    if app.get(ns + 'usesCleartextTraffic') != 'true':
+        fail('manifest: cleartext traffic')
+    print('ok manifest: cleartext traffic')
+    if app.get(ns + 'label') != '幻想影视':
+        fail('manifest: app label 幻想影视')
+    print('ok manifest: app label')
+    if not app.get(ns + 'icon'):
+        fail('manifest: application icon')
+    print('ok manifest: application icon')
 
     activity = None
     for root, _, files in os.walk('android/app/src/main'):

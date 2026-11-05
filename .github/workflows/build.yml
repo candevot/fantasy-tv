@@ -49,19 +49,12 @@ jobs:
             cp assets/icons/ic_launcher-${sz}.png android/app/src/main/res/mipmap-${k}/ic_launcher.png
           done
           ls -l android/app/src/main/res/mipmap-xxxhdpi/
-      - name: Patch manifest
+      - name: Patch and validate manifest (XML)
         run: |
-          python3 - <<'PY'
-          import re,io
-          p='android/app/src/main/AndroidManifest.xml'
-          s=open(p,encoding='utf-8').read()
-          s=s.replace('<application','<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>\n    <application',1)
-          s=s.replace('android:label="fantasy_tv"','android:label="幻想影视"')
-          if 'usesCleartextTraffic' not in s:
-              s=s.replace('<application','<application\n        android:usesCleartextTraffic="true"',1)
-          open(p,'w',encoding='utf-8').write(s)
-          print(s[:600])
-          PY
+          # 不再用字符串 replace：解析 XML、补 INTERNET / 明文流量 / 中文 label，
+          # 写回后重新解析校验；缺 INTERNET / cleartext / label / icon 任一项
+          # 都会打印 diff 并退出 1。
+          python3 tools/patch_manifest.py
       - name: Patch edge-to-edge and legacy storage permission
         run: |
           # Flutter 3.32 模板是 `class MainActivity : FlutterActivity()`，
@@ -86,40 +79,14 @@ jobs:
             --build-number=${{ github.run_number }} \
             --build-name=1.0.${{ github.run_number }}
           ls -lh build/app/outputs/flutter-apk/
-      - name: Verify 16KB page alignment (arm64)
+      - name: Verify release APK (comprehensive gate)
         run: |
+          # 权限 / 明文流量 / label / icon / MaterialIcons 字体 / logo.png /
+          # libapp + libflutter + libmpv / libmpv 4 段 LOAD 0x4000 /
+          # META-INF + apksigner / zipalign / 体积 / sha256，任一不过即失败。
           APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
           test -f "$APK"
-          echo "APK_SIZE_BYTES=$(stat -c %s "$APK")"
-          rm -rf /tmp/apk16 && mkdir -p /tmp/apk16
-          unzip -q -o "$APK" 'lib/arm64-v8a/*.so' -d /tmp/apk16
-          for so in /tmp/apk16/lib/arm64-v8a/*.so; do
-            ALIGN=$(readelf -lW "$so" | awk '/LOAD/{print $NF; exit}')
-            echo "$(basename "$so") LOAD ALIGN=$ALIGN"
-          done
-          echo '--- libmpv LOAD ---'
-          readelf -lW /tmp/apk16/lib/arm64-v8a/libmpv.so | grep LOAD
-          MPV_ALIGN=$(readelf -lW /tmp/apk16/lib/arm64-v8a/libmpv.so | awk '/LOAD/{print $NF; exit}')
-          echo "libmpv ALIGN=$MPV_ALIGN"
-          test "$MPV_ALIGN" = "0x4000"
-          # APK 内未压缩 .so 的 zip 偏移也必须是 16KB 对齐。
-          ZIPALIGN=$(ls "$ANDROID_HOME"/build-tools/*/zipalign 2>/dev/null | sort -V | tail -1)
-          if [ -n "$ZIPALIGN" ] && [ -x "$ZIPALIGN" ]; then
-            "$ZIPALIGN" -c -P 16 -v 4 "$APK" | tail -5
-          else
-            echo 'zipalign not found, skip zip alignment check'
-          fi
-      - name: Verify APK signature
-        run: |
-          APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-          test -f "$APK"
-          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1 || true)
-          if [ -n "$APKSIGNER" ] && [ -x "$APKSIGNER" ]; then
-            "$APKSIGNER" verify --print-certs "$APK"
-          else
-            echo 'apksigner not found, skip JAR signature check'
-          fi
-          sha256sum "$APK"
+          python3 tools/verify_apk.py "$APK"
       - uses: actions/upload-artifact@v4
         with:
           name: fantasy-tv-apk
