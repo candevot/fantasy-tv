@@ -9,14 +9,14 @@ import '../services/download_service.dart';
 import '../services/fx_display_settings.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
+import '../widgets/fs_controls.dart';
+import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
+import '../widgets/player_more_panel.dart' show FxLoopMode;
 import '../widgets/player_theme.dart'
     show
         FxLoadingOverlay,
         FxPlayerSurface,
-        FxSeekRow,
-        PGlassIcon,
-        PGlassPill,
         fxLoadProgress,
         fxResumeMinSeconds,
         fxSaveProgress,
@@ -24,9 +24,12 @@ import '../widgets/player_theme.dart'
 
 /// 离线播放页：用 media_kit（[FxPlayer]）打开已下载的本地文件。
 ///
-/// 与全屏播放器共用同一套控件结构（顶栏 / 底栏 / 锁 / 选集 / 画面比例 /
-/// 镜像 / 倍速 / 定时关闭），但**只连本地文件**：不显示线路、清晰度、
-/// 下载、投屏这些在线才有意义的入口，也不请求 `/api/play`。
+/// 打开即横屏全屏（与在线全屏一致），横屏控件**完全复用在线全屏组件**：
+/// [FsTopBar] 返回·剧名·集数·⋯设置 / [FsSideControls] 左锁右±10s /
+/// [FsBottomBar] 进度·播放暂停·下一集·选集·⋯设置·退出；⋯面板里是
+/// 画面比例 / 镜像 / 倍速 / 定时关闭 / 循环。只隐藏在线才有的入口：
+/// 投屏、清晰度·线路、下载，也不请求 `/api/play`。
+/// 退出（返回键 / 顶栏返回 / 底栏退出）先恢复竖屏再退栈。
 /// 播完当前集按设置自动切到下一部已下载集。
 class OfflinePlayerPage extends StatefulWidget {
   const OfflinePlayerPage({
@@ -53,7 +56,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   FxPlayer? _player;
   bool _loading = true;
   String? _error;
-  bool _fullscreen = false;
   bool _controlsVisible = true;
   bool _playing = false;
   bool _switching = false;
@@ -62,6 +64,12 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   Duration _duration = Duration.zero;
   Duration _buffered = Duration.zero;
   double _rate = 1;
+
+  /// 循环播放：单集循环交给 mpv（loop-file），关闭则按「自动下一集」连播。
+  FxLoopMode _loopMode = FxLoopMode.off;
+
+  /// 退出进行中：顶栏返回 / 底栏退出 / 系统返回键共用一个闸门，只退一次。
+  bool _leaving = false;
 
   /// 切集 / 打开后时长还没出来时挂起的续播点（秒）。
   int? _pendingSeek;
@@ -104,6 +112,8 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
     _service.addListener(_onServiceChanged);
     _refreshEpisodes();
     unawaited(_prepareSettings());
+    // 打开即横屏全屏：竖屏进、横屏播，退出时再恢复竖屏。
+    unawaited(_enterLandscape());
     _open();
   }
 
@@ -167,7 +177,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
       final uri = Uri.file(file.path).toString();
       await player.open(uri, play: true);
       if (!mounted || seq != _openSeq) return;
-      await player.setLooping(false);
+      await player.setLooping(_loopMode == FxLoopMode.single);
       await player.setRate(_rate);
       // 续播：读上次离线/在线共用的进度（同一 videoId + 集号）。
       final saved = await fxLoadProgress(task.id, task.ep);
@@ -259,6 +269,15 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
       unawaited(settings.setSleepTimer(FxSleepMode.off));
       _refreshSheet();
       _wake();
+      return;
+    }
+    if (_loopMode == FxLoopMode.single) {
+      // 单集循环：回到片头继续播这一集，不切下一集、不连播。
+      _endedHandled = false;
+      try {
+        await _player?.seek(Duration.zero);
+        await _player?.play();
+      } catch (_) {}
       return;
     }
     if (settings.autoNext) {
@@ -366,6 +385,18 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
     _refreshSheet();
   }
 
+  /// 循环播放：单集循环交给 mpv（loop-file），关闭则按「自动下一集」连播。
+  Future<void> _setLoopMode(FxLoopMode mode) async {
+    if (_loopMode == mode) return;
+    _loopMode = mode;
+    // 关掉循环时清掉「本集已播完」标记，这一集结尾才会触发自动下一集。
+    if (mode == FxLoopMode.off) _endedHandled = false;
+    try {
+      await _player?.setLooping(mode == FxLoopMode.single);
+    } catch (_) {}
+    _refreshSheet();
+  }
+
   /* -------------------------------------------------------------- 控件显隐 */
 
   void _toggleControls() {
@@ -434,27 +465,36 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
 
   /* ----------------------------------------------------------- 全屏 / 系统 */
 
-  Future<void> _toggleFullscreen() async {
-    if (_fullscreen) {
-      await _restorePortrait();
-      if (mounted) setState(() => _fullscreen = false);
-    } else {
-      setState(() {
-        _fullscreen = true;
-        _controlsVisible = true;
-      });
-      await SystemChrome.setPreferredOrientations(_landscape);
+  /// 进页面即横屏 + 沉浸式全屏（与在线全屏同一套系统栏动作）。
+  Future<void> _enterLandscape() async {
+    try {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      await SystemChrome.setPreferredOrientations(_landscape);
+      SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light);
+    } catch (_) {
+      // 桌面 / 模拟器上不支持也无所谓
     }
-    _wake();
   }
 
+  /// 退出前恢复竖屏 + 常规系统栏。
   Future<void> _restorePortrait() async {
-    await SystemChrome.setPreferredOrientations(
-      const <DeviceOrientation>[DeviceOrientation.portraitUp],
-    );
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    SystemChrome.setSystemUIOverlayStyle(_appOverlay);
+    try {
+      await SystemChrome.setPreferredOrientations(
+        const <DeviceOrientation>[DeviceOrientation.portraitUp],
+      );
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      SystemChrome.setSystemUIOverlayStyle(_appOverlay);
+    } catch (_) {}
+  }
+
+  /// 退出离线播放：先恢复竖屏再退栈，回到列表时已经是竖屏。
+  /// 顶栏返回、底栏「退出」、系统返回键都走这里。
+  Future<void> _leave() async {
+    if (_leaving) return;
+    _leaving = true;
+    await _restorePortrait();
+    if (!mounted) return;
+    Navigator.of(context).pop();
   }
 
   /* ------------------------------------------------------------ 定时关闭 */
@@ -679,6 +719,21 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
                 ],
               ),
             ),
+            _sheetSection(
+              title: '循环播放',
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final mode in FxLoopMode.values)
+                    _optChip(
+                      label: mode.label,
+                      selected: _loopMode == mode,
+                      onTap: () => unawaited(_setLoopMode(mode)),
+                    ),
+                ],
+              ),
+            ),
             const SizedBox(height: 6),
             Row(
               children: [
@@ -851,11 +906,13 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
 
   /// 选集：只列本地任务，已下载的可直接切，其余显示排队 / 未下载状态。
   Widget _episodeSheet() {
+    final size = MediaQuery.sizeOf(context);
     final bottom = MediaQuery.paddingOf(context).bottom;
     final total = _totalEpisodes;
     final current = _task.ep;
     return Container(
-      height: MediaQuery.sizeOf(context).height * .58,
+      // 横屏可用高度小，抽屉放高一点；竖屏维持原来的 58%。
+      height: size.height * (size.width > size.height ? .78 : .58),
       decoration: const BoxDecoration(
         color: Color(0xFFF7FAFF),
         borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
@@ -1012,50 +1069,48 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   Widget build(BuildContext context) {
     final player = _player;
     return PopScope(
-      canPop: !_fullscreen,
+      // 横屏打开：返回键一律走 [_leave]（先恢复竖屏再退栈）。
+      canPop: false,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _fullscreen) {
-          unawaited(_toggleFullscreen());
-        }
+        if (didPop) return;
+        unawaited(_leave());
       },
       child: Scaffold(
         backgroundColor: Colors.black,
-        body: SafeArea(
-          top: !_fullscreen,
-          bottom: !_fullscreen,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              if (player != null)
-                FxPlayerSurface(player: player)
-              else
-                const ColoredBox(color: Colors.black),
-              if (player != null && _error == null && !_locked)
-                FxPlayerGestures(
-                  player: player,
-                  onTap: _toggleControls,
-                  onDoubleTap: () => unawaited(_playOrPause()),
-                  onSeek: (position) => unawaited(_seek(position)),
-                ),
-              if (_loading)
-                FxLoadingOverlay(
-                  title: _switching || !identical(_task, widget.task)
-                      ? '正在打开 ${_task.epLabel}…'
-                      : '正在打开离线缓存…',
-                  compact: true,
-                ),
-              if (_error != null) _errorView(),
-              if (player != null && _error == null && !_locked)
-                _controls(player),
-              if (_locked) _lockedLayer(),
-            ],
-          ),
+        // 横屏沉浸式全屏：不给系统栏留位，与在线全屏一致。
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (player != null)
+              FxPlayerSurface(player: player)
+            else
+              const ColoredBox(color: Colors.black),
+            if (player != null && _error == null && !_locked)
+              FxPlayerGestures(
+                player: player,
+                onTap: _toggleControls,
+                onDoubleTap: () => unawaited(_playOrPause()),
+                onSeek: (position) => unawaited(_seek(position)),
+              ),
+            if (_loading)
+              FxLoadingOverlay(
+                title: _switching || !identical(_task, widget.task)
+                    ? '正在打开 ${_task.epLabel}…'
+                    : '正在打开离线缓存…',
+                compact: true,
+              ),
+            if (_error != null) _errorView(),
+            if (player != null && _error == null && !_locked)
+              _controls(),
+            if (_locked) _lockedLayer(),
+          ],
         ),
       ),
     );
   }
 
   /// 锁屏层：点画面只切解锁钮显隐，解锁钮在最上面单独接点击。
+  /// 解锁钮与左侧的锁同一位置（在线全屏同款 [FsUnlockButton]）。
   Widget _lockedLayer() {
     return Stack(
       fit: StackFit.expand,
@@ -1063,31 +1118,12 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
         GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: _onLockedTap,
-          child: const ColoredBox(color: Colors.transparent),
+          child: const SizedBox.expand(),
         ),
-        IgnorePointer(
-          ignoring: !_unlockVisible,
-          child: AnimatedOpacity(
-            opacity: _unlockVisible ? 1 : 0,
-            duration: const Duration(milliseconds: 160),
-            child: Align(
-              alignment: const Alignment(-.9, 0),
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _unlock,
-                child: Opacity(
-                  opacity: .7,
-                  child: PGlassIcon(
-                    icon: Icons.lock_rounded,
-                    size: 44,
-                    iconSize: 21,
-                    tint: .14,
-                    tooltip: '点击解锁',
-                    onTap: _unlock,
-                  ),
-                ),
-              ),
-            ),
+        SafeArea(
+          child: FsUnlockButton(
+            onUnlock: _unlock,
+            visible: _unlockVisible,
           ),
         ),
       ],
@@ -1120,7 +1156,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   TextButton(
-                    onPressed: () => Navigator.of(context).maybePop(),
+                    onPressed: () => unawaited(_leave()),
                     child: const Text('返回列表',
                         style: TextStyle(color: Colors.white)),
                   ),
@@ -1144,9 +1180,12 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
     );
   }
 
-  /// 完整控件结构（对齐全屏播放器）：顶栏 返回·剧名·集数·⋯设置，
-  /// 中部 锁 / ±10 秒，底部 进度 · 播放暂停 · 选集 · 全屏。
-  Widget _controls(FxPlayer player) {
+  /// 横屏控件层：完全复用在线全屏三件套 —— [FsTopBar] 返回·剧名·集数·⋯设置，
+  /// [FsSideControls] 左锁（左侧中部，不与返回重叠）·右 ±10 秒，
+  /// [FsBottomBar] 进度 · 播放暂停 · 下一集 · 选集 · ⋯设置 · 退出。
+  /// 投屏 / 清晰度·线路 / 下载这些在线入口一律不给。
+  Widget _controls() {
+    final compact = MediaQuery.sizeOf(context).width < 700;
     return AnimatedOpacity(
       opacity: _controlsVisible ? 1 : 0,
       duration: const Duration(milliseconds: 180),
@@ -1155,136 +1194,66 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Align(alignment: Alignment.topCenter, child: _topBar()),
-            Positioned.fill(child: _sideControls()),
-            Align(alignment: Alignment.bottomCenter, child: _bottomBar(player)),
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: _topBar(compact: compact),
+            ),
+            Positioned.fill(
+              child: FsSideControls(
+                onLock: _lock,
+                onSeekBy: (seconds) => unawaited(_seekBy(seconds)),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: _bottomBar(compact: compact),
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _topBar() {
-    final task = _task;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(6, 6, 14, 26),
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0xB3000000), Color(0x00000000)],
-        ),
-      ),
-      child: Row(
-        children: [
-          PGlassIcon(
-            icon: Icons.arrow_back_ios_new_rounded,
-            iconSize: 18,
-            tooltip: '返回',
-            onTap: () => Navigator.of(context).maybePop(),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  task.title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 5, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: Fx.accent.withValues(alpha: .82),
-                        borderRadius: BorderRadius.circular(5),
-                      ),
-                      child: const Text(
-                        '已下载',
-                        style: TextStyle(fontSize: 8.5, color: Colors.white),
-                      ),
-                    ),
-                    const SizedBox(width: 5),
-                    Flexible(
-                      child: Text(
-                        '${task.epLabel} · ${task.sizeLabel}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style:
-                            const TextStyle(fontSize: 10, color: Colors.white70),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          PGlassIcon(
-            icon: Icons.more_horiz_rounded,
-            iconSize: 21,
-            tooltip: '播放设置',
-            onTap: () => unawaited(_openSettingsSheet()),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _sideControls() {
+  /// 顶栏：完全复用在线全屏的 [FsTopBar]（返回 · 剧名 · 集数 · ⋯设置）。
+  ///
+  /// 投屏只对在线播放有意义，而 [FsTopBar] 的投屏钮是必填项：这里传空实现，
+  /// 再用与顶栏逐像素相同的渐变把投屏那一列盖住（离线页不给投屏入口，
+  /// 顺带挡住那颗按钮的点击与长按提示）。遮罩按 FsTopBar 的排布定位：
+  /// 右内边距 10 + ⋯钮 32·s + 间距 7·s + 投屏钮 32·s，上下拉满整条顶栏。
+  Widget _topBar({required bool compact}) {
+    final s = compact ? .9 : 1.0;
     return Stack(
       children: [
-        Positioned(
-          left: 14,
-          top: 0,
-          bottom: 0,
-          child: Center(
-            child: PGlassIcon(
-              icon: Icons.lock_outline_rounded,
-              size: 42,
-              iconSize: 21,
-              tint: .16,
-              tooltip: '锁定屏幕',
-              onTap: _lock,
-            ),
-          ),
+        FsTopBar(
+          title: _task.title,
+          epLabel: '${_task.epLabel} · ${_task.sizeLabel} · 已下载',
+          compact: compact,
+          onBack: () => unawaited(_leave()),
+          onCast: () {}, // 离线不投屏：这一列已被下面的遮罩盖住
+          onMore: () => unawaited(_openSettingsSheet()),
         ),
         Positioned(
-          right: 14,
+          right: 5 + 39 * s,
+          width: 32 * s + 10,
           top: 0,
           bottom: 0,
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                PGlassIcon(
-                  icon: Icons.forward_10_rounded,
-                  size: 44,
-                  iconSize: 23,
-                  tint: .16,
-                  tooltip: '快进 10 秒',
-                  onTap: () => unawaited(_seekBy(10)),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: .52),
+                    Colors.black.withValues(alpha: 0),
+                  ],
                 ),
-                const SizedBox(height: 22),
-                PGlassIcon(
-                  icon: Icons.replay_10_rounded,
-                  size: 44,
-                  iconSize: 23,
-                  tint: .16,
-                  tooltip: '后退 10 秒',
-                  onTap: () => unawaited(_seekBy(-10)),
-                ),
-              ],
+              ),
             ),
           ),
         ),
@@ -1292,72 +1261,33 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
     );
   }
 
-  Widget _bottomBar(FxPlayer player) {
-    final downloaded = _downloaded.length;
-    return Container(
-      padding: EdgeInsets.fromLTRB(14, 28, 14, 12),
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Color(0x00000000), Color(0xB3000000)],
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FxSeekRow(
-            position: _position,
-            duration: _duration,
-            buffered: _buffered,
-            onSeek: (position) => unawaited(_seek(position)),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              PGlassIcon(
-                icon: _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                size: 44,
-                iconSize: 25,
-                tooltip: _playing ? '暂停' : '播放',
-                onTap: () => unawaited(_playOrPause()),
-              ),
-              const SizedBox(width: 10),
-              const Spacer(),
-              PGlassPill(
-                onTap: () => unawaited(_openEpisodeSheet()),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.playlist_play_rounded,
-                        size: 14, color: Colors.white),
-                    const SizedBox(width: 4),
-                    Text(
-                      downloaded > 0 ? '选集 $downloaded' : '选集',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              PGlassIcon(
-                icon: _fullscreen
-                    ? Icons.fullscreen_exit_rounded
-                    : Icons.fullscreen_rounded,
-                size: 36,
-                iconSize: 19,
-                tooltip: _fullscreen ? '退出全屏' : '全屏',
-                onTap: () => unawaited(_toggleFullscreen()),
-              ),
-            ],
-          ),
-        ],
-      ),
+  Widget _bottomBar({required bool compact}) {
+    return FsBottomBar(
+      position: _position,
+      duration: _duration,
+      buffered: _buffered,
+      playing: _playing,
+      rate: _rate,
+      // 清晰度 / 线路只对在线播放有意义：空串即不显示入口。
+      qualityLabel: '',
+      compact: compact,
+      onSeek: (position) => unawaited(_seek(position)),
+      onTogglePlay: () => unawaited(_playOrPause()),
+      onNext: _playNextEpisode,
+      onEpisodes: () => unawaited(_openEpisodeSheet()),
+      onMore: () => unawaited(_openSettingsSheet()),
+      onExit: () => unawaited(_leave()),
     );
+  }
+
+  /// 下一集：只在已下载的集之间切；没有了就提示一句。
+  void _playNextEpisode() {
+    final next = _nextEpisode();
+    if (next == null) {
+      _toast('已经是最后一集已下载的集');
+      return;
+    }
+    unawaited(_switchTo(next, reason: '下一集'));
   }
 
   void _toast(String msg) {
@@ -1387,9 +1317,8 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
     if (_position > Duration.zero) {
       unawaited(_savePosition());
     }
-    if (_fullscreen) {
-      unawaited(_restorePortrait());
-    }
+    // 打开即横屏：任何退出路径（按钮、返回键、外层 pop）都要恢复竖屏。
+    unawaited(_restorePortrait());
     _service.removeListener(_onServiceChanged);
     super.dispose();
   }

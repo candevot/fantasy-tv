@@ -178,22 +178,31 @@ class _DownloadsPageState extends State<DownloadsPage>
   }
 
   /// 点剧卡片：一律进「离线详情」（标题 + 集列表），不跳在线详情、不联网。
-  Future<void> _openSeries(_SeriesGroup group) async {
+  ///
+  /// [cachedOnly] 给「已下载」Tab 用：进去只列已缓存的集，未缓存的不列，
+  /// 想补齐时点顶部「继续补下」。
+  Future<void> _openSeries(_SeriesGroup group, {bool cachedOnly = false}) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => DownloadSeriesPage(seriesId: group.id),
+        builder: (_) => DownloadSeriesPage(
+          seriesId: group.id,
+          cachedOnly: cachedOnly,
+        ),
       ),
     );
   }
 
   /// 已缓存的整部剧：播放集号最小的一集，其余可从「集数」里选。
-  Future<void> _playFirstCompleted(_SeriesGroup group) async {
+  Future<void> _playFirstCompleted(
+    _SeriesGroup group, {
+    bool cachedOnly = false,
+  }) async {
     final done = group.tasks
         .where((t) => t.status == DownloadStatus.completed)
         .toList()
       ..sort((a, b) => a.ep.compareTo(b.ep));
     if (done.isEmpty) {
-      await _openSeries(group);
+      await _openSeries(group, cachedOnly: cachedOnly);
       return;
     }
     await _play(done.first);
@@ -476,7 +485,8 @@ class _DownloadsPageState extends State<DownloadsPage>
     final current = _service.seriesCurrentTask(id);
     final failedCount =
         group.tasks.where((t) => t.status == DownloadStatus.failed).length;
-    final completed = status == DownloadStatus.completed;
+    // 「全部完成」只看集数：只缓存了 1/27 集不算完成（不打勾、不写「已全部缓存」）。
+    final completed = cached >= total;
     final paused = status == DownloadStatus.paused;
     final failed = status == DownloadStatus.failed;
     final downloading = status == DownloadStatus.downloading;
@@ -496,8 +506,8 @@ class _DownloadsPageState extends State<DownloadsPage>
         detail = '已缓存 $cached/$total 集';
       }
     } else {
-      detail = group.sample.isMovie
-          ? '全部已缓存 · ${fxBytes(bytes)}'
+      detail = completed
+          ? '已全部缓存 · ${fxBytes(bytes)}'
           : '已缓存 $cached/$total 集 · ${fxBytes(bytes)}';
     }
 
@@ -505,7 +515,7 @@ class _DownloadsPageState extends State<DownloadsPage>
       padding: const EdgeInsets.all(10),
       radius: 18,
       opacity: .62,
-      onTap: () => _openSeries(group),
+      onTap: () => _openSeries(group, cachedOnly: !downloadingTab),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -646,14 +656,20 @@ class _DownloadsPageState extends State<DownloadsPage>
                           icon: Icons.play_arrow_rounded,
                           label: '播放',
                           color: Fx.accent,
-                          onTap: () => _playFirstCompleted(group),
+                          onTap: () => _playFirstCompleted(
+                            group,
+                            cachedOnly: !downloadingTab,
+                          ),
                         ),
                       const SizedBox(width: 6),
                       _action(
                         icon: Icons.format_list_bulleted_rounded,
                         label: '集数',
                         color: Fx.sub,
-                        onTap: () => _openSeries(group),
+                        onTap: () => _openSeries(
+                          group,
+                          cachedOnly: !downloadingTab,
+                        ),
                       ),
                       const SizedBox(width: 6),
                       _action(

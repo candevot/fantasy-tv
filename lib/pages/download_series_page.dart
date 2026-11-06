@@ -11,9 +11,17 @@ import 'offline_player_page.dart';
 /* ========================================================================== */
 
 class DownloadSeriesPage extends StatefulWidget {
-  const DownloadSeriesPage({super.key, required this.seriesId});
+  const DownloadSeriesPage({
+    super.key,
+    required this.seriesId,
+    this.cachedOnly = false,
+  });
 
   final String seriesId;
+
+  /// 「已下载」Tab 进来的只读视图：**只列已缓存的集**（下载几集显示几集），
+  /// 未缓存 / 下载中的分区先不列；顶部保留「继续补下」，点了才展开补下流程。
+  final bool cachedOnly;
 
   @override
   State<DownloadSeriesPage> createState() => _DownloadSeriesPageState();
@@ -21,6 +29,9 @@ class DownloadSeriesPage extends StatefulWidget {
 
 class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
   final DownloadService _service = DownloadService.instance;
+
+  /// 点过「继续补下」后展开完整集数列表（已缓存 / 下载中 / 未缓存）。
+  bool _supplementing = false;
 
   @override
   void initState() {
@@ -103,6 +114,15 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
 
   Future<void> _downloadMissing() =>
       _enqueueEpisodes(_missingEpisodes());
+
+  /// 「继续补下」入口（顶栏按钮 + 头部卡片都走这里）：
+  /// 只列已缓存的视图先展开完整集数列表，再把没缓存的集排队下载。
+  Future<void> _startSupplement() async {
+    if (widget.cachedOnly && !_supplementing && mounted) {
+      setState(() => _supplementing = true);
+    }
+    await _downloadMissing();
+  }
 
   Future<void> _downloadOne(int ep) => _enqueueEpisodes(<int>[ep]);
 
@@ -218,10 +238,15 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
       ..sort((a, b) => a.ep.compareTo(b.ep));
     final cached =
         sorted.where((t) => t.status == DownloadStatus.completed).toList();
-    final busy = sorted
-        .where((t) => t.status != DownloadStatus.completed)
-        .toList();
+    // 只列已缓存的视图：下载中 / 未缓存两段先不列，点「继续补下」后才展开。
+    final cachedOnly = widget.cachedOnly && !_supplementing;
+    final busy = cachedOnly
+        ? const <DownloadTask>[]
+        : sorted
+            .where((t) => t.status != DownloadStatus.completed)
+            .toList();
     final missing = _missingEpisodes();
+    final listedMissing = cachedOnly ? const <int>[] : missing;
     final bytes = _service.seriesCachedBytes(widget.seriesId);
 
     final children = <Widget>[];
@@ -244,17 +269,17 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
       ));
       children.addAll(busy.map(_busyRow));
     }
-    if (missing.isNotEmpty) {
+    if (listedMissing.isNotEmpty) {
       if (children.isNotEmpty) children.add(const SizedBox(height: 12));
       children.add(_sectionHeader(
         title: '未缓存',
-        count: missing.length,
+        count: listedMissing.length,
         color: Fx.sub,
         hint: '点击下载',
         actionText: '全部下载',
-        onAction: () => _enqueueEpisodes(missing),
+        onAction: () => _enqueueEpisodes(listedMissing),
       ));
-      children.addAll(missing.map(_missingRow));
+      children.addAll(listedMissing.map(_missingRow));
     }
 
     return Scaffold(
@@ -266,8 +291,9 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
             children: [
               _appBar(
                 tasks.first.title,
-                subtitle: '已缓存 $cached.length/$total 集 · ${fxBytes(bytes)}',
+                subtitle: '已缓存 ${cached.length}/$total 集 · ${fxBytes(bytes)}',
                 showDownloadMissing: missing.isNotEmpty,
+                downloadLabel: widget.cachedOnly ? '继续补下' : '补下',
               ),
               Expanded(
                 child: ListView(
@@ -292,6 +318,7 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
     String title, {
     required String? subtitle,
     required bool showDownloadMissing,
+    String downloadLabel = '补下',
   }) {
     return AppBar(
       backgroundColor: Colors.transparent,
@@ -333,15 +360,16 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
       actions: [
         if (showDownloadMissing)
           TextButton(
-            onPressed: _downloadMissing,
+            onPressed: _startSupplement,
             child: Row(
               mainAxisSize: MainAxisSize.min,
-              children: const [
-                Icon(Icons.playlist_add_rounded, size: 16, color: Fx.accent),
-                SizedBox(width: 4),
+              children: [
+                const Icon(Icons.playlist_add_rounded,
+                    size: 16, color: Fx.accent),
+                const SizedBox(width: 4),
                 Text(
-                  '补下',
-                  style: TextStyle(
+                  downloadLabel,
+                  style: const TextStyle(
                     fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                     color: Fx.accent,
@@ -458,6 +486,14 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
     final active = status == DownloadStatus.downloading ||
         status == DownloadStatus.queued;
 
+    // 进度条下面那行状态：下载中报进度；全缓存才说「已全部缓存」，
+    // 只缓存了一部分时如实报 X/Y（1/27 不再谎称已全部缓存）。
+    final String? caption = busyCount > 0
+        ? '下载中 $busyCount 集 · 已完成 ${(progress * 100).round()}%'
+        : cachedCount >= total
+            ? null
+            : '还有 ${total - cachedCount} 集未缓存 · 点「继续补下」补齐';
+
     return GlassCard(
       padding: const EdgeInsets.all(11),
       radius: 18,
@@ -492,7 +528,9 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '已缓存 $cachedCount/$total 集 · ${fxBytes(bytes)}',
+                      cachedCount >= total
+                          ? '已全部缓存 · ${fxBytes(bytes)}'
+                          : '已缓存 $cachedCount/$total 集 · ${fxBytes(bytes)}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 10, color: Fx.sub),
@@ -508,15 +546,15 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
                             Fx.accent),
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      busyCount > 0
-                          ? '下载中 $busyCount 集 · 已完成 ${(progress * 100).round()}%'
-                          : '已全部缓存 · ${fxBytes(bytes)}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 9, color: Fx.sub),
-                    ),
+                    if (caption != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        caption,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 9, color: Fx.sub),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -554,7 +592,7 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
                   icon: Icons.playlist_add_rounded,
                   label: '继续补下',
                   color: Fx.accent,
-                  onTap: _downloadMissing,
+                  onTap: _startSupplement,
                 ),
               ),
               const SizedBox(width: 7),
