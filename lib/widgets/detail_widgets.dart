@@ -372,6 +372,7 @@ class DetailLineCard extends StatelessWidget {
     required this.active,
     this.onTap,
     this.subtitle,
+    this.unstable = false,
     this.width = 102,
   });
 
@@ -382,6 +383,9 @@ class DetailLineCard extends StatelessWidget {
 
   /// 第二行文案；为空时显示「共 N 集」（直播线路用清晰度 / 线路名）。
   final String? subtitle;
+
+  /// 服务端标记 degraded 的线路：照常显示、可点，只在卡片名后补灰色小字。
+  final bool unstable;
 
   /// 卡片宽度；直播线路文字更长时可适当加宽。
   final double width;
@@ -417,8 +421,22 @@ class DetailLineCard extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(
-              name,
+            Text.rich(
+              TextSpan(
+                text: name,
+                children: [
+                  // degraded 线路绝不隐藏，只在名字后补一行灰色小字。
+                  if (unstable)
+                    TextSpan(
+                      text: ' · 不稳',
+                      style: TextStyle(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w500,
+                        color: Fx.sub.withValues(alpha: .85),
+                      ),
+                    ),
+                ],
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(

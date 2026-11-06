@@ -15,7 +15,7 @@ import 'fullscreen_page.dart';
 import 'history_page.dart' show FxStore;
 
 /// 当前线路不能直接播放的原因，交给外层决定换线路与提示文案。
-enum SourceIssue { parse, empty, error }
+enum SourceIssue { parse, empty, expired, error }
 
 /// 详情页内嵌播放器（16:9），也是独立播放页复用的播放控件。
 ///
@@ -965,6 +965,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               play: shouldPlay,
               waitForWarm: waitForWarm,
               direct: info.direct && info.isHls,
+              // 平台线路签名过期时，代理会回调这里重新走 /api/play。
+              refreshPlay: () => _refreshPlatformUrl(line, ep),
+              onPlayExpired: () {
+                if (!mounted || token != _loadToken) return;
+                _emitSourceIssue(SourceIssue.expired);
+              },
             )
             .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) {
@@ -1074,6 +1080,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     return true;
   }
 
+  /// 平台线路（腾讯 / 芒果等）签名失效：重新请求 /api/play 拿新签名地址。
+  /// 本地代理会每 90 秒或遇到分片 403/404 时调用；失败返回 null。
+  Future<String?> _refreshPlatformUrl(String line, int ep) async {
+    if (widget.videoId.isEmpty || line.isEmpty) return null;
+    try {
+      final info = await Api.play(widget.videoId, ep, line, fresh: true);
+      final url = info.url.trim();
+      if (url.isEmpty) return null;
+      // 旧签名已失效，清掉缓存，避免稍后切回本线路又命中过期地址。
+      FxPlayCache.invalidate(widget.videoId, ep, line);
+      return url;
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _emitSourceIssue(SourceIssue issue) {
     final callback = widget.onSourceIssue;
     if (callback != null) {
@@ -1088,6 +1110,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _errorText = switch (issue) {
         SourceIssue.parse => '该线路暂不可直接播放，请切换线路',
         SourceIssue.empty => '当前线路没有可用播放地址，请切换线路',
+        SourceIssue.expired => '该平台线路已失效，请切换线路',
         SourceIssue.error => '线路播放失败，请切换线路',
       };
     });

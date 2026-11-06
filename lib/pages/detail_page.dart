@@ -564,6 +564,7 @@ class _DetailPageState extends State<DetailPage>
     return switch (issue) {
       SourceIssue.parse => '该线路暂不可直接播放，已为你切换$label',
       SourceIssue.empty => '该线路暂无播放地址，已为你切换$label',
+      SourceIssue.expired => '该平台线路已失效，请切换线路',
       _ => '线路播放失败，已自动切换$label',
     };
   }
@@ -576,6 +577,7 @@ class _DetailPageState extends State<DetailPage>
         : switch (issue) {
             SourceIssue.parse => '所有线路暂不可直接播放，请重试或换线路',
             SourceIssue.empty => '所有线路都没有可用播放地址，请稍后重试',
+            SourceIssue.expired => '该平台线路已失效，请切换线路',
             _ => '所有线路都不可用，请重试或换线路',
           };
     final player = _playerKey.currentState;
@@ -1070,6 +1072,8 @@ class _DetailPageState extends State<DetailPage>
                         : line.displayName,
                     count: total,
                     active: line.id == _lineId,
+                    // degraded 线路照常展示并可点，只在卡片名后补灰色小字。
+                    unstable: line.degraded,
                     onTap:
                         _playerSwitchingLine ? null : () => _selectLine(line),
                   ),

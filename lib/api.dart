@@ -321,12 +321,23 @@ class Api {
     return VideoDetail.fromJson(d);
   }
 
-  static Future<PlayInfo> play(String id, int ep, String line) async {
+  static Future<PlayInfo> play(
+    String id,
+    int ep,
+    String line, {
+    bool fresh = false,
+  }) async {
     // 这里不走 _get/_decode：需要解析的线路会返回
     // `{code:1, msg:'unresolved', data:{url, type:'parse', ...}}`，
     // 它是正常的业务响应而不是请求失败，必须单独取原始 body 再判断。
     final r = await _send(() => http.get(
-        _u('/play', {'id': id, 'ep': ep, 'line': line}),
+        _u('/play', {
+          'id': id,
+          'ep': ep,
+          'line': line,
+          // 平台线路签名过期后要求服务端绕过解析缓存，重新取临时签名。
+          if (fresh) 'fresh': 1,
+        }),
         headers: _headers()));
     Map<String, dynamic> body = const <String, dynamic>{};
     try {

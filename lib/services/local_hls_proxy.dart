@@ -9,6 +9,13 @@ import 'dart:typed_data';
 /// 代理日志回调；默认写到 dart:developer（Flutter 控制台 / logcat 可见）。
 typedef HlsProxyLogger = void Function(String message);
 
+/// 平台线路签名过期时，由宿主重新请求 `/api/play?...&fresh=1` 拿新地址。
+/// 返回 null / 抛异常表示这次没拿到（代理按失败计数，连续 2 次通知换线）。
+typedef PlayUrlRefresher = Future<String?> Function();
+
+/// 平台线路彻底失效（连续刷新失败）时通知宿主提示用户切换线路。
+typedef PlayExpiredCallback = void Function();
+
 /// 客户端本地 HLS 分片代理。
 ///
 /// 背景：部分直链（红牛等）对单条 TCP 连接限速，libmpv 顺序拉分片时
@@ -100,6 +107,12 @@ class LocalHlsProxy {
   Future<void>? _starting;
   Map<String, String> _headers = const <String, String>{};
   String? _activePlaylistUrl;
+  Uri? _activeRootUri;
+  PlayUrlRefresher? _refreshPlay;
+  PlayExpiredCallback? _onPlayExpired;
+  final Map<String, Uri> _sourceOverrides = <String, Uri>{};
+  int _platformRefreshFails = 0;
+  bool _platformExpiredNotified = false;
   int _cacheBytes = 0;
   int _cacheHits = 0;
   int _cacheMisses = 0;
@@ -260,8 +273,10 @@ class LocalHlsProxy {
   /// 失败时抛异常，调用方应回退直连。
   Future<String> proxy(
     String m3u8Url,
-    Map<String, String> headers,
-  ) async {
+    Map<String, String> headers, {
+    PlayUrlRefresher? refreshPlay,
+    PlayExpiredCallback? onPlayExpired,
+  }) async {
     if (_disposed) throw StateError('LocalHlsProxy 已释放');
     final uri = Uri.tryParse(m3u8Url.trim());
     if (uri == null ||
@@ -286,6 +301,11 @@ class LocalHlsProxy {
     _refreshTimer = null;
 
     _headers = _normalizeHeaders(headers);
+    _refreshPlay = refreshPlay;
+    _onPlayExpired = onPlayExpired;
+    _activeRootUri = uri;
+    _platformRefreshFails = 0;
+    _platformExpiredNotified = false;
     final sourceKey = uri.toString();
     if (_activePlaylistUrl != null && _activePlaylistUrl != sourceKey) {
       // 换集时清掉上一集的缓存与映射，避免 256MB 被旧集占满。
@@ -294,6 +314,7 @@ class LocalHlsProxy {
       _segmentAliases.clear();
       _activePlaylistKeys.clear();
       _primedPlaylists.clear();
+      _sourceOverrides.clear();
     }
     _activePlaylistUrl = sourceKey;
 
@@ -554,7 +575,10 @@ class LocalHlsProxy {
   }
 
   Future<_RewrittenPlaylist> _fetchAndRewrite(Uri uri) async {
-    final fetched = await _fetchPlaylistText(uri);
+    // 平台签名过期后，逻辑 key 仍是旧地址，实际请求走刷新后的新地址；
+    // 这样播放器手里的本地 /playlist?u=旧地址 不用变，分片别名也能复用。
+    final actual = _sourceOverrides[uri.toString()] ?? uri;
+    final fetched = await _fetchPlaylistText(actual);
     final rewritten = _rewritePlaylist(
       fetched.text,
       fetched.finalUri,
@@ -1335,6 +1359,12 @@ class LocalHlsProxy {
     if (_disposed || _refreshing) return;
     _refreshing = true;
     try {
+      // 平台线路的 m3u8 是临时签名：重取同一个 URL 只会拿到同一份过期
+      // 内容，必须回调宿主重新走 /api/play 拿新签名地址。
+      if (_refreshPlay != null && _isPlatformPlaylist) {
+        await _refreshPlatformPlaylist();
+        return;
+      }
       final keys = List<String>.of(_activePlaylistKeys);
       for (final key in keys) {
         if (_disposed) return;
@@ -1353,6 +1383,10 @@ class LocalHlsProxy {
   }
 
   Future<bool> _refreshForAlias(_SegmentAlias? alias) async {
+    // 遇到 403/404 先重新调用 /api/play 换新签名；拿不到再退回重取旧地址。
+    if (_refreshPlay != null && _isPlatformPlaylist) {
+      if (await _refreshPlatformPlaylist()) return true;
+    }
     if (alias != null) {
       final uri = Uri.tryParse(alias.playlistKey);
       if (uri != null) {
@@ -1368,6 +1402,68 @@ class LocalHlsProxy {
     // 没有 index 映射时，至少把所有活跃列表刷新一遍再试。
     await _refreshActivePlaylists();
     return _activePlaylistKeys.isNotEmpty;
+  }
+
+  /// 平台线路（腾讯 / 芒果 / B 站等 CDN）的连续刷新失败次数达到 2 次后，
+  /// 通知宿主提示「该平台线路已失效，请切换线路」。
+  Future<bool> _refreshPlatformPlaylist() async {
+    final refresher = _refreshPlay;
+    if (_disposed || refresher == null) return false;
+    try {
+      final raw = await refresher().timeout(
+        const Duration(seconds: 20),
+      );
+      final fresh = Uri.tryParse(raw?.trim() ?? '');
+      if (fresh == null ||
+          !fresh.hasScheme ||
+          !(fresh.isScheme('http') || fresh.isScheme('https')) ||
+          fresh.host.isEmpty) {
+        throw StateError('未取到新的平台播放地址');
+      }
+      final rootKey = _activeRootUri?.toString();
+      final rootUri = rootKey == null ? null : Uri.tryParse(rootKey);
+      if (rootKey == null || rootUri == null) {
+        throw StateError('没有可刷新的播放列表');
+      }
+      // 只重写根列表：新地址就是 /api/play 给的根地址，分片别名按 playlistKey
+      // 索引，重取根列表后别名会自动指向新分片；拿根地址去顶子列表会把
+      // master 当 media 喂给播放器。
+      _sourceOverrides[rootKey] = fresh;
+      await _loadPlaylist(rootUri, ttl: Duration.zero);
+      _platformRefreshFails = 0;
+      _platformExpiredNotified = false;
+      _log('平台线路签名已刷新 ${_short(fresh)}');
+      return true;
+    } catch (error) {
+      _platformRefreshFails++;
+      _log('平台线路签名刷新失败（第 $_platformRefreshFails 次）: $error');
+      if (_platformRefreshFails >= 2 && !_platformExpiredNotified) {
+        _platformExpiredNotified = true;
+        _log('平台线路已失效，通知宿主提示切换线路');
+        try {
+          _onPlayExpired?.call();
+        } catch (_) {
+          // 宿主回调异常不能影响代理本身的清理。
+        }
+      }
+      return false;
+    }
+  }
+
+  /// 当前播放列表是否属于平台 CDN（临时签名，必须重新走 /api/play）。
+  bool get _isPlatformPlaylist {
+    final uri = _activeRootUri;
+    if (uri == null) return false;
+    final host = uri.host.toLowerCase();
+    if (host.isEmpty) return false;
+    return host == 'qq.com' ||
+        host.endsWith('.qq.com') ||
+        host.contains('mgtv') ||
+        host.endsWith('mgtv.com') ||
+        host.contains('bilivideo') ||
+        host.endsWith('hdslb.com') ||
+        host.endsWith('bilibili.com') ||
+        host.contains('renren');
   }
 
   _SegmentRef? _latestSegment(_SegmentAlias? alias) {

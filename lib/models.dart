@@ -484,15 +484,39 @@ class LineInfo {
 
   /// 来源站名（如「红牛」）与原始 vod_play_from（如「hnm3u8」），旧接口可能为空。
   final String? source, from;
-  LineInfo(this.id, this.name, this.type, this.priority,
-      {this.source, this.from});
-  factory LineInfo.fromJson(Map<String, dynamic> j) => LineInfo(
+
+  /// 服务端线路健康度：近 N 次抽样成功率低于阈值时标 degraded。
+  /// 只用于展示提示与排到最后，不隐藏线路（服务端仍会照常返回）。
+  final bool degraded;
+
+  /// 健康度成功率（0–1），服务端未给时为 0。
+  final double healthRate;
+
+  LineInfo(
+    this.id,
+    this.name,
+    this.type,
+    this.priority, {
+    this.source,
+    this.from,
+    this.degraded = false,
+    this.healthRate = 0,
+  });
+
+  factory LineInfo.fromJson(Map<String, dynamic> j) {
+    final health = j['health'];
+    final rate = health is Map ? _asNum(health['rate']) : 0;
+    return LineInfo(
       _asStr(j['id']),
       _asStr(j['name']),
       _asStr(j['type'], fallback: 'hls'),
       _asInt(j['priority']),
       source: _lineOptStr(j['source']),
-      from: _lineOptStr(j['from']));
+      from: _lineOptStr(j['from']),
+      degraded: j['degraded'] == true,
+      healthRate: rate.toDouble(),
+    );
+  }
 
   bool get needsParse => type.trim().toLowerCase() == 'parse';
 
@@ -589,7 +613,18 @@ List<LineInfo> fxMergeLines(List<LineInfo> oldLines, List<LineInfo> fresh) {
   for (final line in oldLines) {
     add(line);
   }
-  return merged;
+  return sortDegradedLast(merged);
+}
+
+/// degraded 线路仍然展示，但统一排到最后（稳定排序，其余线路保持接口顺序）。
+List<LineInfo> sortDegradedLast(List<LineInfo> lines) {
+  if (!lines.any((l) => l.degraded)) return lines;
+  return <LineInfo>[
+    for (final line in lines)
+      if (!line.degraded) line,
+    for (final line in lines)
+      if (line.degraded) line,
+  ];
 }
 
 class Episode {
@@ -729,7 +764,7 @@ class VideoDetail {
       tags: _asStrList(j['tags']),
       director: _asStrList(j['director']),
       cast: _asStrList(j['cast']),
-      lines: mergeLines(lines),
+      lines: sortDegradedLast(mergeLines(lines)),
       groups: groups,
       related: cards,
       relatedIds: ids,

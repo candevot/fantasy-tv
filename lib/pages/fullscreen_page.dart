@@ -501,6 +501,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   @override
   void dispose() {
+    // 退出全屏也要复位长按倍速，不能让 3.0x 留在共享播放器上。
+    _resetHold2x(notify: false);
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _seekHintTimer?.cancel();
@@ -683,6 +685,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }) async {
     final c = _controller;
     if (c == null) return;
+    // 换集 / 重试时手势可能还没收到 onLongPressEnd，先把长按倍速清掉。
+    _resetHold2x();
     final token = ++_loadToken;
     _hideTimer?.cancel();
     _cancelFirstFrameTimer();
@@ -776,6 +780,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               play: continuePlayback,
               waitForWarm: waitForWarm,
               direct: source.direct && source.isHls,
+              refreshPlay: _refreshPlatformUrl,
+              onPlayExpired: _onPlatformExpired,
             )
             .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) return;
@@ -872,6 +878,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             headers: headers,
             play: wasPlaying,
             direct: direct,
+            refreshPlay: _refreshPlatformUrl,
+            onPlayExpired: _onPlatformExpired,
           )
           .timeout(_openReadyTimeout);
       if (!mounted) return false;
@@ -986,6 +994,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return info.headers;
     }
 
+    _resetHold2x();
     _switching = true;
     final token = ++_loadToken;
     try {
@@ -1050,6 +1059,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           }
         }
         if (!mounted || token != _loadToken) return;
+        // 出错时手势层会立刻 disabled，onLongPressEnd 再也收不到：
+        // 这里强制复位长按倍速，避免「3.0倍速快进中」常驻。
+        if (!restored) _resetHold2x();
         setState(() {
           _loading = false;
           _loadingHint = null;
@@ -1256,6 +1268,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   Future<void> _watchdogGiveUp() async {
     if (!mounted) return;
+    // 看门狗放弃时也要复位长按倍速：接下来要么退出全屏，要么手势层
+    // 随 _error 变为 disabled，onLongPressEnd 不会再来。
+    _resetHold2x();
     if (widget.canChangeLine && !_exiting) {
       // 全屏没有线路列表：退给竖屏自动切下一条，比停在全屏黑屏更好。
       fxToast(context, '播放无法恢复，正在切换线路');
@@ -1381,6 +1396,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 统一失败收尾：要么自动换线路退出，要么停留在可重试的错误页。
   void _failWith(String text) {
     if (!mounted || _exiting) return;
+    _resetHold2x();
     _cancelFirstFrameTimer();
     // 失败即未加载成功：退出全屏时不能让竖屏把这一集记成「已加载」。
     _loadedEp = null;
@@ -1401,6 +1417,33 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _uiDuration = null;
     });
     _wake();
+  }
+
+  /// 平台线路（腾讯 / 芒果等）签名失效：重新请求 /api/play 拿新签名地址。
+  /// 本地代理每 90 秒或遇到分片 403/404 时回调；失败返回 null。
+  Future<String?> _refreshPlatformUrl() async {
+    if (_isLive || widget.videoId.isEmpty || _line.isEmpty) return null;
+    try {
+      final info = await Api.play(widget.videoId, _ep, _line, fresh: true);
+      final url = info.url.trim();
+      if (url.isEmpty) return null;
+      FxPlayCache.invalidate(widget.videoId, _ep, _line);
+      return url;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 代理连续两次拿不到新签名：提示该平台线路已失效，能换线就退回竖屏换线。
+  void _onPlatformExpired() {
+    if (!mounted || _exiting) return;
+    _resetHold2x();
+    if (widget.canChangeLine) {
+      fxToast(context, '该平台线路已失效，请切换线路');
+      unawaited(_exit(requestLineChange: true));
+      return;
+    }
+    _failWith('该平台线路已失效，请切换线路');
   }
 
   /// 错误页「重试」：不再重新请求接口，直接用当前地址重新 open，
@@ -1573,6 +1616,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<void> _switchEp(int next, {bool auto = false}) async {
     if (_isLive) return;
     if (_loading || _switching) return;
+    _resetHold2x();
     if (next == _ep) {
       _closePanels();
       return;
@@ -1668,6 +1712,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _lock() {
     _unlockTimer?.cancel();
+    // 锁屏会直接移除手势层，长按 end 不会再回来，先复位倍速。
+    _resetHold2x();
     setState(() {
       _locked = true;
       _controls = false;
@@ -1782,7 +1828,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   void _startHold2x() {
-    if (_isLive) return;
+    if (_isLive || _holding2x) return;
     final c = _controller;
     if (c == null ||
         _loading ||
@@ -1803,11 +1849,17 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     });
   }
 
-  void _endHold2x() {
+  void _endHold2x() => _resetHold2x();
+
+  /// 强制结束长按快进并恢复长按前的倍速。
+  /// 切换 / 失败 / 退出全屏 / 切后台都必须走这里，避免「3.0倍速快进中」常驻。
+  void _resetHold2x({bool notify = true}) {
     if (!_holding2x) return;
+    _holding2x = false;
+    if (notify && mounted) {
+      setState(() {});
+    }
     unawaited(_applyRate(_rateBeforeHold));
-    if (!mounted) return;
-    setState(() => _holding2x = false);
   }
 
   void _toggleSpeed() {
@@ -1901,7 +1953,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         setState(() => _skipIntroOutro = on);
         fxToast(context, on ? '已开启跳过片头片尾' : '已关闭跳过片头片尾');
       },
-      onPip: () => fxToast(context, '画中画：当前版本暂不支持'),
       onSleepTimer: () => unawaited(_openSleepTimerPicker()),
       onDownload: () => fxToast(context, '请到详情页下载本集'),
       onSpeed: () => unawaited(_openSpeedPicker()),
@@ -1967,6 +2018,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<void> _exit({bool requestLineChange = false}) async {
     if (_exiting) return;
     _exiting = true;
+    // 长按快进中直接退出全屏时，把倍速恢复成交给竖屏前的值。
+    _resetHold2x();
     _unlockTimer?.cancel();
     // 作废仍在进行的切清晰度/切集请求，退出后不要再回写 UI。
     _loadToken++;

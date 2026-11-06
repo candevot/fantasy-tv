@@ -305,6 +305,9 @@ class FxPlayer implements Listenable {
   /// 默认 false 保持旧调用方（一起看等）先 seek 再播的语义。
   /// [direct] 为 true（调用方已确认是 HLS 直链）时，先走本地分片
   /// 代理（多连接 Range 下载 + 预取）；代理启动失败自动回退直连。
+  /// [refreshPlay] 仅供平台线路（临时签名 m3u8）使用：代理遇到 403/404
+  /// 或每 90 秒回调它重新请求 `/api/play?...&fresh=1` 拿新地址。
+  /// [onPlayExpired] 在连续两次拿不到新地址时回调，由页面提示切换线路。
   /// 打不开、解码失败或超时会抛出 [FxPlayerException]，方便上层切换备用地址。
   Future<void> open(
     String url, {
@@ -312,6 +315,8 @@ class FxPlayer implements Listenable {
     bool play = false,
     bool waitForWarm = false,
     bool direct = false,
+    PlayUrlRefresher? refreshPlay,
+    PlayExpiredCallback? onPlayExpired,
   }) {
     if (_disposed) {
       return Future<void>.error(const FxPlayerException('播放器已释放'));
@@ -320,7 +325,15 @@ class FxPlayer implements Listenable {
     final pending = _opening;
     // 同一 url + headers 正在打开：忽略重复请求，复用同一个结果。
     if (pending != null && pending.key == key) return pending.future;
-    final future = _openInternal(url, headers, play, waitForWarm, direct);
+    final future = _openInternal(
+      url,
+      headers,
+      play,
+      waitForWarm,
+      direct,
+      refreshPlay,
+      onPlayExpired,
+    );
     final request = _OpenRequest(key, future);
     _opening = request;
     return future.whenComplete(() {
@@ -348,6 +361,8 @@ class FxPlayer implements Listenable {
     bool play,
     bool waitForWarm,
     bool direct,
+    PlayUrlRefresher? refreshPlay,
+    PlayExpiredCallback? onPlayExpired,
   ) async {
     final token = ++_openToken;
     _cacheRaised = false;
@@ -368,7 +383,17 @@ class FxPlayer implements Listenable {
         final proxy = _hlsProxy ??= LocalHlsProxy(log: debugPrint);
         try {
           final localUrl = await proxy
-              .proxy(url, headers)
+              .proxy(
+                url,
+                headers,
+                refreshPlay: refreshPlay,
+                onPlayExpired: onPlayExpired == null
+                    ? null
+                    : () {
+                        if (_disposed || token != _openToken) return;
+                        onPlayExpired();
+                      },
+              )
               .timeout(const Duration(seconds: 4));
           if (_disposed || token != _openToken) return;
           if (localUrl.isNotEmpty) {

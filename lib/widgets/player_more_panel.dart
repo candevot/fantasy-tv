@@ -20,8 +20,9 @@ enum FxLoopMode {
 }
 
 /// 腾讯播放设置样式的「更多」面板：
-/// 图标行（画中画 / 定时关闭 / 下载 / 倍速 / 后台播放）
+/// 图标行（定时关闭 / 下载本集 / 倍速 / 后台播放）
 /// + 列表行（循环播放 / 跳过片头片尾 / 撑满全屏 / 问题反馈）。
+/// 画中画已移除：当前版本不支持，列表只保留可用项。
 Future<void> showFxMorePanel(
   BuildContext context, {
   required FxLoopMode loopMode,
@@ -30,7 +31,6 @@ Future<void> showFxMorePanel(
   required ValueChanged<FxLoopMode> onLoopChanged,
   required ValueChanged<bool> onSkipChanged,
   required ValueChanged<bool> onFillChanged,
-  required VoidCallback onPip,
   required VoidCallback onSleepTimer,
   required VoidCallback onDownload,
   required VoidCallback onSpeed,
@@ -108,18 +108,13 @@ Future<void> showFxMorePanel(
                 Row(
                   children: [
                     _MoreAction(
-                      icon: Icons.picture_in_picture_alt_rounded,
-                      label: '画中画',
-                      onTap: () => closeThen(onPip),
-                    ),
-                    _MoreAction(
                       icon: Icons.timer_outlined,
                       label: '定时关闭',
                       onTap: () => closeThen(onSleepTimer),
                     ),
                     _MoreAction(
                       icon: Icons.download_rounded,
-                      label: '下载',
+                      label: '下载本集',
                       onTap: () => closeThen(onDownload),
                     ),
                     _MoreAction(
