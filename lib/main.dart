@@ -198,6 +198,8 @@ class _FantasyAppState extends State<FantasyApp> with WidgetsBindingObserver {
       theme: FxTheme.data,
       // 全局提示入口：网络 401 这类没有 BuildContext 的地方也能弹 SnackBar。
       scaffoldMessengerKey: fxMessengerKey,
+      // 顶栏小标签（已投屏 / 跟随房主）挂根 Overlay 用，播放页不弹遮挡提示。
+      navigatorKey: fxNavigatorKey,
       // 深色模式下也固定浅色主题：自绘玻璃卡片是按浅色校准的，
       // 跟随系统切到深色会出现低对比度 / 白底白字。
       darkTheme: FxTheme.data,

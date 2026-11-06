@@ -3,10 +3,12 @@ import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart' show NativePlayer;
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models.dart';
+import '../services/fx_display_settings.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
 
@@ -107,52 +109,226 @@ double? fxBufferedPercent(Duration buffered, Duration duration) {
 /// 字幕距播放器底部的安全距离：至少 96dp，始终高过底部控件区。
 const double fxSubtitleMinBottom = 96;
 
-/// 播放器默认画面适配：contain —— 等比完整显示，不裁字幕，可能有细黑边。
-const BoxFit kPlayerFit = BoxFit.contain;
+/// 画面比例档位 → BoxFit：
+/// - 适应 / 填充 / 拉伸 → contain / cover / fill；
+/// - 16:9 / 4:3 / 1:1 固定比例档 → 框内裁满（外圈黑边交给 [fxAspectFrame]）。
+BoxFit fxAspectFit(FxAspectMode mode) => switch (mode) {
+      FxAspectMode.contain => BoxFit.contain,
+      FxAspectMode.cover => BoxFit.cover,
+      FxAspectMode.fill => BoxFit.fill,
+      _ => BoxFit.cover,
+    };
 
-/// 「撑满全屏」打开后的画面适配：cover —— 等比撑满，裁掉多余边缘，不变形。
-const BoxFit kPlayerFillFit = BoxFit.cover;
+/// 固定比例档外框：按目标比例居中裁出一个框（框内画面裁满），
+/// 框外留黑边；适应 / 填充 / 拉伸三档原样返回，交给 BoxFit 处理。
+Widget fxAspectFrame(FxAspectMode mode, Widget child) {
+  final ratio = mode.frameRatio;
+  if (ratio == null) return child;
+  return Container(
+    color: Colors.black,
+    alignment: Alignment.center,
+    child: ClipRect(
+      child: AspectRatio(aspectRatio: ratio, child: child),
+    ),
+  );
+}
 
-/// 按「撑满全屏」开关取全屏画面适配：默认 contain，只有开关打开才 cover。
-BoxFit fxFullscreenFit(bool fillScreen) =>
-    fillScreen ? kPlayerFillFit : kPlayerFit;
+/// 镜像包装：默认档原样返回，水平 / 垂直镜像用 Transform.flip 翻转画面。
+Widget fxMirrorWrap(FxMirrorMode mode, Widget child) {
+  if (mode == FxMirrorMode.none) return child;
+  return Transform.flip(flipX: mode.flipX, flipY: mode.flipY, child: child);
+}
 
-/// 播放器画面：固定等比完整显示，并把字幕抬到控件区上方。
+/// 静态画面（切集 / 切线路的冻结帧）按当前画面比例与镜像档位渲染，
+/// 与 [FxPlayerSurface] 共用同一套裁切与翻转，改档立即生效。
+///
+/// [child] 里要按传入的 [BoxFit] 配置子内容，保证与视频同一档适配。
+class FxAspectBox extends StatelessWidget {
+  const FxAspectBox({super.key, required this.child});
+
+  final Widget Function(BuildContext context, BoxFit fit) child;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: FxDisplaySettings.instance,
+      builder: (context, _) {
+        final aspect = FxDisplaySettings.instance.aspect;
+        final mirror = FxDisplaySettings.instance.mirror;
+        return fxMirrorWrap(
+          mirror,
+          fxAspectFrame(aspect, child(context, fxAspectFit(aspect))),
+        );
+      },
+    );
+  }
+}
+
+/// 播放器画面：按「画面比例 / 镜像模式」当前档位渲染，切档立即生效（不重载），
+/// 并把字幕抬到控件区上方。
 ///
 /// [subtitleBottom] 必须不小于 [fxSubtitleMinBottom]；全屏时传
 /// 「底部控件高度 + 安全间距」，避免字幕被进度条/按钮盖住。
-class FxPlayerSurface extends StatelessWidget {
+class FxPlayerSurface extends StatefulWidget {
   const FxPlayerSurface({
     super.key,
     required this.player,
-    this.fit = kPlayerFit,
     this.subtitleBottom = fxSubtitleMinBottom,
   });
 
   final FxPlayer player;
-  final BoxFit fit;
   final double subtitleBottom;
 
   @override
+  State<FxPlayerSurface> createState() => _FxPlayerSurfaceState();
+}
+
+class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
+  @override
+  void initState() {
+    super.initState();
+    FxDisplaySettings.instance.addListener(_onSettingsChanged);
+    // 幂等：读回已保存的画面比例 / 镜像档位，读完会再通知一次。
+    unawaited(FxDisplaySettings.instance.ensureLoaded());
+    _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
+  }
+
+  void _onSettingsChanged() {
+    if (!mounted) return;
+    _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
+    setState(() {});
+  }
+
+  /// 镜像模式下的字幕处理：本项目字幕由 libass 画进视频纹理（libass: true），
+  /// 翻转画面会把字幕一起翻成反字。打开镜像时用 mpv `sub-visibility=no`
+  /// 把纹理里的字幕藏起来，改由 [FxMirrorSubtitle] 以正字显示；
+  /// 关掉镜像再还原成 `yes`。
+  Future<void> _syncMirrorSubtitle(FxMirrorMode mode) async {
+    try {
+      final platform = widget.player.player.platform;
+      if (platform is! NativePlayer) return;
+      await platform.setProperty(
+        'sub-visibility',
+        mode == FxMirrorMode.none ? 'yes' : 'no',
+      );
+    } catch (_) {
+      // 播放器已释放 / 属性不可用：保持现状，不影响播放。
+    }
+  }
+
+  @override
+  void dispose() {
+    FxDisplaySettings.instance.removeListener(_onSettingsChanged);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Video(
-      controller: player.videoController,
+    final settings = FxDisplaySettings.instance;
+    final aspect = settings.aspect;
+    final mirror = settings.mirror;
+    final mirrored = mirror != FxMirrorMode.none;
+    final bottom = widget.subtitleBottom < fxSubtitleMinBottom
+        ? fxSubtitleMinBottom
+        : widget.subtitleBottom;
+    final video = Video(
+      controller: widget.player.videoController,
       controls: NoVideoControls,
-      fit: fit,
+      fit: fxAspectFit(aspect),
       alignment: Alignment.center,
       fill: Colors.black,
       wakelock: true,
       pauseUponEnteringBackgroundMode: false,
       resumeUponEnteringForegroundMode: false,
       subtitleViewConfiguration: SubtitleViewConfiguration(
-        padding: EdgeInsets.fromLTRB(
-          24,
-          0,
-          24,
-          subtitleBottom < fxSubtitleMinBottom
-              ? fxSubtitleMinBottom
-              : subtitleBottom,
-        ),
+        padding: EdgeInsets.fromLTRB(24, 0, 24, bottom),
+        // 兜底（本项目走 libass，字幕画在纹理里，已由 mpv sub-visibility
+        // 隐藏）：非 libass 路径下镜像时也不显示会翻转的内部字幕。
+        visible: !mirrored,
+      ),
+    );
+    final framed = fxAspectFrame(aspect, video);
+    final body = fxMirrorWrap(mirror, framed);
+    if (!mirrored) return body;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        body,
+        FxMirrorSubtitle(player: widget.player, bottom: bottom),
+      ],
+    );
+  }
+}
+
+/// 镜像模式下的字幕层：内容不参与翻转，位置与字号缩放对齐 media_kit 的
+/// SubtitleView（同样的面积缩放公式与安全距离），保证正字可读。
+/// 纹理里的 libass 字幕已由 mpv `sub-visibility=no` 隐藏，不会重复。
+class FxMirrorSubtitle extends StatefulWidget {
+  const FxMirrorSubtitle({
+    super.key,
+    required this.player,
+    required this.bottom,
+  });
+
+  final FxPlayer player;
+  final double bottom;
+
+  @override
+  State<FxMirrorSubtitle> createState() => _FxMirrorSubtitleState();
+}
+
+class _FxMirrorSubtitleState extends State<FxMirrorSubtitle> {
+  List<String> _subtitle = <String>[];
+  StreamSubscription<List<String>>? _subscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _subtitle = widget.player.player.state.subtitle;
+    _subscription = widget.player.player.stream.subtitle.listen((value) {
+      if (!mounted) return;
+      setState(() => _subtitle = value);
+    });
+  }
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = <String>[
+      for (final line in _subtitle)
+        if (line.trim().isNotEmpty) line.trim(),
+    ];
+    if (lines.isEmpty) return const SizedBox.shrink();
+    return IgnorePointer(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // 与 media_kit SubtitleView 相同的缩放公式：按画面面积缩放字号。
+          final area = constraints.maxWidth * constraints.maxHeight;
+          final reference = 1920.0 * 1080.0;
+          final scale = math.sqrt((area / reference).clamp(0.0, 1.0));
+          return Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(24, 0, 24, widget.bottom),
+              child: Text(
+                lines.join('\n'),
+                textAlign: TextAlign.center,
+                textScaler: TextScaler.linear(scale),
+                style: const TextStyle(
+                  height: 1.4,
+                  fontSize: 32,
+                  color: Colors.white,
+                  backgroundColor: Color(0xaa000000),
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -176,41 +352,6 @@ Future<void> fxSaveProgress(String videoId, int ep, double seconds) async {
   try {
     final sp = await SharedPreferences.getInstance();
     await sp.setDouble(fxProgressKey(videoId, ep), seconds < 0 ? 0 : seconds);
-  } catch (_) {
-    // 本地存储失败不影响播放
-  }
-}
-
-/// 「撑满全屏」开关的存储 key。默认关：全屏 contain 完整显示（可能留细黑边）；
-/// 只有用户明确打开后才用 cover 撑满裁边。
-const String fxFillScreenKey = 'player_fill_screen';
-
-/// 画面适配默认值迁移标记：旧版本默认 cover（true），升级后首次读取时
-/// 把旧值强制重置为 contain（false）一次，之后尊重用户在开关里的选择。
-const String fxFillScreenMigratedKey = 'player_fill_screen_contain_migrated_v1';
-
-Future<bool> fxLoadFillScreen() async {
-  try {
-    final sp = await SharedPreferences.getInstance();
-    if (!(sp.getBool(fxFillScreenMigratedKey) ?? false)) {
-      // 升级后首次启动：老版本可能存过 cover，一律回到 contain。
-      // 迁移只做一次，写入标记后不再覆盖用户之后的开关选择。
-      await sp.setBool(fxFillScreenKey, false);
-      await sp.setBool(fxFillScreenMigratedKey, true);
-      return false;
-    }
-    return sp.getBool(fxFillScreenKey) ?? false;
-  } catch (_) {
-    return false;
-  }
-}
-
-Future<void> fxSaveFillScreen(bool value) async {
-  try {
-    final sp = await SharedPreferences.getInstance();
-    await sp.setBool(fxFillScreenKey, value);
-    // 用户显式设置过就视为已完成迁移，避免下次启动被重置。
-    await sp.setBool(fxFillScreenMigratedKey, true);
   } catch (_) {
     // 本地存储失败不影响播放
   }
@@ -241,42 +382,8 @@ void fxToast(BuildContext context, String message) {
   );
 }
 
-/// 续播提示：告知跳到了上次位置，并提供「从头播放」。
-///
-/// 只在恢复位置 ≥ [fxResumeMinSeconds] 时由播放器调用；不足 60 秒直接从头，
-/// 不会出现「片头 20 秒被跳过」。点击操作只 seek 回 0，不改变播放 / 暂停态。
-void fxResumeToast(
-  BuildContext context,
-  Duration position, {
-  required VoidCallback onRestart,
-}) {
-  final messenger = ScaffoldMessenger.maybeOf(context);
-  if (messenger == null) return;
-  messenger.hideCurrentSnackBar();
-  messenger.showSnackBar(
-    SnackBar(
-      content: Text(
-        '已跳到上次位置 ${fxTime(position)}（点击从头播放）',
-        style: const TextStyle(
-          color: Fx.ink,
-          fontSize: 13,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-      action: SnackBarAction(
-        label: '从头播放',
-        textColor: Fx.accent,
-        onPressed: onRestart,
-      ),
-      backgroundColor: Colors.white.withValues(alpha: .96),
-      elevation: 4,
-      behavior: SnackBarBehavior.floating,
-      margin: const EdgeInsets.fromLTRB(18, 0, 18, 18),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      duration: const Duration(seconds: 5),
-    ),
-  );
-}
+/// 续播不弹任何提示：静默 seek 回上次位置（见播放页 / 全屏页），
+/// 播放期间不允许有遮挡画面的浮层文案。
 
 /// 播放器圆形玻璃按钮
 class PGlassIcon extends StatelessWidget {

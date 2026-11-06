@@ -6,10 +6,14 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/cast_service.dart';
+import '../services/app_settings.dart';
 import '../services/fx_player.dart';
+import '../services/video_marks.dart';
 import '../theme.dart';
 import '../widgets/cast_sheet.dart';
+import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
+import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
 import 'history_page.dart' show FxStore;
@@ -151,14 +155,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 每 10 秒把观看进度回写历史，App 被杀也能保留大致位置。
   Timer? _progressTimer;
 
-  /// 是否已切到后台：小窗 / 分屏 / 多任务只算 inactive，不暂停；
-  /// 看门狗在后台期间必须停摆，避免回前台误判卡顿重新 open。
+  /// 是否已切到后台：切后台 / inactive / paused 一律不暂停，继续播放，
+  /// 回前台接着播（不重新 open、不 seek）；看门狗在后台停摆，避免误判卡顿。
   bool _backgrounded = false;
-
-  /// 只有 paused 持续超过 [fxBackgroundPauseDelay] 才暂停（来电 / 音乐等
-  /// 真正离开前台的情况）；inactive 本身不再触发暂停。
-  Timer? _backgroundPauseTimer;
-  bool _pausedByLifecycle = false;
 
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
@@ -173,8 +172,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 进入全屏时随结果带回的真实倍速，切集时沿用。
   double _rate = 1.0;
 
-  /// 全屏画面是否撑满（cover）。默认关（全屏 contain）；打开才 cover。
-  bool _fillScreen = false;
+  /// 播放设置：循环播放（单集循环 / 关闭；连播交给「自动下一集」）。
+  FxLoopMode _loopMode = FxLoopMode.off;
+
+  /// 播放设置：定时关闭，到点自动暂停。
+  Timer? _sleepTimer;
+
+  /// 本剧片头 / 片尾标记（按 videoId 存，见 [VideoMarks]）。
+  VideoMark _mark = const VideoMark();
+
+  /// 本集是否已触发过片头 / 片尾跳转（每集各一次，重新开流时复位）。
+  bool _introJumped = false;
+  bool _outroJumped = false;
 
   bool _openingFullscreen = false;
   bool _fullscreenActive = false;
@@ -220,7 +229,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Future<void> openCastSheet() async {
     final info = _info;
     if (info == null || _loading || _error) {
-      fxToast(context, '播放地址还没准备好');
+      // 还没准备好：静默返回，播放中不弹任何遮挡画面的提示。
       return;
     }
     final active = _activeCastUrl?.trim() ?? '';
@@ -236,8 +245,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         startAt: _controller?.value.position ?? Duration.zero,
         serverBase: Api.base,
       );
-    } on CastException catch (error) {
-      fxToast(context, error.message);
+    } on CastException {
+      // 解析投屏地址失败：静默返回，避免遮挡播放画面。
       return;
     }
     final wasPlaying = _controller?.value.isPlaying ?? false;
@@ -305,14 +314,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _maybePrewarmNext();
     });
     _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
-    unawaited(_loadFillScreen());
+    unawaited(_loadMark());
+    unawaited(_restoreSleepTimer());
     _bootstrap(seekToSaved: true, saveOld: false);
-  }
-
-  Future<void> _loadFillScreen() async {
-    final value = await fxLoadFillScreen();
-    if (!mounted) return;
-    setState(() => _fillScreen = value);
   }
 
   @override
@@ -440,10 +444,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _resetWatchdogClock();
         _watchdogRetried = false;
         _showControls();
-        fxToast(
-          context,
-          actualLine == targetLine ? '已切换线路' : '已自动切换到可用线路',
-        );
+        // 线路已切换：静默，不弹遮挡画面的提示。
         // 自动尝试下一条成功时同步外层高亮，避免 UI 仍指着失败线路。
         widget.onLineFallback?.call(actualLine);
       } else {
@@ -460,7 +461,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _uiDuration = null;
         });
         _showControls();
-        fxToast(context, '线路切换失败，请重试');
+        // 切换失败：错误层（含重试）已在上面亮出，不再叠加提示。
         widget.onLineFallback?.call(lastTried);
       }
     } finally {
@@ -525,18 +526,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         return;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
-        // 切到后台：先记进度；超过 5 秒仍不回来才暂停（不 seek、不换源）。
+        // 切后台：只记进度，永不暂停（来电 / 抢占音频属系统音频策略）。
         _backgrounded = true;
-        _cancelBackgroundPause();
         unawaited(_saveProgress());
-        _armBackgroundPause();
         return;
       case AppLifecycleState.resumed:
         final wasBackgrounded = _backgrounded;
         _backgrounded = false;
-        _cancelBackgroundPause();
         _resetWatchdogClock();
-        _resumeAfterLifecyclePause();
         // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
         if (wasBackgrounded) _remountVideoLayer();
         return;
@@ -545,38 +542,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
   }
 
-  /// paused 后等 5 秒：仍在后台且正在播放才暂停。
-  void _armBackgroundPause() {
-    _cancelBackgroundPause();
-    _backgroundPauseTimer = Timer(fxBackgroundPauseDelay, () {
-      _backgroundPauseTimer = null;
-      if (!mounted || !_backgrounded || _fullscreenActive) return;
-      final c = _controller;
-      if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
-      _pausedByLifecycle = true;
-      unawaited(c.pause());
-    });
-  }
-
-  void _cancelBackgroundPause() {
-    _backgroundPauseTimer?.cancel();
-    _backgroundPauseTimer = null;
-  }
-
-  /// 回前台：只有「因为切后台超过 5 秒而暂停」才继续播放，不 seek。
-  void _resumeAfterLifecyclePause() {
-    if (!_pausedByLifecycle) return;
-    _pausedByLifecycle = false;
-    if (!mounted || _loading || _error || _covered) return;
-    final c = _controller;
-    if (c == null ||
-        !c.value.isInitialized ||
-        c.value.isPlaying ||
-        c.value.isCompleted) {
-      return;
-    }
-    unawaited(c.play());
-  }
+  // 切后台永不暂停：不再有「paused 超时暂停」的定时器，
+  // 回前台也不补 play（播放状态从头到尾没有被 App 改过）。
 
   /// 回前台只重挂 Video 层（不 open / 不 seek）：换 key 让输出层重建，
   /// 同一 FxPlayer 实例、播放位置与播放状态全部保持。
@@ -654,8 +621,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    _sleepTimer?.cancel();
     _progressTimer?.cancel();
-    _cancelBackgroundPause();
     _watchdogTimer?.cancel();
     _frozenClearTimer?.cancel();
     _frozenFallbackTimer?.cancel();
@@ -873,6 +840,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _errorText = '';
       _sourceFailNotified = false;
       _ended = false;
+      // 片头 / 片尾标记每集只触发一次：重新开流（切集 / 换线路）时复位。
+      _introJumped = false;
+      _outroJumped = false;
       // 新一集重新计算预解析，避免沿用上一集的标记。
       _nextPrewarmed = false;
       _prewarmEp = null;
@@ -949,7 +919,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (fromSavedPosition && saved < fxResumeMinSeconds) saved = 0;
     if (!mounted || token != _loadToken) return false;
     final shouldPlay = playOverride ?? (widget.autoPlay && !_covered);
-    var restoredPosition = 0.0;
 
     var ok = false;
     for (final url in candidates) {
@@ -988,12 +957,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           resume = 0;
         }
         if (resume > 0) {
+          // 静默续播：直接 seek 到上次位置，不弹任何提示。
           await controller.seekTo(
             Duration(milliseconds: (resume * 1000).round()),
           );
-          if (fromSavedPosition && resume >= fxResumeMinSeconds) {
-            restoredPosition = resume;
-          }
         }
         if (shouldPlay) {
           await controller.play();
@@ -1039,16 +1006,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _resetWatchdogClock();
         widget.onPlaybackStarted?.call();
         _showControls();
-        if (restoredPosition >= fxResumeMinSeconds) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted || _fullscreenActive) return;
-            fxResumeToast(
-              context,
-              Duration(milliseconds: (restoredPosition * 1000).round()),
-              onRestart: _restartFromBeginning,
-            );
-          });
-        }
+        // 续播静默处理：直接停在上次位置，不弹「已跳到上次位置」提示。
         break;
       } catch (_) {
         try {
@@ -1165,7 +1123,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _watchdogRetried = false;
       if (_watchdogRecoverPending) {
         _watchdogRecoverPending = false;
-        if (mounted) fxToast(context, '已自动恢复');
+        // 自愈成功：静默，不弹「已自动恢复」遮挡画面。
       }
       return;
     }
@@ -1256,6 +1214,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return;
     }
     if (!v.isInitialized) return;
+    // 本剧片头 / 片尾标记到点各跳一次（全屏期间由全屏页负责）。
+    _maybeApplyMark(v.position);
     if (!v.isCompleted) {
       _ended = false;
       return;
@@ -1268,17 +1228,34 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Future<void> _handleEnded() async {
     await _saveProgress(ended: true);
     if (!mounted) return;
+    final settings = AppSettings.instance;
+    // 定时关闭「看完当集」优先级最高：本集播完直接暂停，不连播也不重播。
+    if (settings.sleepMode == FxSleepMode.episode) {
+      try {
+        await _controller?.pause();
+      } catch (_) {}
+      unawaited(settings.setSleepTimer(FxSleepMode.off));
+      return;
+    }
+    if (_loopMode == FxLoopMode.single) {
+      // 单集循环：回到片头继续播这一集，不切下一集。
+      try {
+        await _controller?.seek(Duration.zero);
+        await _controller?.play();
+      } catch (_) {}
+      return;
+    }
     final next = _nextEpNumber();
     if (next != null) {
-      await _switchEpisode(next, auto: true);
+      await _switchEpisode(next);
     } else {
       setState(() => _controls = true);
       _startHideTimer();
-      fxToast(context, '已播放完最后一集');
+      // 播完最后一集：静默，不弹遮挡画面的提示。
     }
   }
 
-  Future<void> _switchEpisode(int next, {bool auto = false}) async {
+  Future<void> _switchEpisode(int next) async {
     if (next < 1 || _switchingLine) return;
     await _saveProgress();
     if (!mounted) return;
@@ -1295,7 +1272,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _uiDuration = null;
     });
     widget.onEpChange?.call(next);
-    if (auto) fxToast(context, '即将播放 ${_epLabelFor(next)}');
+    // 自动连播不提示「即将播放第N集」：播放中保持画面干净。
     await _bootstrap(
       seekToSaved: true,
       saveOld: false,
@@ -1424,20 +1401,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (!c.value.isPlaying && CastService.instance.isCasting) {
       unawaited(CastService.instance.stop());
     }
-    // 用户手动暂停 / 播放后，回前台不再替他继续播放。
-    _pausedByLifecycle = false;
     // 以播放器真实状态为准：交给 media_kit 切换，按钮图标随后续
     // player.stream.playing 事件刷新，不用本地布尔抢先改状态。
     unawaited(c.playOrPause());
     _touch();
-  }
-
-  /// 续播提示里的「从头播放」：只把进度拉回 0，不改变播放 / 暂停状态。
-  void _restartFromBeginning() {
-    final c = _controller;
-    if (c == null || _loading || _error) return;
-    unawaited(c.seek(Duration.zero));
-    _showControls();
   }
 
   void _seek(Duration d) {
@@ -1497,7 +1464,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             rate: realRate,
             qualityKey: _qualityKey,
             canChangeLine: widget.onChangeLine != null,
-            fillScreen: _fillScreen,
             castOwner: this,
           ),
           transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -1520,10 +1486,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _info = result.info ?? _info;
       }
       _qualityKey = result.qualityKey;
-      if (result.fillScreen != _fillScreen) {
-        _fillScreen = result.fillScreen;
-        unawaited(fxSaveFillScreen(_fillScreen));
-      }
       if (result.rate > 0) {
         _rate = result.rate;
         try {
@@ -1569,7 +1531,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 child: FxPlayerSurface(
                   key: ValueKey<int>(_videoEpoch),
                   player: c,
-                  fit: BoxFit.contain,
                   subtitleBottom: fxSubtitleMinBottom,
                 ),
               ),
@@ -1577,10 +1538,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             // 新流首帧就绪后 200ms 淡出；截图失败时保持纯黑底 + 加载层。
             if (!_fullscreenActive && _frozenFrame != null)
               Positioned.fill(
-                child: FxSnapshotLayer(
-                  bytes: _frozenFrame,
-                  opaque: _frozenOpaque,
-                  fit: BoxFit.contain,
+                child: FxAspectBox(
+                  child: (context, fit) => FxSnapshotLayer(
+                    bytes: _frozenFrame,
+                    opaque: _frozenOpaque,
+                    fit: fit,
+                  ),
                 ),
               ),
             // 手势层：单击显隐控件 / 双击暂停 / 左右滑调进度。
@@ -1743,6 +1706,226 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     widget.onSourceFailed?.call();
   }
 
+  /* ---------------------------------------------------------- 播放设置面板 */
+
+  /// 竖屏顶栏「⋯」：与全屏共用同一个「播放设置」面板。
+  /// 画面比例 / 镜像模式在面板里改全局设置，立即生效、不重载视频。
+  Future<void> _openMorePanel() async {
+    _hideTimer?.cancel();
+    if (mounted) setState(() => _controls = true);
+    await showFxMorePanel(
+      context,
+      loopMode: _loopMode,
+      markLabel: _markLabel,
+      onLoopChanged: _setLoopMode,
+      onJumpPanel: () => unawaited(_openJumpSheet()),
+      onSleepTimer: () => unawaited(_openSleepPanel()),
+      onDownload: () {},
+      onSpeed: () => unawaited(_openSpeedPicker()),
+      onBackground: () {},
+      onFeedback: () {},
+    );
+    if (!mounted) return;
+    _showControls();
+  }
+
+  /// 循环播放：单集循环交给 mpv（loop-file），关闭则按「自动下一集」连播。
+  void _setLoopMode(FxLoopMode mode) {
+    if (_loopMode == mode) return;
+    setState(() => _loopMode = mode);
+    final c = _controller;
+    if (c == null) return;
+    unawaited(c.setLooping(mode == FxLoopMode.single));
+  }
+
+  Future<void> _openSpeedPicker() async {
+    final rate = await showFxSpeedSheet(context, _rate);
+    if (!mounted || rate == null) return;
+    _rate = rate;
+    try {
+      await _controller?.setRate(rate);
+    } catch (_) {}
+  }
+
+  /// 定时关闭：竖屏用底部卡片打开同一个 [FsSleepPanel]，模式存进
+  /// [AppSettings]（分钟模式带截止时间戳，杀进程再进来能续上）。
+  Future<void> _openSleepPanel() async {
+    final settings = AppSettings.instance;
+    await settings.init();
+    if (!mounted) return;
+    final mode = settings.sleepMode;
+    final minutes = settings.sleepMinutes;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: .38),
+      builder: (sheetContext) => Center(
+        child: FsSleepPanel(
+          mode: mode,
+          minutes: minutes,
+          onPick: (next, nextMinutes) {
+            Navigator.of(sheetContext).maybePop();
+            unawaited(_applySleep(next, nextMinutes));
+          },
+          onCustom: () async {
+            Navigator.of(sheetContext).maybePop();
+            final picked = await showFxSleepCustomDialog(
+              context,
+              current: mode == FxSleepMode.minutes ? minutes : 0,
+            );
+            if (picked == null || !mounted) return;
+            await _applySleep(FxSleepMode.minutes, picked);
+          },
+        ),
+      ),
+    );
+    if (!mounted) return;
+    _showControls();
+  }
+
+  /// 落地定时关闭：分钟模式记截止时间戳；到点只暂停，保留进度。
+  Future<void> _applySleep(FxSleepMode mode, int minutes) async {
+    final settings = AppSettings.instance;
+    await settings.init();
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (mode == FxSleepMode.minutes) {
+      final endsAt = DateTime.now().millisecondsSinceEpoch + minutes * 60000;
+      await settings.setSleepTimer(mode, minutes: minutes, endsAt: endsAt);
+      _armSleep(endsAt - DateTime.now().millisecondsSinceEpoch);
+    } else {
+      await settings.setSleepTimer(mode);
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _armSleep(int millis) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (millis <= 0) {
+      _fireSleep();
+      return;
+    }
+    _sleepTimer = Timer(Duration(milliseconds: millis), _fireSleep);
+  }
+
+  /// 定时到点：暂停播放、保留进度，模式回落「不开启」。
+  void _fireSleep() {
+    _sleepTimer = null;
+    if (!mounted) return;
+    try {
+      unawaited(_controller?.pause());
+    } catch (_) {}
+    unawaited(AppSettings.instance.setSleepTimer(FxSleepMode.off));
+    setState(() {});
+  }
+
+  /// 进页续上持久化的分钟定时：没过期按剩余时间重新武装。
+  Future<void> _restoreSleepTimer() async {
+    final settings = AppSettings.instance;
+    await settings.init();
+    if (!mounted) return;
+    if (settings.sleepMode != FxSleepMode.minutes) return;
+    final left = settings.sleepEndsAt - DateTime.now().millisecondsSinceEpoch;
+    if (left <= 0) {
+      await settings.setSleepTimer(FxSleepMode.off);
+      if (mounted) setState(() {});
+      return;
+    }
+    _armSleep(left);
+  }
+
+  /// 「跳过片头片尾」行：按 videoId 读写本剧标记，标记卡浮在遮罩上。
+  Future<void> _openJumpSheet() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: .38),
+      builder: (sheetContext) => Center(
+        child: StreamBuilder<Duration>(
+          stream: c.positionStream,
+          initialData: c.value.position,
+          builder: (context, snapshot) {
+            final position = snapshot.data ?? Duration.zero;
+            return FsJumpPanel(
+              position: position,
+              mark: _mark,
+              onMarkIntro: () =>
+                  unawaited(_saveMark(introEnd: position.inSeconds)),
+              onMarkOutro: () =>
+                  unawaited(_saveMark(outroStart: position.inSeconds)),
+              onClear: () => unawaited(_saveMark(clear: true)),
+            );
+          },
+        ),
+      ),
+    );
+    if (!mounted) return;
+    _showControls();
+  }
+
+  /// 读本剧片头 / 片尾标记（进页与改标记后各读一次）。
+  Future<void> _loadMark() async {
+    final mark = await VideoMarks.load(widget.videoId);
+    if (!mounted) return;
+    setState(() => _mark = mark);
+  }
+
+  /// 写本剧标记：[clear] 清除整份，否则只覆盖传入的那一项。
+  Future<void> _saveMark({
+    int? introEnd,
+    int? outroStart,
+    bool clear = false,
+  }) async {
+    final id = widget.videoId;
+    if (clear) {
+      await VideoMarks.clear(id);
+    } else {
+      await VideoMarks.save(
+        id,
+        introEnd: introEnd ?? _mark.introEnd,
+        outroStart: outroStart ?? _mark.outroStart,
+      );
+    }
+    final mark = await VideoMarks.load(id);
+    if (!mounted) return;
+    setState(() => _mark = mark);
+  }
+
+  /// 「跳过片头片尾」行右侧文案：片头 01:20 · 片尾 43:10。
+  String get _markLabel {
+    if (_mark.isEmpty) return '未标记';
+    String at(int? seconds) =>
+        seconds == null ? '未标记' : fxTime(Duration(seconds: seconds));
+    return '片头 ${at(_mark.introEnd)} · 片尾 ${at(_mark.outroStart)}';
+  }
+
+  /// 片头 / 片尾到点各跳一次：进入 [introEnd, +5s) 回到片头结束，
+  /// 到 [outroStart] 跳到本集结尾（交给播完流程切下一集）。
+  void _maybeApplyMark(Duration position) {
+    final mark = _mark;
+    if (mark.isEmpty) return;
+    final seconds = position.inSeconds;
+    final intro = mark.introEnd;
+    if (intro != null &&
+        !_introJumped &&
+        seconds >= intro &&
+        seconds < intro + 5) {
+      _introJumped = true;
+      unawaited(_controller?.seek(Duration(seconds: intro)));
+      return;
+    }
+    final outro = mark.outroStart;
+    if (outro != null && !_outroJumped && seconds >= outro) {
+      _outroJumped = true;
+      final end = _controller?.value.duration ?? Duration.zero;
+      final target = end - const Duration(milliseconds: 600);
+      unawaited(_controller?.seek(target.isNegative ? Duration.zero : target));
+    }
+  }
+
   Widget _buildControls(FxPlayer? c) {
     return Stack(
       fit: StackFit.expand,
@@ -1781,6 +1964,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   iconSize: 18,
                   tooltip: '投屏',
                   onTap: () => unawaited(openCastSheet()),
+                ),
+                const SizedBox(width: 6),
+                PGlassIcon(
+                  icon: Icons.more_horiz_rounded,
+                  size: 31,
+                  iconSize: 18,
+                  tooltip: '播放设置',
+                  onTap: () => unawaited(_openMorePanel()),
                 ),
               ],
             ),

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 
 import '../api.dart';
 import '../auth.dart';
+import '../fx_globals.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
@@ -371,7 +372,6 @@ class _TogetherPageState extends State<TogetherPage>
       _downReported = true;
       if (_isHost) _needsHostResync = true;
       _appendSystem('连接断开，正在自动重连…');
-      togetherToast(context, '连接断开，正在自动重连…');
     }
   }
 
@@ -593,7 +593,7 @@ class _TogetherPageState extends State<TogetherPage>
   void _onError(String code, String message) {
     if (!mounted) return;
     if (code == 'host_only') {
-      togetherToast(context, '跟随房主');
+      fxShowTopTag('跟随房主');
       _bounceToAuthority();
       return;
     }
@@ -796,7 +796,7 @@ class _TogetherPageState extends State<TogetherPage>
   }
 
   /// 重新拉流回到直播边缘（成员暂停后恢复 / 卡顿 / 重连时调用）。
-  void _liveJumpToEdge({String? toast, bool force = false}) {
+  void _liveJumpToEdge({bool force = false}) {
     if (!mounted) return;
     // 只有房主能主动暂停/播放；成员的暂停恢复由房主状态触发。
     if (_isHost && !force) return;
@@ -806,7 +806,6 @@ class _TogetherPageState extends State<TogetherPage>
     _liveReloadAt = now;
     _loadedKey = '';
     _loadingKey = '';
-    if (toast != null && toast.isNotEmpty) togetherToast(context, toast);
     _loadLiveVideo().whenComplete(() => _liveJumping = false);
   }
 
@@ -824,8 +823,8 @@ class _TogetherPageState extends State<TogetherPage>
     }
     final wasPaused = prev != null && !prev.playing;
     if (wasPaused || !controller.value.isPlaying) {
-      // 直播没有可 seam 的进度：重新拉流即回到最新位置。
-      _liveJumpToEdge(toast: '直播已跳过');
+      // 直播没有可 seam 的进度：重新拉流即回到最新位置（静默，不提示）。
+      _liveJumpToEdge();
       return;
     }
   }
@@ -850,7 +849,7 @@ class _TogetherPageState extends State<TogetherPage>
     }
     if (_liveLastProgressAt > 0 && now - _liveLastProgressAt > 6000) {
       _liveLastProgressAt = now;
-      _liveJumpToEdge(toast: _isHost ? null : '直播已跳过', force: _isHost);
+      _liveJumpToEdge(force: _isHost);
     }
   }
 
@@ -1518,7 +1517,7 @@ class _TogetherPageState extends State<TogetherPage>
   /* ------------------------------------------------------------ 播放操作 */
 
   void _hostOnly() {
-    togetherToast(context, '跟随房主');
+    fxShowTopTag('跟随房主');
   }
 
   void _togglePlay() {
@@ -1528,7 +1527,6 @@ class _TogetherPageState extends State<TogetherPage>
     }
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
-      togetherToast(context, '视频还没准备好');
       return;
     }
     if (_isLive) {
@@ -1565,7 +1563,6 @@ class _TogetherPageState extends State<TogetherPage>
 
   void _seekTo(double seconds) {
     if (_isLive) {
-      togetherToast(context, '直播不支持拖动进度');
       return;
     }
     if (!_isHost) {
@@ -1590,7 +1587,6 @@ class _TogetherPageState extends State<TogetherPage>
 
   void _seekBy(int seconds) {
     if (_isLive) {
-      togetherToast(context, '直播不支持拖动进度');
       return;
     }
     if (!_isHost) {
@@ -1607,7 +1603,6 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     if (_isLive) {
-      togetherToast(context, '直播不支持倍速');
       return;
     }
     final value = rate.clamp(.5, 2.0).toDouble();
@@ -1629,7 +1624,6 @@ class _TogetherPageState extends State<TogetherPage>
     }
     _markRemote(playing ? 'play' : 'pause', position, rate: value);
     if (mounted) setState(() {});
-    togetherToast(context, '${togetherRateLabel(value)} 倍速');
   }
 
   /* ------------------------------------------------------------ 换剧 / 选集 / 清晰度 / 线路 */
@@ -1709,7 +1703,6 @@ class _TogetherPageState extends State<TogetherPage>
     final episode = await _pickEpisodeFor(card, episodes);
     if (!mounted) return;
     if (!_online) {
-      togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
     // 换剧视为「继续播放」：切换前暂停才保持暂停。
@@ -1746,7 +1739,6 @@ class _TogetherPageState extends State<TogetherPage>
       rate: _hostRate,
     );
     _syncVideo();
-    togetherToast(context, '正在切换影片…');
   }
 
   /// 选片弹层用：拿详情补真实集数；失败时退回卡片自带的集数。
@@ -1780,7 +1772,6 @@ class _TogetherPageState extends State<TogetherPage>
 
   Future<void> _pickEpisode() async {
     if (_isLive) {
-      togetherToast(context, '直播没有选集');
       return;
     }
     if (!_isHost) {
@@ -1788,7 +1779,6 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     if (_episodes.isEmpty) {
-      togetherToast(context, '暂无剧集信息');
       return;
     }
     final episode = await showTogetherEpisodePicker(
@@ -1799,7 +1789,6 @@ class _TogetherPageState extends State<TogetherPage>
     );
     if (!mounted || episode == null || episode == _ep) return;
     if (!_online) {
-      togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
     // 服务端 episode 动作会重置为 pause；这里带播放意图发 state，
@@ -1818,7 +1807,6 @@ class _TogetherPageState extends State<TogetherPage>
 
   void _nextEpisode() {
     if (_isLive) {
-      togetherToast(context, '直播没有下一集');
       return;
     }
     if (!_isHost) {
@@ -1826,7 +1814,6 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     if (_episodes.isEmpty) {
-      togetherToast(context, '暂无剧集信息');
       return;
     }
     final main = _episodes.where((e) => !fxIsExtraEpisode(e.name)).toList();
@@ -1839,11 +1826,9 @@ class _TogetherPageState extends State<TogetherPage>
       }
     }
     if (next == null) {
-      togetherToast(context, '已是最后一集');
       return;
     }
     if (!_online) {
-      togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
     final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
@@ -1869,7 +1854,6 @@ class _TogetherPageState extends State<TogetherPage>
     }
     final items = _playInfo?.quality ?? const <QualityItem>[];
     if (items.length < 2) {
-      togetherToast(context, '当前线路暂无更多清晰度');
       return;
     }
     final picked = await showTogetherQualitySheet(
@@ -1890,7 +1874,6 @@ class _TogetherPageState extends State<TogetherPage>
     final channel = _liveChannel;
     final lines = channel?.lines ?? const <LiveLine>[];
     if (lines.length < 2) {
-      togetherToast(context, '当前只有一条直播线路');
       return;
     }
     final infos = <LineInfo>[
@@ -1918,7 +1901,6 @@ class _TogetherPageState extends State<TogetherPage>
     }
     if (lineId == _liveLineId) return;
     if (!_online) {
-      togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
     setState(() {
@@ -1935,7 +1917,6 @@ class _TogetherPageState extends State<TogetherPage>
     _livePlaying = playing;
     _client.sendState(playing ? 'play' : 'pause', 0, line: lineId, live: true);
     _markRemote(playing ? 'play' : 'pause', 0);
-    togetherToast(context, '正在切换直播线路…');
   }
 
   Future<void> _setQuality(String? key) async {
@@ -1950,7 +1931,6 @@ class _TogetherPageState extends State<TogetherPage>
     if (key == _qualityKey) return;
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
-      togetherToast(context, '视频还没准备好');
       return;
     }
     _resumePos = controller.value.position.inMilliseconds / 1000.0;
@@ -1959,7 +1939,6 @@ class _TogetherPageState extends State<TogetherPage>
     _loadedKey = '';
     _loadingKey = '';
     _syncVideo();
-    togetherToast(context, '正在切换清晰度…');
   }
 
   Future<void> _pickLine() async {
@@ -1977,7 +1956,6 @@ class _TogetherPageState extends State<TogetherPage>
     }
     final playable = _lines.where((line) => !line.needsParse).toList();
     if (playable.length < 2) {
-      togetherToast(context, '当前只有一条播放线路');
       return;
     }
     final picked = await showTogetherLineSheet(
@@ -1987,7 +1965,6 @@ class _TogetherPageState extends State<TogetherPage>
     );
     if (!mounted || picked == null || picked == _videoLine) return;
     if (!_online) {
-      togetherToast(context, '未连接服务器，请稍后重试');
       return;
     }
     final controller = _controller;
@@ -2017,7 +1994,6 @@ class _TogetherPageState extends State<TogetherPage>
       line: picked,
       rate: _hostRate,
     );
-    togetherToast(context, '正在切换线路…');
   }
 
   Future<void> _pickSpeed() async {

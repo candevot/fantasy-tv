@@ -6,7 +6,9 @@ import 'package:flutter/services.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/cast_service.dart';
+import '../services/app_settings.dart';
 import '../services/fx_player.dart';
+import '../services/video_marks.dart';
 import '../theme.dart';
 import '../widgets/cast_sheet.dart';
 import '../widgets/fs_controls.dart';
@@ -29,7 +31,6 @@ class FullPlayerResult {
     this.qualityKey,
     this.loaded = false,
     this.requestLineChange = false,
-    this.fillScreen = false,
   });
 
   /// 退出时的集数
@@ -56,9 +57,6 @@ class FullPlayerResult {
 
   /// 全屏错误页点了「换线路」：退出后由竖屏页负责切下一条线路。
   final bool requestLineChange;
-
-  /// 退出时「撑满全屏」开关的状态，交回竖屏继续记住（默认 contain）。
-  final bool fillScreen;
 }
 
 /// 全屏横屏播放页
@@ -83,7 +81,6 @@ class FullPlayerPage extends StatefulWidget {
     this.rate = 1.0,
     this.qualityKey,
     this.canChangeLine = false,
-    this.fillScreen = false,
     this.isLive = false,
     this.castSource,
     this.castOwner,
@@ -117,9 +114,6 @@ class FullPlayerPage extends StatefulWidget {
 
   /// 竖屏是否还有其它线路可换（错误页展示「换线路」）
   final bool canChangeLine;
-
-  /// 全屏是否撑满（默认关、contain）；打开才 cover。
-  final bool fillScreen;
 
   /// 直播全屏：复用同一个播放器，但隐藏进度条 / 选集 / 倍速 / 下一集，
   /// 左右横滑不再 seek，底部常驻 LIVE。默认 false，不影响点播。
@@ -241,9 +235,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Timer? _backgroundPauseTimer;
   bool _pausedByLifecycle = false;
 
-  /// 本次进入全屏后是否已经提示过「已跳到上次位置」。
-  bool _resumeHintShown = false;
-
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
   bool _locked = false;
@@ -257,14 +248,24 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _showSpeed = false;
   bool _showQuality = false;
 
-  /// 循环模式默认列表（播完自动下一集）；关闭 / 单集由「更多」面板切换。
-  FxLoopMode _loopMode = FxLoopMode.list;
+  /// 定时关闭右侧面板（不开启 / 看完当集 / 30·60·90 分钟 / 自定义）。
+  bool _showSleep = false;
 
-  /// 跳过片头片尾默认关，只记住开关，不自动跳（产品硬性要求）。
-  bool _skipIntroOutro = false;
+  /// 片头 / 片尾标记面板：底部「片头/尾」按钮打开。
+  bool _showJump = false;
 
-  /// 撑满全屏：默认关（contain 完整显示）；打开才 cover。
-  bool _fillScreen = false;
+  /// 循环播放只剩 单集循环 / 关闭（对应 mpv setLooping）；「列表循环」已删，
+  /// 连播交给设置页的「自动下一集」开关。
+  FxLoopMode _loopMode = FxLoopMode.off;
+
+  /// 本剧片头 / 片尾标记（按 videoId 存 [VideoMarks]）。
+  /// 没加载到或没标记 = 空标记 = 任何位置都不跳（默认）。
+  VideoMark _mark = const VideoMark();
+
+  /// 片头 / 片尾每集各只触发一次：[_skipTag] 记当前集，换集自动复位。
+  int? _skipTag;
+  bool _introFired = false;
+  bool _outroFired = false;
 
   Timer? _sleepTimer;
 
@@ -306,7 +307,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   bool _exiting = false;
 
-  bool get _panelOpen => _showSpeed || _showQuality;
+  bool get _panelOpen =>
+      _showSpeed || _showQuality || _showSleep || _showJump;
 
   bool get _playing => _controller?.value.isPlaying ?? false;
 
@@ -330,8 +332,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     } else {
       try {
         source = _buildCastSource();
-      } on CastException catch (error) {
-        fxToast(context, error.message);
+      } on CastException {
+        // 解析投屏地址失败：静默返回，不弹遮挡画面的提示。
         return;
       }
     }
@@ -458,7 +460,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _controller = c;
     _info = widget.playInfo;
     _qualityKey = widget.qualityKey ?? _qualityKeyFor(widget.playInfo);
-    _fillScreen = widget.fillScreen;
     _rate = widget.rate > 0 ? widget.rate : (c.rate > 0 ? c.rate : 1.0);
     _loadedEp = c.value.isInitialized ? _ep : null;
     _loading = !c.value.isInitialized;
@@ -490,7 +491,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (widget.videoId.isNotEmpty && _episodes.isEmpty) {
         unawaited(_loadEpisodeMeta());
       }
+      unawaited(_loadMarks());
     }
+    // 持久化的分钟定时：退出全屏/杀进程再进来按剩余时间续上。
+    unawaited(_restoreSleepTimer());
     _startHideTimer();
   }
 
@@ -750,19 +754,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
 
     var resume = 0.0;
-    var fromSavedPosition = false;
     if (seekToSaved) {
       resume = await fxLoadProgress(widget.videoId, _ep);
       // 不足 60 秒视为「刚看片头」，直接从头播，避免误跳片头。
-      if (resume < fxResumeMinSeconds) {
-        resume = 0;
-      } else {
-        fromSavedPosition = true;
-      }
+      if (resume < fxResumeMinSeconds) resume = 0;
     }
     if (!mounted || token != _loadToken) return;
 
-    var restoredPosition = 0.0;
     var ok = false;
     for (final url in candidates) {
       if (!mounted || token != _loadToken) return;
@@ -784,10 +782,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         var start = resume;
         if (durationMs > 0 && start >= durationMs / 1000.0 - 2) start = 0;
         if (start > 0) {
+          // 静默续播：直接 seek 到上次位置，不弹任何提示。
           await c.seekTo(Duration(milliseconds: (start * 1000).round()));
-          if (fromSavedPosition && start >= fxResumeMinSeconds) {
-            restoredPosition = start;
-          }
         }
         await c.setLooping(_loopMode == FxLoopMode.single);
         try {
@@ -819,17 +815,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _watchdogRetried = false;
         _resetWatchdogClock();
         _wake();
-        if (!_resumeHintShown && restoredPosition >= fxResumeMinSeconds) {
-          _resumeHintShown = true;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
-            fxResumeToast(
-              context,
-              Duration(milliseconds: (restoredPosition * 1000).round()),
-              onRestart: _restartFromBeginning,
-            );
-          });
-        }
+        // 续播静默处理：直接停在上次位置，不弹「已跳到上次位置」提示。
         break;
       } catch (_) {
         // 换下一条备用地址继续尝试
@@ -847,7 +833,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (_sourceFailNotified) return;
     _sourceFailNotified = true;
     if (!mounted) return;
-    fxToast(context, '当前线路播放失败，可返回竖屏切换线路');
   }
 
   /// 用同一播放器实例打开一个地址，并恢复进度 / 倍速 / 播放状态。
@@ -916,14 +901,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<void> _selectQuality(String? key) async {
     if (_isLive) return;
     if (_loading || _switching) {
-      fxToast(context, '正在切换，请稍候');
       return;
     }
     final info = _info;
     final list = _qualityList;
     // 产品要求：只有 1 个画质时没有清晰度入口；这里再兜一层。
     if (info == null || list.length < 2) {
-      fxToast(context, '当前线路暂无更多清晰度');
       return;
     }
     if (key == _qualityKey) {
@@ -941,7 +924,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         }
       }
       if (picked == null) {
-        fxToast(context, '该清晰度暂不可用');
         return;
       }
     }
@@ -957,13 +939,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (url.isNotEmpty) urls.add(url);
     }
     if (urls.isEmpty) {
-      fxToast(context, '当前清晰度没有可用的播放地址');
       return;
     }
 
     final c = _controller;
     if (c == null || !c.value.isInitialized) {
-      fxToast(context, '播放器尚未就绪，请稍后再试');
       return;
     }
     final oldQuality = _qualityKey;
@@ -1000,6 +980,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       setState(() {
         _showQuality = false;
         _showSpeed = false;
+        _showSleep = false;
+        _showJump = false;
         _loading = true;
         _loadingHint = '正在切换清晰度';
         _error = false;
@@ -1072,7 +1054,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         });
         if (restored) _startUiHoldTimeout();
         _wake();
-        fxToast(context, restored ? '切换清晰度失败，已恢复原清晰度' : '切换清晰度失败，请重试');
         return;
       }
 
@@ -1170,7 +1151,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _watchdogRetried = false;
       if (_watchdogRecoverPending) {
         _watchdogRecoverPending = false;
-        if (mounted) fxToast(context, '已自动恢复');
       }
       return;
     }
@@ -1268,7 +1248,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _resetHold2x();
     if (widget.canChangeLine && !_exiting) {
       // 全屏没有线路列表：退给竖屏自动切下一条，比停在全屏黑屏更好。
-      fxToast(context, '播放无法恢复，正在切换线路');
       await _exit(requestLineChange: true);
       return;
     }
@@ -1381,7 +1360,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _registerFailure() {
     _failStreak++;
     if (_failStreak >= 2 && widget.canChangeLine && !_exiting) {
-      if (mounted) fxToast(context, '连续加载失败，正在切换线路');
       unawaited(_exit(requestLineChange: true));
       return true;
     }
@@ -1434,7 +1412,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!mounted || _exiting) return;
     _resetHold2x();
     if (widget.canChangeLine) {
-      fxToast(context, '该平台线路已失效，请切换线路');
       unawaited(_exit(requestLineChange: true));
       return;
     }
@@ -1536,6 +1513,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return;
     }
     if (!v.isInitialized) return;
+    _autoSkipCheck();
     if (!v.isCompleted) {
       _ended = false;
       return;
@@ -1546,10 +1524,64 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     unawaited(_handleEnded());
   }
 
+  /// 片头 / 片尾自动跳：按本剧标记，每集各只触发一次（[_skipTag] 换集复位）。
+  ///
+  /// - 片头：位置进入 `[introEnd, introEnd + 5s)`（本集开头内）→ 跳回片头结束；
+  /// - 片尾：位置到 `outroStart` → 跳到本集结尾，随后由 [_handleEnded]
+  ///   按「自动下一集」正常切集（「看完当集」则在那暂停）。
+  /// 没有标记时两个分支都不进，任何位置都不跳。
+  void _autoSkipCheck() {
+    if (_isLive || _loading || _error || _switching) return;
+    final introEnd = _mark.introEnd;
+    final outroStart = _mark.outroStart;
+    if (introEnd == null && outroStart == null) return;
+    final ep = _loadedEp;
+    if (ep == null) return;
+    if (_skipTag != ep) {
+      _skipTag = ep;
+      _introFired = false;
+      _outroFired = false;
+    }
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    final pos = c.value.position;
+    final dur = c.value.duration;
+    if (!_introFired && introEnd != null) {
+      final mark = Duration(seconds: introEnd);
+      if (pos >= mark && pos < mark + const Duration(seconds: 5)) {
+        _introFired = true;
+        unawaited(c.seekTo(mark));
+        _showSeekHint('已跳到片头结束');
+        return;
+      }
+    }
+    if (!_outroFired && outroStart != null && dur > Duration.zero) {
+      final mark = Duration(seconds: outroStart);
+      if (pos >= mark) {
+        _outroFired = true;
+        // 留 0.6 秒收尾：mpv 播到末尾自然触发完成 → 正常切集 / 结束。
+        final target = dur - const Duration(milliseconds: 600);
+        unawaited(c.seekTo(target.isNegative ? Duration.zero : target));
+        _showSeekHint('已跳到片尾');
+      }
+    }
+  }
+
   Future<void> _handleEnded() async {
     if (_isLive) return;
     await _saveProgress(ended: true);
     if (!mounted) return;
+    final settings = AppSettings.instance;
+    // 定时关闭「看完当集」优先级最高：本集播完直接暂停，不连播也不重播。
+    if (settings.sleepMode == FxSleepMode.episode) {
+      try {
+        await _controller?.pause();
+      } catch (_) {}
+      unawaited(settings.setSleepTimer(FxSleepMode.off));
+      if (mounted) setState(() {});
+      _wake();
+      return;
+    }
     if (_loopMode == FxLoopMode.single) {
       final c = _controller;
       if (c != null) {
@@ -1560,18 +1592,15 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       }
       return;
     }
-    if (_loopMode == FxLoopMode.off) {
-      _wake();
-      fxToast(context, '已播放结束');
-      return;
+    // 关闭单集循环：是否连播看设置页的「自动下一集」（默认开）。
+    if (settings.autoNext) {
+      final next = _nextEpNumber();
+      if (next != null) {
+        await _switchEp(next);
+        return;
+      }
     }
-    final next = _nextEpNumber();
-    if (next != null) {
-      await _switchEp(next, auto: true);
-    } else {
-      _wake();
-      fxToast(context, '已播放完最后一集');
-    }
+    _wake();
   }
 
   /// 当前集播过 30 秒后后台预热下一集 /api/play 与 m3u8（只请求，不 open）。
@@ -1608,7 +1637,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return _episodes[index + 1].n;
   }
 
-  Future<void> _switchEp(int next, {bool auto = false}) async {
+  Future<void> _switchEp(int next) async {
     if (_isLive) return;
     if (_loading || _switching) return;
     _resetHold2x();
@@ -1622,12 +1651,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _ep = next;
       _episodes = List<Episode>.from(_episodes);
       _showQuality = false;
+      _showSleep = false;
+      _showJump = false;
       _controls = true;
       _loading = true;
       _loadedEp = null;
       _error = false;
     });
-    if (auto) fxToast(context, '即将播放 ${_epLabelFor(next)}');
     await _bootstrap(seekToSaved: true, saveOld: false);
     if (!mounted) return;
     _wake();
@@ -1637,7 +1667,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (_isLive) return;
     final next = _nextEpNumber();
     if (next == null) {
-      fxToast(context, '已经是最后一集了');
       _wake();
       return;
     }
@@ -1678,6 +1707,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _controls = false;
       _showSpeed = false;
       _showQuality = false;
+      _showSleep = false;
+      _showJump = false;
     });
   }
 
@@ -1701,6 +1732,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() {
       _showSpeed = false;
       _showQuality = false;
+      _showSleep = false;
+      _showJump = false;
     });
     _wake();
   }
@@ -1715,6 +1748,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _unlockVisible = true;
       _showSpeed = false;
       _showQuality = false;
+      _showSleep = false;
+      _showJump = false;
     });
     _hideTimer?.cancel();
     // 自动淡出只在刚锁定这一次：3 秒后锁按钮 opacity=0 且不再可点。
@@ -1774,15 +1809,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _pausedByLifecycle = false;
     // 直接让 media_kit 切换，图标由 player.stream.playing 驱动，避免本地态覆盖。
     unawaited(c.playOrPause());
-    _wake();
-  }
-
-  /// 续播提示里的「从头播放」：只 seek 回 0，不改变播放 / 暂停态。
-  void _restartFromBeginning() {
-    if (_isLive) return;
-    final c = _controller;
-    if (c == null || _loading || _error || _switching) return;
-    unawaited(c.seek(Duration.zero));
     _wake();
   }
 
@@ -1851,6 +1877,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _controls = false;
       _showSpeed = false;
       _showQuality = false;
+      _showSleep = false;
+      _showJump = false;
     });
   }
 
@@ -1869,13 +1897,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _toggleSpeed() {
     if (_isLive) {
-      fxToast(context, '直播不支持倍速');
       return;
     }
     _hideTimer?.cancel();
     setState(() {
       _showSpeed = !_showSpeed;
       _showQuality = false;
+      _showSleep = false;
+      _showJump = false;
       _controls = true;
     });
     if (!_showSpeed) _wake();
@@ -1883,13 +1912,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   Future<void> _openEpisodeSheet() async {
     if (_isLive) {
-      fxToast(context, '直播没有选集');
       return;
     }
     if (_loading || _switching) return;
     _hideTimer?.cancel();
     if (_episodes.isEmpty) {
-      fxToast(context, '暂无剧集信息');
       _wake();
       return;
     }
@@ -1907,32 +1934,25 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void _toggleQuality() {
     if (_isLive) return;
     if (_loading || _switching) {
-      fxToast(context, '正在切换，请稍候');
       return;
     }
     _hideTimer?.cancel();
     if (!_canChangeQuality) {
-      fxToast(context, '当前线路暂无更多清晰度');
       _wake();
       return;
     }
     setState(() {
       _showQuality = !_showQuality;
       _showSpeed = false;
+      _showSleep = false;
+      _showJump = false;
       _controls = true;
     });
     if (!_showQuality) _wake();
   }
 
-  void _setFillScreen(bool value) {
-    if (_fillScreen == value) return;
-    setState(() => _fillScreen = value);
-    unawaited(fxSaveFillScreen(value));
-  }
-
   Future<void> _openMorePanel() async {
     if (_isLive) {
-      fxToast(context, '直播暂不支持更多设置');
       _wake();
       return;
     }
@@ -1941,9 +1961,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     await showFxMorePanel(
       context,
       loopMode: _loopMode,
-      skipIntroOutro: _skipIntroOutro,
-      fillScreen: _fillScreen,
-      onFillChanged: _setFillScreen,
+      markLabel: _markLabel,
       onLoopChanged: (mode) {
         if (!mounted) return;
         setState(() => _loopMode = mode);
@@ -1951,21 +1969,86 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           _controller?.setLooping(mode == FxLoopMode.single) ??
               Future<void>.value(),
         );
-        fxToast(context, '循环播放：${mode.label}');
       },
-      onSkipChanged: (on) {
-        if (!mounted) return;
-        setState(() => _skipIntroOutro = on);
-        fxToast(context, on ? '已开启跳过片头片尾' : '已关闭跳过片头片尾');
-      },
-      onSleepTimer: () => unawaited(_openSleepTimerPicker()),
-      onDownload: () => fxToast(context, '请到详情页下载本集'),
+      onJumpPanel: _openJumpPanel,
+      onSleepTimer: _openSleepPanel,
+      onDownload: () {},
       onSpeed: () => unawaited(_openSpeedPicker()),
-      onBackground: () => fxToast(context, '切后台超过 5 秒会暂停，回前台继续播放'),
-      onFeedback: () => fxToast(context, '问题反馈：请到「我的-意见反馈」提交'),
+      onBackground: () {},
+      onFeedback: () {},
     );
     if (!mounted) return;
     _wake();
+  }
+
+  /// 播放设置里「跳过片头片尾」的状态文案：
+  /// 「本剧：片头 01:20 · 片尾 43:10」；没标记显示「本剧：未标记」。
+  String get _markLabel {
+    if (_mark.isEmpty) return '本剧：未标记';
+    final intro = _mark.introEnd;
+    final outro = _mark.outroStart;
+    final introText =
+        intro == null ? '未标记' : fxTime(Duration(seconds: intro));
+    final outroText =
+        outro == null ? '未标记' : fxTime(Duration(seconds: outro));
+    return '本剧：片头 $introText · 片尾 $outroText';
+  }
+
+  /// 打开片头 / 片尾标记面板（底部「片头/尾」按钮、播放设置行）。
+  void _openJumpPanel() {
+    if (_isLive) return;
+    _hideTimer?.cancel();
+    setState(() {
+      _showJump = true;
+      _showSpeed = false;
+      _showQuality = false;
+      _showSleep = false;
+      _controls = true;
+    });
+  }
+
+  /// 把当前位置设为片头结束 / 片尾开始：按 videoId 落盘，立即生效。
+  /// 标记的这一集先置为已触发，避免刚设的标记立刻把自己跳走。
+  Future<void> _markIntroEnd() async {
+    final seconds = _controller?.value.position.inSeconds ?? 0;
+    await VideoMarks.save(
+      widget.videoId,
+      introEnd: seconds,
+      outroStart: _mark.outroStart,
+    );
+    if (!mounted) return;
+    setState(() {
+      _mark = VideoMark(introEnd: seconds, outroStart: _mark.outroStart);
+      _skipTag = _loadedEp;
+      _introFired = true;
+      _outroFired = true;
+    });
+    _showSeekHint('已设为片头结束 ${fxTime(Duration(seconds: seconds))}');
+  }
+
+  Future<void> _markOutroStart() async {
+    final seconds = _controller?.value.position.inSeconds ?? 0;
+    await VideoMarks.save(
+      widget.videoId,
+      introEnd: _mark.introEnd,
+      outroStart: seconds,
+    );
+    if (!mounted) return;
+    setState(() {
+      _mark = VideoMark(introEnd: _mark.introEnd, outroStart: seconds);
+      _skipTag = _loadedEp;
+      _introFired = true;
+      _outroFired = true;
+    });
+    _showSeekHint('已设为片尾开始 ${fxTime(Duration(seconds: seconds))}');
+  }
+
+  /// 清除本剧标记：清完任何位置都不再自动跳。
+  Future<void> _clearMarks() async {
+    await VideoMarks.clear(widget.videoId);
+    if (!mounted) return;
+    setState(() => _mark = const VideoMark());
+    _showSeekHint('已清除本剧标记');
   }
 
   Future<void> _openSpeedPicker() async {
@@ -1974,26 +2057,102 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _setRate(rate);
   }
 
-  Future<void> _openSleepTimerPicker() async {
-    final minutes = await showFxSleepTimerSheet(context);
-    if (!mounted || minutes == null) return;
-    _setSleepTimer(minutes);
+  /// 打开定时关闭右侧面板（与速度 / 清晰度 / 片头尾面板互斥）。
+  void _openSleepPanel() {
+    if (_isLive) return;
+    _hideTimer?.cancel();
+    setState(() {
+      _showSleep = true;
+      _showSpeed = false;
+      _showQuality = false;
+      _showJump = false;
+      _controls = true;
+    });
   }
 
-  void _setSleepTimer(int minutes) {
+  /// 面板选中一项：不开启 / 看完当集 / 30·60·90 分钟。
+  void _pickSleep(FxSleepMode mode, int minutes) {
+    if (mounted) setState(() => _showSleep = false);
+    unawaited(_applySleep(mode, minutes));
+    _wake();
+  }
+
+  /// 自定义分钟（1–1440）：弹输入框，确认后生效。
+  Future<void> _openCustomSleep() async {
+    final settings = AppSettings.instance;
+    final picked = await showFxSleepCustomDialog(
+      context,
+      current: settings.sleepMode == FxSleepMode.minutes
+          ? settings.sleepMinutes
+          : 0,
+    );
+    if (!mounted || picked == null) return;
+    setState(() => _showSleep = false);
+    await _applySleep(FxSleepMode.minutes, picked);
+    if (!mounted) return;
+    _wake();
+  }
+
+  /// 落地定时关闭：分钟模式记截止时间戳（杀进程再进来能续上剩余时间）。
+  /// 到点只暂停播放并保留进度，不退出 App。
+  Future<void> _applySleep(FxSleepMode mode, int minutes) async {
+    final settings = AppSettings.instance;
+    await settings.init();
     _sleepTimer?.cancel();
     _sleepTimer = null;
-    if (minutes <= 0) {
-      fxToast(context, '已取消定时关闭');
+    if (mode == FxSleepMode.minutes) {
+      final endsAt = DateTime.now().millisecondsSinceEpoch + minutes * 60000;
+      await settings.setSleepTimer(mode, minutes: minutes, endsAt: endsAt);
+      _armSleep(endsAt - DateTime.now().millisecondsSinceEpoch);
+    } else {
+      await settings.setSleepTimer(mode);
+    }
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  void _armSleep(int millis) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (millis <= 0) {
+      _fireSleep();
       return;
     }
-    _sleepTimer = Timer(Duration(minutes: minutes), () {
-      _sleepTimer = null;
-      if (!mounted) return;
+    _sleepTimer = Timer(Duration(milliseconds: millis), _fireSleep);
+  }
+
+  /// 定时到点：暂停播放、保留进度，模式回落「不开启」。
+  void _fireSleep() {
+    _sleepTimer = null;
+    if (!mounted) return;
+    try {
       unawaited(_controller?.pause());
-      fxToast(context, '定时关闭：已暂停播放');
-    });
-    fxToast(context, '将在 $minutes 分钟后暂停播放');
+    } catch (_) {}
+    unawaited(AppSettings.instance.setSleepTimer(FxSleepMode.off));
+    setState(() {});
+  }
+
+  /// 进全屏时续上持久化的分钟定时：没过期按剩余时间重新武装，
+  /// 关掉进程期间已经过期就直接回落「不开启」。
+  Future<void> _restoreSleepTimer() async {
+    final settings = AppSettings.instance;
+    await settings.init();
+    if (!mounted) return;
+    if (settings.sleepMode != FxSleepMode.minutes) return;
+    final left = settings.sleepEndsAt - DateTime.now().millisecondsSinceEpoch;
+    if (left <= 0) {
+      await settings.setSleepTimer(FxSleepMode.off);
+      if (mounted) setState(() {});
+      return;
+    }
+    _armSleep(left);
+  }
+
+  /// 读本剧片头 / 片尾标记（videoId 维度，进全屏读一次）。
+  Future<void> _loadMarks() async {
+    final mark = await VideoMarks.load(widget.videoId);
+    if (!mounted) return;
+    setState(() => _mark = mark);
   }
 
   Future<void> _exit({bool requestLineChange = false}) async {
@@ -2020,7 +2179,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         info: _info,
         rate: _rate,
         qualityKey: _qualityKey,
-        fillScreen: _fillScreen,
         // 只有这一集真的打开成功（未处于错误态）才允许竖屏同步集数。
         loaded:
             _loadedEp == _ep && !_error && (c != null && c.value.isInitialized),
@@ -2155,21 +2313,22 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         children: [
           const ColoredBox(color: Colors.black),
           if (showVideo)
-            // 默认 contain：完整显示、不裁字幕，可能有细黑边；
-            // 只有打开「撑满全屏」才 cover（等比裁边、不拉伸变形）。
+            // 画面比例 / 镜像模式在 FxPlayerSurface 内按全局设置渲染：
+            // 改档立即生效、不重载视频，冻结帧用同一套裁切。
             FxPlayerSurface(
               key: ValueKey<int>(_videoEpoch),
               player: c,
-              fit: fxFullscreenFit(_fillScreen),
               subtitleBottom: controlsHeight + 12,
             ),
           // 切集 / 切清晰度：最后一帧垫在黑底上，首帧就绪后 200ms 淡出。
           if (_frozenFrame != null)
             Positioned.fill(
-              child: FxSnapshotLayer(
-                bytes: _frozenFrame,
-                opaque: _freezeOpaque,
-                fit: fxFullscreenFit(_fillScreen),
+              child: FxAspectBox(
+                child: (context, fit) => FxSnapshotLayer(
+                  bytes: _frozenFrame,
+                  opaque: _freezeOpaque,
+                  fit: fit,
+                ),
               ),
             ),
         ],
@@ -2355,6 +2514,36 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     ),
                   ),
                 ),
+              if (!_isLive && _showSleep)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: FsSleepPanel(
+                      mode: AppSettings.instance.sleepMode,
+                      minutes: AppSettings.instance.sleepMinutes,
+                      onPick: _pickSleep,
+                      onCustom: () => unawaited(_openCustomSleep()),
+                    ),
+                  ),
+                ),
+              if (!_isLive && _showJump && c != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: AnimatedBuilder(
+                      animation: c,
+                      builder: (context, _) => FsJumpPanel(
+                        position: c.value.position,
+                        mark: _mark,
+                        onMarkIntro: () => unawaited(_markIntroEnd()),
+                        onMarkOutro: () => unawaited(_markOutroStart()),
+                        onClear: () => unawaited(_clearMarks()),
+                      ),
+                    ),
+                  ),
+                ),
               if (c == null)
                 SizedBox(height: 68 + bottomInset)
               else
@@ -2382,6 +2571,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       onQuality: _isLive ? null : _toggleQuality,
                       onEpisodes:
                           _isLive ? null : () => unawaited(_openEpisodeSheet()),
+                      onJump: _isLive ? null : _openJumpPanel,
+                      jumpActive: !_mark.isEmpty,
                       onExit: () => unawaited(_exit()),
                     );
                   },

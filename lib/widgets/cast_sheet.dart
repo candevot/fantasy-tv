@@ -157,16 +157,17 @@ class _CastSheetState extends State<CastSheet> {
       }
       if (!mounted) return;
       setState(() => _connectingDevice = null);
-      fxGlobalToast('已投屏到 ${device.name}');
+      // 播放中不弹遮挡画面的提示：只在顶栏亮一个 2 秒小标签。
+      fxShowTopTag('已投屏');
     } catch (error) {
       if (!mounted) return;
       final message =
           error is CastException ? error.message : '投屏失败，请稍后重试';
       setState(() {
         _connectingDevice = null;
+        // 失败原因直接显示在面板里，不覆盖播放画面。
         _error = message;
       });
-      fxGlobalToast('投屏失败：$message');
     }
   }
 
@@ -180,8 +181,8 @@ class _CastSheetState extends State<CastSheet> {
       // 恢复手机播放失败不影响「已停止投屏」。
     }
     if (!mounted) return;
+    // 停止投屏后恢复手机播放：静默，不弹遮挡画面的提示。
     Navigator.of(context).maybePop();
-    fxGlobalToast('已停止投屏');
   }
 
   Future<void> _togglePlay() async {
@@ -194,9 +195,9 @@ class _CastSheetState extends State<CastSheet> {
         await _service.resume();
       }
     } on CastException catch (error) {
-      fxGlobalToast(error.message);
+      if (mounted) setState(() => _error = error.message);
     } catch (_) {
-      fxGlobalToast('操作失败，请稍后重试');
+      if (mounted) setState(() => _error = '操作失败，请稍后重试');
     } finally {
       if (mounted) setState(() => _actionBusy = false);
     }
@@ -208,9 +209,9 @@ class _CastSheetState extends State<CastSheet> {
     try {
       await _service.seek(target);
     } on CastException catch (error) {
-      fxGlobalToast(error.message);
+      if (mounted) setState(() => _error = error.message);
     } catch (_) {
-      fxGlobalToast('调整进度失败');
+      if (mounted) setState(() => _error = '调整进度失败');
     } finally {
       if (mounted) setState(() => _actionBusy = false);
     }
@@ -226,9 +227,9 @@ class _CastSheetState extends State<CastSheet> {
     try {
       await _service.setVolume(value.round());
     } on CastException catch (error) {
-      fxGlobalToast(error.message);
+      if (mounted) setState(() => _error = error.message);
     } catch (_) {
-      fxGlobalToast('调整音量失败');
+      if (mounted) setState(() => _error = '调整音量失败');
     } finally {
       if (mounted) setState(() => _actionBusy = false);
     }

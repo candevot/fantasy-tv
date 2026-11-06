@@ -355,7 +355,6 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 child: FxPlayerSurface(
                   key: ValueKey<int>(widget.videoEpoch),
                   player: player,
-                  fit: BoxFit.contain,
                   subtitleBottom: 76,
                 ),
               )
@@ -368,10 +367,12 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   child: AnimatedOpacity(
                     opacity: widget.frozenFrameOpaque ? 1 : 0,
                     duration: const Duration(milliseconds: 200),
-                    child: RawImage(
-                      image: widget.frozenFrame,
-                      fit: BoxFit.contain,
-                      filterQuality: FilterQuality.low,
+                    child: FxAspectBox(
+                      child: (context, fit) => RawImage(
+                        image: widget.frozenFrame,
+                        fit: fit,
+                        filterQuality: FilterQuality.low,
+                      ),
                     ),
                   ),
                 ),

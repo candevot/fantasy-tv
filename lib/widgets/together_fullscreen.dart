@@ -142,16 +142,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   int _seenCount = 0;
   String _lastMessageKey = '';
 
-  /// 撑满全屏：默认关（contain 完整显示）；打开才 cover。
-  bool _fillScreen = false;
-
   @override
   void initState() {
     super.initState();
     _syncChatState(reset: true);
     widget.chat.addListener(_onChatChanged);
     _scheduleHide();
-    unawaited(_loadFillScreen());
   }
 
   @override
@@ -180,12 +176,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       _holding = false;
     }
     super.dispose();
-  }
-
-  Future<void> _loadFillScreen() async {
-    final value = await fxLoadFillScreen();
-    if (!mounted) return;
-    setState(() => _fillScreen = value);
   }
 
   /* ------------------------------------------------------------ 聊天未读 */
@@ -391,7 +381,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       return;
     }
     if (!widget.canChangeQuality) {
-      togetherToast(context, '当前线路暂无更多清晰度');
       return;
     }
     _hideTimer?.cancel();
@@ -577,7 +566,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 child: FxPlayerSurface(
                   key: ValueKey<int>(widget.videoEpoch),
                   player: player,
-                  fit: fxFullscreenFit(_fillScreen),
                   subtitleBottom: controlsHeight + 12,
                 ),
               ),
@@ -590,10 +578,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               child: AnimatedOpacity(
                 opacity: widget.frozenFrameOpaque ? 1 : 0,
                 duration: const Duration(milliseconds: 200),
-                child: RawImage(
-                  image: widget.frozenFrame,
-                  fit: fxFullscreenFit(_fillScreen),
-                  filterQuality: FilterQuality.low,
+                child: FxAspectBox(
+                  child: (context, fit) => RawImage(
+                    image: widget.frozenFrame,
+                    fit: fit,
+                    filterQuality: FilterQuality.low,
+                  ),
                 ),
               ),
             ),

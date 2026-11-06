@@ -3,6 +3,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'download_storage.dart';
 
+/// 定时关闭模式：
+/// - [FxSleepMode.off] 不开启（默认）
+/// - [FxSleepMode.episode] 播完当前集后暂停，不连播
+/// - [FxSleepMode.minutes] N 分钟后暂停
+enum FxSleepMode {
+  off,
+  episode,
+  minutes;
+
+  static FxSleepMode parse(String? raw) =>
+      FxSleepMode.values.firstWhere((m) => m.name == raw, orElse: () => off);
+}
+
 /// 可选的默认清晰度。与全屏播放器里的清晰度 key 保持一致，播放器后续
 /// 可以直接用 [AppSettings.defaultQuality] 去匹配片源清晰度列表。
 class FxQualityOption {
@@ -22,7 +35,14 @@ class AppSettings extends ChangeNotifier {
 
   static const String _kDefaultQuality = 'fx_settings_default_quality';
   static const String _kAutoNext = 'fx_settings_auto_next';
-  static const String _kSkipIntroOutro = 'fx_settings_skip_intro_outro';
+
+  /// 定时关闭：模式 + 分钟数 + 结束时间戳（毫秒，仅分钟模式）。
+  /// 片头 / 片尾不再是全局秒数：改由播放页按 videoId 标记（见 VideoMarks），
+  /// 旧的 `fx_settings_skip_intro_outro` 布尔开关已废弃，不再读取。
+  static const String _kSleepMode = 'fx_settings_sleep_timer_mode';
+  static const String _kSleepMinutes = 'fx_settings_sleep_timer_minutes';
+  static const String _kSleepEndsAt = 'fx_settings_sleep_timer_ends_at';
+
   static const String _kWifiOnlyDownload = 'fx_settings_wifi_only_download';
   static const String _kDownloadLocation = 'fx_settings_download_location';
   static const String _kDownloadConcurrency =
@@ -31,8 +51,9 @@ class AppSettings extends ChangeNotifier {
   static const String defaultQualityKey = 'auto';
   static const bool defaultAutoNext = true;
 
-  /// 产品硬性要求：跳过片头片尾默认关。
-  static const bool defaultSkipIntroOutro = false;
+  /// 定时关闭的可选分钟数。
+  static const List<int> sleepTimerOptions = <int>[30, 60, 90];
+
   static const bool defaultWifiOnlyDownload = false;
 
   /// 下载并发数：HLS 分片 / MP4 Range 分块同时下载的路数。
@@ -51,7 +72,9 @@ class AppSettings extends ChangeNotifier {
 
   String _defaultQuality = defaultQualityKey;
   bool _autoNext = defaultAutoNext;
-  bool _skipIntroOutro = defaultSkipIntroOutro;
+  FxSleepMode _sleepMode = FxSleepMode.off;
+  int _sleepMinutes = sleepTimerOptions.first;
+  int _sleepEndsAt = 0;
   bool _wifiOnlyDownload = defaultWifiOnlyDownload;
   DownloadLocation _downloadLocation = DownloadLocation.phone;
   int _downloadConcurrency = defaultDownloadConcurrency;
@@ -62,7 +85,12 @@ class AppSettings extends ChangeNotifier {
   bool get ready => _ready;
   String get defaultQuality => _defaultQuality;
   bool get autoNext => _autoNext;
-  bool get skipIntroOutro => _skipIntroOutro;
+
+  FxSleepMode get sleepMode => _sleepMode;
+  int get sleepMinutes => _sleepMinutes;
+
+  /// 定时关闭（分钟模式）的结束时间戳，毫秒；0 = 未设置。
+  int get sleepEndsAt => _sleepEndsAt;
   bool get wifiOnlyDownload => _wifiOnlyDownload;
   DownloadLocation get downloadLocation => _downloadLocation;
   int get downloadConcurrency => _downloadConcurrency;
@@ -82,7 +110,19 @@ class AppSettings extends ChangeNotifier {
       final sp = await SharedPreferences.getInstance();
       _defaultQuality = _validQuality(sp.getString(_kDefaultQuality));
       _autoNext = sp.getBool(_kAutoNext) ?? defaultAutoNext;
-      _skipIntroOutro = sp.getBool(_kSkipIntroOutro) ?? defaultSkipIntroOutro;
+      _sleepMode = FxSleepMode.parse(sp.getString(_kSleepMode));
+      _sleepMinutes = _validSeconds(
+        sp.getInt(_kSleepMinutes),
+        sleepTimerOptions,
+      );
+      _sleepEndsAt = sp.getInt(_kSleepEndsAt) ?? 0;
+      // 应用被关掉期间定时已过期：直接回落「不开启」，不再保留一个死计时。
+      if (_sleepMode == FxSleepMode.minutes &&
+          (_sleepEndsAt <= 0 ||
+              _sleepEndsAt <= DateTime.now().millisecondsSinceEpoch)) {
+        _sleepMode = FxSleepMode.off;
+        _sleepEndsAt = 0;
+      }
       _wifiOnlyDownload =
           sp.getBool(_kWifiOnlyDownload) ?? defaultWifiOnlyDownload;
       _downloadLocation = downloadLocationFromKey(
@@ -106,6 +146,11 @@ class AppSettings extends ChangeNotifier {
     return defaultQualityKey;
   }
 
+  int _validSeconds(int? value, List<int> options) {
+    if (value == null || !options.contains(value)) return options.first;
+    return value;
+  }
+
   int _validConcurrency(int? value) {
     if (value == null) return defaultDownloadConcurrency;
     return value.clamp(minDownloadConcurrency, maxDownloadConcurrency).toInt();
@@ -126,11 +171,40 @@ class AppSettings extends ChangeNotifier {
     await _saveBool(_kAutoNext, value);
   }
 
-  Future<void> setSkipIntroOutro(bool value) async {
-    if (_skipIntroOutro == value) return;
-    _skipIntroOutro = value;
+  /// 定时关闭：[FxSleepMode.off] / [FxSleepMode.episode] /
+  /// [FxSleepMode.minutes]（分钟数取 [sleepTimerOptions]，同时记下
+  /// 结束时间戳，杀掉进程再进来也能续上剩余时间）。
+  Future<void> setSleepTimer(
+    FxSleepMode mode, {
+    int minutes = 0,
+    int endsAt = 0,
+  }) async {
+    var next = mode;
+    var nextMinutes = _sleepMinutes;
+    var nextEndsAt = 0;
+    if (mode == FxSleepMode.minutes) {
+      nextMinutes = _validSeconds(minutes, sleepTimerOptions);
+      nextEndsAt = endsAt > 0
+          ? endsAt
+          : DateTime.now().millisecondsSinceEpoch + nextMinutes * 60000;
+    }
+    if (next == _sleepMode &&
+        nextMinutes == _sleepMinutes &&
+        nextEndsAt == _sleepEndsAt) {
+      return;
+    }
+    _sleepMode = next;
+    _sleepMinutes = nextMinutes;
+    _sleepEndsAt = nextEndsAt;
     notifyListeners();
-    await _saveBool(_kSkipIntroOutro, value);
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString(_kSleepMode, next.name);
+      await sp.setInt(_kSleepMinutes, nextMinutes);
+      await sp.setInt(_kSleepEndsAt, nextEndsAt);
+    } catch (e) {
+      debugPrint('AppSettings: save $_kSleepMode failed: $e');
+    }
   }
 
   Future<void> setWifiOnlyDownload(bool value) async {

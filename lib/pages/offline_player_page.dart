@@ -262,7 +262,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
             fit: StackFit.expand,
             children: [
               if (player != null)
-                FxPlayerSurface(player: player, fit: BoxFit.contain)
+                FxPlayerSurface(player: player)
               else
                 const ColoredBox(color: Colors.black),
               if (player != null && _error == null)

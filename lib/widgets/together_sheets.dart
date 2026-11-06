@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -14,9 +15,13 @@ import 'together_ui.dart';
 enum TogetherRoomMenuAction { episodes, changeDrama, quality, line, speed }
 
 /// 房间成员弹层（竖屏与全屏顶栏共用）。
+///
+/// [membersLive] 非空时弹层跟着实时列表重建：打开期间成员进出立即可见；
+/// 为空则退回 [members] 快照。
 Future<void> showTogetherMembers(
   BuildContext context, {
   required List<TogetherMember> members,
+  ValueListenable<List<TogetherMember>>? membersLive,
 }) {
   return showModalBottomSheet<void>(
     context: context,
@@ -24,135 +29,146 @@ Future<void> showTogetherMembers(
     isScrollControlled: true,
     useSafeArea: true,
     barrierColor: Colors.black.withValues(alpha: .30),
-    builder: (ctx) => SafeArea(
-      top: false,
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(18, 0, 18, 18),
-        padding: const EdgeInsets.fromLTRB(18, 16, 18, 10),
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(ctx).height * .64,
-        ),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF9FBFF),
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: Colors.white),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    '房间成员',
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
-                      color: Fx.ink,
-                    ),
-                  ),
-                ),
-                Text(
-                  '${members.length} 人',
+    builder: (ctx) => membersLive == null
+        ? _membersSheetBody(ctx, members)
+        : ValueListenableBuilder<List<TogetherMember>>(
+            valueListenable: membersLive,
+            builder: (ctx, live, _) => _membersSheetBody(ctx, live),
+          ),
+  );
+}
+
+/// 成员弹层主体：静态快照与实时列表共用同一份构建。
+Widget _membersSheetBody(BuildContext ctx, List<TogetherMember> members) {
+  return SafeArea(
+    top: false,
+    child: Container(
+      margin: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 10),
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(ctx).height * .64,
+      ),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF9FBFF),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  '房间成员',
                   style: TextStyle(
-                    fontSize: 10.5,
-                    color: Fx.sub.withValues(alpha: .9),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Flexible(
-              child: members.isEmpty
-                  ? Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 26),
-                      child: Text(
-                        '暂无成员',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Fx.sub.withValues(alpha: .75),
-                        ),
-                      ),
-                    )
-                  : ListView(
-                      shrinkWrap: true,
-                      children: [
-                        for (final member in members)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 5),
-                            child: Row(
-                              children: [
-                                TogetherAvatar(
-                                  name: member.name,
-                                  avatar: member.avatar,
-                                  size: 30,
-                                  host: member.host,
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    member.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 12.5,
-                                      fontWeight: FontWeight.w600,
-                                      color: Fx.ink,
-                                    ),
-                                  ),
-                                ),
-                                if (member.host)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 7,
-                                      vertical: 2,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: Fx.gold.withValues(alpha: .16),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: const Text(
-                                      '房主',
-                                      style: TextStyle(
-                                        fontSize: 9,
-                                        fontWeight: FontWeight.w700,
-                                        color: Color(0xFF9A6A00),
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                      ],
-                    ),
-            ),
-            const SizedBox(height: 4),
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => Navigator.of(ctx).pop(),
-              child: Container(
-                height: 38,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: .9),
-                  borderRadius: BorderRadius.circular(19),
-                ),
-                child: const Text(
-                  '关闭',
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                    color: Fx.sub,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: Fx.ink,
                   ),
                 ),
               ),
+              Text(
+                '${members.length} 人',
+                style: TextStyle(
+                  fontSize: 10.5,
+                  color: Fx.sub.withValues(alpha: .9),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Flexible(
+            child: members.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 26),
+                    child: Text(
+                      '暂无成员',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Fx.sub.withValues(alpha: .75),
+                      ),
+                    ),
+                  )
+                : ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final member in members)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 5),
+                          child: Row(
+                            children: [
+                              TogetherAvatar(
+                                name: member.name,
+                                avatar: member.avatar,
+                                size: 30,
+                                host: member.host,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  member.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: Fx.ink,
+                                  ),
+                                ),
+                              ),
+                              if (member.host)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 7,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Fx.gold.withValues(alpha: .16),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: const Text(
+                                    '房主',
+                                    style: TextStyle(
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF9A6A00),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+          ),
+          const SizedBox(height: 4),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => Navigator.of(ctx).pop(),
+            child: Container(
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: .9),
+                borderRadius: BorderRadius.circular(19),
+              ),
+              child: const Text(
+                '关闭',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: Fx.sub,
+                ),
+              ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     ),
   );
 }
+
 
 /// 邀请弹层：大号房间号 + 邀请文案 + 一键复制。
 Future<void> showTogetherInvite(

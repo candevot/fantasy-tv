@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../models.dart';
+import '../services/app_settings.dart';
+import '../services/video_marks.dart';
 import '../theme.dart';
 import 'fs_controls.dart';
 import 'player_theme.dart';
@@ -53,7 +55,7 @@ class FsGlassCard extends StatelessWidget {
 }
 
 /// 底部控制栏
-/// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 倍速 ·
+/// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 片头/尾 · 倍速 ·
 /// 清晰度 · 选集 · 全屏（退出）
 class FsBottomBar extends StatelessWidget {
   const FsBottomBar({
@@ -72,6 +74,8 @@ class FsBottomBar extends StatelessWidget {
     this.onQuality,
     this.onEpisodes,
     required this.onExit,
+    this.onJump,
+    this.jumpActive = false,
     this.compact = false,
     this.bottomInset = 0,
     this.live = false,
@@ -95,6 +99,12 @@ class FsBottomBar extends StatelessWidget {
   final VoidCallback? onQuality;
   final VoidCallback? onEpisodes;
   final VoidCallback onExit;
+
+  /// 底部「片头/尾」按钮：打开本剧片头 / 片尾标记面板；null 时不显示。
+  final VoidCallback? onJump;
+
+  /// 本剧已标记时高亮「片头/尾」入口。
+  final bool jumpActive;
   final bool compact;
   final double bottomInset;
 
@@ -156,6 +166,15 @@ class FsBottomBar extends StatelessWidget {
                 ),
                 const Spacer(),
                 const SizedBox(width: 10),
+                if (onJump != null) ...[
+                  FsTextAction(
+                    text: '片头/尾',
+                    size: s,
+                    active: jumpActive,
+                    onTap: onJump,
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 FsTextAction(
                   text: '倍速',
                   size: s,
@@ -244,6 +263,137 @@ class FsSpeedPanel extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 定时关闭选中项的红字颜色（竞品同款：当前项红字高亮）。
+const Color _kSleepActive = Color(0xFFE05252);
+
+/// 定时关闭 · 右侧面板。
+///
+/// 条目与竞品一致：不开启（默认）/ 看完当集 / 30 分钟 / 60 分钟 / 90 分钟 /
+/// 自定义分钟（1–1440）；当前项红字高亮 + 对勾。
+/// 到点只暂停播放并保留进度，不退出 App。
+class FsSleepPanel extends StatelessWidget {
+  const FsSleepPanel({
+    super.key,
+    required this.mode,
+    required this.minutes,
+    required this.onPick,
+    required this.onCustom,
+  });
+
+  final FxSleepMode mode;
+  final int minutes;
+
+  /// 选中条目：off / episode 传 minutes=0，预设分钟条目传 30 / 60 / 90。
+  final void Function(FxSleepMode mode, int minutes) onPick;
+
+  /// 自定义分钟：弹输入框（1–1440），确认后生效。
+  final VoidCallback onCustom;
+
+  /// 分钟数不在预设里 = 用户自己输入的值，高亮「自定义」这一行。
+  bool get _customActive =>
+      mode == FxSleepMode.minutes &&
+      !AppSettings.sleepTimerOptions.contains(minutes);
+
+  String get _currentLabel => switch (mode) {
+        FxSleepMode.off => '不开启',
+        FxSleepMode.episode => '看完当集',
+        FxSleepMode.minutes => '$minutes 分钟',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    return FsGlassCard(
+      width: 182,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.timer_outlined, size: 17, color: Fx.accent),
+              const SizedBox(width: 6),
+              const Text(
+                '定时关闭',
+                style: TextStyle(
+                    fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
+              ),
+              const Spacer(),
+              Text(
+                '当前 $_currentLabel',
+                style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w700,
+                    color: _kSleepActive),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          _FsSleepTile(
+            label: '不开启',
+            active: mode == FxSleepMode.off,
+            onTap: () => onPick(FxSleepMode.off, 0),
+          ),
+          _FsSleepTile(
+            label: '看完当集',
+            active: mode == FxSleepMode.episode,
+            onTap: () => onPick(FxSleepMode.episode, 0),
+          ),
+          for (final m in AppSettings.sleepTimerOptions)
+            _FsSleepTile(
+              label: '$m 分钟',
+              active: mode == FxSleepMode.minutes && minutes == m,
+              onTap: () => onPick(FxSleepMode.minutes, m),
+            ),
+          _FsSleepTile(
+            label: _customActive ? '自定义 · $minutes 分钟' : '自定义分钟',
+            active: _customActive,
+            onTap: onCustom,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FsSleepTile extends StatelessWidget {
+  const _FsSleepTile({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+                  color: active ? _kSleepActive : Fx.ink,
+                ),
+              ),
+            ),
+            if (active)
+              const Icon(Icons.check_rounded, size: 16, color: _kSleepActive),
+          ],
+        ),
       ),
     );
   }
@@ -348,49 +498,87 @@ class FsQualityPanel extends StatelessWidget {
   }
 }
 
-/// 片头 / 片尾弹层
+/// 片头 / 片尾标记面板（底部「片头/尾」按钮、播放设置行点开）。
+///
+/// 两行设置 + 一行清除：把当前播放位置记成「片头结束 / 片尾开始」，
+/// 按 videoId 存 SharedPreferences（见 [VideoMarks]）；没有标记 = 什么都不跳。
 class FsJumpPanel extends StatelessWidget {
-  const FsJumpPanel({super.key, required this.onIntro, required this.onOutro});
+  const FsJumpPanel({
+    super.key,
+    required this.position,
+    required this.mark,
+    required this.onMarkIntro,
+    required this.onMarkOutro,
+    required this.onClear,
+  });
 
-  final VoidCallback onIntro;
-  final VoidCallback onOutro;
+  /// 面板打开期间的当前播放位置（由调用方随播放进度重建）。
+  final Duration position;
+  final VideoMark mark;
+  final VoidCallback onMarkIntro;
+  final VoidCallback onMarkOutro;
+  final VoidCallback onClear;
+
+  static String _at(int? seconds) =>
+      seconds == null ? '未标记' : fxTime(Duration(seconds: seconds));
 
   @override
   Widget build(BuildContext context) {
+    final now = fxTime(position);
     return FsGlassCard(
-      width: 258,
+      width: 306,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.bolt_rounded, size: 17, color: Fx.gold),
+              const Icon(Icons.bookmark_border_rounded,
+                  size: 17, color: Fx.gold),
               const SizedBox(width: 6),
               const Text(
                 '片头 / 片尾',
                 style: TextStyle(
                     fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
               ),
+              const Spacer(),
+              Text(
+                '本剧：片头 ${_at(mark.introEnd)} · 片尾 ${_at(mark.outroStart)}',
+                style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+              ),
             ],
           ),
           const SizedBox(height: 4),
           const Text(
-            '自动跳过默认关闭，仅在点击下面按钮时手动跳转',
+            '标记只对本剧生效，每集到点各跳一次；未标记时不跳',
             style: TextStyle(fontSize: 10.5, color: Fx.sub, height: 1.4),
           ),
           const SizedBox(height: 6),
           _FsJumpTile(
             icon: Icons.fast_forward_rounded,
-            title: '跳过片头',
-            subtitle: '手动前进 90 秒',
-            onTap: onIntro,
+            title: '将当前 $now 设为片头结束',
+            subtitle: mark.hasIntro
+                ? '本剧片头结束 ${_at(mark.introEnd)} · 点按修改'
+                : '本剧尚未标记片头',
+            onTap: onMarkIntro,
           ),
           _FsJumpTile(
-            icon: Icons.skip_next_rounded,
-            title: '跳到片尾',
-            subtitle: '手动跳到最后一分钟',
-            onTap: onOutro,
+            icon: Icons.last_page_rounded,
+            title: '将当前 $now 设为片尾开始',
+            subtitle: mark.hasOutro
+                ? '本剧片尾开始 ${_at(mark.outroStart)} · 点按修改'
+                : '本剧尚未标记片尾',
+            onTap: onMarkOutro,
+          ),
+          _FsJumpTile(
+            icon: Icons.delete_outline_rounded,
+            title: '清除本剧标记',
+            subtitle: mark.isEmpty
+                ? '本剧还没有标记'
+                : '清除后任何位置都不再自动跳',
+            onTap: () {
+              if (!mark.isEmpty) onClear();
+            },
           ),
         ],
       ),

@@ -693,7 +693,6 @@ class _LiveDetailPageState extends State<LiveDetailPage>
                     FxPlayerSurface(
                       key: ObjectKey(player),
                       player: player,
-                      fit: BoxFit.contain,
                       subtitleBottom: 70,
                     ),
                   if (player != null)

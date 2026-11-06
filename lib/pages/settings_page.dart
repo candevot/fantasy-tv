@@ -355,19 +355,8 @@ class _SettingsPageState extends State<SettingsPage> {
                     _toast(value ? '已开启自动下一集' : '已关闭自动下一集');
                   },
                 ),
-                _divider(),
-                _switchRow(
-                  icon: Icons.fast_forward_rounded,
-                  color: const Color(0xFF2FA985),
-                  title: '跳过片头片尾',
-                  subtitle: '默认关闭，开启后全屏与自动连播生效',
-                  value: _settings.skipIntroOutro,
-                  onChanged: (value) async {
-                    await _settings.setSkipIntroOutro(value);
-                    if (!mounted) return;
-                    _toast(value ? '已开启跳过片头片尾' : '已关闭跳过片头片尾');
-                  },
-                ),
+                // 跳过片头片尾已改为「按本剧标记」：入口在播放页底部
+                // 「片头/尾」按钮（按 videoId 存），这里不再放全局秒数开关。
               ],
             ),
           ),
