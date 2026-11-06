@@ -18,6 +18,7 @@ import '../widgets/player_theme.dart'
         FxLoadingOverlay,
         FxPlayerSurface,
         fxLoadProgress,
+        fxPlayerQuality,
         fxResumeMinSeconds,
         fxSaveProgress,
         kPlayerControlsAutoHide;
@@ -1234,6 +1235,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
           title: _task.title,
           epLabel: '${_task.epLabel} · ${_task.sizeLabel} · 已下载',
           compact: compact,
+          qualityLabel: fxPlayerQuality(_player),
           onBack: () => unawaited(_leave()),
           onCast: () {}, // 离线不投屏：这一列已被下面的遮罩盖住
           onMore: () => unawaited(_openSettingsSheet()),

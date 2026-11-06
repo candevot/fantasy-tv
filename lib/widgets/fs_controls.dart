@@ -171,10 +171,14 @@ class FsTopBar extends StatelessWidget {
     required this.onCast,
     required this.onMore,
     this.compact = false,
+    this.qualityLabel = '',
   });
 
   final String title;
   final String epLabel;
+
+  /// 真实分辨率胶囊（`1920x1080`）；空串自动隐藏。
+  final String qualityLabel;
 
   final VoidCallback onBack;
   final VoidCallback onCast;
@@ -249,6 +253,10 @@ class FsTopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
+          if (qualityLabel.isNotEmpty) ...[
+            FsQualityPill(label: qualityLabel, size: s),
+            const SizedBox(width: 8),
+          ],
           PGlassIcon(
             icon: Icons.tv_rounded,
             size: 32 * s,

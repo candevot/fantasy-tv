@@ -2037,6 +2037,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             title: _title,
             epLabel: _isLive ? 'LIVE · 直播中' : _epLabel,
             compact: compact,
+            qualityLabel: _qualityText,
             onBack: () => unawaited(_exit()),
             onCast: () => unawaited(_openCastSheet()),
             onMore: () => unawaited(_openMorePanel()),
