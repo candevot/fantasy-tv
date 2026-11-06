@@ -226,14 +226,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Timer? _hideTimer;
   Timer? _progressTimer;
 
-  /// 是否已切到后台：小窗 / 分屏 / 多任务只算 inactive，不暂停；
-  /// 看门狗在后台期间必须停摆，避免回前台误判卡顿重新 open。
+  /// 是否已切到后台：切后台 / inactive / paused 一律不暂停，继续播放，
+  /// 回前台接着播（不重新 open、不 seek）；看门狗在后台停摆，避免误判卡顿。
   bool _backgrounded = false;
-
-  /// 只有 paused 持续超过 [fxBackgroundPauseDelay] 才暂停；
-  /// inactive 不再触发暂停，避免小窗回复消息就断播。
-  Timer? _backgroundPauseTimer;
-  bool _pausedByLifecycle = false;
 
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
@@ -508,7 +503,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _unlockTimer?.cancel();
     _uiHoldTimer?.cancel();
     _progressTimer?.cancel();
-    _cancelBackgroundPause();
     _watchdogTimer?.cancel();
     _sleepTimer?.cancel();
     _firstFrameTimer?.cancel();
@@ -529,23 +523,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     switch (state) {
       case AppLifecycleState.inactive:
         // 多任务 / 分屏 / 小窗 / 下拉通知栏：只失去前台焦点，绝不暂停。
-        // 真正离开前台会继续收到 paused，由 5 秒兜底处理。
         return;
       case AppLifecycleState.hidden:
       case AppLifecycleState.paused:
-        // 切后台：先复位长按倍速并记进度；超过 5 秒仍不回来才暂停。
+        // 切后台：只复位长按倍速并记进度，永不暂停（系统 paused 也继续播；
+        // 来电 / 被其它应用抢占音频属系统音频策略，不由 App 断播）。
         _backgrounded = true;
-        _cancelBackgroundPause();
         _endHold2x();
         unawaited(_saveProgress());
-        _armBackgroundPause();
         return;
       case AppLifecycleState.resumed:
         final wasBackgrounded = _backgrounded;
         _backgrounded = false;
-        _cancelBackgroundPause();
         _resetWatchdogClock();
-        _resumeAfterLifecyclePause();
         // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
         if (wasBackgrounded) _remountVideoLayer();
         return;
@@ -554,38 +544,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
   }
 
-  /// paused 后等 5 秒：仍在后台且正在播放才暂停。
-  void _armBackgroundPause() {
-    _cancelBackgroundPause();
-    _backgroundPauseTimer = Timer(fxBackgroundPauseDelay, () {
-      _backgroundPauseTimer = null;
-      if (!mounted || !_backgrounded) return;
-      final c = _controller;
-      if (c == null || !c.value.isInitialized || !c.value.isPlaying) return;
-      _pausedByLifecycle = true;
-      unawaited(c.pause());
-    });
-  }
-
-  void _cancelBackgroundPause() {
-    _backgroundPauseTimer?.cancel();
-    _backgroundPauseTimer = null;
-  }
-
-  /// 回前台：只有「因为切后台超过 5 秒而暂停」才继续播放，不 seek。
-  void _resumeAfterLifecyclePause() {
-    if (!_pausedByLifecycle) return;
-    _pausedByLifecycle = false;
-    if (!mounted || _loading || _error || _switching) return;
-    final c = _controller;
-    if (c == null ||
-        !c.value.isInitialized ||
-        c.value.isPlaying ||
-        c.value.isCompleted) {
-      return;
-    }
-    unawaited(c.play());
-  }
+  // 切后台永不暂停：不再有「paused 超时暂停」的定时器，回前台也不补 play
+  // （播放状态从头到尾没有被 App 改过，直接接着播，不重新 open、不 seek）。
 
   /// 回前台只重挂 Video 层（不 open / 不 seek）：换 key 让输出层重建，
   /// 同一 FxPlayer 实例、播放位置与播放状态全部保持。
@@ -1805,8 +1765,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!c.value.isPlaying && CastService.instance.isCasting) {
       unawaited(CastService.instance.stop());
     }
-    // 用户手动暂停 / 播放后，回前台不再替他继续播放。
-    _pausedByLifecycle = false;
     // 直接让 media_kit 切换，图标由 player.stream.playing 驱动，避免本地态覆盖。
     unawaited(c.playOrPause());
     _wake();
@@ -1973,7 +1931,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       onJumpPanel: _openJumpPanel,
       onSleepTimer: _openSleepPanel,
       onDownload: () {},
-      onSpeed: () => unawaited(_openSpeedPicker()),
+      onSpeed: _toggleSpeed,
+      onQuality: _toggleQuality,
       onBackground: () {},
       onFeedback: () {},
     );
@@ -2049,12 +2008,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!mounted) return;
     setState(() => _mark = const VideoMark());
     _showSeekHint('已清除本剧标记');
-  }
-
-  Future<void> _openSpeedPicker() async {
-    final rate = await showFxSpeedSheet(context, _rate);
-    if (!mounted || rate == null) return;
-    _setRate(rate);
   }
 
   /// 打开定时关闭右侧面板（与速度 / 清晰度 / 片头尾面板互斥）。
@@ -2465,7 +2418,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: FsTopBar(
             title: _title,
             epLabel: _isLive ? 'LIVE · 直播中' : _epLabel,
-            quality: _isLive ? '' : _qualityText,
             compact: compact,
             onBack: () => unawaited(_exit()),
             onCast: () => unawaited(_openCastSheet()),
@@ -2557,22 +2509,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       buffered: v.buffered,
                       playing: v.isInitialized && v.isPlaying,
                       rate: _rate,
-                      qualityLabel:
-                          _isLive ? '' : (_canChangeQuality ? '清晰度' : ''),
-                      qualityActive:
-                          !_isLive && _canChangeQuality && _qualityKey != null,
+                      // 清晰度 / 线路 / 倍速 / 片头尾全部收进 ⋯ 播放设置。
+                      qualityLabel: '',
                       compact: compact,
                       bottomInset: bottomInset,
                       live: _isLive,
                       onSeek: _isLive ? null : _seekTo,
                       onTogglePlay: _togglePlay,
                       onNext: _isLive ? null : () => unawaited(_next()),
-                      onSpeed: _isLive ? null : _toggleSpeed,
-                      onQuality: _isLive ? null : _toggleQuality,
                       onEpisodes:
                           _isLive ? null : () => unawaited(_openEpisodeSheet()),
-                      onJump: _isLive ? null : _openJumpPanel,
-                      jumpActive: !_mark.isEmpty,
+                      onMore: _isLive
+                          ? null
+                          : () => unawaited(_openMorePanel()),
                       onExit: () => unawaited(_exit()),
                     );
                   },

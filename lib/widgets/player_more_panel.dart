@@ -35,6 +35,7 @@ Future<void> showFxMorePanel(
   required VoidCallback onSleepTimer,
   required VoidCallback onDownload,
   required VoidCallback onSpeed,
+  VoidCallback? onQuality,
   required VoidCallback onBackground,
   required VoidCallback onFeedback,
 }) {
@@ -136,6 +137,12 @@ Future<void> showFxMorePanel(
                 ),
                 const SizedBox(height: 14),
                 const Divider(height: 1, color: Color(0xFFEFF3FA)),
+                if (onQuality != null)
+                  _MoreRow(
+                    icon: Icons.high_quality_rounded,
+                    title: '清晰度 · 线路',
+                    onTap: () => closeThen(onQuality),
+                  ),
                 _MoreRow(
                   icon: Icons.repeat_rounded,
                   title: '循环播放',

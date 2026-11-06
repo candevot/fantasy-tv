@@ -15,10 +15,8 @@ import '../theme.dart';
 /// 播放器通用小工具：时间格式、进度持久化、白玻璃控件。
 String fxPad2(int n) => n.toString().padLeft(2, '0');
 
-/// 切到后台 / 失去音频焦点后的暂停宽限：只有 paused 超过 5 秒才暂停，
-/// 小窗、分屏、多任务等短暂 inactive 一律不打断播放。
-const Duration fxBackgroundPauseDelay = Duration(seconds: 5);
-
+/// 切后台 / inactive / paused 一律不暂停（全 App 统一）：系统切后台、来电等
+/// 场景由系统音频策略处理，App 层不再用超时定时器断播。
 /// 续播门槛：上次进度不足 60 秒时从头播，避免把「片头 20 秒」误当成续播。
 const double fxResumeMinSeconds = 60;
 

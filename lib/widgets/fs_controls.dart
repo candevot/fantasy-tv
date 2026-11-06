@@ -169,15 +169,12 @@ class FsTopBar extends StatelessWidget {
     required this.onBack,
     required this.onCast,
     required this.onMore,
-    this.quality = '',
     this.compact = false,
   });
 
   final String title;
   final String epLabel;
 
-  /// 画质胶囊文案；空串时不显示，避免出现空胶囊。
-  final String quality;
   final VoidCallback onBack;
   final VoidCallback onCast;
   final VoidCallback onMore;
@@ -243,10 +240,6 @@ class FsTopBar extends StatelessWidget {
               ],
             ),
           ),
-          if (quality.isNotEmpty) ...[
-            const SizedBox(width: 12),
-            FsQualityPill(label: quality, size: s),
-          ],
           const SizedBox(width: 8),
           PGlassIcon(
             icon: Icons.tv_rounded,

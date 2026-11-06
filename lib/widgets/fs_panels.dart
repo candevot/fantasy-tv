@@ -55,8 +55,9 @@ class FsGlassCard extends StatelessWidget {
 }
 
 /// 底部控制栏
-/// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 片头/尾 · 倍速 ·
-/// 清晰度 · 选集 · 全屏（退出）
+/// 进度条（左 00:25 / 右 10:34）+ 播放暂停 · 下一集 · 选集 · ⋯设置 · 退出；
+/// 倍速 / 清晰度 / 线路已收进 ⋯ 播放设置面板（onSpeed / qualityLabel 只给
+/// 还没迁移的调用方用，传 null / 空串即不显示）。
 class FsBottomBar extends StatelessWidget {
   const FsBottomBar({
     super.key,
@@ -73,6 +74,7 @@ class FsBottomBar extends StatelessWidget {
     this.onSpeed,
     this.onQuality,
     this.onEpisodes,
+    this.onMore,
     required this.onExit,
     this.onJump,
     this.jumpActive = false,
@@ -98,6 +100,9 @@ class FsBottomBar extends StatelessWidget {
   final VoidCallback? onSpeed;
   final VoidCallback? onQuality;
   final VoidCallback? onEpisodes;
+
+  /// ⋯「播放设置」入口：打开播放设置面板；null 时不显示（如直播）。
+  final VoidCallback? onMore;
   final VoidCallback onExit;
 
   /// 底部「片头/尾」按钮：打开本剧片头 / 片尾标记面板；null 时不显示。
@@ -175,13 +180,15 @@ class FsBottomBar extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                 ],
-                FsTextAction(
-                  text: '倍速',
-                  size: s,
-                  active: (rate - 1).abs() > .001,
-                  onTap: onSpeed,
-                ),
-                const SizedBox(width: 8),
+                if (onSpeed != null) ...[
+                  FsTextAction(
+                    text: '倍速',
+                    size: s,
+                    active: (rate - 1).abs() > .001,
+                    onTap: onSpeed,
+                  ),
+                  const SizedBox(width: 8),
+                ],
               ],
               if (qualityLabel.isNotEmpty) ...[
                 FsTextAction(
@@ -192,8 +199,20 @@ class FsBottomBar extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
               ],
-              if (!live) ...[
+              if (!live && onEpisodes != null) ...[
                 FsTextAction(text: '选集', size: s, onTap: onEpisodes),
+                const SizedBox(width: 8),
+              ],
+              // 底栏只留 ⋯ 播放设置：倍速 / 清晰度 / 线路全部收进面板。
+              if (onMore != null) ...[
+                PGlassIcon(
+                  icon: Icons.more_horiz_rounded,
+                  size: 34 * s,
+                  iconSize: 21 * s,
+                  tint: .16,
+                  tooltip: '播放设置',
+                  onTap: onMore,
+                ),
                 const SizedBox(width: 8),
               ],
               PGlassIcon(
