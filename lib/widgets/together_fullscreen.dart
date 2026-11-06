@@ -142,6 +142,10 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   int _seenCount = 0;
   String _lastMessageKey = '';
 
+  /// 聊天面板拖动后的位置（dx=左距 / dy=底距，左下为原点）；
+  /// null 表示没拖过，跟随安全区与键盘自动摆放。
+  Offset? _chatPos;
+
   @override
   void initState() {
     super.initState();
@@ -508,6 +512,16 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             ),
           if (widget.errorText.isNotEmpty)
             Positioned.fill(child: _buildError()),
+          // 掉线 / 重连期间：顶栏常驻小标，不弹 toast、不打断观看。
+          if (!widget.online)
+            Positioned(
+              top: pad.top + 8,
+              left: 0,
+              right: 0,
+              child: const IgnorePointer(
+                child: Center(child: _ReconnectBadge()),
+              ),
+            ),
           if (!_locked) _buildChatLayer(pad, keyboard),
           if (_locked)
             Positioned.fill(
@@ -920,6 +934,15 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         : size.height - pad.top - pad.bottom - 24;
     final panelHeight = math.min(maxHeight, available);
     final bottom = keyboard > 0 ? keyboard + 10 : 14 + pad.bottom;
+    // 面板可拖动：记录左下角位置并夹回屏内（键盘弹起时不低于键盘）。
+    final origin = Offset(14, bottom);
+    final pos = _chatPos ?? origin;
+    final minDx = 8.0;
+    final maxDx = math.max(minDx, size.width - maxWidth - 8);
+    final minDy = keyboard > 0 ? keyboard + 8 : 8.0;
+    final maxDy = math.max(minDy, size.height - panelHeight - 8);
+    final left = pos.dx.clamp(minDx, maxDx).toDouble();
+    final dy = pos.dy.clamp(minDy, maxDy).toDouble();
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -931,8 +954,8 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
           ),
         ),
         Positioned(
-          left: 14,
-          bottom: bottom,
+          left: left,
+          bottom: dy,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () {},
@@ -957,49 +980,55 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                   children: [
                     Padding(
                       padding: const EdgeInsets.fromLTRB(12, 8, 6, 4),
-                      child: Row(
-                        children: [
-                          const Icon(
-                            Icons.forum_rounded,
-                            size: 14,
-                            color: Fx.accent,
-                          ),
-                          const SizedBox(width: 5),
-                          const Expanded(
-                            child: Text(
-                              '聊天',
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onPanUpdate: (d) => setState(
+                          () => _chatPos = (_chatPos ?? origin) + d.delta,
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.forum_rounded,
+                              size: 14,
+                              color: Fx.accent,
+                            ),
+                            const SizedBox(width: 5),
+                            const Expanded(
+                              child: Text(
+                                '聊天',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                  color: Fx.ink,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              widget.online
+                                  ? '${widget.members.length} 人'
+                                  : '重连中',
                               style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w800,
-                                color: Fx.ink,
+                                fontSize: 9,
+                                color: Fx.sub.withValues(alpha: .9),
                               ),
                             ),
-                          ),
-                          Text(
-                            widget.online
-                                ? '${widget.members.length} 人'
-                                : '重连中',
-                            style: TextStyle(
-                              fontSize: 9,
-                              color: Fx.sub.withValues(alpha: .9),
-                            ),
-                          ),
-                          const SizedBox(width: 2),
-                          GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTap: _closeChat,
-                            child: Container(
-                              width: 24,
-                              height: 24,
-                              alignment: Alignment.center,
-                              child: Icon(
-                                Icons.close_rounded,
-                                size: 15,
-                                color: Fx.sub.withValues(alpha: .8),
+                            const SizedBox(width: 2),
+                            GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: _closeChat,
+                              child: Container(
+                                width: 24,
+                                height: 24,
+                                alignment: Alignment.center,
+                                child: Icon(
+                                  Icons.close_rounded,
+                                  size: 15,
+                                  color: Fx.sub.withValues(alpha: .8),
+                                ),
                               ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                     Expanded(
@@ -1141,6 +1170,38 @@ class _FsBadge extends StatelessWidget {
           fontSize: 12,
           fontWeight: FontWeight.w600,
         ),
+      ),
+    );
+  }
+}
+
+
+/// 掉线 / 自动重连期间的顶栏小标（常驻、不参与点击）。
+class _ReconnectBadge extends StatelessWidget {
+  const _ReconnectBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: .52),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: .28)),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.circle, size: 6, color: Color(0xFFFF8A80)),
+          SizedBox(width: 5),
+          Text('重连中',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
       ),
     );
   }

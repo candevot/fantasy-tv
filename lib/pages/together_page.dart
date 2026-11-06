@@ -172,6 +172,10 @@ class _TogetherPageState extends State<TogetherPage>
 
   List<TogetherMember> _members = const <TogetherMember>[];
 
+  /// 成员实时列表：成员弹层打开期间也跟着进出（join / leave）即时更新。
+  final ValueNotifier<List<TogetherMember>> _membersLive =
+      ValueNotifier<List<TogetherMember>>(const <TogetherMember>[]);
+
   final List<TogetherChatMessage> _messages = <TogetherChatMessage>[];
   final ValueNotifier<List<TogetherChatMessage>> _chat =
       ValueNotifier<List<TogetherChatMessage>>(const <TogetherChatMessage>[]);
@@ -299,6 +303,7 @@ class _TogetherPageState extends State<TogetherPage>
     _client.leave();
     _client.dispose();
     _chat.dispose();
+    _membersLive.dispose();
     _position.dispose();
     super.dispose();
   }
@@ -431,6 +436,7 @@ class _TogetherPageState extends State<TogetherPage>
               ),
             ]
           : info.members;
+      _membersLive.value = _members;
     });
     _resetSyncState();
     _downReported = false;
@@ -491,6 +497,7 @@ class _TogetherPageState extends State<TogetherPage>
         _roomTitle = stripLiveRoomTitle(state.title);
         if (_liveChannel != null) _videoTitle = _liveChannel!.title;
         if (state.members.isNotEmpty) _members = state.members;
+        _membersLive.value = _members;
         if (validLine) {
           _liveLineId = targetLine;
           _videoLine = targetLine;
@@ -532,6 +539,7 @@ class _TogetherPageState extends State<TogetherPage>
       if (state.code.isNotEmpty) _roomCode = state.code;
       if (state.title.isNotEmpty) _roomTitle = state.title;
       if (state.members.isNotEmpty) _members = state.members;
+      _membersLive.value = _members;
       if (state.videoId.isNotEmpty) _videoId = state.videoId;
       if (state.ep > 0) _ep = state.ep;
       if (state.line.isNotEmpty) _videoLine = state.line;
@@ -985,6 +993,7 @@ class _TogetherPageState extends State<TogetherPage>
       _roomCode = '';
       _roomTitle = '';
       _members = const <TogetherMember>[];
+      _membersLive.value = const <TogetherMember>[];
       _messages.clear();
       _chat.value = const <TogetherChatMessage>[];
       _videoId = '';
@@ -2018,7 +2027,11 @@ class _TogetherPageState extends State<TogetherPage>
 
   Future<void> _showMembers() async {
     if (!mounted) return;
-    await showTogetherMembers(context, members: _members);
+    await showTogetherMembers(
+      context,
+      members: _members,
+      membersLive: _membersLive,
+    );
   }
 
   /* ------------------------------------------------------------ 视频加载 */

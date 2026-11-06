@@ -511,7 +511,8 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
     final stateText = widget.isHost ? '房主' : '跟随房主';
     final dot =
         widget.online ? const Color(0xFF57D3A3) : const Color(0xFFFF8A80);
-    final status = widget.online ? stateText : '连接中…';
+    // 房间内掉线即进入自动重连（客户端会回原房间号），顶栏小标显示「重连中」。
+    final status = widget.online ? stateText : '重连中';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
