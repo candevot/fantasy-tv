@@ -194,6 +194,9 @@ class _TogetherPageState extends State<TogetherPage>
   int _liveReloadAt = 0;
   bool _liveJumping = false;
 
+  /// 无感救援链第③步已试过的线路 id：每轮拉流重置，每条只换一次。
+  final List<String> _liveRescueTried = <String>[];
+
   /// 直播房期望的播放状态：建房默认在播；房主每次 play / pause 立即更新
   /// 并广播，成员则以最新的 room_state 为准，不自行猜成「在播」。
   bool _livePlaying = true;
@@ -2078,6 +2081,37 @@ class _TogetherPageState extends State<TogetherPage>
     }
   }
 
+  /// 无感救援链第③步：本台前两步自救失败后，换下一条线路的地址。
+  /// 只更新线路 id 并返回新地址，不重新 open（播放器自己换流），
+  /// 每条线路每轮只试一次；本轮全部试完返回 null，交给三步全败。
+  Future<FxLineSource?> _nextLiveLineSource(
+    LiveChannel channel,
+    LiveLine current,
+    int seq,
+  ) async {
+    if (!mounted || seq != _videoSeq) return null;
+    final lines = channel.lines;
+    if (lines.length < 2) return null;
+    if (!_liveRescueTried.contains(current.id)) {
+      _liveRescueTried.add(current.id);
+    }
+    final index = lines.indexWhere((line) => line.id == current.id);
+    for (var k = 1; k <= lines.length; k++) {
+      final next = lines[(index + k) % lines.length];
+      if (next.id == current.id || next.url.trim().isEmpty) continue;
+      if (_liveRescueTried.contains(next.id)) continue;
+      _liveRescueTried.add(next.id);
+      if (!mounted || seq != _videoSeq) return null;
+      // 线路卡跟着换，界面显示与实际线路保持一致（不重新 open）。
+      setState(() {
+        _liveLineId = next.id;
+        _videoLine = next.id;
+      });
+      return FxLineSource(url: next.url.trim());
+    }
+    return null;
+  }
+
   /// 直播拉流：没有 seek / 进度，open 后直接播到最新位置。
   ///
   /// 成员跟随房主的 lineId；线路变化、暂停恢复、卡顿、重连都走这里重新拉流，
@@ -2100,6 +2134,7 @@ class _TogetherPageState extends State<TogetherPage>
     if (!_liveJumping && (key == _loadedKey || key == _loadingKey)) return;
     _loadingKey = key;
     final seq = ++_videoSeq;
+    _liveRescueTried.clear();
     _endedSent = false;
     // 本次拉流是否已作废（页面销毁 / 被换线、重连的新请求取代）。
     bool stale() => !mounted || seq != _videoSeq;
@@ -2134,7 +2169,13 @@ class _TogetherPageState extends State<TogetherPage>
     FxPlayer? controller;
     try {
       controller = FxPlayer.create(readyTimeout: const Duration(seconds: 20));
-      await controller.open(line.url, play: shouldPlay);
+      await controller.open(
+        line.url,
+        play: shouldPlay,
+        // 无感救援链第③步（与直播详情页一致）：前两步自救失败后按本台
+        // 线路表轮换，播放器自己换流、不打断观看，日志走 FX RESCUE。
+        rescueLines: () async => _nextLiveLineSource(channel, line, seq),
+      );
       if (stale()) {
         await _dropLivePlayer(controller);
         return;

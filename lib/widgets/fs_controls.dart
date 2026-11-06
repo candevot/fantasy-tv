@@ -184,8 +184,15 @@ class FsTopBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = compact ? .9 : 1.0;
     final gap = SizedBox(width: 7 * s);
+    // 刘海 / 挖孔 / 圆角屏：先让出安全边距，按钮不压进屏幕圆角与摄像头。
+    final safe = MediaQuery.viewPaddingOf(context);
     return Container(
-      padding: EdgeInsets.fromLTRB(14, 8, 10, 18),
+      padding: EdgeInsets.fromLTRB(
+        14 + safe.left,
+        8 + safe.top,
+        10 + safe.right,
+        18,
+      ),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -282,10 +289,12 @@ class FsSideControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 左右安全边距：刘海 / 圆角屏上按钮不贴边、不进圆角区。
+    final safe = MediaQuery.viewPaddingOf(context);
     return Stack(
       children: [
         Positioned(
-          left: 14,
+          left: 14 + safe.left,
           top: 0,
           bottom: 0,
           child: Center(
@@ -301,7 +310,7 @@ class FsSideControls extends StatelessWidget {
         ),
         if (showSeek)
           Positioned(
-            right: 14,
+            right: 14 + safe.right,
             top: 0,
             bottom: 0,
             child: Center(

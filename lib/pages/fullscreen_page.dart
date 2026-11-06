@@ -1797,29 +1797,29 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   Future<void> _openMorePanel() async {
-    if (_isLive) {
-      _wake();
-      return;
-    }
     _hideTimer?.cancel();
     if (mounted) setState(() => _controls = true);
     await showFxMorePanel(
       context,
       loopMode: _loopMode,
       markLabel: _markLabel,
-      onLoopChanged: (mode) {
-        if (!mounted) return;
-        setState(() => _loopMode = mode);
-        unawaited(
-          _controller?.setLooping(mode == FxLoopMode.single) ??
-              Future<void>.value(),
-        );
-      },
-      onJumpPanel: _openJumpPanel,
+      // 直播没有循环 / 片头尾 / 下载 / 倍速：传 null 让对应行不显示；
+      // 画面比例、镜像、定时关闭、后台播放、问题反馈照常可用且生效。
+      onLoopChanged: _isLive
+          ? null
+          : (mode) {
+              if (!mounted) return;
+              setState(() => _loopMode = mode);
+              unawaited(
+                _controller?.setLooping(mode == FxLoopMode.single) ??
+                    Future<void>.value(),
+              );
+            },
+      onJumpPanel: _isLive ? null : _openJumpPanel,
       onSleepTimer: _openSleepPanel,
-      onDownload: () {},
-      onSpeed: _toggleSpeed,
-      onQuality: _toggleQuality,
+      onDownload: _isLive ? null : () {},
+      onSpeed: _isLive ? null : _toggleSpeed,
+      onQuality: _isLive ? null : _toggleQuality,
       onBackground: () {},
       onFeedback: () {},
     );
@@ -1872,8 +1872,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   /// 打开定时关闭右侧面板（与速度 / 清晰度 / 片头尾面板互斥）。
+  /// 直播同样可用：到点暂停对直播一样生效。
   void _openSleepPanel() {
-    if (_isLive) return;
     _hideTimer?.cancel();
     setState(() {
       _showSleep = true;
@@ -2269,6 +2269,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   ) {
     final compact = MediaQuery.sizeOf(context).width < 700;
     final bottomInset = keyboard > 0 ? 0.0 : pad.bottom;
+    // 刘海 / 圆角屏安全边距：设置面板跟着右移，不压进屏幕圆角。
+    final safe = MediaQuery.viewPaddingOf(context);
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -2301,7 +2303,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             children: [
               if (!_isLive && _showQuality)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
                   child: Align(
                     alignment: Alignment.centerRight,
                     child: FsQualityPanel(
@@ -2314,7 +2316,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                 ),
               if (!_isLive && _showSpeed)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
                   child: Align(
                     alignment: Alignment.centerRight,
                     child: FsSpeedPanel(
@@ -2327,9 +2329,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     ),
                   ),
                 ),
-              if (!_isLive && _showSleep)
+              if (_showSleep)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
                   child: Align(
                     alignment: Alignment.centerRight,
                     child: FsSleepPanel(
@@ -2342,7 +2344,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                 ),
               if (!_isLive && _showJump)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
                   child: Align(
                     alignment: Alignment.centerRight,
                     child: FsJumpPanel(
@@ -2380,9 +2382,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       onNext: _isLive ? null : () => unawaited(_next()),
                       onEpisodes:
                           _isLive ? null : () => unawaited(_openEpisodeSheet()),
-                      onMore: _isLive
-                          ? null
-                          : () => unawaited(_openMorePanel()),
+                      onMore: () => unawaited(_openMorePanel()),
                       onExit: () => unawaited(_exit()),
                     );
                   },

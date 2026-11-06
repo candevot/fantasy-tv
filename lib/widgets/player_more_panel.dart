@@ -22,6 +22,9 @@ enum FxLoopMode {
 /// 腾讯播放设置样式的「更多」面板（竖屏与全屏共用）：
 /// 图标行（定时关闭 / 下载本集 / 倍速 / 后台播放）
 /// + 列表行（循环播放 / 跳过片头片尾 / 画面比例 / 镜像模式 / 问题反馈）。
+/// [onQuality] / [onLoopChanged] / [onJumpPanel] / [onDownload] /
+/// [onSpeed] 传 null 时对应入口整块不显示（直播全屏没有下一集 /
+/// 片头尾 / 下载 / 倍速）；其余行为所有播放场景共用。
 /// 画中画已移除：当前版本不支持，列表只保留可用项。
 /// 旧「撑满全屏」开关已删除：由「画面比例 · 填充」替代。
 /// 旧的跳过秒数下拉已删除：片头 / 片尾改为按本剧标记，
@@ -30,11 +33,11 @@ Future<void> showFxMorePanel(
   BuildContext context, {
   required FxLoopMode loopMode,
   required String markLabel,
-  required ValueChanged<FxLoopMode> onLoopChanged,
-  required VoidCallback onJumpPanel,
+  ValueChanged<FxLoopMode>? onLoopChanged,
+  VoidCallback? onJumpPanel,
   required VoidCallback onSleepTimer,
-  required VoidCallback onDownload,
-  required VoidCallback onSpeed,
+  VoidCallback? onDownload,
+  VoidCallback? onSpeed,
   VoidCallback? onQuality,
   required VoidCallback onBackground,
   required VoidCallback onFeedback,
@@ -51,6 +54,11 @@ Future<void> showFxMorePanel(
       // FxDisplaySettings 通知所有播放画面重建（立即生效，不重载视频）。
       var aspect = FxDisplaySettings.instance.aspect;
       var mirror = FxDisplaySettings.instance.mirror;
+      // 直播等场景缺省的行为：局部变量判空后可安全地在闭包里使用。
+      final loopChanged = onLoopChanged;
+      final jumpPanel = onJumpPanel;
+      final download = onDownload;
+      final speed = onSpeed;
       return StatefulBuilder(
         builder: (context, setSheetState) {
           void closeThen(VoidCallback action) {
@@ -118,16 +126,18 @@ Future<void> showFxMorePanel(
                       label: '定时关闭',
                       onTap: () => closeThen(onSleepTimer),
                     ),
-                    _MoreAction(
-                      icon: Icons.download_rounded,
-                      label: '下载本集',
-                      onTap: () => closeThen(onDownload),
-                    ),
-                    _MoreAction(
-                      icon: Icons.speed_rounded,
-                      label: '倍速',
-                      onTap: () => closeThen(onSpeed),
-                    ),
+                    if (download != null)
+                      _MoreAction(
+                        icon: Icons.download_rounded,
+                        label: '下载本集',
+                        onTap: () => closeThen(download),
+                      ),
+                    if (speed != null)
+                      _MoreAction(
+                        icon: Icons.speed_rounded,
+                        label: '倍速',
+                        onTap: () => closeThen(speed),
+                      ),
                     _MoreAction(
                       icon: Icons.headphones_rounded,
                       label: '后台播放',
@@ -143,22 +153,24 @@ Future<void> showFxMorePanel(
                     title: '清晰度 · 线路',
                     onTap: () => closeThen(onQuality),
                   ),
-                _MoreRow(
-                  icon: Icons.repeat_rounded,
-                  title: '循环播放',
-                  value: loop.label,
-                  onTap: () {
-                    loop = loop.next;
-                    setSheetState(() {});
-                    onLoopChanged(loop);
-                  },
-                ),
-                _MoreRow(
-                  icon: Icons.bookmark_border_rounded,
-                  title: '跳过片头片尾',
-                  value: markLabel,
-                  onTap: () => closeThen(onJumpPanel),
-                ),
+                if (loopChanged != null)
+                  _MoreRow(
+                    icon: Icons.repeat_rounded,
+                    title: '循环播放',
+                    value: loop.label,
+                    onTap: () {
+                      loop = loop.next;
+                      setSheetState(() {});
+                      loopChanged(loop);
+                    },
+                  ),
+                if (jumpPanel != null)
+                  _MoreRow(
+                    icon: Icons.bookmark_border_rounded,
+                    title: '跳过片头片尾',
+                    value: markLabel,
+                    onTap: () => closeThen(jumpPanel),
+                  ),
                 _MoreChoiceRow(
                   icon: Icons.aspect_ratio_rounded,
                   title: '画面比例',

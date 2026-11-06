@@ -121,8 +121,10 @@ class FsBottomBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final s = compact ? .9 : 1.0;
+    // 刘海 / 圆角屏：左右让出安全边距，底栏按钮不压进屏幕圆角。
+    final safe = MediaQuery.viewPaddingOf(context);
     return Container(
-      padding: EdgeInsets.fromLTRB(16, 26, 16, 6 + bottomInset),
+      padding: EdgeInsets.fromLTRB(16 + safe.left, 26, 16 + safe.right, 6 + bottomInset),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -171,39 +173,53 @@ class FsBottomBar extends StatelessWidget {
                   onTap: onNext,
                 ),
                 const Spacer(),
-                const SizedBox(width: 10),
-                if (onJump != null) ...[
-                  FsTextAction(
-                    text: '片头/尾',
-                    size: s,
-                    active: jumpActive,
-                    onTap: onJump,
-                  ),
-                  const SizedBox(width: 8),
-                ],
-                if (onSpeed != null) ...[
-                  FsTextAction(
-                    text: '倍速',
-                    size: s,
-                    active: (rate - 1).abs() > .001,
-                    onTap: onSpeed,
-                  ),
-                  const SizedBox(width: 8),
-                ],
               ],
-              if (qualityLabel.isNotEmpty) ...[
-                FsTextAction(
-                  text: qualityLabel,
-                  size: s,
-                  active: qualityActive,
-                  onTap: onQuality,
+              // 中段文字按钮：窄屏 / 刘海屏放不下时整体缩小，绝不挤出屏幕。
+              Flexible(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (!live) const SizedBox(width: 10),
+                        if (!live && onJump != null) ...[
+                          FsTextAction(
+                            text: '片头/尾',
+                            size: s,
+                            active: jumpActive,
+                            onTap: onJump,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        if (!live && onSpeed != null) ...[
+                          FsTextAction(
+                            text: '倍速',
+                            size: s,
+                            active: (rate - 1).abs() > .001,
+                            onTap: onSpeed,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        if (qualityLabel.isNotEmpty) ...[
+                          FsTextAction(
+                            text: qualityLabel,
+                            size: s,
+                            active: qualityActive,
+                            onTap: onQuality,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        if (!live && onEpisodes != null) ...[
+                          FsTextAction(text: '选集', size: s, onTap: onEpisodes),
+                          const SizedBox(width: 8),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
-                const SizedBox(width: 8),
-              ],
-              if (!live && onEpisodes != null) ...[
-                FsTextAction(text: '选集', size: s, onTap: onEpisodes),
-                const SizedBox(width: 8),
-              ],
+              ),
               // 底栏只留 ⋯ 播放设置：倍速 / 清晰度 / 线路全部收进面板。
               if (onMore != null) ...[
                 PGlassIcon(

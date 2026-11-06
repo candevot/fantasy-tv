@@ -70,6 +70,10 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   String _lastPlayerKey = '';
   Timer? _hideTimer;
 
+  /// 救援链（open 的 rescueLines）已静默试过的线路 id：同一次播放里每条
+  /// 线路只换一次，全部线路都试过仍失败才由播放器把「播放中断」抛给页面。
+  final List<String> _rescueTried = <String>[];
+
   List<LiveLine> get _lines => _channel.lines;
 
   bool get _hasPlaylist => widget.playlist.isNotEmpty;
@@ -225,7 +229,30 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     final player = FxPlayer.create(readyTimeout: const Duration(seconds: 20));
     try {
       player.addListener(_onPlayer);
-      await player.open(line.url, play: true);
+      await player.open(
+        line.url,
+        play: true,
+        // 无感救援链第③步（照抄剧集播放页）：本台线路轮换，当前地址失败时
+        // 播放器静默 open 下一条；本台线路全部试过才由播放器报「播放中断」。
+        rescueLines: () async {
+          if (!mounted || seq != _openSeq) return null;
+          final lines = _lines;
+          if (lines.length < 2) return null;
+          if (!_rescueTried.contains(line.id)) _rescueTried.add(line.id);
+          final index = lines.indexWhere((l) => l.id == line.id);
+          for (var k = 1; k <= lines.length; k++) {
+            final next = lines[(index + k) % lines.length];
+            if (next.id == line.id || next.url.trim().isEmpty) continue;
+            if (_rescueTried.contains(next.id)) continue;
+            _rescueTried.add(next.id);
+            if (!mounted || seq != _openSeq) return null;
+            // 线路卡跟着换，用户看到的当前线路和实际播放保持一致。
+            setState(() => _lineId = next.id);
+            return FxLineSource(url: next.url.trim());
+          }
+          return null;
+        },
+      );
       if (!mounted || seq != _openSeq) {
         await _dropPlayer(player);
         return null;
@@ -244,6 +271,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       // 并发时后发者不会被先发者覆盖，先发者在上面的分支里已被释放。
       _player = player;
       _lastPlayerKey = '';
+      // 新一轮播放：救援链重新从「下一条线路」开始轮换。
+      _rescueTried.clear();
       setState(() {
         _loading = false;
         _error = null;

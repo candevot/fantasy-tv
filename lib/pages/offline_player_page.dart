@@ -1226,6 +1226,8 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   /// 右内边距 10 + ⋯钮 32·s + 间距 7·s + 投屏钮 32·s，上下拉满整条顶栏。
   Widget _topBar({required bool compact}) {
     final s = compact ? .9 : 1.0;
+    // FsTopBar 会按屏幕安全边距右移一列，遮罩跟着移才能继续盖住投屏钮。
+    final safeRight = MediaQuery.viewPaddingOf(context).right;
     return Stack(
       children: [
         FsTopBar(
@@ -1237,7 +1239,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
           onMore: () => unawaited(_openSettingsSheet()),
         ),
         Positioned(
-          right: 5 + 39 * s,
+          right: 5 + 39 * s + safeRight,
           width: 32 * s + 10,
           top: 0,
           bottom: 0,
