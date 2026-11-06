@@ -1835,30 +1835,25 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _armSleep(left);
   }
 
-  /// 「跳过片头片尾」行：按 videoId 读写本剧标记，标记卡浮在遮罩上。
+  /// 「跳过片头片尾」行：点开分秒输入面板（竖屏弹层，全屏同一套面板）。
   Future<void> _openJumpSheet() async {
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) return;
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
       barrierColor: Colors.black.withValues(alpha: .38),
-      builder: (sheetContext) => Center(
-        child: StreamBuilder<Duration>(
-          stream: c.positionStream,
-          initialData: c.value.position,
-          builder: (context, snapshot) {
-            final position = snapshot.data ?? Duration.zero;
-            return FsJumpPanel(
-              position: position,
-              mark: _mark,
-              onMarkIntro: () =>
-                  unawaited(_saveMark(introEnd: position.inSeconds)),
-              onMarkOutro: () =>
-                  unawaited(_saveMark(outroStart: position.inSeconds)),
-              onClear: () => unawaited(_saveMark(clear: true)),
-            );
-          },
+      isScrollControlled: true,
+      builder: (sheetContext) => Padding(
+        // 输入时键盘不盖住面板：整体抬到键盘之上。
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+        ),
+        child: Center(
+          child: FsJumpPanel(
+            mark: _mark,
+            onApply: (intro, outro) =>
+                unawaited(_saveMark(intro: intro, outro: outro)),
+            onClear: () => unawaited(_saveMark(clear: true)),
+          ),
         ),
       ),
     );
@@ -1873,10 +1868,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     setState(() => _mark = mark);
   }
 
-  /// 写本剧标记：[clear] 清除整份，否则只覆盖传入的那一项。
+  /// 写本剧片头 / 片尾时长：[clear] 删掉整份，否则两项一起覆盖。
   Future<void> _saveMark({
-    int? introEnd,
-    int? outroStart,
+    int intro = 0,
+    int outro = 0,
     bool clear = false,
   }) async {
     final id = widget.videoId;
@@ -1885,8 +1880,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     } else {
       await VideoMarks.save(
         id,
-        introEnd: introEnd ?? _mark.introEnd,
-        outroStart: outroStart ?? _mark.outroStart,
+        VideoMark(introSeconds: intro, outroSeconds: outro),
       );
     }
     final mark = await VideoMarks.load(id);
@@ -1894,35 +1888,42 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     setState(() => _mark = mark);
   }
 
-  /// 「跳过片头片尾」行右侧文案：片头 01:20 · 片尾 43:10。
+  /// 「跳过片头片尾」行右侧文案：片头 00:30 · 片尾 01:00 / 未设置。
   String get _markLabel {
-    if (_mark.isEmpty) return '未标记';
-    String at(int? seconds) =>
-        seconds == null ? '未标记' : fxTime(Duration(seconds: seconds));
-    return '片头 ${at(_mark.introEnd)} · 片尾 ${at(_mark.outroStart)}';
+    if (_mark.isEmpty) return '未设置';
+    return '片头 ${fxTime(Duration(seconds: _mark.introSeconds))}'
+        ' · 片尾 ${fxTime(Duration(seconds: _mark.outroSeconds))}';
   }
 
-  /// 片头 / 片尾到点各跳一次：进入 [introEnd, +5s) 回到片头结束，
-  /// 到 [outroStart] 跳到本集结尾（交给播完流程切下一集）。
+  /// 开播 / 切集按本剧时长跳，每集各只触发一次（重新开流时复位）：
+  /// position < 片头秒数 → seek 到片头秒数（跳过前 N 秒）；
+  /// 时长 - position ≤ 片尾秒数 → seek 到本集结尾（交给播完流程切下一集）。
+  /// 两项都没设（0）时直接返回，任何位置都不跳。
   void _maybeApplyMark(Duration position) {
-    final mark = _mark;
-    if (mark.isEmpty) return;
-    final seconds = position.inSeconds;
-    final intro = mark.introEnd;
-    if (intro != null &&
+    final intro = _mark.introSeconds;
+    final outro = _mark.outroSeconds;
+    if (intro <= 0 && outro <= 0) return;
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    final dur = c.value.duration;
+    if (dur <= Duration.zero) return;
+    // 片头 / 片尾 ≥ 整集时长 = 配错了：宁可不跳，也不把整集跳没。
+    if (intro > 0 &&
         !_introJumped &&
-        seconds >= intro &&
-        seconds < intro + 5) {
+        intro < dur.inSeconds &&
+        position < Duration(seconds: intro)) {
       _introJumped = true;
-      unawaited(_controller?.seek(Duration(seconds: intro)));
+      unawaited(c.seek(Duration(seconds: intro)));
       return;
     }
-    final outro = mark.outroStart;
-    if (outro != null && !_outroJumped && seconds >= outro) {
+    if (outro > 0 &&
+        !_outroJumped &&
+        outro < dur.inSeconds &&
+        dur - position <= Duration(seconds: outro)) {
       _outroJumped = true;
-      final end = _controller?.value.duration ?? Duration.zero;
-      final target = end - const Duration(milliseconds: 600);
-      unawaited(_controller?.seek(target.isNegative ? Duration.zero : target));
+      // 留 0.6 秒收尾：mpv 播到末尾自然触发完成 → 正常切集 / 结束。
+      final target = dur - const Duration(milliseconds: 600);
+      unawaited(c.seek(target.isNegative ? Duration.zero : target));
     }
   }
 

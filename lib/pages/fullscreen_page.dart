@@ -1484,17 +1484,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     unawaited(_handleEnded());
   }
 
-  /// 片头 / 片尾自动跳：按本剧标记，每集各只触发一次（[_skipTag] 换集复位）。
+  /// 开播 / 切集按本剧片头片尾时长自动跳，每集各只触发一次
+  /// （[_skipTag] 换集复位）：
   ///
-  /// - 片头：位置进入 `[introEnd, introEnd + 5s)`（本集开头内）→ 跳回片头结束；
-  /// - 片尾：位置到 `outroStart` → 跳到本集结尾，随后由 [_handleEnded]
+  /// - 片头：position < 片头秒数 → 跳到片头秒数（跳过前 N 秒）；
+  /// - 片尾：时长 - position ≤ 片尾秒数 → 跳到本集结尾，随后由 [_handleEnded]
   ///   按「自动下一集」正常切集（「看完当集」则在那暂停）。
-  /// 没有标记时两个分支都不进，任何位置都不跳。
+  /// 两项都没设（0）时两个分支都不进，任何位置都不跳。
   void _autoSkipCheck() {
     if (_isLive || _loading || _error || _switching) return;
-    final introEnd = _mark.introEnd;
-    final outroStart = _mark.outroStart;
-    if (introEnd == null && outroStart == null) return;
+    final intro = _mark.introSeconds;
+    final outro = _mark.outroSeconds;
+    if (intro <= 0 && outro <= 0) return;
     final ep = _loadedEp;
     if (ep == null) return;
     if (_skipTag != ep) {
@@ -1506,24 +1507,26 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null || !c.value.isInitialized) return;
     final pos = c.value.position;
     final dur = c.value.duration;
-    if (!_introFired && introEnd != null) {
-      final mark = Duration(seconds: introEnd);
-      if (pos >= mark && pos < mark + const Duration(seconds: 5)) {
-        _introFired = true;
-        unawaited(c.seekTo(mark));
-        _showSeekHint('已跳到片头结束');
-        return;
-      }
+    if (dur <= Duration.zero) return;
+    // 片头 / 片尾 ≥ 整集时长 = 配错了：宁可不跳，也不把整集跳没。
+    if (intro > 0 &&
+        !_introFired &&
+        intro < dur.inSeconds &&
+        pos < Duration(seconds: intro)) {
+      _introFired = true;
+      unawaited(c.seekTo(Duration(seconds: intro)));
+      _showSeekHint('已跳过片头 ${fxTime(Duration(seconds: intro))}');
+      return;
     }
-    if (!_outroFired && outroStart != null && dur > Duration.zero) {
-      final mark = Duration(seconds: outroStart);
-      if (pos >= mark) {
-        _outroFired = true;
-        // 留 0.6 秒收尾：mpv 播到末尾自然触发完成 → 正常切集 / 结束。
-        final target = dur - const Duration(milliseconds: 600);
-        unawaited(c.seekTo(target.isNegative ? Duration.zero : target));
-        _showSeekHint('已跳到片尾');
-      }
+    if (outro > 0 &&
+        !_outroFired &&
+        outro < dur.inSeconds &&
+        dur - pos <= Duration(seconds: outro)) {
+      _outroFired = true;
+      // 留 0.6 秒收尾：mpv 播到末尾自然触发完成 → 正常切集 / 结束。
+      final target = dur - const Duration(milliseconds: 600);
+      unawaited(c.seekTo(target.isNegative ? Duration.zero : target));
+      _showSeekHint('已跳到片尾');
     }
   }
 
@@ -1941,16 +1944,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   /// 播放设置里「跳过片头片尾」的状态文案：
-  /// 「本剧：片头 01:20 · 片尾 43:10」；没标记显示「本剧：未标记」。
+  /// 「片头 00:30 · 片尾 01:00」；两项都没设置显示「未设置」。
   String get _markLabel {
-    if (_mark.isEmpty) return '本剧：未标记';
-    final intro = _mark.introEnd;
-    final outro = _mark.outroStart;
-    final introText =
-        intro == null ? '未标记' : fxTime(Duration(seconds: intro));
-    final outroText =
-        outro == null ? '未标记' : fxTime(Duration(seconds: outro));
-    return '本剧：片头 $introText · 片尾 $outroText';
+    if (_mark.isEmpty) return '未设置';
+    return '片头 ${fxTime(Duration(seconds: _mark.introSeconds))}'
+        ' · 片尾 ${fxTime(Duration(seconds: _mark.outroSeconds))}';
   }
 
   /// 打开片头 / 片尾标记面板（底部「片头/尾」按钮、播放设置行）。
@@ -1966,48 +1964,27 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     });
   }
 
-  /// 把当前位置设为片头结束 / 片尾开始：按 videoId 落盘，立即生效。
-  /// 标记的这一集先置为已触发，避免刚设的标记立刻把自己跳走。
-  Future<void> _markIntroEnd() async {
-    final seconds = _controller?.value.position.inSeconds ?? 0;
-    await VideoMarks.save(
-      widget.videoId,
-      introEnd: seconds,
-      outroStart: _mark.outroStart,
+  /// 应用输入的片头 / 片尾时长：按 videoId 落盘，本集立即按新值跳。
+  Future<void> _applyJump(int introSeconds, int outroSeconds) async {
+    final mark = VideoMark(
+      introSeconds: introSeconds,
+      outroSeconds: outroSeconds,
     );
+    await VideoMarks.save(widget.videoId, mark);
     if (!mounted) return;
-    setState(() {
-      _mark = VideoMark(introEnd: seconds, outroStart: _mark.outroStart);
-      _skipTag = _loadedEp;
-      _introFired = true;
-      _outroFired = true;
-    });
-    _showSeekHint('已设为片头结束 ${fxTime(Duration(seconds: seconds))}');
+    setState(() => _mark = mark);
+    _showSeekHint(mark.isEmpty
+        ? '已清空跳过片头片尾'
+        : '已设置片头 ${fxTime(Duration(seconds: introSeconds))}'
+            ' · 片尾 ${fxTime(Duration(seconds: outroSeconds))}');
   }
 
-  Future<void> _markOutroStart() async {
-    final seconds = _controller?.value.position.inSeconds ?? 0;
-    await VideoMarks.save(
-      widget.videoId,
-      introEnd: _mark.introEnd,
-      outroStart: seconds,
-    );
-    if (!mounted) return;
-    setState(() {
-      _mark = VideoMark(introEnd: _mark.introEnd, outroStart: seconds);
-      _skipTag = _loadedEp;
-      _introFired = true;
-      _outroFired = true;
-    });
-    _showSeekHint('已设为片尾开始 ${fxTime(Duration(seconds: seconds))}');
-  }
-
-  /// 清除本剧标记：清完任何位置都不再自动跳。
+  /// 清空本剧设置：清完任何位置都不再自动跳。
   Future<void> _clearMarks() async {
     await VideoMarks.clear(widget.videoId);
     if (!mounted) return;
     setState(() => _mark = const VideoMark());
-    _showSeekHint('已清除本剧标记');
+    _showSeekHint('已清空本剧设置');
   }
 
   /// 打开定时关闭右侧面板（与速度 / 清晰度 / 片头尾面板互斥）。
@@ -2479,25 +2456,25 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     ),
                   ),
                 ),
-              if (!_isLive && _showJump && c != null)
+              if (!_isLive && _showJump)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                   child: Align(
                     alignment: Alignment.centerRight,
-                    child: AnimatedBuilder(
-                      animation: c,
-                      builder: (context, _) => FsJumpPanel(
-                        position: c.value.position,
-                        mark: _mark,
-                        onMarkIntro: () => unawaited(_markIntroEnd()),
-                        onMarkOutro: () => unawaited(_markOutroStart()),
-                        onClear: () => unawaited(_clearMarks()),
-                      ),
+                    child: FsJumpPanel(
+                      mark: _mark,
+                      onApply: (intro, outro) =>
+                          unawaited(_applyJump(intro, outro)),
+                      onClear: () => unawaited(_clearMarks()),
                     ),
                   ),
                 ),
               if (c == null)
                 SizedBox(height: 68 + bottomInset)
+              else if (keyboard > 0)
+                // 分秒输入时键盘弹出：底栏先让位，面板贴着键盘顶即可，
+                // 否则横屏可用高度不够，面板会被顶出屏幕。
+                const SizedBox(height: 0)
               else
                 AnimatedBuilder(
                   animation: c,
