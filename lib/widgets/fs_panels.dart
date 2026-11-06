@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models.dart';
 import '../services/app_settings.dart';
@@ -517,35 +518,148 @@ class FsQualityPanel extends StatelessWidget {
   }
 }
 
-/// 片头 / 片尾标记面板（底部「片头/尾」按钮、播放设置行点开）。
+/// 「跳过片头片尾」时长面板（竖屏播放设置行弹层、全屏右下角同一套位置）。
 ///
-/// 两行设置 + 一行清除：把当前播放位置记成「片头结束 / 片尾开始」，
-/// 按 videoId 存 SharedPreferences（见 [VideoMarks]）；没有标记 = 什么都不跳。
-class FsJumpPanel extends StatelessWidget {
+/// 只手动输入分秒，不再「把当前进度设为片头 / 片尾」：两行 `[MM:SS]` 输入
+/// （00:00–10:00，00:00 = 未设置 = 完全不跳），「应用」按 videoId 落盘，
+/// 「清空本剧设置」把两项一起归零并删掉本剧的存储。
+class FsJumpPanel extends StatefulWidget {
   const FsJumpPanel({
     super.key,
-    required this.position,
     required this.mark,
-    required this.onMarkIntro,
-    required this.onMarkOutro,
+    required this.onApply,
     required this.onClear,
   });
 
-  /// 面板打开期间的当前播放位置（由调用方随播放进度重建）。
-  final Duration position;
+  /// 本剧当前时长（用来回填两个输入框）。
   final VideoMark mark;
-  final VoidCallback onMarkIntro;
-  final VoidCallback onMarkOutro;
+
+  /// 「应用」：输入框里的片头 / 片尾各多少秒（已校验在 0–10:00 内）。
+  final void Function(int introSeconds, int outroSeconds) onApply;
+
+  /// 「清空本剧设置」：删掉本剧的片头 / 片尾存储。
   final VoidCallback onClear;
 
-  static String _at(int? seconds) =>
-      seconds == null ? '未标记' : fxTime(Duration(seconds: seconds));
+  /// 秒 → 展示用 `[MM:SS]`，裁到 0–10:00。
+  static String label(int seconds) {
+    final total = seconds <= 0
+        ? 0
+        : seconds > VideoMarks.maxSeconds
+            ? VideoMarks.maxSeconds
+            : seconds;
+    return '${fxPad2(total ~/ 60)}:${fxPad2(total % 60)}';
+  }
+
+  @override
+  State<FsJumpPanel> createState() => _FsJumpPanelState();
+}
+
+class _FsJumpPanelState extends State<FsJumpPanel> {
+  late final TextEditingController _introCtl;
+  late final TextEditingController _outroCtl;
+
+  /// 校验失败提示：null = 这一项没问题。
+  String? _introError;
+  String? _outroError;
+
+  static const String _kRangeHint = '请输入 00:00–10:00 的分秒';
+
+  @override
+  void initState() {
+    super.initState();
+    _introCtl = TextEditingController(
+      text: FsJumpPanel.label(widget.mark.introSeconds),
+    );
+    _outroCtl = TextEditingController(
+      text: FsJumpPanel.label(widget.mark.outroSeconds),
+    );
+    _introCtl.addListener(() {
+      if (_introError != null) setState(() => _introError = null);
+    });
+    _outroCtl.addListener(() {
+      if (_outroError != null) setState(() => _outroError = null);
+    });
+  }
+
+  @override
+  void dispose() {
+    _introCtl.dispose();
+    _outroCtl.dispose();
+    super.dispose();
+  }
+
+  /// 外面（清空按钮 / 另一处设置）改了本剧时长就回填输入框；
+  /// 值相同不动，避免打断正在输入的光标。
+  @override
+  void didUpdateWidget(FsJumpPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.mark == oldWidget.mark) return;
+    _fill(_introCtl, widget.mark.introSeconds);
+    _fill(_outroCtl, widget.mark.outroSeconds);
+    _introError = null;
+    _outroError = null;
+  }
+
+  void _fill(TextEditingController ctl, int seconds) {
+    final text = FsJumpPanel.label(seconds);
+    if (ctl.text != text) ctl.text = text;
+  }
+
+  /// `[MM:SS]` → 秒：空串 = 未设置 = 0；没有冒号按秒读；
+  /// 超出 0–10:00（含格式坏掉）返回 null，交给输入框显示错误。
+  int? _parse(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return 0;
+    final parts = text.split(':');
+    if (parts.length > 2) return null;
+    var seconds = 0;
+    for (final part in parts) {
+      if (part.isEmpty) return null;
+      final n = int.tryParse(part);
+      if (n == null) return null;
+      seconds = seconds * 60 + n;
+    }
+    return seconds <= VideoMarks.maxSeconds ? seconds : null;
+  }
+
+  /// 「应用」：两项都合法才落盘，顺手把输入规范回填（90 秒 → 01:30）。
+  void _apply() {
+    final intro = _parse(_introCtl.text);
+    final outro = _parse(_outroCtl.text);
+    if (intro == null || outro == null) {
+      setState(() {
+        _introError = intro == null ? _kRangeHint : null;
+        _outroError = outro == null ? _kRangeHint : null;
+      });
+      return;
+    }
+    final introText = FsJumpPanel.label(intro);
+    final outroText = FsJumpPanel.label(outro);
+    if (_introCtl.text != introText) _introCtl.text = introText;
+    if (_outroCtl.text != outroText) _outroCtl.text = outroText;
+    setState(() {
+      _introError = null;
+      _outroError = null;
+    });
+    widget.onApply(intro, outro);
+  }
+
+  /// 「清空本剧设置」：两个输入框一起归 00:00，存储交给调用方删。
+  void _clear() {
+    if (_introCtl.text != '00:00') _introCtl.text = '00:00';
+    if (_outroCtl.text != '00:00') _outroCtl.text = '00:00';
+    setState(() {
+      _introError = null;
+      _outroError = null;
+    });
+    widget.onClear();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final now = fxTime(position);
+    final mark = widget.mark;
     return FsGlassCard(
-      width: 306,
+      width: 316,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -556,48 +670,51 @@ class FsJumpPanel extends StatelessWidget {
                   size: 17, color: Fx.gold),
               const SizedBox(width: 6),
               const Text(
-                '片头 / 片尾',
+                '跳过片头片尾',
                 style: TextStyle(
                     fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
               ),
               const Spacer(),
               Text(
-                '本剧：片头 ${_at(mark.introEnd)} · 片尾 ${_at(mark.outroStart)}',
+                mark.isEmpty
+                    ? '未设置'
+                    : '片头 ${FsJumpPanel.label(mark.introSeconds)}'
+                        ' · 片尾 ${FsJumpPanel.label(mark.outroSeconds)}',
                 style: const TextStyle(fontSize: 10.5, color: Fx.sub),
               ),
             ],
           ),
           const SizedBox(height: 4),
           const Text(
-            '标记只对本剧生效，每集到点各跳一次；未标记时不跳',
+            '手动输入分秒（00:00–10:00）；填 00:00 = 未设置，完全不跳',
             style: TextStyle(fontSize: 10.5, color: Fx.sub, height: 1.4),
           ),
+          const SizedBox(height: 8),
+          _FsJumpField(
+            label: '片头',
+            controller: _introCtl,
+            error: _introError,
+            help: '播放到该时长自动跳到片头结束（跳过前 N 秒）',
+          ),
           const SizedBox(height: 6),
-          _FsJumpTile(
-            icon: Icons.fast_forward_rounded,
-            title: '将当前 $now 设为片头结束',
-            subtitle: mark.hasIntro
-                ? '本剧片头结束 ${_at(mark.introEnd)} · 点按修改'
-                : '本剧尚未标记片头',
-            onTap: onMarkIntro,
+          _FsJumpField(
+            label: '片尾',
+            controller: _outroCtl,
+            error: _outroError,
+            help: '时长-位置 ≤ 该值时跳到结尾 / 自动下一集',
           ),
-          _FsJumpTile(
-            icon: Icons.last_page_rounded,
-            title: '将当前 $now 设为片尾开始',
-            subtitle: mark.hasOutro
-                ? '本剧片尾开始 ${_at(mark.outroStart)} · 点按修改'
-                : '本剧尚未标记片尾',
-            onTap: onMarkOutro,
-          ),
-          _FsJumpTile(
-            icon: Icons.delete_outline_rounded,
-            title: '清除本剧标记',
-            subtitle: mark.isEmpty
-                ? '本剧还没有标记'
-                : '清除后任何位置都不再自动跳',
-            onTap: () {
-              if (!mark.isEmpty) onClear();
-            },
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _FsJumpButton(label: '应用', primary: true, onTap: _apply),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _FsJumpButton(
+                    label: '清空本剧设置', primary: false, onTap: _clear),
+              ),
+            ],
           ),
         ],
       ),
@@ -605,17 +722,92 @@ class FsJumpPanel extends StatelessWidget {
   }
 }
 
-class _FsJumpTile extends StatelessWidget {
-  const _FsJumpTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
+/// 一行时长输入：`片头 [MM:SS]` 输入框 + 帮助 / 校验提示。
+class _FsJumpField extends StatelessWidget {
+  const _FsJumpField({
+    required this.label,
+    required this.controller,
+    required this.help,
+    this.error,
+  });
+
+  final String label;
+  final TextEditingController controller;
+  final String help;
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            SizedBox(
+              width: 34,
+              child: Text(
+                label,
+                style: const TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w700, color: Fx.ink),
+              ),
+            ),
+            Expanded(
+              child: TextField(
+                controller: controller,
+                // 数字键盘就够：冒号由 [_MmSsFormatter] 自动补。
+                keyboardType: TextInputType.number,
+                inputFormatters: const [_MmSsFormatter()],
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: Fx.ink,
+                  letterSpacing: .8,
+                ),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: '00:00',
+                  hintStyle: const TextStyle(fontSize: 14, color: Fx.sub),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                  filled: true,
+                  fillColor: const Color(0xFFF3F6FC),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Fx.accent),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 3),
+        Text(
+          error ?? help,
+          style: TextStyle(
+            fontSize: 10,
+            height: 1.3,
+            color: error == null ? Fx.sub : const Color(0xFFE5484D),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 面板底部按钮：「应用」渐变主按钮，「清空本剧设置」浅灰次按钮。
+class _FsJumpButton extends StatelessWidget {
+  const _FsJumpButton({
+    required this.label,
+    required this.primary,
     required this.onTap,
   });
 
-  final IconData icon;
-  final String title;
-  final String subtitle;
+  final String label;
+  final bool primary;
   final VoidCallback onTap;
 
   @override
@@ -623,45 +815,74 @@ class _FsJumpTile extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 7),
-        child: Row(
-          children: [
-            Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
-                color: Fx.accent.withValues(alpha: .12),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon, size: 17, color: Fx.accent),
-            ),
-            const SizedBox(width: 9),
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w700,
-                      color: Fx.ink,
-                    ),
-                  ),
-                  Text(
-                    subtitle,
-                    style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-                  ),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right_rounded, size: 18, color: Fx.sub),
-          ],
+      child: Container(
+        height: 36,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          gradient: primary ? Fx.brand : null,
+          color: primary ? null : const Color(0xFFF3F6FC),
+          border: primary ? null : Border.all(color: const Color(0xFFE7EDF7)),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+            color: primary ? Colors.white : Fx.ink,
+          ),
         ),
       ),
     );
+  }
+}
+
+/// 分秒输入格式化：只留数字（最多 4 位），冒号插在最后两位前，
+/// 依次键入 `1` `3` `0` → `1:30`，`1000` → `10:00`，`30` → `30`（30 秒）。
+/// 数字键盘即可完成分:秒输入；0–10:00 的校验在点「应用」时做。
+class _MmSsFormatter extends TextInputFormatter {
+  const _MmSsFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final digits = newValue.text.replaceAll(RegExp(r'\D'), '');
+    // 超过 4 位（> 10:00）多打的数字直接丢掉。
+    final kept = digits.length > 4 ? digits.substring(0, 4) : digits;
+    final text = _mmSs(kept);
+
+    // 光标跟着「前面有几个数字」走：改中间也不会乱跳。
+    var cursor = newValue.selection.baseOffset;
+    if (cursor < 0 || cursor > newValue.text.length) {
+      cursor = newValue.text.length;
+    }
+    final before =
+        newValue.text.substring(0, cursor).replaceAll(RegExp(r'\D'), '').length;
+    return TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: _offsetAfter(text, before)),
+    );
+  }
+
+  /// 展示：≤2 位原样（就是秒）；再多把冒号插在最后两位前。
+  static String _mmSs(String digits) => digits.length <= 2
+      ? digits
+      : '${digits.substring(0, digits.length - 2)}:'
+          '${digits.substring(digits.length - 2)}';
+
+  /// [text] 里数够 [count] 个数字之后的下标（0 个在开头，数不到在末尾）。
+  static int _offsetAfter(String text, int count) {
+    if (count <= 0) return 0;
+    var seen = 0;
+    for (var i = 0; i < text.length; i++) {
+      final c = text.codeUnitAt(i);
+      if (c < 48 || c > 57) continue;
+      seen++;
+      if (seen == count) return i + 1;
+    }
+    return text.length;
   }
 }
 
