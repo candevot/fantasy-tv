@@ -184,12 +184,26 @@ class FxPlayerSurface extends StatefulWidget {
 }
 
 class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
+  /// 已经同步到 mpv 的字幕可见性与对应播放器，避免改画面比例这类无关档位时
+  /// 重复写属性，同时保证换播放器实例（切线路 / 换集）后重新写一次。
+  bool? _subtitleVisible;
+  Object? _subtitlePlayer;
+
   @override
   void initState() {
     super.initState();
     FxDisplaySettings.instance.addListener(_onSettingsChanged);
     // 幂等：读回已保存的画面比例 / 镜像档位，读完会再通知一次。
     unawaited(FxDisplaySettings.instance.ensureLoaded());
+    _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
+  }
+
+  @override
+  void didUpdateWidget(covariant FxPlayerSurface oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(oldWidget.player, widget.player)) return;
+    // 换了播放器实例：新 mpv 的 sub-visibility 是默认值，需要按当前镜像档位重写。
+    _subtitlePlayer = null;
     _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
   }
 
@@ -204,13 +218,17 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   /// 把纹理里的字幕藏起来，改由 [FxMirrorSubtitle] 以正字显示；
   /// 关掉镜像再还原成 `yes`。
   Future<void> _syncMirrorSubtitle(FxMirrorMode mode) async {
+    final visible = mode == FxMirrorMode.none;
+    final player = widget.player;
+    if (_subtitleVisible == visible && identical(_subtitlePlayer, player)) {
+      return;
+    }
+    _subtitleVisible = visible;
+    _subtitlePlayer = player;
     try {
-      final platform = widget.player.player.platform;
+      final platform = player.player.platform;
       if (platform is! NativePlayer) return;
-      await platform.setProperty(
-        'sub-visibility',
-        mode == FxMirrorMode.none ? 'yes' : 'no',
-      );
+      await platform.setProperty('sub-visibility', visible ? 'yes' : 'no');
     } catch (_) {
       // 播放器已释放 / 属性不可用：保持现状，不影响播放。
     }
