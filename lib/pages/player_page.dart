@@ -80,9 +80,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 切线路时最多尝试的线路数（含用户选中的目标线路）。
   static const int _maxLineAttempts = 2;
 
-  /// 看门狗：每 3 秒检查一次，连续 12 秒位置不前进即尝试自愈。
-  static const Duration _watchdogTick = Duration(seconds: 3);
-  static const Duration _watchdogStall = Duration(seconds: 12);
+  /// 停摆 / 出错的自愈已整体搬进 FxPlayer：连续 30 秒无字节流动才判定
+  /// 失败（缓冲中只显示「缓冲中 xx%」），随后静默跑
+  /// ①refreshPlay 换地址 ②同地址重开并 seek 回原进度 ③换下一条线路，
+  /// 页面只在三步全失败时弹一次「播放中断」（见 _onPlayerFatal）。
 
   /// 竖屏控件 3 秒无操作自动隐藏。
   static const Duration _controlsAutoHide = Duration(seconds: 3);
@@ -132,16 +133,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 正在切换线路（防止重复点击并发 open）。
   bool _switchingLine = false;
   int? _pendingEp;
-
-  /// 看门狗：播放中位置长时间不动时自愈一次，再失败自动换下一条线路。
-  Timer? _watchdogTimer;
-  Duration _watchdogLastPosition = Duration.zero;
-  DateTime _watchdogLastAdvance = DateTime.now();
-  bool _watchdogBusy = false;
-  bool _watchdogRetried = false;
-
-  /// 自愈成功后等 position 真正前进，再提示「已自动恢复」。
-  bool _watchdogRecoverPending = false;
 
   /// 切换期间锁住 UI 进度，避免新播放器 open 时进度归零。
   Duration? _uiPosition;
@@ -313,7 +304,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       unawaited(_saveProgress());
       _maybePrewarmNext();
     });
-    _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
     unawaited(_loadMark());
     unawaited(_restoreSleepTimer());
     _bootstrap(seekToSaved: true, saveOld: false);
@@ -374,7 +364,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     _switchingLine = true;
     widget.onSwitchingChanged?.call(true);
-    _watchdogRecoverPending = false;
     final old = _controller;
     final healthy = old != null &&
         old.value.isInitialized &&
@@ -441,8 +430,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _uiPosition = null;
           _uiDuration = null;
         });
-        _resetWatchdogClock();
-        _watchdogRetried = false;
         _showControls();
         // 线路已切换：静默，不弹遮挡画面的提示。
         // 自动尝试下一条成功时同步外层高亮，避免 UI 仍指着失败线路。
@@ -533,7 +520,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       case AppLifecycleState.resumed:
         final wasBackgrounded = _backgrounded;
         _backgrounded = false;
-        _resetWatchdogClock();
         // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
         if (wasBackgrounded) _remountVideoLayer();
         return;
@@ -623,7 +609,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _hideTimer?.cancel();
     _sleepTimer?.cancel();
     _progressTimer?.cancel();
-    _watchdogTimer?.cancel();
     _frozenClearTimer?.cancel();
     _frozenFallbackTimer?.cancel();
     _frozenFrame = null;
@@ -940,6 +925,37 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 if (!mounted || token != _loadToken) return;
                 _emitSourceIssue(SourceIssue.expired);
               },
+              // 无感救援链第③步：本线路 ①refreshPlay ②同地址重开都失败后，
+              // 播放器会静默回调这里换下一条线路（并 seek 回原进度）。
+              rescueLines: () async {
+                if (!mounted || token != _loadToken) return null;
+                final lines = widget.detail?.lines ?? const <LineInfo>[];
+                if (lines.length < 2) return null;
+                final index = lines.indexWhere((l) => l.id == line);
+                for (var k = 1; k <= lines.length; k++) {
+                  final next = lines[(index + k) % lines.length];
+                  if (next.id == line || next.id.trim().isEmpty) continue;
+                  try {
+                    final fresh =
+                        await Api.play(widget.videoId, ep, next.id);
+                    final freshUrl = fresh.url.trim();
+                    if (freshUrl.isEmpty) continue;
+                    FxPlayCache.invalidate(widget.videoId, ep, line);
+                    if (mounted && token == _loadToken) {
+                      setState(() => _line = next.id);
+                      _activeCastUrl = null;
+                    }
+                    return FxLineSource(
+                      url: freshUrl,
+                      headers: fresh.headers,
+                      direct: fresh.direct && fresh.isHls,
+                    );
+                  } catch (_) {
+                    // 这条也取不到地址就继续试下一条线路。
+                  }
+                }
+                return null;
+              },
             )
             .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) {
@@ -1003,7 +1019,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             _fadeOutFrozenFrame,
           );
         }
-        _resetWatchdogClock();
         widget.onPlaybackStarted?.call();
         _showControls();
         // 续播静默处理：直接停在上次位置，不弹「已跳到上次位置」提示。
@@ -1081,122 +1096,27 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     widget.onSourceFailed?.call();
   }
 
-  /* -------------------------------------------------------------- 看门狗 */
+  /* ------------------------------------------- 无感救援链（FxPlayer 内部） */
 
-  /// 播放中位置连续 12 秒不前进（仍在 buffering / 应该播放）时尝试自愈：
-  /// 先重新 open 当前地址一次，仍失败或再次报错则自动切下一条线路。
-  void _checkWatchdog() {
-    if (!mounted || _fullscreenActive || _watchdogBusy) return;
-    // 投屏期间手机播放器是暂停的，看门狗不能把它重新拉起来出声。
-    if (CastService.instance.isCasting) {
-      _resetWatchdogClock();
-      return;
-    }
-    if (_loading || _error || _switchingLine || _backgrounded) {
-      _resetWatchdogClock();
-      return;
-    }
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) {
-      _resetWatchdogClock();
-      return;
-    }
-    final v = c.value;
-    if (v.isCompleted) {
-      _resetWatchdogClock();
-      return;
-    }
-    // ready 之后 hasError 也必须走看门狗，而不是直接锁死错误页。
-    if (v.hasError) {
-      unawaited(_recoverFromWatchdog());
-      return;
-    }
-    if (!v.isPlaying && !v.isBuffering) {
-      _resetWatchdogClock();
-      return;
-    }
-    // 位置前进了：播放恢复健康，播过自愈提示后重新计数。
-    if ((v.position - _watchdogLastPosition).abs() >
-        const Duration(milliseconds: 300)) {
-      _watchdogLastPosition = v.position;
-      _watchdogLastAdvance = DateTime.now();
-      _watchdogRetried = false;
-      if (_watchdogRecoverPending) {
-        _watchdogRecoverPending = false;
-        // 自愈成功：静默，不弹「已自动恢复」遮挡画面。
-      }
-      return;
-    }
-    _watchdogLastPosition = v.position;
-    if (DateTime.now().difference(_watchdogLastAdvance) < _watchdogStall) {
-      return;
-    }
-    unawaited(_recoverFromWatchdog());
-  }
+  // 停摆 / 出错的自愈已整体搬进 FxPlayer：连续 30 秒「完全无字节流动」
+  // 才判定失败（缓冲中只显示「缓冲中 xx%」，不弹错误层），随后播放器内部
+  // 静默跑 ①refreshPlay 换地址 ②同地址重新 open 并 seek 回原进度
+  // ③换下一条线路（open 的 rescueLines hook），每步结果都写进 proxy.log。
+  // 三步都失败后播放器才会带 hasError 回到页面，这里只负责弹一次错误层。
 
-  void _resetWatchdogClock() {
-    _watchdogLastPosition = _controller?.value.position ?? Duration.zero;
-    _watchdogLastAdvance = DateTime.now();
-  }
-
-  Future<void> _recoverFromWatchdog() async {
-    if (!mounted || _watchdogBusy || _switchingLine) return;
-    if (_watchdogRetried) {
-      await _watchdogNextLine();
-      return;
-    }
-    final c = _controller;
-    if (c == null) return;
-    final resume = c.value.position;
-    _watchdogRetried = true;
-    _watchdogBusy = true;
-    try {
-      // 重新 open 当前线路（含备用地址），成功后等 position 前进再提示恢复。
-      final ok = await _bootstrap(
-        seekToSaved: false,
-        saveOld: false,
-        resumeSeconds: resume.inMilliseconds / 1000.0,
-        playOverride: true,
-        reportFailure: false,
-      );
-      if (!mounted) return;
-      if (ok) {
-        _watchdogRecoverPending = true;
-        _resetWatchdogClock();
-      } else {
-        await _watchdogNextLine();
-      }
-    } finally {
-      _watchdogBusy = false;
-    }
-  }
-
-  /// 看门狗自愈失败：切下一条线路；没有下一条才显示错误 + 重试。
-  Future<void> _watchdogNextLine() async {
-    if (!mounted) return;
-    final lines = widget.detail?.lines ?? const <LineInfo>[];
-    String? next;
-    if (lines.length > 1) {
-      final index = lines.indexWhere((l) => l.id == _line);
-      next = lines[(index < 0 ? 0 : index + 1) % lines.length].id;
-      if (next == _line) next = null;
-    }
-    if (next == null || next.isEmpty) {
-      _clearFrozenFrame();
-      setState(() {
-        _loading = false;
-        _loadedEp = null;
-        _error = true;
-        _errorText = '播放中断，自动恢复失败，请重试或切换线路';
-        _uiPosition = null;
-        _uiDuration = null;
-      });
-      _showControls();
-      return;
-    }
-    // 新线路有自己的自愈额度，避免一条坏线路反复重试。
-    _watchdogRetried = false;
-    await _switchLine(next, _ep);
+  /// 救援链三步全部失败：只弹一次「播放中断」，页面不再自己重开 / 换线。
+  void _onPlayerFatal() {
+    if (!mounted || _error) return;
+    _clearFrozenFrame();
+    setState(() {
+      _loading = false;
+      _loadedEp = null;
+      _error = true;
+      _errorText = '播放中断，自动恢复失败，请重试或切换线路';
+      _uiPosition = null;
+      _uiDuration = null;
+    });
+    _showControls();
   }
 
   void _onVideoValue() {
@@ -1209,8 +1129,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (_fullscreenActive || _loading || _error) return;
     final v = c.value;
     if (v.hasError) {
-      // ready 后出错不直接锁死：交给看门狗重开当前地址 / 切线路。
-      unawaited(_recoverFromWatchdog());
+      // FxPlayer 内部三步救援链已全部失败：页面只弹一次「播放中断」。
+      _onPlayerFatal();
       return;
     }
     if (!v.isInitialized) return;

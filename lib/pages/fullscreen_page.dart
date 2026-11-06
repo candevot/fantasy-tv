@@ -163,10 +163,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 出错前的播放位置，重试时尽量接着播。
   Duration _positionBeforeError = Duration.zero;
 
-  /// 看门狗：每 3 秒检查一次，连续 12 秒位置不前进即尝试自愈。
-  static const Duration _watchdogTick = Duration(seconds: 3);
-  static const Duration _watchdogStall = Duration(seconds: 12);
-
   static const List<DeviceOrientation> _landscape = <DeviceOrientation>[
     DeviceOrientation.landscapeLeft,
     DeviceOrientation.landscapeRight,
@@ -266,16 +262,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 切清晰度期间：禁止重复点击，避免并发 open。
   bool _switching = false;
-
-  /// 看门狗：播放中位置长时间不动时重开当前地址，仍失败则退出并切线路。
-  Timer? _watchdogTimer;
-  Duration _watchdogLastPosition = Duration.zero;
-  DateTime _watchdogLastAdvance = DateTime.now();
-  bool _watchdogBusy = false;
-  bool _watchdogRetried = false;
-
-  /// 自愈成功后等 position 真正前进，再提示「已自动恢复」。
-  bool _watchdogRecoverPending = false;
 
   /// 切清晰度期间锁住 UI 进度，防止播放器 open 归零时进度条跳回 0。
   Duration? _uiPosition;
@@ -481,8 +467,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         unawaited(_saveProgress());
         _maybePrewarmNext();
       });
-      _watchdogTimer = Timer.periodic(_watchdogTick, (_) => _checkWatchdog());
-      _resetWatchdogClock();
       if (widget.videoId.isNotEmpty && _episodes.isEmpty) {
         unawaited(_loadEpisodeMeta());
       }
@@ -503,7 +487,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _unlockTimer?.cancel();
     _uiHoldTimer?.cancel();
     _progressTimer?.cancel();
-    _watchdogTimer?.cancel();
     _sleepTimer?.cancel();
     _firstFrameTimer?.cancel();
     _freezeClearTimer?.cancel();
@@ -535,7 +518,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       case AppLifecycleState.resumed:
         final wasBackgrounded = _backgrounded;
         _backgrounded = false;
-        _resetWatchdogClock();
         // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
         if (wasBackgrounded) _remountVideoLayer();
         return;
@@ -735,6 +717,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               direct: source.direct && source.isHls,
               refreshPlay: _refreshPlatformUrl,
               onPlayExpired: _onPlatformExpired,
+              rescueLines: _rescueLineSource,
             )
             .timeout(_openReadyTimeout);
         if (!mounted || token != _loadToken) return;
@@ -772,8 +755,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         });
         _sourceFailNotified = false;
         ok = true;
-        _watchdogRetried = false;
-        _resetWatchdogClock();
         _wake();
         // 续播静默处理：直接停在上次位置，不弹「已跳到上次位置」提示。
         break;
@@ -820,6 +801,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             direct: direct,
             refreshPlay: _refreshPlatformUrl,
             onPlayExpired: _onPlatformExpired,
+            rescueLines: _rescueLineSource,
           )
           .timeout(_openReadyTimeout);
       if (!mounted) return false;
@@ -1026,8 +1008,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _sourceFailNotified = false;
         _controls = true;
       });
-      _watchdogRetried = false;
-      _resetWatchdogClock();
       _startUiHoldTimeout();
       _wake();
       _showSeekHint('清晰度：$_qualityLabel');
@@ -1070,60 +1050,39 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return seconds;
   }
 
-  /* -------------------------------------------------------------- 看门狗 */
+  /* ------------------------------- 无感救援链（FxPlayer 内部） / 地址工具 */
 
-  /// 播放中位置连续 12 秒不前进（仍在 buffering / 应该播放）时重开当前地址；
-  /// 一次自愈仍失败则退出全屏并请求竖屏切下一条线路。
-  void _checkWatchdog() {
-    if (_isLive) return;
-    if (!mounted || _watchdogBusy) return;
-    // 投屏期间手机播放器是暂停的，看门狗不能把它重新拉起来出声。
-    if (CastService.instance.isCasting) {
-      _resetWatchdogClock();
-      return;
-    }
-    if (_loading || _error || _switching || _backgrounded) {
-      _resetWatchdogClock();
-      return;
-    }
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) {
-      _resetWatchdogClock();
-      return;
-    }
-    final v = c.value;
-    if (v.isCompleted) {
-      _resetWatchdogClock();
-      return;
-    }
-    if (v.hasError) {
-      unawaited(_recoverFromWatchdog());
-      return;
-    }
-    if (!v.isPlaying && !v.isBuffering) {
-      _resetWatchdogClock();
-      return;
-    }
-    if ((v.position - _watchdogLastPosition).abs() >
-        const Duration(milliseconds: 300)) {
-      _watchdogLastPosition = v.position;
-      _watchdogLastAdvance = DateTime.now();
-      _watchdogRetried = false;
-      if (_watchdogRecoverPending) {
-        _watchdogRecoverPending = false;
+  // 停摆 / 出错的自愈已整体搬进 FxPlayer：连续 30 秒「完全无字节流动」
+  // 才判失败（缓冲中只显示「缓冲中 xx%」），随后播放器静默跑
+  // ①refreshPlay 换地址 ②同地址重开并 seek 回原进度 ③换下一条线路，
+  // 每步结果写进 proxy.log；三步都失败后播放器带 hasError，页面这里
+  // 只通过 _onPlaybackFailure 弹一次错误层。
+
+  /// 无感救援链第③步：本线路 ①②自救都失败后，播放器静默回调这里取
+  /// 下一条线路的地址（换完它自己 seek 回原进度）。
+  Future<FxLineSource?> _rescueLineSource() async {
+    if (!mounted || _exiting) return null;
+    if (_lines.length < 2 || widget.videoId.isEmpty) return null;
+    final index = _lines.indexWhere((l) => l.id == _line);
+    for (var k = 1; k <= _lines.length; k++) {
+      final next = _lines[(index + k) % _lines.length];
+      if (next.id == _line || next.id.trim().isEmpty) continue;
+      try {
+        final fresh = await Api.play(widget.videoId, _ep, next.id);
+        final freshUrl = fresh.url.trim();
+        if (freshUrl.isEmpty) continue;
+        FxPlayCache.invalidate(widget.videoId, _ep, _line);
+        if (mounted) setState(() => _line = next.id);
+        return FxLineSource(
+          url: freshUrl,
+          headers: fresh.headers,
+          direct: fresh.direct && fresh.isHls,
+        );
+      } catch (_) {
+        // 这条取不到地址就继续试下一条线路。
       }
-      return;
     }
-    _watchdogLastPosition = v.position;
-    if (DateTime.now().difference(_watchdogLastAdvance) < _watchdogStall) {
-      return;
-    }
-    unawaited(_recoverFromWatchdog());
-  }
-
-  void _resetWatchdogClock() {
-    _watchdogLastPosition = _controller?.value.position ?? Duration.zero;
-    _watchdogLastAdvance = DateTime.now();
+    return null;
   }
 
   String? _watchdogUrl() {
@@ -1148,79 +1107,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (q.url.trim() == url && q.headers.isNotEmpty) return q.headers;
     }
     return _info?.headers ?? const <String, String>{};
-  }
-
-  Future<void> _recoverFromWatchdog() async {
-    if (!mounted || _watchdogBusy || _switching || _loading) return;
-    if (_watchdogRetried) {
-      await _watchdogGiveUp();
-      return;
-    }
-    final c = _controller;
-    final url = _watchdogUrl();
-    if (c == null || !c.value.isInitialized || url == null) {
-      await _watchdogGiveUp();
-      return;
-    }
-    final resume = c.value.position;
-    _watchdogRetried = true;
-    _watchdogBusy = true;
-    _hideTimer?.cancel();
-    setState(() {
-      _loading = true;
-      _loadingHint = '正在自动恢复播放';
-      _error = false;
-      _errorText = '';
-      _controls = true;
-      _uiPosition = resume;
-      _uiDuration = c.value.duration > Duration.zero ? c.value.duration : null;
-      _firstFrame = false;
-    });
-    final ok = await _openSource(
-      url,
-      headers: _watchdogHeaders(url),
-      resume: resume,
-      wasPlaying: true,
-      direct: (_info?.direct ?? false) && (_info?.isHls ?? false),
-    );
-    _watchdogBusy = false;
-    if (!mounted) return;
-    if (ok) {
-      _watchdogRecoverPending = true;
-      _loadedEp = _ep;
-      _resetWatchdogClock();
-      setState(() {
-        _loading = false;
-        _loadingHint = null;
-        _uiPosition = null;
-        _uiDuration = null;
-      });
-      _wake();
-    } else {
-      await _watchdogGiveUp();
-    }
-  }
-
-  Future<void> _watchdogGiveUp() async {
-    if (!mounted) return;
-    // 看门狗放弃时也要复位长按倍速：接下来要么退出全屏，要么手势层
-    // 随 _error 变为 disabled，onLongPressEnd 不会再来。
-    _resetHold2x();
-    if (widget.canChangeLine && !_exiting) {
-      // 全屏没有线路列表：退给竖屏自动切下一条，比停在全屏黑屏更好。
-      await _exit(requestLineChange: true);
-      return;
-    }
-    setState(() {
-      _loading = false;
-      _loadingHint = null;
-      _loadedEp = null;
-      _error = true;
-      _errorText = '加载失败，重试';
-      _uiPosition = null;
-      _uiDuration = null;
-    });
-    _wake();
   }
 
   /* ------------------------------------------------------ 首帧 / 错误检测 */
@@ -1424,8 +1310,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     _loadedEp = _ep;
     _sourceFailNotified = false;
-    _watchdogRetried = false;
-    _resetWatchdogClock();
     if (!_firstFrame) _armFirstFrameTimer();
     setState(() {
       _loading = false;
