@@ -107,19 +107,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Future<void> _pickQuality() async {
-    final selected = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => _QualitySheet(current: _settings.defaultQuality),
-    );
-    if (selected == null || !mounted) return;
-    await _settings.setDefaultQuality(selected);
-    if (!mounted) return;
-    _toast('默认清晰度已设为「${_settings.defaultQualityLabel}」');
-  }
-
   Future<void> _checkUpdate() async {
     if (_checking) return;
     setState(() => _checking = true);
@@ -325,41 +312,6 @@ class _SettingsPageState extends State<SettingsPage> {
               onTap: _openChangePassword,
             ),
           ),
-          const _SectionTitle('播放设置'),
-          GlassCard(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-            radius: 20,
-            child: Column(
-              children: [
-                _row(
-                  icon: Icons.high_quality_rounded,
-                  color: Fx.accent,
-                  title: '默认清晰度',
-                  subtitle: _qualityHint(_settings.defaultQuality),
-                  trailing: Text(
-                    _settings.defaultQualityLabel,
-                    style: const TextStyle(fontSize: 11, color: Fx.sub),
-                  ),
-                  onTap: _pickQuality,
-                ),
-                _divider(),
-                _switchRow(
-                  icon: Icons.skip_next_rounded,
-                  color: const Color(0xFF8E6BFF),
-                  title: '自动下一集',
-                  subtitle: '当前集播完后自动播放下一集',
-                  value: _settings.autoNext,
-                  onChanged: (value) async {
-                    await _settings.setAutoNext(value);
-                    if (!mounted) return;
-                    _toast(value ? '已开启自动下一集' : '已关闭自动下一集');
-                  },
-                ),
-                // 跳过片头片尾已改为「按本剧标记」：入口在播放页底部
-                // 「片头/尾」按钮（按 videoId 存），这里不再放全局秒数开关。
-              ],
-            ),
-          ),
           const _SectionTitle('下载与缓存'),
           GlassCard(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
@@ -458,13 +410,6 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
-  }
-
-  String _qualityHint(String key) {
-    for (final option in AppSettings.qualityOptions) {
-      if (option.key == key) return option.hint;
-    }
-    return AppSettings.qualityOptions.first.hint;
   }
 
   String _downloadHint() {
@@ -580,59 +525,6 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _switchRow({
-    required IconData icon,
-    required Color color,
-    required String title,
-    required String subtitle,
-    required bool value,
-    required ValueChanged<bool> onChanged,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: .11),
-              borderRadius: BorderRadius.circular(11),
-            ),
-            child: Icon(icon, size: 18, color: color),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Fx.ink,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-                ),
-              ],
-            ),
-          ),
-          Switch.adaptive(
-            value: value,
-            activeColor: Fx.accent,
-            onChanged: onChanged,
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _SectionTitle extends StatelessWidget {
@@ -649,113 +541,6 @@ class _SectionTitle extends StatelessWidget {
           fontSize: 12,
           fontWeight: FontWeight.w600,
           color: Fx.sub,
-        ),
-      ),
-    );
-  }
-}
-
-class _QualitySheet extends StatelessWidget {
-  const _QualitySheet({required this.current});
-
-  final String current;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(18, 10, 18, 22),
-      decoration: const BoxDecoration(
-        color: Color(0xFFFBFDFF),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
-      ),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 38,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 18),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFDCE4F0),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const Text(
-              '默认清晰度',
-              style: TextStyle(
-                fontSize: 16.5,
-                fontWeight: FontWeight.w700,
-                color: Fx.ink,
-              ),
-            ),
-            const SizedBox(height: 12),
-            for (final option in AppSettings.qualityOptions) ...[
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.pop(context, option.key),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 12,
-                  ),
-                  decoration: BoxDecoration(
-                    color: current == option.key
-                        ? Fx.accent.withValues(alpha: .07)
-                        : Colors.white.withValues(alpha: .72),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: current == option.key
-                          ? Fx.accent.withValues(alpha: .45)
-                          : Colors.white,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              option.label,
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color:
-                                    current == option.key ? Fx.accent : Fx.ink,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              option.hint,
-                              style: const TextStyle(
-                                fontSize: 10.5,
-                                color: Fx.sub,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Icon(
-                        current == option.key
-                            ? Icons.check_circle_rounded
-                            : Icons.radio_button_unchecked_rounded,
-                        size: 19,
-                        color: current == option.key
-                            ? Fx.accent
-                            : const Color(0xFFC3CDDA),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-          ],
         ),
       ),
     );

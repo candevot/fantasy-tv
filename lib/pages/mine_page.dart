@@ -8,7 +8,6 @@ import '../api.dart';
 import '../auth.dart';
 import '../models.dart';
 import '../theme.dart';
-import 'change_password_page.dart';
 import 'downloads_page.dart';
 import 'favorite_page.dart';
 import 'history_page.dart';
@@ -133,15 +132,6 @@ class _MinePageState extends State<MinePage> {
     }
   }
 
-  Future<void> _openChangePassword() async {
-    if (Auth.instance.user == null) {
-      await _openLogin();
-      if (Auth.instance.user == null) return;
-    }
-    if (!mounted) return;
-    await _open(const ChangePasswordPage());
-  }
-
   Future<void> _editNickname() async {
     final user = Auth.instance.user;
     if (user == null) return;
@@ -259,8 +249,6 @@ class _MinePageState extends State<MinePage> {
             _sectionHeader('我的功能'),
             const SizedBox(height: 10),
             _entryGrid(),
-            const SizedBox(height: 12),
-            _accountEntry(),
             const SizedBox(height: 28),
             const Center(
               child: Text(
@@ -651,60 +639,6 @@ class _MinePageState extends State<MinePage> {
                   height: 1.2,
                   fontWeight: FontWeight.w400,
                   color: Fx.sub)),
-        ],
-      ),
-    );
-  }
-
-  Widget _accountEntry() {
-    final logged = Auth.instance.user != null;
-    return GlassCard(
-      padding: const EdgeInsets.all(14),
-      radius: 18,
-      opacity: .62,
-      onTap: _openChangePassword,
-      child: Row(
-        children: [
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: Fx.accent2.withValues(alpha: .11),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Icon(Icons.lock_reset_rounded,
-                size: 19, color: Fx.accent2),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('修改密码',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                        fontSize: 14,
-                        height: 1.2,
-                        fontWeight: FontWeight.w500,
-                        color: Fx.ink)),
-                const SizedBox(height: 4),
-                Text(
-                  logged ? '验证原密码后更换登录密码' : '登录后可修改登录密码',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 11.5,
-                      height: 1.2,
-                      fontWeight: FontWeight.w400,
-                      color: Fx.sub),
-                ),
-              ],
-            ),
-          ),
-          const Icon(Icons.chevron_right_rounded,
-              size: 18, color: Color(0xFFB3BECD)),
         ],
       ),
     );
