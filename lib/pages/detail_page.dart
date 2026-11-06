@@ -77,10 +77,19 @@ class _DetailPageState extends State<DetailPage>
   /// 稳定播放 3 秒后才清零重试预算与失败集合。
   Timer? _stableTimer;
 
-  /// 服务端平台线路是异步补的：首屏没腾讯线时，页面加载 1.5 秒后再拉一次
-  /// /api/detail，只合并 lines，不重载页面、不重建播放器。
+  /// 服务端平台线路是异步计算的：首屏没有平台线时，2.5 秒后再拉一次
+  /// /api/detail 把平台线补上，最多补 2 次；只合并 lines，不重载页面、
+  /// 不重建播放器。补线期间线路区一直占着固定高度，布局不跳动。
   Timer? _lineRefreshTimer;
-  bool _lineRefreshScheduled = false;
+  int _lineRefreshTries = 0;
+
+  /// 平台线补线的节奏：服务端匹配窗口 2.5 秒，两次重试足够等到结果。
+  static const int _lineRefreshMax = 2;
+  static const Duration _lineRefreshDelay = Duration(milliseconds: 2500);
+
+  /// 作品已被服务端删除 / 下架：首屏拿到 404「作品不存在」时，
+  /// 给友好提示 + 删除这条历史记录的入口，不再走通用错误页的重试。
+  bool _invalid = false;
 
   List<CommentItem> _comments = const <CommentItem>[];
   final Set<String> _liked = <String>{};
@@ -181,6 +190,9 @@ class _DetailPageState extends State<DetailPage>
         _lineId = lineId;
         _ep = ep;
         _error = null;
+        // 从历史 / 播放器带集数进来时，选集条要切到能看见这一集的分组，
+        // 才能高亮并滚动到对应集数。
+        _groupIndex = _groupIndexOf(_episodeGroups, ep);
       });
       _scheduleLineRefresh();
       // 详情页一打开就后台预热当前线路 / 集（上次看的集优先）：
@@ -202,21 +214,55 @@ class _DetailPageState extends State<DetailPage>
       }
     } catch (e) {
       if (!mounted) return;
+      if (_isGoneError(e)) {
+        // 作品已从服务端删除：只提示一次，并给出删除这条记录的入口。
+        // 不走「重试」错误页（重试必然再失败），播放器也没机会再报一次，
+        // 避免用户看到两层错误弹窗。
+        fxToast(context, '该视频已失效');
+        if (_detail == null) {
+          setState(() {
+            _invalid = true;
+            _error = '该视频已失效';
+          });
+        }
+        return;
+      }
       final msg = fxErrorText(e);
       setState(() => _error = msg);
       if (_detail != null) fxToast(context, msg);
     }
   }
 
-  /// 首屏线路里没有腾讯线时，1.5 秒后再取一次详情，把服务端异步补上的
-  /// 平台线路显示出来。只执行一次；确实超时就等下次进入详情页。
+  /// 服务端已删掉这个作品：/api/detail 以 404「作品不存在」返回。
+  bool _isGoneError(Object e) {
+    if (e is! ApiException) return false;
+    return e.code == 404 || e.message.contains('作品不存在');
+  }
+
+  /// 失效作品：删掉本地这条观看记录后返回上一页；历史页回来会重新加载。
+  Future<void> _deleteGoneRecord() async {
+    try {
+      final list = await FxStore.read(FxStore.historyKey);
+      list.removeWhere((e) => '${e['id']}' == widget.id);
+      await FxStore.write(FxStore.historyKey, list);
+    } catch (_) {}
+    if (!mounted) return;
+    fxToast(context, '已删除这条记录');
+    await Navigator.of(context).maybePop();
+  }
+
+  /// 首屏线路里没有平台线（腾讯 / 芒果 / B 站…）时，2.5 秒后再取一次详情，
+  /// 把服务端异步补上的平台线路显示出来；最多补 2 次。服务端确实还没算完
+  /// 也会把结果写进缓存，下次进入详情页就能直接带上。
   void _scheduleLineRefresh() {
-    if (_lineRefreshScheduled) return;
+    if (_lineRefreshTimer != null || _lineRefreshTries >= _lineRefreshMax) {
+      return;
+    }
     final d = _detail;
-    if (d == null || d.lines.any(fxIsTencentLine)) return;
-    _lineRefreshScheduled = true;
+    if (d == null || d.lines.any(fxIsPlatformLine)) return;
+    _lineRefreshTries++;
     _lineRefreshTimer?.cancel();
-    _lineRefreshTimer = Timer(const Duration(milliseconds: 1500), () {
+    _lineRefreshTimer = Timer(_lineRefreshDelay, () {
       _lineRefreshTimer = null;
       unawaited(_refreshLines());
     });
@@ -227,39 +273,42 @@ class _DetailPageState extends State<DetailPage>
     if (!mounted) return;
     final current = _detail;
     if (current == null) return;
-    if (current.lines.any(fxIsTencentLine)) return;
+    if (current.lines.any(fxIsPlatformLine)) return;
     VideoDetail fresh;
     try {
       fresh = await Api.detail(widget.id);
     } catch (_) {
-      // 服务端平台匹配确实超时：本次不显示，下次进入详情页再取。
+      // 这次没取到（服务端还在算 / 网络抖动）：还有重试额度就继续排。
+      if (mounted) _scheduleLineRefresh();
       return;
     }
     if (!mounted) return;
     final latest = _detail;
     if (latest == null) return;
-    if (latest.lines.any(fxIsTencentLine)) return;
+    if (latest.lines.any(fxIsPlatformLine)) return;
 
     final merged = fxMergeLines(latest.lines, fresh.lines);
-    if (merged.length == latest.lines.length &&
-        !merged.asMap().entries.any(
+    final changed = merged.length != latest.lines.length ||
+        merged.asMap().entries.any(
               (entry) => entry.value.id != latest.lines[entry.key].id,
-            )) {
-      return;
-    }
-    var lineId = _lineId;
-    if (lineId.isEmpty || !merged.any((line) => line.id == lineId)) {
-      if (merged.any((line) => line.id == widget.line)) {
-        lineId = widget.line;
-      } else {
-        lineId = merged.isEmpty ? '' : merged.first.id;
+            );
+    if (changed) {
+      var lineId = _lineId;
+      if (lineId.isEmpty || !merged.any((line) => line.id == lineId)) {
+        if (merged.any((line) => line.id == widget.line)) {
+          lineId = widget.line;
+        } else {
+          lineId = merged.isEmpty ? '' : merged.first.id;
+        }
       }
+      setState(() {
+        _detail = latest.copyWith(lines: merged);
+        _lineId = lineId;
+      });
+      if (lineId.isNotEmpty) FxPlayCache.warm(widget.id, _ep, lineId);
     }
-    setState(() {
-      _detail = latest.copyWith(lines: merged);
-      _lineId = lineId;
-    });
-    if (lineId.isNotEmpty) FxPlayCache.warm(widget.id, _ep, lineId);
+    // 还是没有平台线：排下一轮重试（最多 2 次）。
+    _scheduleLineRefresh();
   }
 
   /// `related` 只是 id 数组：按 id 补卡片，最多补 8 个。
@@ -632,9 +681,20 @@ class _DetailPageState extends State<DetailPage>
       _scrollToPlayer();
       return;
     }
-    setState(() => _ep = n);
+    setState(() {
+      _ep = n;
+      _groupIndex = _groupIndexOf(_episodeGroups, n);
+    });
     _saveHistory();
     _scrollToPlayer();
+  }
+
+  /// [ep] 所在分组下标：让选集条停在能看到这一集的分组（默认正片组）。
+  int _groupIndexOf(List<EpisodeGroup> groups, int ep) {
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i].episodes.any((e) => e.n == ep)) return i;
+    }
+    return 0;
   }
 
   /// 播本地缓存：先暂停内嵌播放器，退出离线页后按原状态恢复。
@@ -727,6 +787,10 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Future<void> _refresh() async {
+    // 下拉刷新算一次新的补线预算：取消挂起的重试，重新数 2 次。
+    _lineRefreshTimer?.cancel();
+    _lineRefreshTimer = null;
+    _lineRefreshTries = 0;
     await _loadDetail(silent: true);
     if (!mounted) return;
     await _loadComments(reset: true, silent: true);
@@ -854,6 +918,24 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Widget _buildEntryState() {
+    if (_invalid) {
+      // 已失效的作品：一个提示 + 一个删除按钮，不给「重试」（必然失败），
+      // 也不弹第二个错误对话框。
+      return Column(
+        children: [
+          _backBar('详情'),
+          Expanded(
+            child: FxEmptyView(
+              icon: Icons.link_off_rounded,
+              title: '该视频已失效',
+              subtitle: '该视频可能已被下架或删除，暂时无法播放。\n可以把这条观看记录删掉。',
+              actionText: '删除这条记录',
+              onAction: () => unawaited(_deleteGoneRecord()),
+            ),
+          ),
+        ],
+      );
+    }
     if (_error != null) {
       return Column(
         children: [
@@ -1051,40 +1133,42 @@ class _DetailPageState extends State<DetailPage>
         _titleBlock(d),
         _actionRow(),
         _sourceHint(),
-        if (d.lines.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          SizedBox(
-            height: 60,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              itemCount: d.lines.length,
-              separatorBuilder: (context, i) => const SizedBox(width: 8),
-              itemBuilder: (context, i) {
-                final line = d.lines[i];
-                // 所有线路统一展示，不显示额外角标。
-                return SizedBox(
-                  width: 102,
-                  height: 60,
-                  child: DetailLineCard(
-                    name: line.displayName.isEmpty
-                        ? '线路${i + 1}'
-                        : line.displayName,
-                    count: total,
-                    active: line.id == _lineId,
-                    // degraded 线路照常展示并可点，只在卡片名后补灰色小字。
-                    unstable: line.degraded,
-                    onTap:
-                        _playerSwitchingLine ? null : () => _selectLine(line),
-                  ),
-                );
-              },
-            ),
-          ),
-        ] else ...[
-          const SizedBox(height: 16),
-          _noLinesHint(),
-        ],
+        const SizedBox(height: 16),
+        // 线路区固定 60px：平台线后到时原地填充，标题 / 选集不整体下移。
+        SizedBox(
+          height: 60,
+          child: d.lines.isNotEmpty
+              ? ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  itemCount: d.lines.length,
+                  separatorBuilder: (context, i) => const SizedBox(width: 8),
+                  itemBuilder: (context, i) {
+                    final line = d.lines[i];
+                    // 所有线路统一展示，不显示额外角标。
+                    return SizedBox(
+                      key: ValueKey<String>(line.id),
+                      width: 102,
+                      height: 60,
+                      child: DetailLineCard(
+                        name: line.displayName.isEmpty
+                            ? '线路${i + 1}'
+                            : line.displayName,
+                        count: total,
+                        active: line.id == _lineId,
+                        // degraded 线路照常展示并可点，只在卡片名后补灰色小字。
+                        unstable: line.degraded,
+                        onTap:
+                            _playerSwitchingLine ? null : () => _selectLine(line),
+                      ),
+                    );
+                  },
+                )
+              : (_lineRefreshTimer != null
+                  // 补线进行中：同尺寸骨架占位，线路到了直接替换，不跳版。
+                  ? _linePlaceholder()
+                  : Center(child: _noLinesHint())),
+        ),
         if (visibleEpisodes.isNotEmpty) ...[
           const SizedBox(height: 22),
           _episodeHeader(totalAll, available: visibleEpisodes.length),
@@ -1352,6 +1436,26 @@ class _DetailPageState extends State<DetailPage>
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 补线中的占位骨架：与线路卡片同尺寸、同起点，平台线补到时直接原地
+  /// 替换成真实卡片，页面不会先空一块再撑开。
+  Widget _linePlaceholder() {
+    return ListView.separated(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      itemCount: 3,
+      separatorBuilder: (_, __) => const SizedBox(width: 8),
+      itemBuilder: (_, __) => Container(
+        width: 102,
+        height: 60,
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: .72),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white),
         ),
       ),
     );

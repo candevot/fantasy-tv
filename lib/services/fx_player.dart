@@ -128,18 +128,14 @@ class FxPlayerValue {
     return '${w}x$h';
   }
 
-  /// 真实缓冲进度（0–99）；拿不到可靠数据时返回 null。
+  /// 真实缓冲进度（0–99）；拿不到时返回 null，UI 显示不带数字的转圈。
   ///
-  /// 优先「已缓存时长 / 总时长」；直播 / 时长未知的 HLS 退回 libmpv 的
-  /// cache-buffering-state，UI 不会为了凑进度显示假的 100%。
+  /// 只用 libmpv 的 `cache-buffering-state`：本次缓冲需要把缓存填到的
+  /// 百分比，0→100 填满即恢复播放，是唯一随缓冲真实推进的进度。
+  /// 「已缓存时长 ÷ 总时长」只是全片下载比例——停在百分之十几、缓存够了
+  /// 又瞬间跳满，看起来像假进度，不再拿来显示数字。
   double? get bufferingPercent {
-    if (duration > Duration.zero && buffered > Duration.zero) {
-      final ratio = buffered.inMilliseconds / duration.inMilliseconds;
-      if (ratio.isFinite) return (ratio * 100).clamp(0.0, 99.0);
-    }
-    if (bufferingPercentage > 0) {
-      return bufferingPercentage.clamp(0.0, 99.0);
-    }
+    if (bufferingPercentage > 0) return bufferingPercentage.clamp(0.0, 99.0);
     return null;
   }
 

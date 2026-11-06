@@ -586,18 +586,25 @@ List<LineInfo> mergeLines(List<LineInfo> lines) {
   return <LineInfo>[for (final group in groups) pick(group)];
 }
 
-/// 是否为「幻想腾讯4K」平台线路。
+/// 是否为服务端异步补算的平台线路（腾讯 / 芒果 / B 站 …）。
 ///
 /// 服务端平台匹配改成异步后，首屏 /api/detail 可能暂时只返回采集线路，
-/// 客户端据此决定要不要在 1.5 秒后再拉一次 lines。
-bool fxIsTencentLine(LineInfo line) {
-  final raw = '${line.id} ${line.name} ${line.source ?? ''} ${line.from ?? ''}';
+/// 客户端据此决定要不要再拉几次 detail 把平台线补齐。
+bool fxIsPlatformLine(LineInfo line) {
+  final raw = '${line.id} ${line.name} ${line.source ?? ''} ${line.from ?? ''} ${line.type}';
   final lower = raw.toLowerCase();
-  return lower.contains('tencent') || raw.contains('腾讯');
+  return line.type.trim().toLowerCase() == 'platform' ||
+      lower.contains('tencent') ||
+      lower.contains('mgtv') ||
+      lower.contains('bilibili') ||
+      raw.contains('腾讯') ||
+      raw.contains('芒果');
 }
 
 /// 合并两次 /api/detail 的线路表：以新返回的顺序为准（平台线路在服务端
-/// 已置顶），旧表里新返回没带的线路追加在后面，避免刷新反而少线路。
+/// 已置顶），旧表里新返回没带的线路追加在后面，避免刷新反而少线路；
+/// 最后按 priority 稳定排序 + degraded 压底，后补的平台线只在自己该在的
+/// 位置出现，不整列表闪动。
 List<LineInfo> fxMergeLines(List<LineInfo> oldLines, List<LineInfo> fresh) {
   final seen = <String>{};
   final merged = <LineInfo>[];
@@ -613,7 +620,13 @@ List<LineInfo> fxMergeLines(List<LineInfo> oldLines, List<LineInfo> fresh) {
   for (final line in oldLines) {
     add(line);
   }
-  return sortDegradedLast(merged);
+  // Dart 的 sort 不稳定：带上原始下标做 tie-break，同 priority 保持接口顺序。
+  final indexed = merged.asMap().entries.toList()
+    ..sort((a, b) {
+      final byPriority = a.value.priority.compareTo(b.value.priority);
+      return byPriority != 0 ? byPriority : a.key.compareTo(b.key);
+    });
+  return sortDegradedLast([for (final e in indexed) e.value]);
 }
 
 /// degraded 线路仍然展示，但统一排到最后（稳定排序，其余线路保持接口顺序）。

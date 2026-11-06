@@ -89,21 +89,6 @@ String fxPlayerQuality(FxPlayer? player) {
   return fxResolutionLabel(width);
 }
 
-/// 真实缓冲进度：`player.stream.buffer`（libmpv demuxer-cache-time，
-/// 已缓冲位置）÷ 总时长。
-///
-/// - 时长未知时返回 null：调用方用不确定转圈 +「缓冲中…」，不猜进度；
-/// - 百分比向下取整并锁在 99% 以内，绝不显示假的 100%。
-double? fxBufferedPercent(Duration buffered, Duration duration) {
-  if (duration <= Duration.zero) return null;
-  if (buffered <= Duration.zero) return 0;
-  final ratio = buffered.inMilliseconds / duration.inMilliseconds;
-  if (!ratio.isFinite) return null;
-  final percent = (ratio * 100).floorToDouble();
-  if (percent <= 0) return 0;
-  return percent > 99 ? 99 : percent;
-}
-
 /// 字幕距播放器底部的安全距离：至少 96dp，始终高过底部控件区。
 const double fxSubtitleMinBottom = 96;
 
@@ -848,7 +833,8 @@ class _FxSeekRowState extends State<FxSeekRow> {
 /// 播放器加载 / 缓冲浮层。
 ///
 /// - 切集、切线路、首帧未出：圆环 + 单行「正在加载 线路名 · 第01集」；
-/// - 播放中缓冲：圆环 +「缓冲中 42%」（[fxBufferedPercent] 的真实进度）；
+/// - 播放中缓冲：圆环 +「缓冲中 42%」（libmpv cache-buffering-state 的真实
+///   填充进度）；拿不到进度时不确定圆环 +「缓冲中…」，绝不编数字；
 /// - 时长未知：不确定圆环 +「缓冲中…」。
 ///
 /// 只有一行文案：线路名已经拼在 [title] 里，不再单独叠副文案。

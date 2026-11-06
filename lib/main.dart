@@ -576,8 +576,10 @@ class _BootRetryBannerState extends State<_BootRetryBanner> {
 
 /// 统一导航
 class Nav {
-  static Future<void> detail(BuildContext c, String id) => Navigator.of(c)
-      .push(MaterialPageRoute(builder: (_) => DetailPage(id: id)));
+  static Future<void> detail(BuildContext c, String id,
+          {int ep = 1, String line = ''}) =>
+      Navigator.of(c).push(MaterialPageRoute(
+          builder: (_) => DetailPage(id: id, ep: ep, line: line)));
 
   static Future<void> search(BuildContext c) => Navigator.of(c)
       .push(MaterialPageRoute(builder: (_) => const SearchPage()));

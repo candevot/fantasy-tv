@@ -3,9 +3,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../main.dart' show Nav;
 import '../theme.dart';
 import 'category_page.dart';
-import 'player_page.dart';
 import 'search_page.dart';
 
 /* ========================================================================== */
@@ -345,11 +345,9 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   Future<void> _continue(WatchRecord r) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => PlayerPage(videoId: r.id, ep: r.ep, line: r.lineId),
-      ),
-    );
+    // 与首页点卡片保持一致：先进详情页，由详情页定位集数并负责起播。
+    // 作品已被服务端删除时，详情页会提示「该视频已失效」并提供删除入口。
+    await Nav.detail(context, r.id, ep: r.ep, line: r.lineId);
     // 播放器会在播放中回写进度，返回时重新读一次让进度条保持最新。
     if (mounted) await _load();
   }
