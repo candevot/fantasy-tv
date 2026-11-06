@@ -1,11 +1,7 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 
 import '../api.dart';
 import '../models.dart';
@@ -69,8 +65,9 @@ class FullPlayerResult {
 ///
 /// 直接复用竖屏传入的 [FxPlayer]（同一个 Player / VideoController）：
 /// 进入和退出全屏都不重新创建、不重新 open，进度与暂停状态自然保持。
-/// 进入即横屏 + 沉浸式，退出恢复竖屏；控件 3 秒自动隐藏，点击画面切换显隐；
-/// 锁屏后只剩解锁按钮，其它手势全部失效。
+/// 进入即横屏 + 沉浸式，退出恢复竖屏；控件 5 秒自动隐藏，点击画面切换显隐；
+/// 锁屏后只剩解锁按钮（锁定瞬间亮 3 秒自动淡出，点屏幕切换显隐），
+/// 其它手势全部失效。
 class FullPlayerPage extends StatefulWidget {
   const FullPlayerPage({
     super.key,
@@ -251,7 +248,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   int _videoEpoch = 0;
   bool _locked = false;
 
-  /// 锁屏后解锁钮是否可见：出现 3 秒后自动隐藏，点屏幕再出现。
+  /// 锁屏后解锁钮是否可见：锁定瞬间亮 3 秒后自动隐藏（[_startUnlockTimer]），
+  /// 之后由点屏幕即时切换显隐（隐藏 0 延迟），不会常驻。
   bool _unlockVisible = false;
   Timer? _unlockTimer;
 
@@ -269,9 +267,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _fillScreen = false;
 
   Timer? _sleepTimer;
-
-  /// 全屏截图：截取整个播放器层（含控制条）。
-  final GlobalKey _captureKey = GlobalKey();
 
   /// 切清晰度期间：禁止重复点击，避免并发 open。
   bool _switching = false;
@@ -1722,11 +1717,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showQuality = false;
     });
     _hideTimer?.cancel();
-    // 锁按钮只亮 3 秒，之后完全隐藏；不弹 toast 打扰观看。
+    // 自动淡出只在刚锁定这一次：3 秒后锁按钮 opacity=0 且不再可点。
     _startUnlockTimer();
   }
 
-  /// 锁定后解锁钮只亮 3 秒；点屏幕可重新唤出（同样 3 秒后隐藏）。
+  /// 刚锁定时的唯一自动淡出计时器：3 秒后隐藏解锁钮。
+  /// 之后点屏幕是即时切换显隐，不再有「点一下亮 3 秒」。
   void _startUnlockTimer() {
     _unlockTimer?.cancel();
     _unlockTimer = Timer(kPlayerUnlockAutoHide, () {
@@ -1735,10 +1731,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     });
   }
 
+  /// 锁定状态点屏幕 = 解锁钮显隐切换（toggle），隐藏 0 延迟立即执行；
+  /// 可见时点一下马上消失，再点一下重新唤出，点锁钮本身则是解锁。
+  ///
+  /// 根因：旧实现每次点屏都置 visible=true 并重启 3 秒计时器，用户为了
+  /// 让它消失而点屏反而不断续命，看起来就是「锁按钮永不消失」。
   void _onLockedTap() {
     if (!mounted) return;
-    if (!_unlockVisible) setState(() => _unlockVisible = true);
-    _startUnlockTimer();
+    if (_unlockVisible) {
+      _unlockTimer?.cancel();
+      setState(() => _unlockVisible = false);
+    } else {
+      setState(() => _unlockVisible = true);
+    }
   }
 
   void _unlock() {
@@ -1991,30 +1996,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     fxToast(context, '将在 $minutes 分钟后暂停播放');
   }
 
-  Future<void> _screenshot() async {
-    final boundary = _captureKey.currentContext?.findRenderObject();
-    if (boundary is! RenderRepaintBoundary) {
-      fxToast(context, '截图失败，请稍后重试');
-      return;
-    }
-    try {
-      final image = await boundary.toImage(pixelRatio: 2);
-      final data = await image.toByteData(format: ui.ImageByteFormat.png);
-      image.dispose();
-      if (data == null) throw StateError('empty image');
-      final dir = await getTemporaryDirectory();
-      final file = File(
-        '${dir.path}/fx_shot_${DateTime.now().millisecondsSinceEpoch}.png',
-      );
-      await file.writeAsBytes(data.buffer.asUint8List());
-      if (!mounted) return;
-      fxToast(context, '截图已保存');
-    } catch (_) {
-      if (!mounted) return;
-      fxToast(context, '截图失败，请稍后重试');
-    }
-  }
-
   Future<void> _exit({bool requestLineChange = false}) async {
     if (_exiting) return;
     _exiting = true;
@@ -2066,7 +2047,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         backgroundColor: Colors.black,
         resizeToAvoidBottomInset: false,
         body: RepaintBoundary(
-          key: _captureKey,
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -2120,8 +2100,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                   ),
                 ),
               if (_error) _buildError(),
-              // 锁屏：所有控件隐藏；解锁钮只亮 3 秒（点屏幕再亮 3 秒），
-              // 不常驻，也不再弹锁定 toast。
+              // 锁屏：所有控件隐藏；锁按钮锁定瞬间亮 3 秒自动淡出，
+              // 之后点屏幕即时切换显隐，点锁钮解锁，不常驻。
               if (_locked)
                 Positioned.fill(
                   child: SafeArea(
@@ -2330,7 +2310,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             compact: compact,
             onBack: () => unawaited(_exit()),
             onCast: () => unawaited(_openCastSheet()),
-            onScreenshot: () => unawaited(_screenshot()),
             onMore: () => unawaited(_openMorePanel()),
           ),
         ),

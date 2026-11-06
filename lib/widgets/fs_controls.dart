@@ -157,9 +157,10 @@ class _FsClockPillState extends State<FsClockPill> {
   }
 }
 
-/// 顶部控制条（对齐腾讯）：返回 · 片名/第xx集 · 画质 · 投屏 · 截图 · 更多。
+/// 顶部控制条（对齐腾讯）：返回 · 片名/第xx集 · 画质 · 投屏 · 更多。
 ///
 /// 画质只保留一个胶囊，内容限定为 4K / 1080P / 720P / 标清。
+/// 已按产品要求移除截图按钮：顶栏只剩返回/剧名、投屏、更多。
 class FsTopBar extends StatelessWidget {
   const FsTopBar({
     super.key,
@@ -167,7 +168,6 @@ class FsTopBar extends StatelessWidget {
     required this.epLabel,
     required this.onBack,
     required this.onCast,
-    required this.onScreenshot,
     required this.onMore,
     this.quality = '',
     this.compact = false,
@@ -180,7 +180,6 @@ class FsTopBar extends StatelessWidget {
   final String quality;
   final VoidCallback onBack;
   final VoidCallback onCast;
-  final VoidCallback onScreenshot;
   final VoidCallback onMore;
   final bool compact;
 
@@ -258,14 +257,6 @@ class FsTopBar extends StatelessWidget {
           ),
           gap,
           PGlassIcon(
-            icon: Icons.photo_camera_outlined,
-            size: 32 * s,
-            iconSize: 17 * s,
-            tooltip: '截图',
-            onTap: onScreenshot,
-          ),
-          gap,
-          PGlassIcon(
             icon: Icons.more_horiz_rounded,
             size: 32 * s,
             iconSize: 19 * s,
@@ -278,7 +269,10 @@ class FsTopBar extends StatelessWidget {
   }
 }
 
-/// 左右侧控件：左中锁屏，右中 +10s / -10s
+/// 左右侧控件：左中锁屏，右中 +10s / -10s。
+///
+/// 未锁定时锁按钮就放在左侧控件层里，随控件层的显隐一起出现 /
+/// 一起淡出（页面统一 5 秒自动隐藏），不会自己常驻。
 class FsSideControls extends StatelessWidget {
   const FsSideControls({
     super.key,
@@ -349,8 +343,9 @@ class FsSideControls extends StatelessWidget {
 
 /// 锁屏后唯一的解锁按钮：半透明小圆钮。
 ///
-/// 锁定后由页面用 3 秒计时器控制 [visible]：默认只短暂出现，点屏幕再亮 3 秒，
-/// 不会常驻在画面上。
+/// [visible] 由页面控制：刚锁定时亮 3 秒自动淡出；锁定后点屏幕是
+/// 显隐切换（隐藏立即生效）。[visible] 为 false 时 opacity=0 且
+/// [IgnorePointer] 让出触摸，绝非常驻画面上。
 class FsUnlockButton extends StatelessWidget {
   const FsUnlockButton({
     super.key,
