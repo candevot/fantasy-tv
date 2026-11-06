@@ -70,23 +70,24 @@ String fxTime(Duration d) {
 
 String fxClock(DateTime t) => '${fxPad2(t.hour)}:${fxPad2(t.minute)}';
 
-/// 分辨率通俗标签：4K / 1080P / 720P / 标清。
+/// 真实分辨率文案：`宽x高`（如 `1920x1080` / `720x480`）。
 ///
-/// 只按视频原始宽度分档，不再拼接其他后缀；未就绪时返回空串。
-String fxResolutionLabel(int? width) {
-  if (width == null || width <= 0) return '';
-  if (width >= 3800) return '4K';
-  if (width >= 1800) return '1080P';
-  if (width >= 1200) return '720P';
-  return '标清';
+/// 宽或高任一缺失、≤0 时返回空串（胶囊自动隐藏）；
+/// 不做分档，低于 1080P 的老片也照常显示。
+String fxResolutionText(int? width, int? height) {
+  final w = width ?? 0;
+  final h = height ?? 0;
+  if (w <= 0 || h <= 0) return '';
+  return '${w}x$h';
 }
 
-/// 顶栏唯一的画质胶囊文案：取播放器真实视频宽度，未就绪时为空。
+/// 顶栏唯一的画质胶囊文案：取播放器真实视频宽高拼成 `宽x高`，未就绪时为空。
 String fxPlayerQuality(FxPlayer? player) {
   final value = player?.value;
   if (value == null || !value.isInitialized) return '';
   final width = (value.videoWidth ?? 0) > 0 ? value.videoWidth : value.width;
-  return fxResolutionLabel(width);
+  final height = (value.videoHeight ?? 0) > 0 ? value.videoHeight : value.height;
+  return fxResolutionText(width, height);
 }
 
 /// 字幕距播放器底部的安全距离：至少 96dp，始终高过底部控件区。

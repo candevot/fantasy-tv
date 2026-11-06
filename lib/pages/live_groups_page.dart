@@ -162,14 +162,14 @@ bool liveChannelMatches(LiveChannel channel, String query) {
 String _normalize(String raw) =>
     raw.toLowerCase().replaceAll(RegExp(r'[\s\-_·.]+'), '');
 
-/// 当前台最高清晰度，只返回 4K / 1080P / 720P；没有高清线路时为空。
+/// 当前台最高清晰度：只在有 720P 及以上线路时显示真实分辨率（1920x1080），
+/// 没有高清线路时为空（标清线路不打标签）。
 String liveChannelQuality(LiveChannel channel) {
   var height = 0;
   for (final line in channel.lines) {
     if (line.height > height) height = line.height;
   }
-  final label = liveQualityLabel(height);
-  return label == '4K' || label == '1080P' || label == '720P' ? label : '';
+  return height >= 720 ? liveQualityLabel(height) : '';
 }
 
 /// 频道卡副标题：地方台优先展示省份，其余展示所属分组。
@@ -561,9 +561,13 @@ class _QualityTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 标签可能是新的真实分辨率 `1920x1080`，也可能退回旧的 4K / 1080P。
+    final height = int.tryParse(label.split('x').last) ?? 0;
     final color = switch (label) {
       '4K' => Fx.gold,
       '1080P' => const Color(0xFF8DB4FF),
+      _ when height >= 2160 => Fx.gold,
+      _ when height >= 1080 => const Color(0xFF8DB4FF),
       _ => const Color(0xFF7FE3D9),
     };
     return Container(

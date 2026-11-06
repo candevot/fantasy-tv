@@ -1,6 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/services.dart' show MethodChannel, MissingPluginException, PlatformException;
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 import '../api.dart';
 import 'app_info.dart';
@@ -15,6 +19,7 @@ class AppUpdateInfo {
     required this.versionCode,
     required this.downloadUrl,
     required this.notes,
+    this.hasVersionCode = false,
   });
 
   static const String fallbackDownloadUrl =
@@ -32,9 +37,15 @@ class AppUpdateInfo {
   final String downloadUrl;
   final String notes;
 
-  /// 优先比较 versionCode；后端只给版本名时退化为版本号字符串比较。
+  /// 接口 payload 里是否真的给了 versionCode（含显式 `versionCode: 0`）。
+  final bool hasVersionCode;
+
+  /// 有新版本吗。
+  ///
+  /// 给了 versionCode 就**只做数值比较**（服务端 `versionCode: 0` = 无更新，
+  /// 永远不会误报）；只有版本名时才退化为点分版本号比较。
   bool get hasUpdate {
-    if (versionCode > 0) return versionCode > AppInfo.versionCode;
+    if (hasVersionCode) return versionCode > AppInfo.versionCode;
     return compareVersion(versionName, AppInfo.versionName) > 0;
   }
 
@@ -56,7 +67,12 @@ class AppUpdateService {
 
   static const Duration _timeout = Duration(seconds: 10);
 
-  static Future<AppUpdateInfo> check() async {
+  /// 启动后自动检查用的更短超时：5 秒内没结果就当没网，静默放弃。
+  static const Duration startupTimeout = Duration(seconds: 5);
+
+  static Future<AppUpdateInfo> check({
+    Duration timeout = _timeout,
+  }) async {
     await AppInfo.load();
     final uri = Uri.parse('${Api.base}/app/version');
     http.Response response;
@@ -67,7 +83,7 @@ class AppUpdateService {
           'Accept': 'application/json',
           if (Api.token.isNotEmpty) 'Authorization': 'Bearer ${Api.token}',
         },
-      ).timeout(_timeout);
+      ).timeout(timeout);
     } catch (_) {
       throw AppUpdateException('网络连接失败，请检查网络后重试');
     }
@@ -107,11 +123,21 @@ class AppUpdateService {
       data['version'],
       data['name'],
     ]);
+    // versionCode 的候选键：只要出现过数字（含显式 0）就走数值比较。
+    const codeKeys = <String>[
+      'versionCode',
+      'buildNumber',
+      'build',
+      'version_code',
+    ];
+    final hasVersionCode = codeKeys.any((key) {
+      final value = data[key];
+      if (value is int) return true;
+      if (value is String && int.tryParse(value.trim()) != null) return true;
+      return false;
+    });
     final versionCode = _firstInt(<Object?>[
-      data['versionCode'],
-      data['buildNumber'],
-      data['build'],
-      data['version_code'],
+      for (final key in codeKeys) data[key],
     ]);
     final downloadUrl = _firstString(<Object?>[
       data['downloadUrl'],
@@ -137,7 +163,133 @@ class AppUpdateService {
       downloadUrl:
           downloadUrl.isEmpty ? AppUpdateInfo.fallbackDownloadUrl : downloadUrl,
       notes: notes,
+      hasVersionCode: hasVersionCode,
     );
+  }
+
+  /// 启动后的自动检查：5 秒超时，任何失败（网络 / 超时 / 接口异常）都返回
+  /// null，绝不打扰启动动画。只在「确实有新版本」时返回 info。
+  static Future<AppUpdateInfo?> checkQuietly() async {
+    try {
+      final info = await check(timeout: startupTimeout);
+      return info.hasUpdate ? info : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 本次进程（会话）内已经提示过的 versionCode。
+  ///
+  /// 同一 versionCode 只弹一次；服务端把 versionCode 改了才允许再弹。
+  static int? _promptedVersionCode;
+
+  /// 启动检查整个进程只跑一次（RootShell 重建也不会重复请求）。
+  static bool _startupChecked = false;
+
+  /// 领取一次启动检查机会；已领过返回 false。
+  static bool claimStartupCheck() {
+    if (_startupChecked) return false;
+    _startupChecked = true;
+    return true;
+  }
+
+  /// 这个 versionCode 还需要弹吗（本会话已弹过 → false）。
+  static bool shouldPrompt(int versionCode) =>
+      _promptedVersionCode != versionCode;
+
+  /// 记下已经弹过的 versionCode（点「暂不更新」或开始下载都算弹过）。
+  static void markPrompted(int versionCode) =>
+      _promptedVersionCode = versionCode;
+
+  /// 下载 APK 到应用缓存目录 `updates/`，返回本地文件。
+  ///
+  /// 失败抛 [AppUpdateException]；[onProgress] 收到 0–1 的进度，
+  /// 服务端没给 content-length 时回 null（进度条走不确定态）。
+  static Future<File> downloadApk(
+    String url, {
+    void Function(double? progress)? onProgress,
+  }) async {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null ||
+        !(uri.isScheme('http') || uri.isScheme('https')) ||
+        uri.host.isEmpty) {
+      throw AppUpdateException('下载链接无效，请复制链接手动下载');
+    }
+
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', uri);
+      request.headers['Accept'] = 'application/vnd.android.package-archive, */*';
+      final response =
+          await client.send(request).timeout(const Duration(seconds: 20));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw AppUpdateException('下载失败（HTTP ${response.statusCode}）');
+      }
+      // github releases 打不开时经常回一个 HTML 错误页，别当 APK 存下来。
+      final contentType = (response.headers['content-type'] ?? '').toLowerCase();
+      if (contentType.contains('text/html')) {
+        throw AppUpdateException('下载失败：服务器返回的不是安装包');
+      }
+
+      final dir = Directory(
+        '${(await getTemporaryDirectory()).path}${Platform.pathSeparator}updates',
+      );
+      await dir.create(recursive: true);
+      final file = File(
+        '${dir.path}${Platform.pathSeparator}fantasy_update.apk',
+      );
+      final sink = file.openWrite();
+      final clen = response.contentLength;
+      final total = (clen != null && clen > 0) ? clen : null;
+      var received = 0;
+      try {
+        await for (final chunk in response.stream) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (total != null) {
+            onProgress?.call((received / total).clamp(0.0, 1.0).toDouble());
+          }
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+      if (received <= 0) {
+        unawaited(file.delete().catchError((_) => file));
+        throw AppUpdateException('下载失败：安装包是空的');
+      }
+      // 拿不到总长度时也上报一次 100%，让进度条走完。
+      onProgress?.call(1.0);
+      return file;
+    } on AppUpdateException {
+      rethrow;
+    } on TimeoutException {
+      throw AppUpdateException('下载超时，请检查网络后重试');
+    } catch (e) {
+      throw AppUpdateException('下载失败，请检查网络后重试');
+    } finally {
+      client.close();
+    }
+  }
+
+  /// 调起系统安装器安装本地 APK（Android 8+ 走 FileProvider）。
+  static const MethodChannel _installChannel =
+      MethodChannel('fantasy_tv/update');
+
+  static Future<void> installApk(File file) async {
+    if (!await file.exists()) {
+      throw AppUpdateException('安装包不存在，请重新下载');
+    }
+    try {
+      await _installChannel.invokeMethod<void>(
+        'installApk',
+        <String, Object?>{'path': file.path},
+      );
+    } on MissingPluginException {
+      throw AppUpdateException('当前构建不支持应用内安装，请复制链接手动下载');
+    } on PlatformException catch (e) {
+      throw AppUpdateException(e.message ?? '调起安装失败，请手动安装');
+    }
   }
 
   static String _firstString(List<Object?> values) {

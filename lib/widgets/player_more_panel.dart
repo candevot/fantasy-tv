@@ -22,7 +22,9 @@ enum FxLoopMode {
 /// 腾讯播放设置样式的「更多」面板（竖屏与全屏共用）：
 /// 图标行（定时关闭 / 下载本集 / 倍速 / 后台播放）
 /// + 列表行（循环播放 / 跳过片头片尾 / 画面比例 / 镜像模式 / 问题反馈）。
-/// [onQuality] / [onLoopChanged] / [onJumpPanel] / [onDownload] /
+/// 旧「清晰度 · 线路」入口已删除：码率档切换面板随入口一起移除，
+/// 线路切换仍由错误页「换线路」与详情页线路卡片负责。
+/// [onLoopChanged] / [onJumpPanel] / [onDownload] /
 /// [onSpeed] 传 null 时对应入口整块不显示（直播全屏没有下一集 /
 /// 片头尾 / 下载 / 倍速）；其余行为所有播放场景共用。
 /// 画中画已移除：当前版本不支持，列表只保留可用项。
@@ -38,7 +40,6 @@ Future<void> showFxMorePanel(
   required VoidCallback onSleepTimer,
   VoidCallback? onDownload,
   VoidCallback? onSpeed,
-  VoidCallback? onQuality,
   required VoidCallback onBackground,
   required VoidCallback onFeedback,
 }) {
@@ -147,12 +148,6 @@ Future<void> showFxMorePanel(
                 ),
                 const SizedBox(height: 14),
                 const Divider(height: 1, color: Color(0xFFEFF3FA)),
-                if (onQuality != null)
-                  _MoreRow(
-                    icon: Icons.high_quality_rounded,
-                    title: '清晰度 · 线路',
-                    onTap: () => closeThen(onQuality),
-                  ),
                 if (loopChanged != null)
                   _MoreRow(
                     icon: Icons.repeat_rounded,

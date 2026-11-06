@@ -11,8 +11,10 @@ import 'package:path_provider/path_provider.dart';
 import 'api.dart';
 import 'auth.dart';
 import 'fx_globals.dart';
+import 'services/app_update_service.dart';
 import 'services/download_service.dart';
 import 'theme.dart';
+import 'widgets/update_dialog.dart';
 import 'pages/home_page.dart';
 import 'pages/category_page.dart';
 import 'pages/rank_page.dart';
@@ -434,6 +436,31 @@ class _RootShellState extends State<RootShell> {
     (icon: Icons.local_fire_department_rounded, label: '排行榜'),
     (icon: Icons.person_rounded, label: '我的'),
   ];
+
+  Timer? _updateTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    // 进主界面后延迟 ~1.7s 再查更新：避开启动动画 / 首页首屏请求。
+    // 每次冷启动只查一次；本次会话弹过（版本没变）就不再弹。
+    _updateTimer = Timer(const Duration(milliseconds: 1700), _checkUpdateOnStart);
+  }
+
+  @override
+  void dispose() {
+    _updateTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 启动自动检查更新：失败（网络 / 超时 5s）静默返回，绝不打扰启动。
+  Future<void> _checkUpdateOnStart() async {
+    if (!mounted || !AppUpdateService.claimStartupCheck()) return;
+    final info = await AppUpdateService.checkQuietly();
+    if (info == null || !mounted) return;
+    if (!AppUpdateService.shouldPrompt(info.versionCode)) return;
+    await showAppUpdateDialog(context, info);
+  }
 
   @override
   Widget build(BuildContext context) {

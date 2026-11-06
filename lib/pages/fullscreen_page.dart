@@ -151,7 +151,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 当前片源是否已经出过视频首帧；未出首帧时展示加载文案。
   bool _firstFrame = false;
 
-  /// 切集 / 切清晰度 / 重连前抓下的最后一帧：盖在黑底和新画面之间，
+  /// 切集 / 重连前抓下的最后一帧：盖在黑底和新画面之间，
   /// 等新流首帧出来再淡出，避免切换过程中闪一下黑屏。
   Uint8List? _frozenFrame;
   bool _freezeOpaque = false;
@@ -182,7 +182,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   FxPlayer? _controller;
   PlayInfo? _info;
 
-  /// 全屏内实际 open 成功的地址 / 请求头（切清晰度后投屏要跟着变）。
+  /// 全屏内实际 open 成功的地址 / 请求头（重新 open 后投屏要跟着变）。
   String? _activeCastUrl;
   Map<String, String> _activeCastHeaders = const <String, String>{};
 
@@ -237,7 +237,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   // 弹层
   bool _showSpeed = false;
-  bool _showQuality = false;
 
   /// 定时关闭右侧面板（不开启 / 看完当集 / 30·60·90 分钟 / 自定义）。
   bool _showSleep = false;
@@ -260,15 +259,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   Timer? _sleepTimer;
 
-  /// 切清晰度期间：禁止重复点击，避免并发 open。
-  bool _switching = false;
-
-  /// 切清晰度期间锁住 UI 进度，防止播放器 open 归零时进度条跳回 0。
+  /// 切线路 / 重连期间锁住 UI 进度，防止播放器 open 归零时进度条跳回 0。
   Duration? _uiPosition;
   Duration? _uiDuration;
   Timer? _uiHoldTimer;
 
-  /// loading 浮层文案（切清晰度时不同）。
+  /// loading 浮层文案（重新连接时显示「正在重新连接」）。
   String? _loadingHint;
 
   /// 已展示过的画质胶囊文案：videoParams 晚到时补一次重建。
@@ -288,8 +284,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   bool _exiting = false;
 
-  bool get _panelOpen =>
-      _showSpeed || _showQuality || _showSleep || _showJump;
+  bool get _panelOpen => _showSpeed || _showSleep || _showJump;
 
   bool get _playing => _controller?.value.isPlaying ?? false;
 
@@ -298,10 +293,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   List<QualityItem> get _qualityList => _info?.quality ?? const <QualityItem>[];
 
-  /// 只有 ≥2 个真实码率才提供清晰度入口（产品要求，单码率不显示）。
-  bool get _canChangeQuality => _qualityList.length >= 2;
-
-  /// 顶栏唯一的画质胶囊：按真实视频宽度分档，未就绪时为空。
+  /// 顶栏画质胶囊文案：真实分辨率 `宽x高`（如 1920x1080），未就绪时为空。
   String get _qualityText => fxPlayerQuality(_controller);
 
   /// 全屏顶栏「投屏」：复用竖屏解析好的当前清晰度 / 直播地址。
@@ -357,26 +349,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     );
   }
 
-  /// 底部清晰度按钮文案：单码率返回空串，直接隐藏入口。
-  String get _qualityLabel {
-    if (!_canChangeQuality) return '';
-    final key = _qualityKey;
-    if (key == null) return '默认';
-    for (final q in _qualityList) {
-      if (q.key == key) return _qualityName(q);
-    }
-    return '默认';
-  }
-
-  /// 主播放地址不在码率列表里时，用「默认」档代表它。
-  bool get _showSourceTier {
-    final info = _info;
-    if (info == null) return false;
-    final main = info.url.trim();
-    if (main.isEmpty) return false;
-    return _qualityList.every((q) => q.url.trim() != main);
-  }
-
   /// 主地址对应哪个码率：用于进入页面时正确高亮当前档。
   String? _qualityKeyFor(PlayInfo? info) {
     if (info == null) return null;
@@ -407,12 +379,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _uiDuration = null;
       });
     });
-  }
-
-  /// 直接使用 PlayInfo.quality 里的真实名称，不再把 key 猜成 4K / 1080P。
-  String _qualityName(QualityItem q) {
-    final name = q.name.trim();
-    return name.isEmpty ? q.key : name;
   }
 
   String get _epLabel => _epLabelFor(_ep);
@@ -819,7 +785,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (wasPlaying) {
         await c.play();
       } else {
-        // 暂停状态下也先拉一帧再暂停，避免切清晰度后停在黑屏。
+        // 暂停状态下也先拉一帧再暂停，避免重新 open 后停在黑屏。
         await c.play();
         await Future<void>.delayed(const Duration(milliseconds: 60));
         await c.pause();
@@ -835,187 +801,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return true;
     } catch (_) {
       return false;
-    }
-  }
-
-  /// 切换清晰度：真正换 networkUrl，并恢复切换前的进度 / 倍速 / 播放状态。
-  /// 新清晰度失败时回退打开原来的播放地址；连回退也失败才进入错误态。
-  Future<void> _selectQuality(String? key) async {
-    if (_isLive) return;
-    if (_loading || _switching) {
-      return;
-    }
-    final info = _info;
-    final list = _qualityList;
-    // 产品要求：只有 1 个画质时没有清晰度入口；这里再兜一层。
-    if (info == null || list.length < 2) {
-      return;
-    }
-    if (key == _qualityKey) {
-      _closePanels();
-      _wake();
-      return;
-    }
-
-    QualityItem? picked;
-    if (key != null) {
-      for (final q in list) {
-        if (q.key == key) {
-          picked = q;
-          break;
-        }
-      }
-      if (picked == null) {
-        return;
-      }
-    }
-
-    final urls = <String>[];
-    if (picked == null) {
-      for (final u in <String>[info.url, ...info.backup]) {
-        final url = u.trim();
-        if (url.isNotEmpty && !urls.contains(url)) urls.add(url);
-      }
-    } else {
-      final url = picked.url.trim();
-      if (url.isNotEmpty) urls.add(url);
-    }
-    if (urls.isEmpty) {
-      return;
-    }
-
-    final c = _controller;
-    if (c == null || !c.value.isInitialized) {
-      return;
-    }
-    final oldQuality = _qualityKey;
-    String? oldUrl;
-    if (oldQuality != null) {
-      for (final q in list) {
-        if (q.key == oldQuality && q.url.trim().isNotEmpty) {
-          oldUrl = q.url.trim();
-          break;
-        }
-      }
-    }
-    // 切换前固定住进度与播放状态：open 新地址期间 UI 不允许归零。
-    final wasPlaying = c.value.isPlaying;
-    final resume = c.value.position;
-    final resumeDuration = c.value.duration;
-
-    /// 清晰度地址可能带自己的请求头（防盗链），优先用它，其次用全局头。
-    Map<String, String> headersFor(String url) {
-      for (final q in list) {
-        if (q.url.trim() == url && q.headers.isNotEmpty) return q.headers;
-      }
-      return info.headers;
-    }
-
-    _resetHold2x();
-    _switching = true;
-    final token = ++_loadToken;
-    try {
-      // 先把当前进度落盘：切换失败后点重试也能回到正确位置。
-      await _saveProgress();
-      if (!mounted || token != _loadToken) return;
-      _hideTimer?.cancel();
-      setState(() {
-        _showQuality = false;
-        _showSpeed = false;
-        _showSleep = false;
-        _showJump = false;
-        _loading = true;
-        _loadingHint = '正在切换清晰度';
-        _error = false;
-        _errorText = '';
-        _ended = false;
-        _controls = true;
-        _uiPosition = resume;
-        _uiDuration = resumeDuration;
-        _firstFrame = false;
-      });
-
-      var ok = false;
-      for (final url in urls) {
-        if (!mounted || token != _loadToken) return;
-        // 复用同一个播放器实例，只换地址；ready 后 seek 回原进度。
-        if (await _openSource(
-          url,
-          headers: headersFor(url),
-          resume: resume,
-          wasPlaying: wasPlaying,
-          direct: info.direct && info.isHls,
-        )) {
-          ok = true;
-          break;
-        }
-      }
-
-      if (!mounted || token != _loadToken) return;
-      if (!ok) {
-        // open 已经打断了原片源：必须把原来的地址重新打开并 seek 回原进度，
-        // 否则就是黑屏且不报错。回退也失败才置错误态，让用户点重试。
-        final fallback = <String>[];
-        if (oldUrl != null) fallback.add(oldUrl);
-        for (final u in <String>[info.url, ...info.backup]) {
-          final url = u.trim();
-          if (url.isNotEmpty && !fallback.contains(url)) fallback.add(url);
-        }
-        var restored = false;
-        var restoredKey = oldUrl == null ? null : oldQuality;
-        for (final url in fallback) {
-          if (!mounted || token != _loadToken) return;
-          if (await _openSource(
-            url,
-            headers: headersFor(url),
-            resume: resume,
-            wasPlaying: wasPlaying,
-            direct: info.direct && info.isHls,
-          )) {
-            restored = true;
-            if (oldUrl == null || url != oldUrl) restoredKey = null;
-            break;
-          }
-        }
-        if (!mounted || token != _loadToken) return;
-        // 出错时手势层会立刻 disabled，onLongPressEnd 再也收不到：
-        // 这里强制复位长按倍速，避免「3.0倍速快进中」常驻。
-        if (!restored) _resetHold2x();
-        setState(() {
-          _loading = false;
-          _loadingHint = null;
-          _qualityKey = restored ? restoredKey : oldQuality;
-          _controls = true;
-          if (!restored) {
-            _error = true;
-            _errorText = '切换清晰度失败，播放器需要重试';
-            _uiPosition = null;
-            _uiDuration = null;
-          }
-          // 回退成功时继续用 resume 占位，真实进度追上后由 _onVideoValue 释放。
-        });
-        if (restored) _startUiHoldTimeout();
-        _wake();
-        return;
-      }
-
-      setState(() {
-        _qualityKey = key;
-        _loading = false;
-        _loadingHint = null;
-        _error = false;
-        _errorText = '';
-        _sourceFailNotified = false;
-        _controls = true;
-      });
-      _startUiHoldTimeout();
-      _wake();
-      _showSeekHint('清晰度：$_qualityLabel');
-    } finally {
-      // 必须触发一次重建：否则手势层/控件会一直停留在「切换中」的禁用状态。
-      if (mounted && _switching) {
-        setState(() => _switching = false);
-      }
     }
   }
 
@@ -1175,7 +960,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   /// media_kit 平台错误（Video 层解码 / 输出失败）：直接进错误页。
-  /// open / 切清晰度期间由各自 try/catch 处理，避免重复弹错误。
+  /// open / 重连期间由各自 try/catch 处理，避免重复弹错误。
   void _onPlatformError(String message) {
     if (!mounted || _exiting || _error || _loading) return;
     unawaited(_onPlaybackFailure());
@@ -1267,7 +1052,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 错误页「重试」：不再重新请求接口，直接用当前地址重新 open，
   /// 尽量接着出错前的位置播放。
   Future<void> _retryPlayback() async {
-    if (!mounted || _exiting || _loading || _switching) return;
+    if (!mounted || _exiting || _loading) return;
     final c = _controller;
     if (c == null) return;
     final url = _watchdogUrl();
@@ -1315,6 +1100,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _loading = false;
       _loadingHint = null;
     });
+    // 占位进度最多挂 2 秒：真实进度没追上也不会让进度条永远停在旧值。
+    _startUiHoldTimeout();
     _wake();
   }
 
@@ -1336,7 +1123,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     // loading 期间的错误交给 _bootstrap / _openSource 的 try/catch 处理。
     if (_loading || _error) return;
-    // 切清晰度成功后，真实进度追上占位值再释放，避免进度条归零。
+    // 重新 open 成功后，真实进度追上占位值再释放，避免进度条归零。
     if (_uiPosition != null && v.isInitialized) {
       final diff = (v.position - _uiPosition!).abs();
       if (diff <= const Duration(seconds: 3)) {
@@ -1376,7 +1163,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   ///   按「自动下一集」正常切集（「看完当集」则在那暂停）。
   /// 两项都没设（0）时两个分支都不进，任何位置都不跳。
   void _autoSkipCheck() {
-    if (_isLive || _loading || _error || _switching) return;
+    if (_isLive || _loading || _error) return;
     final intro = _mark.introSeconds;
     final outro = _mark.outroSeconds;
     if (intro <= 0 && outro <= 0) return;
@@ -1486,7 +1273,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   Future<void> _switchEp(int next) async {
     if (_isLive) return;
-    if (_loading || _switching) return;
+    if (_loading) return;
     _resetHold2x();
     if (next == _ep) {
       _closePanels();
@@ -1497,7 +1284,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() {
       _ep = next;
       _episodes = List<Episode>.from(_episodes);
-      _showQuality = false;
       _showSleep = false;
       _showJump = false;
       _controls = true;
@@ -1530,8 +1316,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           _panelOpen ||
           _holding2x ||
           _loading ||
-          _error ||
-          _switching) {
+          _error) {
         if (_holding2x) _startHideTimer();
         return;
       }
@@ -1553,7 +1338,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() {
       _controls = false;
       _showSpeed = false;
-      _showQuality = false;
       _showSleep = false;
       _showJump = false;
     });
@@ -1578,7 +1362,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!_panelOpen) return;
     setState(() {
       _showSpeed = false;
-      _showQuality = false;
       _showSleep = false;
       _showJump = false;
     });
@@ -1594,7 +1377,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _controls = false;
       _unlockVisible = true;
       _showSpeed = false;
-      _showQuality = false;
       _showSleep = false;
       _showJump = false;
     });
@@ -1644,7 +1426,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null ||
         _loading ||
         _error ||
-        _switching ||
         !c.value.isInitialized) {
       return;
     }
@@ -1660,7 +1441,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void _seekTo(Duration d) {
     if (_isLive) return; // 直播没有可回看的进度。
     final c = _controller;
-    if (c == null || _loading || _switching || !c.value.isInitialized) return;
+    if (c == null || _loading || !c.value.isInitialized) return;
     unawaited(c.seekTo(d));
     _wake();
   }
@@ -1668,7 +1449,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void _seekBy(int seconds) {
     if (_isLive) return;
     final c = _controller;
-    if (c == null || _loading || _switching || !c.value.isInitialized) return;
+    if (c == null || _loading || !c.value.isInitialized) return;
     final total = c.value.duration;
     var target = c.value.position + Duration(seconds: seconds);
     if (target < Duration.zero) target = Duration.zero;
@@ -1709,7 +1490,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (c == null ||
         _loading ||
         _error ||
-        _switching ||
         !c.value.isInitialized) {
       return;
     }
@@ -1721,7 +1501,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       // 参考：长按进入快进时收起控件，只在顶部留「3.0倍速快进中」胶囊。
       _controls = false;
       _showSpeed = false;
-      _showQuality = false;
       _showSleep = false;
       _showJump = false;
     });
@@ -1747,7 +1526,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _hideTimer?.cancel();
     setState(() {
       _showSpeed = !_showSpeed;
-      _showQuality = false;
       _showSleep = false;
       _showJump = false;
       _controls = true;
@@ -1759,7 +1537,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (_isLive) {
       return;
     }
-    if (_loading || _switching) return;
+    if (_loading) return;
     _hideTimer?.cancel();
     if (_episodes.isEmpty) {
       _wake();
@@ -1774,26 +1552,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!mounted) return;
     _wake();
     if (picked != null) await _switchEp(picked);
-  }
-
-  void _toggleQuality() {
-    if (_isLive) return;
-    if (_loading || _switching) {
-      return;
-    }
-    _hideTimer?.cancel();
-    if (!_canChangeQuality) {
-      _wake();
-      return;
-    }
-    setState(() {
-      _showQuality = !_showQuality;
-      _showSpeed = false;
-      _showSleep = false;
-      _showJump = false;
-      _controls = true;
-    });
-    if (!_showQuality) _wake();
   }
 
   Future<void> _openMorePanel() async {
@@ -1819,7 +1577,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       onSleepTimer: _openSleepPanel,
       onDownload: _isLive ? null : () {},
       onSpeed: _isLive ? null : _toggleSpeed,
-      onQuality: _isLive ? null : _toggleQuality,
       onBackground: () {},
       onFeedback: () {},
     );
@@ -1842,7 +1599,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() {
       _showJump = true;
       _showSpeed = false;
-      _showQuality = false;
       _showSleep = false;
       _controls = true;
     });
@@ -1871,14 +1627,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _showSeekHint('已清空本剧设置');
   }
 
-  /// 打开定时关闭右侧面板（与速度 / 清晰度 / 片头尾面板互斥）。
+  /// 打开定时关闭右侧面板（与速度 / 片头尾面板互斥）。
   /// 直播同样可用：到点暂停对直播一样生效。
   void _openSleepPanel() {
     _hideTimer?.cancel();
     setState(() {
       _showSleep = true;
       _showSpeed = false;
-      _showQuality = false;
       _showJump = false;
       _controls = true;
     });
@@ -1975,7 +1730,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 长按快进中直接退出全屏时，把倍速恢复成交给竖屏前的值。
     _resetHold2x();
     _unlockTimer?.cancel();
-    // 作废仍在进行的切清晰度/切集请求，退出后不要再回写 UI。
+    // 作废仍在进行的切集 / 重连请求，退出后不要再回写 UI。
     _loadToken++;
     _uiHoldTimer?.cancel();
     _hideTimer?.cancel();
@@ -2024,7 +1779,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             children: [
               Positioned.fill(child: _buildVideoSurface(c)),
               // 手势层：单击显隐控件 / 双击暂停 / 横扫调进度 / 竖扫亮度音量 /
-              // 长按 3.0x。加载与切清晰度时仍保留手势（按钮的 no-op 由页面自己判）。
+              // 长按 3.0x。加载与切换时仍保留手势（按钮的 no-op 由页面自己判）。
               if (!_locked && c != null)
                 Positioned.fill(
                   child: FxPlayerGestures(
@@ -2134,7 +1889,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               player: c,
               subtitleBottom: controlsHeight + 12,
             ),
-          // 切集 / 切清晰度：最后一帧垫在黑底上，首帧就绪后 200ms 淡出。
+          // 切集 / 重连：最后一帧垫在黑底上，首帧就绪后 200ms 淡出。
           if (_frozenFrame != null)
             Positioned.fill(
               child: FxAspectBox(
@@ -2301,19 +2056,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (!_isLive && _showQuality)
-                Padding(
-                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: FsQualityPanel(
-                      items: _qualityList,
-                      currentKey: _qualityKey,
-                      showSource: _showSourceTier,
-                      onPick: (key) => unawaited(_selectQuality(key)),
-                    ),
-                  ),
-                ),
               if (!_isLive && _showSpeed)
                 Padding(
                   padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
@@ -2372,7 +2114,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       buffered: v.buffered,
                       playing: v.isInitialized && v.isPlaying,
                       rate: _rate,
-                      // 清晰度 / 线路 / 倍速 / 片头尾全部收进 ⋯ 播放设置。
+                      // 倍速 / 定时 / 片头尾等全部收进 ⋯ 播放设置。
                       qualityLabel: '',
                       compact: compact,
                       bottomInset: bottomInset,
@@ -2421,3 +2163,4 @@ class _FsBadge extends StatelessWidget {
     );
   }
 }
+

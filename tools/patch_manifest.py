@@ -12,6 +12,11 @@ manifest 只有 android:label="fantasy_tv"、没有 INTERNET / 明文流量。�
 - <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
   （DLNA/SSDP 组播；MulticastLock 在 MainActivity 的 fantasy_tv/cast 通道
    里按需申请，二者都是 normal 权限，没有运行时弹窗）
+- <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+  （应用内更新：下载 APK 后交给系统安装器）
+- <application> 里的 FileProvider（androidx.core.content.FileProvider，
+  authorities=${applicationId}.fileprovider）+ res/xml/file_paths.xml
+  （cache-path updates/，对应下载目录 <cacheDir>/updates/）
 - <application android:usesCleartextTraffic="true" ...>
 - android:label="幻想影视"
 - android:icon 必须存在（由 Flutter 模板 / 图标步骤提供，缺失直接失败）
@@ -24,6 +29,7 @@ manifest 只有 android:label="fantasy_tv"、没有 INTERNET / 明文流量。�
 
 import difflib
 import io
+import os
 import sys
 import xml.etree.ElementTree as ET
 
@@ -39,6 +45,17 @@ STORAGE_MAX_SDK = '28'
 # 的 fantasy_tv/cast 通道里按需申请，二者都是 normal 权限，安装即授予）。
 WIFI_STATE = 'android.permission.ACCESS_WIFI_STATE'
 MULTICAST = 'android.permission.CHANGE_WIFI_MULTICAST_STATE'
+# 应用内更新：下载 APK 后用 FileProvider 换出 content:// URI 交给安装器。
+INSTALL = 'android.permission.REQUEST_INSTALL_PACKAGES'
+PROVIDER_NAME = 'androidx.core.content.FileProvider'
+PROVIDER_AUTHORITIES = '${applicationId}.fileprovider'
+FILE_PROVIDER_PATHS = 'android.support.FILE_PROVIDER_PATHS'
+FILE_PATHS_RES = 'android/app/src/main/res/xml/file_paths.xml'
+FILE_PATHS_XML = '''<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="updates" path="updates/" />
+</paths>
+'''
 
 ET.register_namespace('android', ANDROID_NS)
 
@@ -93,6 +110,61 @@ def ensure_permission(root, name, max_sdk=None):
     return changed
 
 
+def ensure_file_provider(app):
+    """确保 <application> 里有更新用的 FileProvider；返回说明文字或 ''。"""
+    target = None
+    created = False
+    for el in app.findall('provider'):
+        if (el.get(attr('name')) or '') == PROVIDER_NAME:
+            target = el
+            break
+    if target is None:
+        target = ET.Element('provider')
+        target.set(attr('name'), PROVIDER_NAME)
+        app.append(target)
+        created = True
+        # 新增的 provider 追加在 <application> 末尾（activity 之后），
+        # manifest 允许任意顺序，AGP 合并不受影响。
+    changed = 'added' if created else ''
+    if target.get(attr('authorities')) != PROVIDER_AUTHORITIES:
+        target.set(attr('authorities'), PROVIDER_AUTHORITIES)
+        changed = changed or 'authorities'
+    if target.get(attr('exported')) != 'false':
+        target.set(attr('exported'), 'false')
+        changed = changed or 'exported'
+    if target.get(attr('grantUriPermissions')) != 'true':
+        target.set(attr('grantUriPermissions'), 'true')
+        changed = changed or 'grantUriPermissions'
+    meta = None
+    for item in target.findall('meta-data'):
+        if (item.get(attr('name')) or '') == FILE_PROVIDER_PATHS:
+            meta = item
+            break
+    if meta is None:
+        meta = ET.SubElement(target, 'meta-data')
+        meta.set(attr('name'), FILE_PROVIDER_PATHS)
+        meta.set(attr('resource'), '@xml/file_paths')
+        changed = (changed + '+meta-data') if created else 'meta-data'
+    elif meta.get(attr('resource')) != '@xml/file_paths':
+        meta.set(attr('resource'), '@xml/file_paths')
+        changed = changed or 'meta-data resource'
+    return changed
+
+
+def ensure_file_paths():
+    """写 res/xml/file_paths.xml（cache-path updates/ = 下载目录）；返回是否新建。"""
+    directory = os.path.dirname(FILE_PATHS_RES)
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+    if os.path.exists(FILE_PATHS_RES):
+        with io.open(FILE_PATHS_RES, encoding='utf-8') as handle:
+            if 'path="updates/"' in handle.read():
+                return False
+    with io.open(FILE_PATHS_RES, 'w', encoding='utf-8') as handle:
+        handle.write(FILE_PATHS_XML)
+    return True
+
+
 def patch(root):
     notes = []
     app = application(root)
@@ -109,6 +181,14 @@ def patch(root):
         notes.append('ACCESS_WIFI_STATE %s' % what)
     for what in ensure_permission(root, MULTICAST):
         notes.append('CHANGE_WIFI_MULTICAST_STATE %s' % what)
+    for what in ensure_permission(root, INSTALL):
+        notes.append('REQUEST_INSTALL_PACKAGES %s' % what)
+
+    provider = ensure_file_provider(app)
+    if provider:
+        notes.append('FileProvider %s' % provider)
+    if ensure_file_paths():
+        notes.append('res/xml/file_paths.xml written')
 
     if app.get(attr('usesCleartextTraffic')) != 'true':
         app.set(attr('usesCleartextTraffic'), 'true')
@@ -147,9 +227,38 @@ def validate(root):
         elif item.get(attr('maxSdkVersion')) is not None:
             problems.append('%s must not be limited by maxSdkVersion' % name)
 
+    if INSTALL not in perms:
+        problems.append('missing uses-permission %s' % INSTALL)
+
     if app is None:
         problems.append('missing <application>')
         return problems
+
+    provider = None
+    for el in app.findall('provider'):
+        if (el.get(attr('name')) or '') == PROVIDER_NAME:
+            provider = el
+            break
+    if provider is None:
+        problems.append('missing <provider android:name="%s">' % PROVIDER_NAME)
+    else:
+        if provider.get(attr('authorities')) != PROVIDER_AUTHORITIES:
+            problems.append('FileProvider authorities must be %s (got %r)'
+                            % (PROVIDER_AUTHORITIES,
+                               provider.get(attr('authorities'))))
+        if provider.get(attr('exported')) != 'false':
+            problems.append('FileProvider android:exported must be false')
+        if provider.get(attr('grantUriPermissions')) != 'true':
+            problems.append('FileProvider android:grantUriPermissions '
+                            'must be true')
+        meta = None
+        for item in provider.findall('meta-data'):
+            if (item.get(attr('name')) or '') == FILE_PROVIDER_PATHS:
+                meta = item
+                break
+        if meta is None or meta.get(attr('resource')) != '@xml/file_paths':
+            problems.append('FileProvider missing meta-data %s -> '
+                            '@xml/file_paths' % FILE_PROVIDER_PATHS)
 
     if app.get(attr('usesCleartextTraffic')) != 'true':
         problems.append('<application> usesCleartextTraffic must be true')
@@ -159,6 +268,15 @@ def validate(root):
     icon = app.get(ICON_ATTR)
     if not icon:
         problems.append('<application> android:icon is missing')
+
+    if not os.path.isfile(FILE_PATHS_RES):
+        problems.append('missing %s (FileProvider paths)' % FILE_PATHS_RES)
+    else:
+        with io.open(FILE_PATHS_RES, encoding='utf-8') as handle:
+            paths_body = handle.read()
+        if 'path="updates/"' not in paths_body:
+            problems.append('%s must declare <cache-path path="updates/">'
+                            % FILE_PATHS_RES)
     return problems
 
 
@@ -243,6 +361,9 @@ def validate_ok_lines(root):
     yield '%s maxSdkVersion=%s' % (STORAGE, STORAGE_MAX_SDK)
     yield '%s' % WIFI_STATE
     yield '%s' % MULTICAST
+    yield '%s' % INSTALL
+    yield 'provider=%s authorities=%s' % (PROVIDER_NAME, PROVIDER_AUTHORITIES)
+    yield 'file_paths=%s' % FILE_PATHS_RES
     yield 'usesCleartextTraffic=%s' % app.get(attr('usesCleartextTraffic'))
     yield 'label=%s' % app.get(attr('label'))
     yield 'icon=%s' % app.get(ICON_ATTR)

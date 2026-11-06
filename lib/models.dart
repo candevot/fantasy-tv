@@ -239,20 +239,32 @@ class LiveLine {
     this.height = 0,
   });
 
-  /// 展示用清晰度：优先服务端 label，其次按实际高度分档。
+  /// 展示用清晰度：优先真实分辨率 `宽x高`（如 `1920x1080`）——
+  /// 线路名里直接带宽高就用它，否则按服务端给的高度反推宽度；
+  /// 完全拿不到数值时才退回通俗标签（4K / 1080P / 直播）。
   String get qualityLabel {
+    final dims = _dimsFromName(name) ?? _dimsFromHeight(height);
+    if (dims != null) return '${dims.$1}x${dims.$2}';
+    return plainQualityLabel;
+  }
+
+  /// 通俗标签（旧分档 4K / 1080P / 720P / 标清）：
+  /// 拿不到真实宽高时的兜底，另给 [subtitle] 判断线路名是否与画质重复。
+  String get plainQualityLabel {
     final raw = name.trim().toUpperCase();
     if (raw == '4K' || raw == '1080P' || raw == '720P' || raw == 'SD') {
       return raw == 'SD' ? '标清' : raw;
     }
-    final label = liveQualityLabel(height);
+    final label = _liveTierLabel(height);
     return label.isEmpty ? (raw.isEmpty ? '直播' : name.trim()) : label;
   }
 
   /// 线路卡副标题：服务端 label 与清晰度重复时退回线路序号。
   String subtitle(int index) {
     final n = name.trim();
-    if (n.isEmpty || n.toUpperCase() == qualityLabel.toUpperCase()) {
+    if (n.isEmpty ||
+        n.toUpperCase() == qualityLabel.toUpperCase() ||
+        n.toUpperCase() == plainQualityLabel.toUpperCase()) {
       return '线路 ${index + 1}';
     }
     return n;
@@ -284,13 +296,39 @@ class LiveLine {
   }
 }
 
-/// 4K / 1080P / 720P / 标清；0 高度返回空串（旧接口没有分辨率）。
+/// 直播清晰度 → 真实分辨率文案 `宽x高`（1080 → `1920x1080`）；
+/// 0 高度返回空串（旧接口没有分辨率，调用方自行隐藏）。
 String liveQualityLabel(int height) {
+  final dims = _dimsFromHeight(height);
+  return dims == null ? '' : '${dims.$1}x${dims.$2}';
+}
+
+/// 通俗分档标签：4K / 1080P / 720P / 标清；0 高度返回空串。
+/// 仅在拿不到真实宽高时兜底显示。
+String _liveTierLabel(int height) {
   if (height >= 2160) return '4K';
   if (height >= 1080) return '1080P';
   if (height >= 720) return '720P';
   if (height > 0) return '标清';
   return '';
+}
+
+/// 线路名 / label 里抠 `1920x1080` 这类真实宽高，抠不到返回 null。
+(int, int)? _dimsFromName(String raw) {
+  final m = RegExp(r'(\d{3,4})\s*[x×*]\s*(\d{3,4})').firstMatch(raw);
+  if (m == null) return null;
+  final w = int.tryParse(m.group(1)!) ?? 0;
+  final h = int.tryParse(m.group(2)!) ?? 0;
+  if (w <= 0 || h <= 0) return null;
+  return (w, h);
+}
+
+/// 只有高度时按 16:9 反推宽度（直播线路常见 1080 → 1920），
+/// 宽度取偶数，得到 1920x1080 / 1280x720 这类标准值。
+(int, int)? _dimsFromHeight(int height) {
+  if (height <= 0) return null;
+  final w = (height * 16 / 9).round();
+  return (w.isEven ? w : w + 1, height);
 }
 
 int _heightFromLabel(String raw) {

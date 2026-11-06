@@ -73,6 +73,57 @@ CAST_BLOCK = '''
                 else -> result.notImplemented()
             }
         }
+
+        // 应用内更新：下载完成后把 <cacheDir>/updates/*.apk 用 FileProvider
+        // 换成 content:// URI，交给系统安装器（需 REQUEST_INSTALL_PACKAGES）。
+        io.flutter.plugin.common.MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fantasy_tv/update"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "installApk" -> {
+                    try {
+                        val path = call.argument<String>("path")
+                        if (path.isNullOrBlank()) {
+                            result.error("install_path", "path is empty", null)
+                        } else {
+                            val file = java.io.File(path)
+                            if (!file.exists()) {
+                                result.error(
+                                    "install_missing",
+                                    "APK not found: " + path,
+                                    null
+                                )
+                            } else {
+                                val uri = androidx.core.content.FileProvider.getUriForFile(
+                                    this,
+                                    "$packageName.fileprovider",
+                                    file
+                                )
+                                val intent = android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW
+                                )
+                                intent.setDataAndType(
+                                    uri,
+                                    "application/vnd.android.package-archive"
+                                )
+                                intent.addFlags(
+                                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                )
+                                intent.addFlags(
+                                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                )
+                                startActivity(intent)
+                                result.success(true)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        result.error("install_failed", e.message, null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 '''
 

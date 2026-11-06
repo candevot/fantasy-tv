@@ -111,10 +111,7 @@ class AppSettings extends ChangeNotifier {
       _defaultQuality = _validQuality(sp.getString(_kDefaultQuality));
       _autoNext = sp.getBool(_kAutoNext) ?? defaultAutoNext;
       _sleepMode = FxSleepMode.parse(sp.getString(_kSleepMode));
-      _sleepMinutes = _validSeconds(
-        sp.getInt(_kSleepMinutes),
-        sleepTimerOptions,
-      );
+      _sleepMinutes = _validSleepMinutes(sp.getInt(_kSleepMinutes));
       _sleepEndsAt = sp.getInt(_kSleepEndsAt) ?? 0;
       // 应用被关掉期间定时已过期：直接回落「不开启」，不再保留一个死计时。
       if (_sleepMode == FxSleepMode.minutes &&
@@ -146,9 +143,12 @@ class AppSettings extends ChangeNotifier {
     return defaultQualityKey;
   }
 
-  int _validSeconds(int? value, List<int> options) {
-    if (value == null || !options.contains(value)) return options.first;
-    return value;
+  /// 自定义定时分钟数：合法区间 1–1440（24 小时）。
+  /// null / 0 / 负数视为没填，回落到预设第一项（[sleepTimerOptions].first）；
+  /// 超过 1440 只夹到 1440，不再按白名单把 45 分钟改回 30 分钟。
+  int _validSleepMinutes(int? value) {
+    if (value == null || value <= 0) return sleepTimerOptions.first;
+    return value.clamp(1, 1440).toInt();
   }
 
   int _validConcurrency(int? value) {
@@ -172,8 +172,9 @@ class AppSettings extends ChangeNotifier {
   }
 
   /// 定时关闭：[FxSleepMode.off] / [FxSleepMode.episode] /
-  /// [FxSleepMode.minutes]（分钟数取 [sleepTimerOptions]，同时记下
-  /// 结束时间戳，杀掉进程再进来也能续上剩余时间）。
+  /// [FxSleepMode.minutes]（分钟数为用户自定义值，夹在 1–1440，未填才回落
+  /// [sleepTimerOptions] 第一项；同时记下结束时间戳，杀掉进程再进来也能续上
+  /// 剩余时间）。
   Future<void> setSleepTimer(
     FxSleepMode mode, {
     int minutes = 0,
@@ -183,7 +184,8 @@ class AppSettings extends ChangeNotifier {
     var nextMinutes = _sleepMinutes;
     var nextEndsAt = 0;
     if (mode == FxSleepMode.minutes) {
-      nextMinutes = _validSeconds(minutes, sleepTimerOptions);
+      // 自定义分钟数不再走 sleepTimerOptions 白名单，否则 45 分钟会被改回 30。
+      nextMinutes = _validSleepMinutes(minutes);
       nextEndsAt = endsAt > 0
           ? endsAt
           : DateTime.now().millisecondsSinceEpoch + nextMinutes * 60000;

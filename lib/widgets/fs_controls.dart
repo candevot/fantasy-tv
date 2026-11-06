@@ -75,9 +75,9 @@ class FsTextAction extends StatelessWidget {
   }
 }
 
-/// 顶栏唯一的画质胶囊：只显示 4K / 1080P / 720P / 标清。
+/// 顶栏唯一的画质胶囊：显示真实分辨率 `宽x高`（如 1920x1080），空串自动隐藏。
 ///
-/// 纯信息展示，不可点击；切换清晰度仍在底部「清晰度」按钮。
+/// 纯信息展示，不可点击；码率档切换已收进 ⋯ 播放设置面板。
 class FsQualityPill extends StatelessWidget {
   const FsQualityPill({
     super.key,
@@ -157,9 +157,10 @@ class _FsClockPillState extends State<FsClockPill> {
   }
 }
 
-/// 顶部控制条（对齐腾讯）：返回 · 片名/第xx集 · 画质 · 投屏 · 更多。
+/// 顶部控制条（对齐腾讯）：返回 · 片名/第xx集 · 投屏 · 更多。
 ///
-/// 画质只保留一个胶囊，内容限定为 4K / 1080P / 720P / 标清。
+/// 画质胶囊只保留一个，内容为真实分辨率 `宽x高`（如 1920x1080），
+/// 分辨率未知时传空串自动隐藏。
 /// 已按产品要求移除截图按钮：顶栏只剩返回/剧名、投屏、更多。
 class FsTopBar extends StatelessWidget {
   const FsTopBar({
