@@ -6,7 +6,8 @@ import 'category_page.dart';
 import 'offline_player_page.dart';
 
 /* ========================================================================== */
-/*  整部剧的缓存详情：集数列表 / 补下 / 单集删除                               */
+/*  整部剧的「离线详情」：标题 + 分组集数列表（全程不联网）                    */
+/*  已缓存在上（带播放键）→ 下载中（进度/暂停）→ 未缓存（下载键）              */
 /* ========================================================================== */
 
 class DownloadSeriesPage extends StatefulWidget {
@@ -37,8 +38,7 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
     if (mounted) setState(() {});
   }
 
-  List<DownloadTask> get _tasks =>
-      _service.tasksForSeries(widget.seriesId);
+  List<DownloadTask> get _tasks => _service.tasksForSeries(widget.seriesId);
 
   void _toast(String msg) {
     final messenger = ScaffoldMessenger.maybeOf(context);
@@ -102,7 +102,7 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
   }
 
   Future<void> _downloadMissing() =>
-      _enqueueEpisodes(_service.seriesMissingEpisodes(widget.seriesId));
+      _enqueueEpisodes(_missingEpisodes());
 
   Future<void> _downloadOne(int ep) => _enqueueEpisodes(<int>[ep]);
 
@@ -113,6 +113,13 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
     } else {
       await _service.resume(task);
     }
+  }
+
+  /// 未缓存且也没排队的集号（1..总集数）。
+  List<int> _missingEpisodes() {
+    final total = _service.seriesTotalEpisodes(widget.seriesId);
+    final busy = <int>{for (final t in _tasks) t.ep};
+    return <int>[for (var n = 1; n <= total; n++) if (!busy.contains(n)) n];
   }
 
   Future<void> _deleteTask(DownloadTask task) async {
@@ -179,154 +186,389 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
     Navigator.of(context).maybePop();
   }
 
+  /* ------------------------------------------------------------------ UI */
+
   @override
   Widget build(BuildContext context) {
     final tasks = _tasks;
     if (tasks.isEmpty) {
-      return const FxPageScaffold(
-        title: '剧集缓存',
-        child: FxEmptyView(
-          icon: Icons.download_rounded,
-          title: '缓存已清空',
-          subtitle: '这部剧的缓存任务已全部删除',
+      return Scaffold(
+        backgroundColor: Colors.transparent,
+        body: FxBackground(
+          child: SafeArea(
+            child: Column(
+              children: [
+                _appBar('剧集缓存', subtitle: null, showDownloadMissing: false),
+                const Expanded(
+                  child: FxEmptyView(
+                    icon: Icons.download_rounded,
+                    title: '缓存已清空',
+                    subtitle: '这部剧的缓存任务已全部删除',
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       );
     }
+
     final total = _service.seriesTotalEpisodes(widget.seriesId);
-    final missing = _service.seriesMissingEpisodes(widget.seriesId).length;
-    return FxPageScaffold(
-      title: tasks.first.title,
-      actions: [
-        FxTextAction(
-          '补下',
-          icon: Icons.playlist_add_rounded,
-          onTap: missing > 0 ? _downloadMissing : null,
+    final sorted = List<DownloadTask>.from(tasks)
+      ..sort((a, b) => a.ep.compareTo(b.ep));
+    final cached =
+        sorted.where((t) => t.status == DownloadStatus.completed).toList();
+    final busy = sorted
+        .where((t) => t.status != DownloadStatus.completed)
+        .toList();
+    final missing = _missingEpisodes();
+    final bytes = _service.seriesCachedBytes(widget.seriesId);
+
+    final children = <Widget>[];
+    if (cached.isNotEmpty) {
+      children.add(_sectionHeader(
+        title: '已缓存',
+        count: cached.length,
+        color: const Color(0xFF2FA985),
+        hint: '点击即可离线播放',
+      ));
+      children.addAll(cached.map(_cachedRow));
+    }
+    if (busy.isNotEmpty) {
+      if (children.isNotEmpty) children.add(const SizedBox(height: 12));
+      children.add(_sectionHeader(
+        title: '下载中',
+        count: busy.length,
+        color: Fx.accent,
+        hint: '显示进度 · 可暂停 / 继续',
+      ));
+      children.addAll(busy.map(_busyRow));
+    }
+    if (missing.isNotEmpty) {
+      if (children.isNotEmpty) children.add(const SizedBox(height: 12));
+      children.add(_sectionHeader(
+        title: '未缓存',
+        count: missing.length,
+        color: Fx.sub,
+        hint: '点击下载',
+        actionText: '全部下载',
+        onAction: () => _enqueueEpisodes(missing),
+      ));
+      children.addAll(missing.map(_missingRow));
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: FxBackground(
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              _appBar(
+                tasks.first.title,
+                subtitle: '已缓存 $cached.length/$total 集 · ${fxBytes(bytes)}',
+                showDownloadMissing: missing.isNotEmpty,
+              ),
+              Expanded(
+                child: ListView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(18, 4, 18, 30),
+                  children: [
+                    _header(tasks, total, cached.length, busy.length),
+                    const SizedBox(height: 6),
+                    ...children,
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
-      ],
-      child: Column(
+      ),
+    );
+  }
+
+  /// 标准 AppBar：返回 + 剧名（集数副标题）+ 右侧「补下」。
+  Widget _appBar(
+    String title, {
+    required String? subtitle,
+    required bool showDownloadMissing,
+  }) {
+    return AppBar(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      toolbarHeight: 54,
+      leading: IconButton(
+        onPressed: () => Navigator.of(context).maybePop(),
+        tooltip: '返回',
+        icon: const Icon(Icons.arrow_back_ios_new_rounded,
+            size: 17, color: Fx.ink),
+      ),
+      title: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          _header(tasks, total),
-          Expanded(
-            child: ListView.builder(
-              physics: const BouncingScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(18, 2, 18, 30),
-              itemCount: total,
-              itemBuilder: (ctx, i) => _episodeRow(i + 1),
+          Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: Fx.ink,
             ),
           ),
+          if (subtitle != null) ...[
+            const SizedBox(height: 1),
+            Text(
+              subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 10, color: Fx.sub),
+            ),
+          ],
+        ],
+      ),
+      centerTitle: true,
+      actions: [
+        if (showDownloadMissing)
+          TextButton(
+            onPressed: _downloadMissing,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: const [
+                Icon(Icons.playlist_add_rounded, size: 16, color: Fx.accent),
+                SizedBox(width: 4),
+                Text(
+                  '补下',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: Fx.accent,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        const SizedBox(width: 4),
+      ],
+    );
+  }
+
+  Widget _sectionHeader({
+    required String title,
+    required int count,
+    required Color color,
+    required String hint,
+    String? actionText,
+    VoidCallback? onAction,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 7),
+      child: Row(
+        children: [
+          Container(
+            width: 4,
+            height: 13,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: Fx.ink,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: .12),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              '$count 集',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: color,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              hint,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 9.5, color: Fx.sub),
+            ),
+          ),
+          if (actionText != null)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onAction,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                decoration: BoxDecoration(
+                  color: Fx.accent.withValues(alpha: .10),
+                  borderRadius: BorderRadius.circular(10),
+                  border:
+                      Border.all(color: Fx.accent.withValues(alpha: .22)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.download_rounded,
+                        size: 12, color: Fx.accent),
+                    const SizedBox(width: 3),
+                    Text(
+                      actionText,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                        color: Fx.accent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
   }
 
-  Widget _header(List<DownloadTask> tasks, int total) {
+  Widget _header(
+    List<DownloadTask> tasks,
+    int total,
+    int cachedCount,
+    int busyCount,
+  ) {
     final sample = tasks.first;
-    final cached = _service.seriesCachedCount(widget.seriesId);
     final bytes = _service.seriesCachedBytes(widget.seriesId);
     final progress = _service.seriesProgress(widget.seriesId);
     final status = _service.seriesStatus(widget.seriesId);
     final active = status == DownloadStatus.downloading ||
         status == DownloadStatus.queued;
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 2, 18, 8),
-      child: GlassCard(
-        padding: const EdgeInsets.all(11),
-        radius: 18,
-        opacity: .6,
-        child: Column(
-          children: [
-            Row(
-              children: [
-                SizedBox(
-                  width: 52,
-                  height: 76,
-                  child: FxCover(
-                    url: sample.cover,
-                    title: sample.title,
-                    radius: 9,
-                  ),
+    return GlassCard(
+      padding: const EdgeInsets.all(11),
+      radius: 18,
+      opacity: .6,
+      child: Column(
+        children: [
+          Row(
+            children: [
+              SizedBox(
+                width: 52,
+                height: 76,
+                child: FxCover(
+                  url: sample.cover,
+                  title: sample.title,
+                  radius: 9,
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        sample.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          color: Fx.ink,
-                        ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      sample.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: Fx.ink,
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '已缓存 $cached/$total 集 · ${fxBytes(bytes)}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 10, color: Fx.sub),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '已缓存 $cachedCount/$total 集 · ${fxBytes(bytes)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 10, color: Fx.sub),
+                    ),
+                    const SizedBox(height: 7),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(3),
+                      child: LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 4,
+                        backgroundColor: const Color(0xFFE8EDF5),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                            Fx.accent),
                       ),
-                      const SizedBox(height: 7),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(3),
-                        child: LinearProgressIndicator(
-                          value: progress,
-                          minHeight: 4,
-                          backgroundColor: const Color(0xFFE8EDF5),
-                          valueColor: const AlwaysStoppedAnimation<Color>(
-                              Fx.accent),
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '已完成 ${(progress * 100).round()}%',
-                        style: const TextStyle(fontSize: 9, color: Fx.sub),
-                      ),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      busyCount > 0
+                          ? '下载中 $busyCount 集 · 已完成 ${(progress * 100).round()}%'
+                          : '已全部缓存 · ${fxBytes(bytes)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 9, color: Fx.sub),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            const SizedBox(height: 9),
-            Row(
-              children: [
-                Expanded(
-                  child: _pill(
-                    icon: active
-                        ? Icons.pause_rounded
-                        : Icons.play_arrow_rounded,
-                    label: active ? '暂停整部' : '继续整部',
-                    color: active ? const Color(0xFFD68A00) : Fx.accent,
-                    onTap: active
-                        ? () => _service.pauseSeries(widget.seriesId)
-                        : () => _service.resumeSeries(widget.seriesId),
-                  ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          Row(
+            children: [
+              Expanded(
+                child: _pill(
+                  icon: active
+                      ? Icons.pause_rounded
+                      : Icons.play_arrow_rounded,
+                  label: active ? '暂停整部' : (busyCount > 0 ? '继续整部' : '播放'),
+                  color: active ? const Color(0xFFD68A00) : Fx.accent,
+                  onTap: active
+                      ? () => _service.pauseSeries(widget.seriesId)
+                      : () {
+                          final done = tasks
+                              .where((t) =>
+                                  t.status == DownloadStatus.completed)
+                              .toList()
+                            ..sort((a, b) => a.ep.compareTo(b.ep));
+                          if (done.isNotEmpty) {
+                            _play(done.first);
+                          } else {
+                            _service.resumeSeries(widget.seriesId);
+                          }
+                        },
                 ),
-                const SizedBox(width: 7),
-                Expanded(
-                  child: _pill(
-                    icon: Icons.playlist_add_rounded,
-                    label: '继续补下',
-                    color: Fx.accent,
-                    onTap: _downloadMissing,
-                  ),
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: _pill(
+                  icon: Icons.playlist_add_rounded,
+                  label: '继续补下',
+                  color: Fx.accent,
+                  onTap: _downloadMissing,
                 ),
-                const SizedBox(width: 7),
-                Expanded(
-                  child: _pill(
-                    icon: Icons.delete_outline_rounded,
-                    label: '删除整剧',
-                    color: const Color(0xFFE45C5C),
-                    onTap: _deleteSeries,
-                  ),
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: _pill(
+                  icon: Icons.delete_outline_rounded,
+                  label: '删除整剧',
+                  color: const Color(0xFFE45C5C),
+                  onTap: _deleteSeries,
                 ),
-              ],
-            ),
-          ],
-        ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -370,50 +612,123 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
     );
   }
 
-  Widget _episodeRow(int ep) {
-    final task = _service.taskFor(widget.seriesId, ep);
-    final status = task?.status;
-    final cached = status == DownloadStatus.completed;
-    final busy =
-        status == DownloadStatus.downloading || status == DownloadStatus.queued;
-    final failed = status == DownloadStatus.failed;
+  /* ------------------------------------------------------------ 三种行 */
 
-    final statusText = switch (status) {
-      null => '未缓存',
-      DownloadStatus.completed => '已缓存 · ${task!.sizeLabel}',
-      DownloadStatus.downloading =>
-        '下载中 ${(task!.progressValue * 100).round()}% · ${task.progressDetail}',
-      DownloadStatus.queued => '排队中',
-      DownloadStatus.paused =>
-        '已暂停 ${(task!.progressValue * 100).round()}%',
-      DownloadStatus.failed => task!.error ?? '下载失败',
-    };
+  /// 已缓存：右侧是播放键（点整行也播放）。
+  Widget _cachedRow(DownloadTask task) {
+    return _epCard(
+      ep: task.ep,
+      color: const Color(0xFF2FA985),
+      title: task.epLabel,
+      subtitle: '已缓存 · ${task.sizeLabel}',
+      progress: 1,
+      progressColor: const Color(0xFF2FA985),
+      onTap: () => _play(task),
+      trailing: [
+        _iconBtn(
+          icon: Icons.play_circle_fill_rounded,
+          color: const Color(0xFF2FA985),
+          tooltip: '播放',
+          onTap: () => _play(task),
+        ),
+        _iconBtn(
+          icon: Icons.delete_outline_rounded,
+          color: const Color(0xFFE45C5C),
+          tooltip: '删除',
+          onTap: () => _deleteTask(task),
+        ),
+      ],
+    );
+  }
+
+  /// 下载中 / 排队 / 暂停 / 失败：进度 + 片数速度 + 暂停 / 继续。
+  Widget _busyRow(DownloadTask task) {
+    final status = task.status;
     final color = switch (status) {
-      null => Fx.sub,
-      DownloadStatus.completed => const Color(0xFF2FA985),
       DownloadStatus.downloading => Fx.accent,
       DownloadStatus.queued => const Color(0xFF7C8AA0),
       DownloadStatus.paused => const Color(0xFFD68A00),
       DownloadStatus.failed => const Color(0xFFE45C5C),
+      DownloadStatus.completed => const Color(0xFF2FA985),
     };
+    final busy =
+        status == DownloadStatus.downloading || status == DownloadStatus.queued;
+    final subtitle = switch (status) {
+      DownloadStatus.downloading =>
+        '下载中 ${(task.progressValue * 100).round()}% · ${task.progressDetail}',
+      DownloadStatus.queued => '排队中 · 等待前一集完成',
+      DownloadStatus.paused =>
+        '已暂停 ${(task.progressValue * 100).round()}% · ${task.sizeLabel}',
+      DownloadStatus.failed => task.error ?? '下载失败 · 点击重试',
+      DownloadStatus.completed => task.sizeLabel,
+    };
+    final known = task.totalSegments > 0 || task.totalBytes > 0;
+    return _epCard(
+      ep: task.ep,
+      color: color,
+      title: task.epLabel,
+      subtitle: subtitle,
+      progress: known ? task.progressValue : null,
+      progressColor: color,
+      indeterminate: busy && !known,
+      onTap: () => _pauseResumeOne(task),
+      trailing: [
+        _iconBtn(
+          icon: busy
+              ? Icons.pause_circle_outline_rounded
+              : Icons.play_circle_outline_rounded,
+          color: color,
+          tooltip: busy ? '暂停' : '继续',
+          onTap: () => _pauseResumeOne(task),
+        ),
+        _iconBtn(
+          icon: Icons.delete_outline_rounded,
+          color: const Color(0xFFE45C5C),
+          tooltip: '删除',
+          onTap: () => _deleteTask(task),
+        ),
+      ],
+    );
+  }
 
+  /// 未缓存：右侧是下载键。
+  Widget _missingRow(int ep) {
+    return _epCard(
+      ep: ep,
+      color: Fx.sub,
+      title: '第 $ep 集',
+      subtitle: '未缓存 · 点击下载',
+      progress: null,
+      onTap: () => _downloadOne(ep),
+      trailing: [
+        _iconBtn(
+          icon: Icons.download_rounded,
+          color: Fx.accent,
+          tooltip: '下载',
+          onTap: () => _downloadOne(ep),
+        ),
+      ],
+    );
+  }
+
+  Widget _epCard({
+    required int ep,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required double? progress,
+    Color? progressColor,
+    bool indeterminate = false,
+    required List<Widget> trailing,
+    VoidCallback? onTap,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: GlassCard(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         radius: 13,
         opacity: .5,
-        onTap: () {
-          if (task == null) {
-            _downloadOne(ep);
-          } else if (cached) {
-            _play(task);
-          } else if (busy || status == DownloadStatus.paused) {
-            _pauseResumeOne(task);
-          } else if (failed) {
-            _service.resume(task);
-          }
-        },
+        onTap: onTap,
         child: Row(
           children: [
             Container(
@@ -439,7 +754,7 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    task?.epLabel ?? '第 $ep 集',
+                    title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
@@ -450,44 +765,51 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
                   ),
                   const SizedBox(height: 1),
                   Text(
-                    statusText,
+                    subtitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 9, color: color),
                   ),
+                  if (progress != null || indeterminate) ...[
+                    const SizedBox(height: 5),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        value: indeterminate ? null : progress,
+                        minHeight: 3,
+                        backgroundColor: const Color(0xFFE8EDF5),
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                          progressColor ?? Fx.accent,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
             const SizedBox(width: 6),
-            if (task == null)
-              Icon(Icons.download_rounded, size: 17, color: color)
-            else if (cached)
-              Icon(Icons.play_circle_outline_rounded, size: 19, color: color)
-            else
-              Icon(
-                busy
-                    ? Icons.pause_circle_outline_rounded
-                    : status == DownloadStatus.paused
-                        ? Icons.play_circle_outline_rounded
-                        : Icons.refresh_rounded,
-                size: 19,
-                color: color,
-              ),
-            if (task != null) ...[
-              const SizedBox(width: 6),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => _deleteTask(task),
-                child: const Padding(
-                  padding: EdgeInsets.all(3),
-                  child: Icon(Icons.delete_outline_rounded,
-                      size: 17, color: Color(0xFFE45C5C)),
-                ),
-              ),
-            ],
+            ...trailing,
           ],
         ),
       ),
     );
+  }
+
+  Widget _iconBtn({
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+    String? tooltip,
+  }) {
+    final btn = GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(4),
+        child: Icon(icon, size: 20, color: color),
+      ),
+    );
+    if (tooltip == null) return btn;
+    return Tooltip(message: tooltip, child: btn);
   }
 }

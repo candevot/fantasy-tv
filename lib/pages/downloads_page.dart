@@ -7,7 +7,7 @@ import 'download_series_page.dart';
 import 'offline_player_page.dart';
 
 /* ========================================================================== */
-/*  离线缓存                                                                   */
+/*  离线缓存：标准 AppBar + 「下载中 / 已下载」两个分区                        */
 /* ========================================================================== */
 
 /// 同一部剧的缓存任务聚合。下载页按剧展示一行，点进去再看具体集数。
@@ -21,6 +21,11 @@ class _SeriesGroup {
 
   int get updatedAt =>
       tasks.fold(0, (max, t) => t.updatedAt > max ? t.updatedAt : max);
+
+  /// 只要有任意一集没下载完，整部剧就留在「下载中」；
+  /// 全部完成后下次刷新自动落到「已下载」。
+  bool get finished =>
+      tasks.isNotEmpty && tasks.every((t) => t.status == DownloadStatus.completed);
 }
 
 class DownloadsPage extends StatefulWidget {
@@ -30,8 +35,10 @@ class DownloadsPage extends StatefulWidget {
   State<DownloadsPage> createState() => _DownloadsPageState();
 }
 
-class _DownloadsPageState extends State<DownloadsPage> {
+class _DownloadsPageState extends State<DownloadsPage>
+    with SingleTickerProviderStateMixin {
   final DownloadService _service = DownloadService.instance;
+  late final TabController _tab = TabController(length: 2, vsync: this);
   bool _loading = true;
 
   @override
@@ -54,6 +61,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
   @override
   void dispose() {
     _service.removeListener(_onChanged);
+    _tab.dispose();
     super.dispose();
   }
 
@@ -69,6 +77,14 @@ class _DownloadsPageState extends State<DownloadsPage> {
     groups.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     return groups;
   }
+
+  /// 「下载中」：还有集没下完（下载 / 排队 / 暂停 / 失败）。
+  List<_SeriesGroup> get _activeGroups =>
+      _groups.where((g) => !g.finished).toList(growable: false);
+
+  /// 「已下载」：这部剧的每一集都已完成。
+  List<_SeriesGroup> get _finishedGroups =>
+      _groups.where((g) => g.finished).toList(growable: false);
 
   bool get _hasActive => _service.tasks.any((t) =>
       t.status == DownloadStatus.downloading ||
@@ -115,7 +131,9 @@ class _DownloadsPageState extends State<DownloadsPage> {
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
         title: Text(
-          count > 1 ? '删除「${group.sample.title}」整部缓存？' : '删除「${group.sample.epLabel}」缓存？',
+          count > 1
+              ? '删除「${group.sample.title}」整部缓存？'
+              : '删除「${group.sample.epLabel}」缓存？',
           style: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
         ),
         content: Text(
@@ -159,15 +177,8 @@ class _DownloadsPageState extends State<DownloadsPage> {
     );
   }
 
+  /// 点剧卡片：一律进「离线详情」（标题 + 集列表），不跳在线详情、不联网。
   Future<void> _openSeries(_SeriesGroup group) async {
-    // 单集电影：点卡片直接播放，其它情况都进集数列表。
-    if (group.sample.isMovie && group.tasks.length == 1) {
-      final only = group.tasks.first;
-      if (only.status == DownloadStatus.completed) {
-        await _play(only);
-        return;
-      }
-    }
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => DownloadSeriesPage(seriesId: group.id),
@@ -200,54 +211,200 @@ class _DownloadsPageState extends State<DownloadsPage> {
     ));
   }
 
+  /* ------------------------------------------------------------------ UI */
+
   @override
   Widget build(BuildContext context) {
-    return FxPageScaffold(
-      title: '离线缓存',
-      actions: [
-        FxTextAction(
-          '清空',
-          icon: Icons.delete_sweep_rounded,
-          onTap: _service.tasks.isEmpty ? null : _confirmClear,
+    final active = _activeGroups.length;
+    final finished = _finishedGroups.length;
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: FxBackground(
+        child: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              _appBar(),
+              _tabBar(active, finished),
+              Expanded(
+                child: TabBarView(
+                  controller: _tab,
+                  children: [
+                    _tabBody(_activeGroups, downloadingTab: true),
+                    _tabBody(_finishedGroups, downloadingTab: false),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
-      ],
-      child: _content(),
+      ),
     );
   }
 
-  Widget _content() {
+  /// 标准 AppBar：返回 + 居中「离线缓存」+ 右侧「清空」。
+  /// 用真正的 AppBar 排版，标题与右侧按钮各自占位，不会再叠字。
+  Widget _appBar() {
+    final canClear = !_loading && _service.tasks.isNotEmpty;
+    return AppBar(
+      backgroundColor: Colors.transparent,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      toolbarHeight: 52,
+      leading: IconButton(
+        onPressed: () => Navigator.of(context).maybePop(),
+        tooltip: '返回',
+        icon: const Icon(Icons.arrow_back_ios_new_rounded,
+            size: 17, color: Fx.ink),
+      ),
+      title: const Text(
+        '离线缓存',
+        style: TextStyle(
+          fontSize: 17,
+          fontWeight: FontWeight.w700,
+          color: Fx.ink,
+        ),
+      ),
+      centerTitle: true,
+      actions: [
+        TextButton(
+          onPressed: canClear ? _confirmClear : null,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.delete_sweep_rounded,
+                size: 16,
+                color: canClear ? Fx.sub : const Color(0xFFB6C0CD),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '清空',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: canClear ? Fx.sub : const Color(0xFFB6C0CD),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 4),
+      ],
+    );
+  }
+
+  Widget _tabBar(int active, int finished) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
+      decoration: const BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: Color(0x1450729F), width: 1),
+        ),
+      ),
+      child: Material(
+        type: MaterialType.transparency,
+        child: TabBar(
+          controller: _tab,
+          indicatorSize: TabBarIndicatorSize.tab,
+          indicator: BoxDecoration(
+            color: Colors.white.withValues(alpha: .88),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF50729F).withValues(alpha: .12),
+                blurRadius: 14,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          indicatorPadding: const EdgeInsets.fromLTRB(4, 7, 4, 7),
+          dividerColor: Colors.transparent,
+          labelColor: Fx.ink,
+          unselectedLabelColor: Fx.sub,
+          labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+          unselectedLabelStyle:
+              const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          splashFactory: NoSplash.splashFactory,
+          tabs: [
+            Tab(child: _tabLabel('下载中', active, const Color(0xFFD68A00))),
+            Tab(child: _tabLabel('已下载', finished, const Color(0xFF2FA985))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _tabLabel(String text, int count, Color color) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(text),
+        const SizedBox(width: 5),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: .14),
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Text(
+            '$count',
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              color: color,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _tabBody(List<_SeriesGroup> groups, {required bool downloadingTab}) {
     if (_loading) return const FxLoadingView(label: '正在读取缓存…');
-    final groups = _groups;
     if (groups.isEmpty) {
-      return const FxEmptyView(
-        icon: Icons.download_rounded,
-        title: '暂无离线缓存',
-        subtitle: '在详情页点击「下载」并选择剧集，缓存任务会出现在这里',
+      return FxEmptyView(
+        icon: downloadingTab
+            ? Icons.download_rounded
+            : Icons.offline_pin_rounded,
+        title: downloadingTab ? '没有正在下载的任务' : '还没有已下载的剧集',
+        subtitle: downloadingTab
+            ? (_service.tasks.isEmpty
+                ? '在详情页点击「下载」并选择剧集，任务会出现在这里'
+                : '所有任务都下载完了，切换到「已下载」看看')
+            : '下载完成后会自动出现在这里，可离线播放',
       );
     }
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(18, 4, 18, 8),
+          padding: const EdgeInsets.fromLTRB(18, 8, 18, 8),
           child: Row(
             children: [
-              _topAction(
-                icon: Icons.pause_circle_outline_rounded,
-                label: '全部暂停',
-                enabled: _hasActive,
-                onTap: _service.pauseAll,
-              ),
-              const SizedBox(width: 8),
-              _topAction(
-                icon: Icons.play_circle_outline_rounded,
-                label: '全部继续',
-                enabled: _hasPaused,
-                onTap: _service.resumeAll,
-              ),
-              const Spacer(),
+              if (downloadingTab) ...[
+                _topAction(
+                  icon: Icons.pause_circle_outline_rounded,
+                  label: '全部暂停',
+                  enabled: _hasActive,
+                  onTap: _service.pauseAll,
+                ),
+                const SizedBox(width: 8),
+                _topAction(
+                  icon: Icons.play_circle_outline_rounded,
+                  label: '全部继续',
+                  enabled: _hasPaused,
+                  onTap: _service.resumeAll,
+                ),
+                const Spacer(),
+              ] else
+                const Spacer(),
               Flexible(
                 child: Text(
-                  '${groups.length} 部 · ${fxBytes(_service.totalCachedBytes)}',
+                  downloadingTab
+                      ? '${groups.length} 部 · ${_service.activeTasks.length} 个任务'
+                      : '${groups.length} 部 · ${fxBytes(_service.totalCachedBytes)}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   textAlign: TextAlign.right,
@@ -265,7 +422,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
             itemBuilder: (ctx, i) {
               return Padding(
                 padding: const EdgeInsets.only(bottom: 10),
-                child: _seriesCard(groups[i]),
+                child: _seriesCard(groups[i], downloadingTab: downloadingTab),
               );
             },
           ),
@@ -309,7 +466,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
     );
   }
 
-  Widget _seriesCard(_SeriesGroup group) {
+  Widget _seriesCard(_SeriesGroup group, {required bool downloadingTab}) {
     final id = group.id;
     final status = _service.seriesStatus(id);
     final total = _service.seriesTotalEpisodes(id);
@@ -326,13 +483,23 @@ class _DownloadsPageState extends State<DownloadsPage> {
     final queued = status == DownloadStatus.queued;
     final active = downloading || queued;
 
-    final detail = completed
-        ? '全部已缓存'
-        : failed
-            ? '$failedCount 集下载失败'
-            : paused
-                ? '已暂停 · 已完成 ${(progress * 100).round()}%'
-                : '第 ${current?.ep ?? cached}/$total 集 · 已完成 ${(progress * 100).round()}%';
+    final String detail;
+    if (downloadingTab) {
+      if (active) {
+        detail =
+            '第 ${current?.ep ?? cached}/$total 集 · ${current?.progressDetail ?? ''}';
+      } else if (paused) {
+        detail = '已暂停 · 已完成 ${(progress * 100).round()}% · $cached/$total 集';
+      } else if (failed) {
+        detail = '$failedCount 集下载失败 · 点击继续重试';
+      } else {
+        detail = '已缓存 $cached/$total 集';
+      }
+    } else {
+      detail = group.sample.isMovie
+          ? '全部已缓存 · ${fxBytes(bytes)}'
+          : '已缓存 $cached/$total 集 · ${fxBytes(bytes)}';
+    }
 
     return GlassCard(
       padding: const EdgeInsets.all(10),
@@ -369,8 +536,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.center,
-                      style:
-                          const TextStyle(fontSize: 8, color: Colors.white),
+                      style: const TextStyle(fontSize: 8, color: Colors.white),
                     ),
                   ),
                 ),
@@ -420,7 +586,8 @@ class _DownloadsPageState extends State<DownloadsPage> {
                               : '已缓存 $cached/$total 集 · ${fxBytes(bytes)}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 9.5, color: Fx.sub),
+                          style:
+                              const TextStyle(fontSize: 9.5, color: Fx.sub),
                         ),
                       ),
                     ],
@@ -460,14 +627,14 @@ class _DownloadsPageState extends State<DownloadsPage> {
                   const Spacer(),
                   Row(
                     children: [
-                      if (active)
+                      if (downloadingTab && active)
                         _action(
                           icon: Icons.pause_rounded,
                           label: '暂停',
                           color: const Color(0xFFD68A00),
                           onTap: () => _service.pauseSeries(id),
                         )
-                      else if (paused || failed)
+                      else if (downloadingTab && (paused || failed))
                         _action(
                           icon: Icons.play_arrow_rounded,
                           label: '继续',
