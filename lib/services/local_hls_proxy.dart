@@ -6,8 +6,122 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:path_provider/path_provider.dart';
+
 /// 代理日志回调；默认写到 dart:developer（Flutter 控制台 / logcat 可见）。
 typedef HlsProxyLogger = void Function(String message);
+
+/// 落盘诊断日志：`<App 私有目录>/logs/proxy.log`，保留最近 [maxLines] 行。
+///
+/// - 每行自带毫秒级时间戳；
+/// - 顺序追加写入，超期 / 超量时全量重写裁掉旧行，磁盘上不会无限增长；
+/// - 拿不到私有目录（测试环境没有 path_provider 通道）时静默降级为
+///   只写控制台，日志失败绝不影响播放。
+class HlsProxyLog {
+  HlsProxyLog._();
+
+  /// 落盘保留行数。
+  static const int maxLines = 500;
+
+  /// 日志文件名。
+  static const String fileName = 'proxy.log';
+
+  static const Duration _flushInterval = Duration(seconds: 2);
+  static const Duration _rewriteInterval = Duration(seconds: 30);
+
+  static final List<String> _lines = <String>[];
+  static final List<String> _pending = <String>[];
+  static String? _path;
+  static bool _resolved = false;
+  static bool _disabled = false;
+  static int _fileLines = 0;
+  static DateTime _lastRewrite = DateTime.fromMillisecondsSinceEpoch(0);
+  static Timer? _flushTimer;
+  static bool _flushing = false;
+  static bool _flushAgain = false;
+
+  /// 日志文件绝对路径；尚未解析成功时为 null。
+  static String? get path => _path;
+
+  /// 追加一行（自动补时间戳），约 2 秒后落盘。
+  static void write(String message) {
+    if (_disabled || message.isEmpty) return;
+    final line = '${_stamp()} $message';
+    _lines.add(line);
+    if (_lines.length > maxLines) {
+      _lines.removeRange(0, _lines.length - maxLines);
+    }
+    _pending.add(line);
+    if (_pending.length > maxLines * 2) {
+      _pending.removeRange(0, _pending.length - maxLines);
+    }
+    if (_flushTimer != null) return;
+    _flushTimer = Timer(_flushInterval, () {
+      _flushTimer = null;
+      unawaited(flush());
+    });
+  }
+
+  /// 立即把待写内容落盘（幂等，可并发调用）。
+  static Future<void> flush() async {
+    if (_flushing) {
+      _flushAgain = true;
+      return;
+    }
+    if (_pending.isEmpty) return;
+    _flushing = true;
+    try {
+      if (!_resolved) {
+        _resolved = true;
+        try {
+          final dir = await getApplicationDocumentsDirectory();
+          _path = '${dir.path}/logs/$fileName';
+        } catch (_) {
+          _path = null;
+        }
+      }
+      final path = _path;
+      if (path == null) {
+        _disabled = true;
+        _pending.clear();
+        return;
+      }
+      final file = File(path);
+      await file.parent.create(recursive: true);
+      final rewrite = _fileLines == 0 ||
+          _fileLines > maxLines + 100 ||
+          DateTime.now().difference(_lastRewrite) > _rewriteInterval;
+      if (rewrite) {
+        await file.writeAsString('${_lines.join('\n')}\n');
+        _fileLines = _lines.length;
+        _lastRewrite = DateTime.now();
+      } else if (_pending.isNotEmpty) {
+        await file.writeAsString(
+          '${_pending.join('\n')}\n',
+          mode: FileMode.append,
+        );
+        _fileLines += _pending.length;
+      }
+      _pending.clear();
+    } catch (_) {
+      // 落盘失败不影响播放，留在内存里下轮再试。
+    } finally {
+      _flushing = false;
+      if (_flushAgain) {
+        _flushAgain = false;
+        if (_pending.isNotEmpty) unawaited(flush());
+      }
+    }
+  }
+
+  static String _stamp() {
+    final now = DateTime.now();
+    String two(int value) => value.toString().padLeft(2, '0');
+    return '${now.year}-${two(now.month)}-${two(now.day)} '
+        '${two(now.hour)}:${two(now.minute)}:${two(now.second)}.'
+        '${now.millisecond.toString().padLeft(3, '0')}';
+  }
+}
 
 /// 平台线路签名过期时，由宿主重新请求 `/api/play?...&fresh=1` 拿新地址。
 /// 返回 null / 抛异常表示这次没拿到（代理按失败计数，连续 2 次通知换线）。
@@ -26,14 +140,19 @@ typedef PlayExpiredCallback = void Function();
 /// 平台线路（腾讯 / 芒果等）的 m3u8 里常带几分钟过期的签名：
 /// - 每 [playlistRefreshInterval] 重新拉一次 playlist，后续分片始终用
 ///   刷新后的新地址（本地 URL 保持不变，[index] 映射到新地址）；
-/// - 分片返回 403 / 404 时立即刷新 playlist 并重试一次，实现自愈。
+/// - 分片失败（含 403 / 404）按 200/600/1500ms 指数退避重试 3 次，
+///   平台线路每次重试前先 refreshPlay 换新签名，实现自愈；
+/// - 播放器（libmpv）主动断开 / 取消的请求记为 cancelled，不算失败，
+///   不计入并发降级，也不触发 onPlayExpired；
+/// - 连续 2 次分片失败把该流的并行分段数 8→4→2 降级；
+/// - 所有请求写入 `<App 私有目录>/logs/proxy.log`（保留 500 行）。
 class LocalHlsProxy {
   LocalHlsProxy({
     this.parallelism = 8,
     this.prefetchCount = 5,
     this.prefetchConcurrency = 3,
     this.cacheLimitBytes = 256 * 1024 * 1024,
-    this.retries = 2,
+    this.retries = 3,
     this.retryDelay = const Duration(milliseconds: 300),
     this.playlistRefreshInterval = const Duration(seconds: 90),
     this.spoolThresholdBytes = 8 * 1024 * 1024,
@@ -44,6 +163,7 @@ class LocalHlsProxy {
         assert(cacheLimitBytes >= 0),
         assert(retries >= 0),
         assert(!playlistRefreshInterval.isNegative),
+        _parallelLevel = parallelism,
         _logger = log ?? _defaultLog;
 
   static const Duration _connectTimeout = Duration(seconds: 8);
@@ -55,6 +175,12 @@ class LocalHlsProxy {
   static const int _maxPlaylistBytes = 8 * 1024 * 1024;
   static const int _maxAliases = 50000;
   static const String _defaultUserAgent = 'Mozilla/5.0';
+
+  /// 单个分片失败后的指数退避表：第 1/2/3 次重试分别等 200/600/1500ms。
+  static const List<int> _retryBackoffMs = <int>[200, 600, 1500];
+
+  /// 连续多少次「整片下载失败」后把并行分段数砍半（8→4→2，下限 2）。
+  static const int _concurrencyDropAfter = 2;
 
   /// 单个分片并行 Range 的条数（默认 8）。
   final int parallelism;
@@ -68,10 +194,10 @@ class LocalHlsProxy {
   /// 内存 LRU 缓存上限（默认 256MB）。
   final int cacheLimitBytes;
 
-  /// 单段下载失败重试次数（默认 2）。
+  /// 单段下载失败重试次数（默认 3，退避 200/600/1500ms）。
   final int retries;
 
-  /// 重试退避基数（默认 300ms，按次数线性增长）。
+  /// 重试退避基数（保留兼容；实际退避按 [_retryBackoffMs] 指数增长）。
   final Duration retryDelay;
 
   /// 定期重取 playlist 的间隔，默认 90 秒；传 [Duration.zero] 关闭。
@@ -81,6 +207,19 @@ class LocalHlsProxy {
   final int spoolThresholdBytes;
 
   final HlsProxyLogger _logger;
+
+  /// 当前生效的并行分段数：连续 2 次失败后按 8→4→2 降级。
+  int _parallelLevel;
+
+  /// 连续整片失败计数（成功即清零）。
+  int _failStreak = 0;
+
+  /// HttpClient 代际：切集 / 释放会推进它，旧代际的失败按 cancelled 处理。
+  int _clientEpoch = 0;
+
+  /// 平台签名刷新的共享 future：并发分片同时要刷新时只打一次 /api/play。
+  Future<bool>? _refreshInflight;
+
 
   final LinkedHashMap<String, _CachedBody> _cache =
       LinkedHashMap<String, _CachedBody>();
@@ -148,11 +287,67 @@ class LocalHlsProxy {
   }
 
   void _log(String message) {
+    // 控制台 + 落盘双写；任何一边失败都不影响播放。
     try {
       _logger('[HLS] $message');
     } catch (_) {
       // 日志失败不影响播放。
     }
+    HlsProxyLog.write(message);
+  }
+
+  /// 请求日志行：时间由 [HlsProxyLog] 统一加，这里给
+  /// URL / 状态 / 重试次数 / 并发级 / cancelled 区分。
+  String _reqLine(
+    String kind,
+    Uri uri, {
+    int? index,
+    required String status,
+    int retry = 0,
+    bool cancelled = false,
+    String? detail,
+  }) {
+    final buffer = StringBuffer(kind);
+    if (index != null) buffer.write(' #$index');
+    buffer
+      ..write(' ${_short(uri)}')
+      ..write(' status=$status')
+      ..write(' retry=$retry')
+      ..write(' conc=$_parallelLevel')
+      ..write(' cancelled=${cancelled ? 1 : 0}');
+    if (detail != null && detail.isNotEmpty) buffer.write(' $detail');
+    return buffer.toString();
+  }
+
+  /// 第 [retryIndex] 次重试（1 起）前的退避时长：200 / 600 / 1500ms。
+  Duration _backoff(int retryIndex) {
+    final slot = retryIndex.clamp(1, _retryBackoffMs.length);
+    return Duration(milliseconds: _retryBackoffMs[slot - 1]);
+  }
+
+  /// 失败是否属于「被取消」：我们自己重建 / 关闭了 HttpClient，
+  /// 或者错误文案本身就是 cancel / abort。这类不算失败。
+  bool _isCancelled(Object error, int epoch) {
+    if (_disposed || epoch != _clientEpoch) return true;
+    if (error is _CancelledException) return true;
+    final text = error.toString().toLowerCase();
+    return text.contains('cancel') || text.contains('abort');
+  }
+
+  /// 记一次成功的分片下载：清零连续失败计数。
+  void _noteSegmentSuccess() {
+    if (_failStreak != 0) _failStreak = 0;
+  }
+
+  /// 记一次整片失败：连续 2 次就把该流的并行分段数砍半并记日志。
+  void _noteSegmentFailure() {
+    _failStreak++;
+    if (_failStreak < _concurrencyDropAfter) return;
+    _failStreak = 0;
+    if (_parallelLevel <= 2) return;
+    final old = _parallelLevel;
+    _parallelLevel = math.max(2, old ~/ 2);
+    _log('连续 $_concurrencyDropAfter 次分片失败：并发 $old → $_parallelLevel 路');
   }
 
   // ------------------------------------------------------------ lifecycle
@@ -200,7 +395,7 @@ class LocalHlsProxy {
       ..connectionTimeout = _connectTimeout
       ..idleTimeout = const Duration(seconds: 30)
       ..autoUncompress = true
-      ..maxConnectionsPerHost = math.max(parallelism * 2, 16);
+      ..maxConnectionsPerHost = math.max(_parallelLevel * 2, 16);
   }
 
   /// 关闭本地服务、取消预取与定时刷新、清空内存缓存和临时文件。
@@ -208,6 +403,7 @@ class LocalHlsProxy {
     if (_disposed) return;
     _disposed = true;
     _generation++;
+    _clientEpoch++;
     _prefetchQueue.clear();
     _prefetchQueued.clear();
     _refreshTimer?.cancel();
@@ -251,6 +447,8 @@ class LocalHlsProxy {
       }
     }
     _log('本地分片代理已关闭');
+    // 退出前把 proxy.log 的尾部冲刷到磁盘。
+    unawaited(HlsProxyLog.flush());
   }
 
   /// 切集 / 退出时取消预取队列。正在执行的下载会自然结束，
@@ -297,6 +495,12 @@ class LocalHlsProxy {
     final hadWork = _prefetchActive > 0 || _prefetchQueue.isNotEmpty;
     _clearPrefetchQueue();
     if (hadWork) _resetClient();
+    // 新的一集 / 新的线路：并发级与失败计数回到初始值（8 路起步）。
+    if (_parallelLevel != parallelism || _failStreak != 0) {
+      _log('新播放源：并发恢复 $_parallelLevel → $parallelism 路');
+      _parallelLevel = parallelism;
+      _failStreak = 0;
+    }
     _refreshTimer?.cancel();
     _refreshTimer = null;
 
@@ -373,9 +577,26 @@ class LocalHlsProxy {
           await _writeText(request, HttpStatus.notFound, 'not found');
       }
     } catch (error) {
-      _log('本地请求失败 ${request.uri.path}: $error');
+      // mpv 取消请求（seek / 切集）导致的中断单独标记，不算代理故障。
+      final cancelled = error is _CancelledException || _isLocalCancel(error);
+      _log(
+        '本地请求 ${request.uri.path} '
+        '${cancelled ? 'cancelled(客户端已取消)' : '失败'}: $error',
+      );
+      if (cancelled) return;
       await _writeText(request, HttpStatus.badGateway, 'proxy error: $error');
     }
+  }
+
+  /// 本地回写阶段的「客户端已断开」类错误判定。
+  static bool _isLocalCancel(Object error) {
+    final text = error.toString().toLowerCase();
+    return text.contains('cancel') ||
+        text.contains('abort') ||
+        text.contains('connection closed') ||
+        text.contains('connection reset') ||
+        text.contains('broken pipe') ||
+        text.contains('socketexception');
   }
 
   Future<void> _servePlaylist(HttpRequest request) async {
@@ -428,6 +649,18 @@ class LocalHlsProxy {
     final ref = _SegmentRef(source, range);
     final alias = _segmentAliases[ref.cacheKey];
 
+    // mpv 在 seek / 切集时会主动取消本地请求；连接断开后既不回写也
+    // 不算这次分片失败（不计并发降级、不触发 refreshPlay / 过期回调）。
+    var clientGone = false;
+    unawaited(
+      request.response.done.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace __) {
+          clientGone = true;
+        },
+      ),
+    );
+
     // 先把接下来 5 个分片排进预取队列（当前分片可能还在下载）。
     if (alias != null) {
       final playlist = _playlistCache[alias.playlistKey]?.value.playlist;
@@ -439,65 +672,108 @@ class LocalHlsProxy {
     try {
       data = await _loadSegment(ref);
     } catch (error) {
+      // 被取消（播放器放弃 / 切集）与真实失败分开记账。
+      final cancelled = error is _CancelledException || clientGone;
       _log(
-        '分片失败 ${index == null ? '' : '#$index '}'
-        '${_short(source)}: $error',
+        _reqLine(
+          'SEG',
+          source,
+          index: index,
+          status: cancelled ? 'cancelled' : 'error',
+          cancelled: cancelled,
+          detail: cancelled ? '$error' : 'segment error: $error',
+        ),
       );
+      if (clientGone || error is _CancelledException) return;
+      // 只有整条流重试全部用尽才会走到这里：播放器此时还在用已有缓冲。
       await _writeText(request, HttpStatus.badGateway, 'segment error: $error');
       return;
     }
 
-    final cacheText = data.cacheHit ? '命中缓存' : '未命中缓存';
-    _log(
-      '分片${index == null ? '' : ' #$index'}：'
-      '${data.cacheHit ? '命中缓存' : '并行下载 ${data.parallelCount} 段'}，'
-      '耗时 ${data.cacheHit ? stopwatch.elapsedMilliseconds : data.elapsedMs}ms，'
-      '$cacheText，大小 ${_formatBytes(data.bytes.length)}',
-    );
-
-    var body = data.bytes;
-    var status = HttpStatus.ok;
-    String? contentRange;
-    final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
-    if (rangeHeader != null && rangeHeader.trim().isNotEmpty) {
-      final requested = _parseHttpRange(rangeHeader, body.length);
-      if (requested != null && requested.length <= 0) {
-        await _writeText(
-          request,
-          HttpStatus.requestedRangeNotSatisfiable,
-          'range not satisfiable',
-        );
-        return;
-      }
-      if (requested != null) {
-        body = Uint8List.sublistView(
-          data.bytes,
-          requested.start,
-          requested.start + requested.length,
-        );
-        status = HttpStatus.partialContent;
-        contentRange = 'bytes ${requested.start}-'
-            '${requested.start + requested.length - 1}/${data.bytes.length}';
-      }
-    }
-
-    final response = request.response;
-    response.statusCode = status;
-    response.headers.set(
-      HttpHeaders.contentTypeHeader,
-      _segmentContentType(source, data.contentType),
-    );
-    response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
-    if (contentRange != null) {
-      response.headers.set(HttpHeaders.contentRangeHeader, contentRange);
-    }
-    response.contentLength = body.length;
-    if (request.method == 'HEAD') {
-      await response.close();
+    if (clientGone) {
+      _log(
+        _reqLine(
+          'SEG',
+          source,
+          index: index,
+          status: 'cancelled',
+          cancelled: true,
+          detail: 'mpv 已断开，跳过回写',
+        ),
+      );
       return;
     }
-    response.add(body);
-    await response.close();
+
+    _log(
+      _reqLine(
+        'SEG',
+        source,
+        index: index,
+        status: '200',
+        retry: data.retryCount,
+        detail: '${stopwatch.elapsedMilliseconds}ms ${data.cacheHit ? 'cache-hit' : 'parallel=${data.parallelCount}'} '
+            '${_formatBytes(data.bytes.length)}',
+      ),
+    );
+
+    try {
+      var body = data.bytes;
+      var status = HttpStatus.ok;
+      String? contentRange;
+      final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+      if (rangeHeader != null && rangeHeader.trim().isNotEmpty) {
+        final requested = _parseHttpRange(rangeHeader, body.length);
+        if (requested != null && requested.length <= 0) {
+          await _writeText(
+            request,
+            HttpStatus.requestedRangeNotSatisfiable,
+            'range not satisfiable',
+          );
+          return;
+        }
+        if (requested != null) {
+          body = Uint8List.sublistView(
+            data.bytes,
+            requested.start,
+            requested.start + requested.length,
+          );
+          status = HttpStatus.partialContent;
+          contentRange = 'bytes ${requested.start}-'
+              '${requested.start + requested.length - 1}/${data.bytes.length}';
+        }
+      }
+
+      final response = request.response;
+      response.statusCode = status;
+      response.headers.set(
+        HttpHeaders.contentTypeHeader,
+        _segmentContentType(source, data.contentType),
+      );
+      response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+      if (contentRange != null) {
+        response.headers.set(HttpHeaders.contentRangeHeader, contentRange);
+      }
+      response.contentLength = body.length;
+      if (request.method == 'HEAD') {
+        await response.close();
+        return;
+      }
+      response.add(body);
+      await response.close();
+    } catch (error) {
+      // 写回失败 = mpv 已经取消了这条请求（seek / 切集）：记 cancelled，
+      // 不算分片失败，分片内容也已进缓存，下次 seek 回来直接命中。
+      _log(
+        _reqLine(
+          'SEG',
+          source,
+          index: index,
+          status: 'cancelled',
+          cancelled: true,
+          detail: '回写中断: $error',
+        ),
+      );
+    }
   }
 
   Future<void> _serveKey(HttpRequest request) async {
@@ -510,7 +786,17 @@ class LocalHlsProxy {
     try {
       body = await _loadKey(source);
     } catch (error) {
-      _log('密钥获取失败 ${_short(source)}: $error');
+      final cancelled = error is _CancelledException;
+      _log(
+        _reqLine(
+          'KEY',
+          source,
+          status: cancelled ? 'cancelled' : 'error',
+          cancelled: cancelled,
+          detail: '$error',
+        ),
+      );
+      if (cancelled) return;
       await _writeText(request, HttpStatus.badGateway, 'key error: $error');
       return;
     }
@@ -885,33 +1171,108 @@ class LocalHlsProxy {
     }
   }
 
+  /// 下载分片（带自愈重试）：
+  ///
+  /// - 单分片失败按 200/600/1500ms 指数退避最多重试 [retries] 次；
+  /// - 平台线路每次重试前先 refreshPlay 换新签名地址（并发时共享同一次
+  ///   刷新），403 / 404 则立即刷新列表再试；
+  /// - 被取消（切集 / 释放 / 播放器放弃）的请求不算失败，直接抛
+  ///   [_CancelledException]，不计并发降级、不触发 onPlayExpired；
+  /// - 全部重试用尽才把错误抛回给播放器。
   Future<_SegmentData> _downloadSegmentWithRefresh(
     _SegmentRef ref,
     _SegmentAlias? alias,
   ) async {
     var target = _latestSegment(alias) ?? ref;
-    try {
-      return await _downloadSegment(target);
-    } on _HttpStatusException catch (error) {
-      if (error.statusCode != HttpStatus.forbidden &&
-          error.statusCode != HttpStatus.notFound) {
+    final index = alias?.index;
+    var retry = 0;
+    while (true) {
+      final epoch = _clientEpoch;
+      try {
+        final data = await _downloadSegment(target);
+        _noteSegmentSuccess();
+        if (retry == 0) return data;
+        return _SegmentData(
+          data.bytes,
+          data.contentType,
+          data.parallelCount,
+          data.elapsed,
+          data.cacheHit,
+          retryCount: retry,
+        );
+      } on _CancelledException {
         rethrow;
+      } catch (error) {
+        if (_isCancelled(error, epoch)) {
+          _log(
+            _reqLine(
+              'SEG',
+              target.uri,
+              index: index,
+              status: 'cancelled',
+              retry: retry,
+              cancelled: true,
+              detail: 'err=$error',
+            ),
+          );
+          throw _CancelledException(error);
+        }
+        final http =
+            error is _HttpStatusException ? error.statusCode : null;
+        final expired =
+            http == HttpStatus.forbidden || http == HttpStatus.notFound;
+        if (retry >= retries) {
+          _noteSegmentFailure();
+          _log(
+            _reqLine(
+              'SEG',
+              target.uri,
+              index: index,
+              status: http == null ? 'error' : 'HTTP $http',
+              retry: retry,
+              detail: '重试用尽 err=$error',
+            ),
+          );
+          rethrow;
+        }
+        retry++;
+        final delay = _backoff(retry);
+        // 平台线路（临时签名）：重试前 refreshPlay 拿新地址；
+        // 403 / 404 是签名过期，任何线路都先刷新列表。
+        var action = 'backoff';
+        if (expired || (_refreshPlay != null && _isPlatformPlaylist)) {
+          final refreshed = await _refreshForAlias(alias);
+          final latest = _latestSegment(alias);
+          if (latest != null) target = latest;
+          action = refreshed ? 'refresh-ok' : 'refresh-fail';
+        }
+        _log(
+          _reqLine(
+            'SEG',
+            target.uri,
+            index: index,
+            status: http == null ? 'retry' : 'HTTP $http',
+            retry: retry,
+            detail:
+                'err=$error backoff=${delay.inMilliseconds}ms $action',
+          ),
+        );
+        await Future<void>.delayed(delay);
       }
-      // 签名过期：立即重取 playlist，用同位置的新地址再试一次。
-      final refreshed = await _refreshForAlias(alias);
-      if (!refreshed) rethrow;
-      target = _latestSegment(alias) ?? target;
-      _log('分片 ${_short(ref.uri)} 返回 ${error.statusCode}，'
-          '已刷新列表并重试新地址');
-      return _downloadSegment(target);
     }
   }
 
   Future<_SegmentData> _downloadSegment(_SegmentRef ref) async {
     final stopwatch = Stopwatch()..start();
     final _Downloaded downloaded;
+    // 这里的单连接下载不再自行退避：外层 [_downloadSegmentWithRefresh]
+    // 统一负责 200/600/1500ms 重试与平台 refreshPlay，避免两层重试相乘。
     if (ref.range != null) {
-      downloaded = await _downloadWhole(ref, expectedLength: ref.range!.length);
+      downloaded = await _downloadWhole(
+        ref,
+        expectedLength: ref.range!.length,
+        attempts: 1,
+      );
     } else {
       final head = await _head(ref.uri);
       final length = head?.contentLength;
@@ -928,19 +1289,31 @@ class LocalHlsProxy {
           _log('并行下载失败回退单连接 ${_short(ref.uri)}: $error');
           return _finishDownload(
             ref,
-            await _downloadWhole(ref, expectedLength: length),
+            await _downloadWhole(
+              ref,
+              expectedLength: length,
+              attempts: 1,
+            ),
             stopwatch,
           );
         } catch (error) {
           _log('并行下载失败回退单连接 ${_short(ref.uri)}: $error');
           return _finishDownload(
             ref,
-            await _downloadWhole(ref, expectedLength: length),
+            await _downloadWhole(
+              ref,
+              expectedLength: length,
+              attempts: 1,
+            ),
             stopwatch,
           );
         }
       } else {
-        downloaded = await _downloadWhole(ref, expectedLength: length);
+        downloaded = await _downloadWhole(
+          ref,
+          expectedLength: length,
+          attempts: 1,
+        );
       }
     }
     return _finishDownload(ref, downloaded, stopwatch);
@@ -961,8 +1334,9 @@ class LocalHlsProxy {
   }
 
   Future<_Downloaded> _downloadParallel(_SegmentRef ref, int length) async {
+    // 并行分段数用自适应级别：连续 2 次失败后 8→4→2。
     final count = math.min(
-      parallelism,
+      _parallelLevel,
       math.max(2, length ~/ _minChunkBytes),
     );
     if (count < 2) {
@@ -1084,6 +1458,7 @@ class LocalHlsProxy {
   ) async {
     Object? lastError;
     for (var attempt = 0; attempt <= retries; attempt++) {
+      final epoch = _clientEpoch;
       try {
         return await _fetchRange(uri, start, end);
       } on _HttpStatusException catch (error) {
@@ -1091,16 +1466,28 @@ class LocalHlsProxy {
             error.statusCode == HttpStatus.notFound) {
           rethrow; // 403/404 交给上层刷新 playlist，不做无意义重试。
         }
+        if (_isCancelled(error, epoch)) throw _CancelledException(error);
         lastError = error;
+      } on _CancelledException {
+        rethrow;
       } catch (error) {
+        if (_isCancelled(error, epoch)) throw _CancelledException(error);
         lastError = error;
       }
       if (attempt < retries) {
-        await Future<void>.delayed(
-          Duration(
-            milliseconds: retryDelay.inMilliseconds * (attempt + 1),
+        final delay = _backoff(attempt + 1);
+        _log(
+          _reqLine(
+            'CHUNK',
+            uri,
+            status: 'retry',
+            retry: attempt + 1,
+            detail:
+                'range=$start-$end backoff=${delay.inMilliseconds}ms '
+                'err=$lastError',
           ),
         );
+        await Future<void>.delayed(delay);
       }
     }
     throw StateError('Range $start-$end 下载失败: $lastError');
@@ -1141,9 +1528,13 @@ class LocalHlsProxy {
   Future<_Downloaded> _downloadWhole(
     _SegmentRef ref, {
     int? expectedLength,
+    int? attempts,
   }) async {
+    // [attempts] 允许调用方把退避交给外层（分片级重试）统一负责。
+    final maxTries = attempts ?? (retries + 1);
     Object? lastError;
-    for (var attempt = 0; attempt <= retries; attempt++) {
+    for (var attempt = 0; attempt < maxTries; attempt++) {
+      final epoch = _clientEpoch;
       try {
         final response = await _get(
           ref.uri,
@@ -1189,16 +1580,26 @@ class LocalHlsProxy {
             error.statusCode == HttpStatus.notFound) {
           rethrow;
         }
+        if (_isCancelled(error, epoch)) throw _CancelledException(error);
         lastError = error;
+      } on _CancelledException {
+        rethrow;
       } catch (error) {
+        if (_isCancelled(error, epoch)) throw _CancelledException(error);
         lastError = error;
       }
-      if (attempt < retries) {
-        await Future<void>.delayed(
-          Duration(
-            milliseconds: retryDelay.inMilliseconds * (attempt + 1),
+      if (attempt < maxTries - 1) {
+        final delay = _backoff(attempt + 1);
+        _log(
+          _reqLine(
+            'SEG',
+            ref.uri,
+            status: 'retry',
+            retry: attempt + 1,
+            detail: 'whole backoff=${delay.inMilliseconds}ms err=$lastError',
           ),
         );
+        await Future<void>.delayed(delay);
       }
     }
     throw StateError('分片下载失败: $lastError');
@@ -1252,6 +1653,7 @@ class LocalHlsProxy {
   Future<_CachedBody> _downloadKey(Uri uri) async {
     Object? lastError;
     for (var attempt = 0; attempt <= retries; attempt++) {
+      final epoch = _clientEpoch;
       try {
         final response = await _get(uri);
         if (response.statusCode < 200 || response.statusCode >= 400) {
@@ -1264,15 +1666,24 @@ class LocalHlsProxy {
           bytes,
           response.headers.value(HttpHeaders.contentTypeHeader),
         );
+      } on _CancelledException {
+        rethrow;
       } catch (error) {
+        if (_isCancelled(error, epoch)) throw _CancelledException(error);
         lastError = error;
       }
       if (attempt < retries) {
-        await Future<void>.delayed(
-          Duration(
-            milliseconds: retryDelay.inMilliseconds * (attempt + 1),
+        final delay = _backoff(attempt + 1);
+        _log(
+          _reqLine(
+            'KEY',
+            uri,
+            status: 'retry',
+            retry: attempt + 1,
+            detail: 'backoff=${delay.inMilliseconds}ms err=$lastError',
           ),
         );
+        await Future<void>.delayed(delay);
       }
     }
     throw StateError('密钥下载失败: $lastError');
@@ -1362,7 +1773,7 @@ class LocalHlsProxy {
       // 平台线路的 m3u8 是临时签名：重取同一个 URL 只会拿到同一份过期
       // 内容，必须回调宿主重新走 /api/play 拿新签名地址。
       if (_refreshPlay != null && _isPlatformPlaylist) {
-        await _refreshPlatformPlaylist();
+        await _refreshPlatformShared();
         return;
       }
       final keys = List<String>.of(_activePlaylistKeys);
@@ -1383,9 +1794,10 @@ class LocalHlsProxy {
   }
 
   Future<bool> _refreshForAlias(_SegmentAlias? alias) async {
-    // 遇到 403/404 先重新调用 /api/play 换新签名；拿不到再退回重取旧地址。
+    // 遇到 403/404 / 重试退避前先重新调用 /api/play 换新签名；
+    // 拿不到再退回重取旧地址。并发分片共享同一次刷新。
     if (_refreshPlay != null && _isPlatformPlaylist) {
-      if (await _refreshPlatformPlaylist()) return true;
+      if (await _refreshPlatformShared()) return true;
     }
     if (alias != null) {
       final uri = Uri.tryParse(alias.playlistKey);
@@ -1402,6 +1814,22 @@ class LocalHlsProxy {
     // 没有 index 映射时，至少把所有活跃列表刷新一遍再试。
     await _refreshActivePlaylists();
     return _activePlaylistKeys.isNotEmpty;
+  }
+
+  /// 并发分片同时要换签名时共享同一次 refreshPlay：只打一次 /api/play，
+  /// 避免 seek 突发重试把平台接口打爆，也避免重复累计刷新失败次数
+  /// （被取消的请求根本不会走到这里，因此不会误触发 onPlayExpired）。
+  Future<bool> _refreshPlatformShared() {
+    final existing = _refreshInflight;
+    if (existing != null) return existing;
+    final future = _refreshPlatformPlaylist();
+    _refreshInflight = future;
+    unawaited(
+      future.whenComplete(() {
+        if (identical(_refreshInflight, future)) _refreshInflight = null;
+      }),
+    );
+    return future;
   }
 
   /// 平台线路（腾讯 / 芒果 / B 站等 CDN）的连续刷新失败次数达到 2 次后，
@@ -1573,6 +2001,9 @@ class LocalHlsProxy {
   }
 
   void _resetClient() {
+    // 旧 client 上还没跑完的请求全部作废：它们的失败按 cancelled 记，
+    // 不算这条流的失败，也不会触发 refreshPlay / onPlayExpired。
+    _clientEpoch++;
     final old = _client;
     _client = _newClient();
     old?.close(force: true);
@@ -1813,14 +2244,18 @@ class _SegmentData {
     this.contentType,
     this.parallelCount,
     this.elapsed,
-    this.cacheHit,
-  );
+    this.cacheHit, {
+    this.retryCount = 0,
+  });
 
   final Uint8List bytes;
   final String? contentType;
   final int parallelCount;
   final Duration elapsed;
   final bool cacheHit;
+
+  /// 拿到这份数据前重试过几次（0 = 一次成功），写进 proxy.log。
+  final int retryCount;
 
   int get elapsedMs => elapsed.inMilliseconds;
 }
@@ -1892,4 +2327,15 @@ class _HttpStatusException implements Exception {
 
   @override
   String toString() => 'HTTP $statusCode ($uri)';
+}
+
+/// 「请求被取消」：切集 / 释放重建了 HttpClient，或播放器主动放弃。
+/// 这类不算这条流的失败，不计并发降级、不触发 refreshPlay / onPlayExpired。
+class _CancelledException implements Exception {
+  const _CancelledException(this.cause);
+
+  final Object cause;
+
+  @override
+  String toString() => 'cancelled: $cause';
 }

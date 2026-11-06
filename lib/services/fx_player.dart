@@ -22,6 +22,28 @@ class FxPlayerException implements Exception {
   String toString() => 'FxPlayerException: $message';
 }
 
+/// 无感救援链第③步：返回下一条线路的播放源；没有下一条或取不到地址时
+/// 返回 null。回调必须静默执行（只请求接口，不弹 UI），耗时建议 ≤10s。
+typedef FxLineRescue = Future<FxLineSource?> Function();
+
+/// 换线路用的播放源，字段语义与 `FxPlayer.open` 的参数一致。
+class FxLineSource {
+  const FxLineSource({
+    required this.url,
+    this.headers = const <String, String>{},
+    this.direct = false,
+  });
+
+  /// 新线路的 m3u8 / 播放地址。
+  final String url;
+
+  /// 新线路需要透传给 mpv 的请求头。
+  final Map<String, String> headers;
+
+  /// 是否为 HLS 直链（走本地分片代理）。
+  final bool direct;
+}
+
 /// 播放器状态快照。
 ///
 /// 字段刻意对齐 video_player 的 `VideoPlayerValue` 常用子集，
@@ -197,12 +219,34 @@ class FxPlayer implements Listenable {
       const Duration(minutes: 5),
       (_) => unawaited(_setCacheLimits(_steadyBufferBytes)),
     );
+    // 稳定性看门狗：只看「字节是否还在流动」，缓冲中不算失败。
+    _watchdogTimer = Timer.periodic(
+      _watchdogTick,
+      (_) => unawaited(_watchdogTickAsync()),
+    );
   }
 
-  /// 起播前向缓存 12MB；首帧后升到 32MB；回看缓存单独压到 8MB。
+  /// 起播前向缓存 12MB（先出画）；首帧 / open 后升到 96MiB，
+  /// 4K 高码率在 seek、网络抖动时不至于瞬间断粮；回看缓存压到 8MB。
   static const int _startupBufferBytes = 12 * 1024 * 1024;
-  static const int _steadyBufferBytes = 32 * 1024 * 1024;
+  static const int _steadyBufferBytes = 96 * 1024 * 1024;
   static const int _backBufferBytes = 8 * 1024 * 1024;
+
+  /// mpv demuxer 预读秒数（demuxer-readahead-secs），配合 96MiB 缓存抗抖动。
+  static const String _readaheadSeconds = '60';
+
+  /// 看门狗采样间隔。
+  static const Duration _watchdogTick = Duration(seconds: 2);
+
+  /// 停摆判定门槛：连续 [stall] 完全没有字节流动才算失败候选
+  /// （原 12 秒太激进，4K 高码率 seek / 起播都可能超过 12 秒）。
+  static const Duration _stallTimeout = Duration(seconds: 30);
+
+  /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
+  static const int _rescueTries = 2;
+
+  /// 救援重开时等待新流首帧 / 时长的上限。
+  static const Duration _rescueOpenTimeout = Duration(seconds: 8);
 
   /// 创建播放器实例。
   ///
@@ -228,6 +272,42 @@ class FxPlayer implements Listenable {
   int _openToken = 0;
   Completer<void>? _ready;
   Timer? _cacheGuardTimer;
+
+  // ------------------------------------------------- 看门狗 / 救援链状态
+
+  /// 无字节流动看门狗（30 秒门槛）。
+  Timer? _watchdogTimer;
+
+  /// 最近一次「有字节流动」的时间；停摆计时从它开始。
+  DateTime _lastFlowAt = DateTime.now();
+  Duration _lastFlowPos = Duration.zero;
+  Duration _lastFlowBuffered = Duration.zero;
+  double _lastFlowPct = -1;
+  int? _lastFlowStreamPos;
+
+  /// 救援链正在执行（防止看门狗 / 错误事件重复进入）。
+  bool _rescueBusy = false;
+
+  /// 救援代际：新的 open / dispose 会推进它，进行中的救援立即让位。
+  int _rescueGen = 0;
+
+  /// 救援重开期间把进度显示钉在原位置，避免 UI / 进度回写读到 0。
+  bool _rescueHold = false;
+
+  /// 停摆期间我们主动点亮的「缓冲中」，恢复后要自己熄灭。
+  bool _stallIndicated = false;
+
+  /// 救援重开时等待新流就绪（首帧 / 时长 / 位置）的信号。
+  Completer<void>? _mediaReady;
+
+  // ------------------------------------------------------ 当前播放源信息
+
+  String _sourceUrl = '';
+  Map<String, String> _sourceHeaders = const <String, String>{};
+  bool _sourceDirect = false;
+  PlayUrlRefresher? _refreshPlay;
+  PlayExpiredCallback? _onPlayExpired;
+  FxLineRescue? _lineRescue;
 
   /// 正在执行的 open（url+headers）：同一地址并发 open 直接复用，防重复。
   _OpenRequest? _opening;
@@ -308,6 +388,10 @@ class FxPlayer implements Listenable {
   /// [refreshPlay] 仅供平台线路（临时签名 m3u8）使用：代理遇到 403/404
   /// 或每 90 秒回调它重新请求 `/api/play?...&fresh=1` 拿新地址。
   /// [onPlayExpired] 在连续两次拿不到新地址时回调，由页面提示切换线路。
+  /// [rescueLines] 是无感救援链第③步：播放中出现任何失败 / 停摆时，
+  /// 播放器内部按 ①refreshPlay 换地址 ②同地址重新 open 并 seek 回原进度
+  /// ③换下一条线路 的顺序静默自救（①②各先试 2 次），三步都失败才把
+  /// 「播放中断」一次性抛给页面；不传则跳过第③步。
   /// 打不开、解码失败或超时会抛出 [FxPlayerException]，方便上层切换备用地址。
   Future<void> open(
     String url, {
@@ -317,6 +401,7 @@ class FxPlayer implements Listenable {
     bool direct = false,
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
+    FxLineRescue? rescueLines,
   }) {
     if (_disposed) {
       return Future<void>.error(const FxPlayerException('播放器已释放'));
@@ -333,6 +418,7 @@ class FxPlayer implements Listenable {
       direct,
       refreshPlay,
       onPlayExpired,
+      rescueLines,
     );
     final request = _OpenRequest(key, future);
     _opening = request;
@@ -363,80 +449,49 @@ class FxPlayer implements Listenable {
     bool direct,
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
+    FxLineRescue? rescueLines,
   ) async {
     final token = ++_openToken;
+    // 新的 open 取代正在进行的救援链。
+    _rescueGen++;
     _cacheRaised = false;
     _value = const FxPlayerValue();
     _notify();
+    // 记住当前播放源：救援链（refresh → 重开 → 换线路）全程要用。
+    _sourceUrl = url;
+    _sourceHeaders = headers;
+    _sourceDirect = direct;
+    _refreshPlay = refreshPlay;
+    _onPlayExpired = onPlayExpired;
+    _lineRescue = rescueLines;
     final ready = Completer<void>();
     _ready = ready;
     // 如果 open 自身先抛错而没来得及 await ready，提前吞掉这个错误，
     // 避免出现未处理的异步异常。
     unawaited(ready.future.catchError((Object _) {}));
     try {
-      // 1) 直链 HLS：本机代理把分片切成多连接 Range 下载并预取。
-      //    代理失败（端口占用 / 拉列表失败 / 超时）就回退直连。
-      var playbackUrl = url;
-      var playbackHeaders = headers;
-      var proxied = false;
-      if (direct) {
-        final proxy = _hlsProxy ??= LocalHlsProxy(log: debugPrint);
-        try {
-          final localUrl = await proxy
-              .proxy(
-                url,
-                headers,
-                refreshPlay: refreshPlay,
-                onPlayExpired: onPlayExpired == null
-                    ? null
-                    : () {
-                        if (_disposed || token != _openToken) return;
-                        onPlayExpired();
-                      },
-              )
-              .timeout(const Duration(seconds: 4));
-          if (_disposed || token != _openToken) return;
-          if (localUrl.isNotEmpty) {
-            playbackUrl = localUrl;
-            playbackHeaders = const <String, String>{};
-            proxied = true;
-          }
-        } catch (error) {
-          debugPrint('FxPlayer: 本地 HLS 代理启动失败，回退直连: $error');
-          // 只有当前这次 open 仍是“最新”时才销毁代理；快速连切时旧 open
-          // 的失败不能把新 open 正在用的代理关掉。
-          if (!_disposed && token == _openToken) {
-            final failed = _hlsProxy;
-            _hlsProxy = null;
-            unawaited(failed?.dispose());
-          }
-        }
+      // 1) 直链 HLS 走本机代理（多连接 Range + 预取），代理失败回退直连；
+      //    非代理路径保留原有 m3u8 预热。被新 open 取代时返回 null 静默让位。
+      final source = await _resolvePlaybackSource(
+        url,
+        headers,
+        direct: direct,
+        token: token,
+        waitForWarm: waitForWarm,
+      );
+      if (source == null) {
+        if (identical(_ready, ready)) _ready = null;
+        return;
       }
-      if (_disposed || token != _openToken) return;
-
-      // 2) 非代理路径保留原有 m3u8 预热；代理路径本身已经拉过列表并预取。
-      if (!proxied) {
-        final warmup = _FxHlsWarmup.prepare(url, headers);
-        if (waitForWarm) {
-          await warmup;
-        } else {
-          unawaited(warmup);
-        }
-      }
-      if (_disposed || token != _openToken) return;
-      // 3) 新一集回到 12MB 小缓冲起步，首帧后再升到 32MB。
-      unawaited(_setCacheLimits(_startupBufferBytes));
-      await _player
-          .open(
-            Media(
-              playbackUrl,
-              httpHeaders: playbackHeaders.isEmpty ? null : playbackHeaders,
-            ),
-            // 5) 立即解除暂停，先出画面，不等 duration / 全部元数据。
-            play: play,
-          )
+      // 2) 交给 mpv：12MB 小缓冲先出画，open 发出后立刻调到 96MiB。
+      await _openMedia(source, play: play, token: token)
           .timeout(readyTimeout);
     } catch (error) {
+      if (_disposed || token != _openToken) {
+        // 已被新的播放请求取代：不报错，也不去污染新 open 的状态。
+        if (identical(_ready, ready)) _ready = null;
+        return;
+      }
       if (identical(_ready, ready)) _ready = null;
       _fail('$error');
       throw FxPlayerException('$error');
@@ -452,18 +507,103 @@ class FxPlayer implements Listenable {
     } finally {
       if (identical(_ready, ready)) _ready = null;
     }
-    // 首帧 / 时长已就绪：把起播小缓冲动态升到 32MB，长播更稳。
+    // 首帧 / 时长已就绪：把起播小缓冲动态升到 96MiB，长播更稳。
     _raiseCacheAfterStart();
   }
 
-  /// 首帧后把前向缓存从 12MB 升到 32MB；每集只升一次。
+  /// 解析出真正交给 mpv 的地址：直链先过本地分片代理（代理失败回退
+  /// 直连），非代理路径做 m3u8 预热。返回 null = 这次 open 已被取代。
+  Future<_PlaybackSource?> _resolvePlaybackSource(
+    String url,
+    Map<String, String> headers, {
+    required bool direct,
+    required int token,
+    required bool waitForWarm,
+  }) async {
+    var playbackUrl = url;
+    var playbackHeaders = headers;
+    var proxied = false;
+    if (direct) {
+      final proxy = _hlsProxy ??= LocalHlsProxy(log: debugPrint);
+      try {
+        final localUrl = await proxy
+            .proxy(
+              url,
+              headers,
+              refreshPlay: _refreshPlay,
+              onPlayExpired: _onPlayExpired == null
+                  ? null
+                  : () {
+                      if (_disposed || token != _openToken) return;
+                      final expired = _onPlayExpired;
+                      if (expired != null) expired();
+                    },
+            )
+            .timeout(const Duration(seconds: 4));
+        if (_disposed || token != _openToken) return null;
+        if (localUrl.isNotEmpty) {
+          playbackUrl = localUrl;
+          playbackHeaders = const <String, String>{};
+          proxied = true;
+        }
+      } catch (error) {
+        debugPrint('FxPlayer: 本地 HLS 代理启动失败，回退直连: $error');
+        // 只有当前这次 open 仍是“最新”时才销毁代理；快速连切时旧 open
+        // 的失败不能把新 open 正在用的代理关掉。
+        if (!_disposed && token == _openToken) {
+          final failed = _hlsProxy;
+          _hlsProxy = null;
+          unawaited(failed?.dispose());
+        }
+      }
+    }
+    if (_disposed || token != _openToken) return null;
+
+    // 非代理路径保留原有 m3u8 预热；代理路径本身已经拉过列表并预取。
+    if (!proxied) {
+      final warmup = _FxHlsWarmup.prepare(url, headers);
+      if (waitForWarm) {
+        await warmup;
+      } else {
+        unawaited(warmup);
+      }
+    }
+    if (_disposed || token != _openToken) return null;
+    return _PlaybackSource(playbackUrl, playbackHeaders);
+  }
+
+  /// 把地址交给 mpv：先按 12MB 小缓冲起播（首帧优先），open 一发出就
+  /// 把 demuxer 缓存放大到 96MiB + readahead 60s（4K 高码率抗抖动）。
+  Future<void> _openMedia(
+    _PlaybackSource source, {
+    required bool play,
+    required int token,
+  }) async {
+    await _setCacheLimits(_startupBufferBytes);
+    if (_disposed || token != _openToken) {
+      throw StateError('open 已被新的播放请求取代');
+    }
+    final opening = _player.open(
+      Media(
+        source.url,
+        httpHeaders: source.headers.isEmpty ? null : source.headers,
+      ),
+      // 立即解除暂停，先出画面，不等 duration / 全部元数据。
+      play: play,
+    );
+    unawaited(_setCacheLimits(_steadyBufferBytes));
+    await opening;
+  }
+
+  /// 首帧后把前向缓存从 12MB 升到 96MiB；每集只升一次。
   void _raiseCacheAfterStart() {
     if (_disposed || _cacheRaised) return;
     _cacheRaised = true;
     unawaited(_setCacheLimits(_steadyBufferBytes));
   }
 
-  /// 限制 demuxer 前向 / 回看缓存；mpv 在播放中会按新上限回收旧缓存，
+  /// 限制 demuxer 前向 / 回看缓存并固定 60 秒预读（demuxer-readahead-secs，
+  /// 4K 高码率 seek / 抖动后不至于瞬间断粮）；mpv 会按新上限回收旧缓存，
   /// 长播时不会因为回看缓存累积而内存无限增长。
   Future<void> _setCacheLimits(int forwardBytes) async {
     if (_disposed) return;
@@ -474,6 +614,10 @@ class FxPlayer implements Listenable {
       await platform.setProperty(
         'demuxer-max-back-bytes',
         '$_backBufferBytes',
+      );
+      await platform.setProperty(
+        'demuxer-readahead-secs',
+        _readaheadSeconds,
       );
     } catch (_) {
       // 旧版本 / 特殊平台没有这些属性时静默跳过。
@@ -528,6 +672,11 @@ class FxPlayer implements Listenable {
     if (_disposed) return;
     _disposed = true;
     _openToken++;
+    // 救援链 / 看门狗在释放后一律停手。
+    _rescueGen++;
+    _rescueBusy = false;
+    _watchdogTimer?.cancel();
+    _watchdogTimer = null;
     _cacheGuardTimer?.cancel();
     _cacheGuardTimer = null;
     _opening = null;
@@ -535,6 +684,11 @@ class FxPlayer implements Listenable {
     _ready = null;
     if (ready != null && !ready.isCompleted) {
       ready.completeError(const FxPlayerException('播放器已释放'));
+    }
+    final mediaReady = _mediaReady;
+    _mediaReady = null;
+    if (mediaReady != null && !mediaReady.isCompleted) {
+      mediaReady.completeError(const FxPlayerException('播放器已释放'));
     }
     for (final subscription in _subscriptions) {
       unawaited(subscription.cancel());
@@ -561,7 +715,11 @@ class FxPlayer implements Listenable {
   void _bindStreams() {
     _subscriptions.add(
       _player.stream.position.listen((position) {
+        // 救援重开期间新流的 position 会先归零：保留原进度显示，
+        // 避免 UI 进度条 / 观看进度回写读到 0。
+        if (_rescueHold && position <= Duration.zero) return;
         final initialized = _value.isInitialized || position > Duration.zero;
+        if (position > Duration.zero) _signalMediaReady();
         _setValue(
           _value.copyWith(
             isInitialized: initialized,
@@ -572,6 +730,7 @@ class FxPlayer implements Listenable {
     );
     _subscriptions.add(
       _player.stream.duration.listen((duration) {
+        if (duration > Duration.zero) _signalMediaReady();
         _setValue(
           _value.copyWith(
             isInitialized: _value.isInitialized || duration > Duration.zero,
@@ -634,6 +793,8 @@ class FxPlayer implements Listenable {
     }
     if (hasSize) {
       aspect = width / height;
+      // 新流出画面尺寸 = 首帧就绪信号（救援重开用它判断这步是否成功）。
+      _signalMediaReady();
     }
     _setValue(
       _value.copyWith(
@@ -647,11 +808,36 @@ class FxPlayer implements Listenable {
     );
   }
 
+  /// mpv / media_kit 报错入口。
+  ///
+  /// - seek / 切集时 mpv 主动取消产生的 canceled 不算失败（也不会触发
+  ///   refreshPlay / onPlayExpired）；
+  /// - 首帧还没出来：保持旧行为，把错误抛给 open 的调用方去试备用地址；
+  /// - 首帧之后的任何失败：静默进入三步救援链，期间只显示「缓冲中」。
   void _onError(String message) {
     if (_disposed) return;
+    if (_looksCancelled(message)) {
+      _logFx('忽略 mpv 取消事件(cancelled 不算失败): $message');
+      return;
+    }
+    // 救援重开正在等新流就绪：立刻结束等待，让这一步判失败。
+    final mediaReady = _mediaReady;
+    if (mediaReady != null && !mediaReady.isCompleted) {
+      mediaReady.completeError(FxPlayerException(message));
+    }
+    final ready = _ready;
+    if (ready == null && _value.isInitialized) {
+      // 播放中出错：静默走救援链，绝不弹错误层。
+      _logFx('播放中报错，进入救援链: $message');
+      _stallIndicated = true;
+      _setValue(
+        _value.copyWith(hasError: false, errorText: '', isBuffering: true),
+      );
+      unawaited(_runRescue('播放错误: $message'));
+      return;
+    }
     _value = _value.copyWith(hasError: true, errorText: message);
     _notify();
-    final ready = _ready;
     if (ready != null && !ready.isCompleted) {
       ready.completeError(FxPlayerException(message));
     }
@@ -661,6 +847,282 @@ class FxPlayer implements Listenable {
     if (_disposed) return;
     _value = _value.copyWith(hasError: true, errorText: message);
     _notify();
+  }
+
+  // ------------------------------------------------- 看门狗 / 无感救援链
+
+  /// 每 2 秒采样一次：只有「完全无字节流动」才累计停摆时间。
+  ///
+  /// 缓冲中（字节仍在进来）绝不计入失败，也不弹错误层，只让页面显示
+  /// 「缓冲中 xx%」；连续 [_stallTimeout]（30 秒）毫无流动才进救援链。
+  Future<void> _watchdogTickAsync() async {
+    if (_disposed || _rescueBusy) return;
+    final v = _value;
+    // 救援 / 最终失败之后都由新的 open 接管，看门狗不再自作主张。
+    if (v.hasError) return;
+    if (_opening != null ||
+        _ready != null ||
+        !v.isInitialized ||
+        v.isCompleted) {
+      _lastFlowAt = DateTime.now();
+      return;
+    }
+    // 用户主动暂停（非缓冲暂停）的时间不计入停摆。
+    if (!v.isPlaying && !v.isBuffering) {
+      _lastFlowAt = DateTime.now();
+      _clearStallIndication();
+      return;
+    }
+    final flowing = await _bytesFlowing();
+    if (_disposed || _rescueBusy) return;
+    if (flowing) {
+      _lastFlowAt = DateTime.now();
+      _clearStallIndication();
+      return;
+    }
+    // 没有字节流动：只亮「缓冲中 xx%」，错误层一步都不碰。
+    if (!_stallIndicated) {
+      _stallIndicated = true;
+      _setValue(_value.copyWith(isBuffering: true));
+    }
+    final stalled = DateTime.now().difference(_lastFlowAt);
+    if (stalled < _stallTimeout) return;
+    unawaited(_runRescue('连续 ${stalled.inSeconds}s 无字节流动'));
+  }
+
+  /// 字节是否还在流动：位置 / 已缓存时长 / 缓冲百分比 / stream-pos
+  /// 任一有变化即算流动，只有全都纹丝不动才算停摆。
+  Future<bool> _bytesFlowing() async {
+    final v = _value;
+    final posMoved = v.position != _lastFlowPos;
+    final bufferedMoved = v.buffered != _lastFlowBuffered;
+    final pctMoved = v.bufferingPercentage != _lastFlowPct;
+    _lastFlowPos = v.position;
+    _lastFlowBuffered = v.buffered;
+    _lastFlowPct = v.bufferingPercentage;
+    var streamMoved = false;
+    final streamPos = await _readStreamPos();
+    if (streamPos != null) {
+      final previous = _lastFlowStreamPos;
+      _lastFlowStreamPos = streamPos;
+      // 首次采样视为有流动，避免刚起播就误判停摆。
+      streamMoved = previous == null || previous != streamPos;
+    }
+    if (_disposed) return true;
+    return posMoved || bufferedMoved || pctMoved || streamMoved;
+  }
+
+  /// 读 mpv 的 stream-pos（当前流的字节位置）；读不到就退回
+  /// position / 缓存时长这些信号，不影响看门狗工作。
+  Future<int?> _readStreamPos() async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return null;
+    try {
+      final raw = await platform.getProperty(
+        'stream-pos',
+        waitForInitialization: false,
+      );
+      return int.tryParse(raw.trim());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 字节恢复流动 / 暂停：熄灭我们自己点亮的「缓冲中」。
+  void _clearStallIndication() {
+    if (!_stallIndicated) return;
+    _stallIndicated = false;
+    _setValue(_value.copyWith(isBuffering: false));
+  }
+
+  /// 救援重开时的新流就绪信号（首帧 / 时长 / 位置任一到达）。
+  void _signalMediaReady() {
+    final completer = _mediaReady;
+    if (completer != null && !completer.isCompleted) completer.complete();
+  }
+
+  static bool _looksCancelled(String message) {
+    final lower = message.toLowerCase();
+    return lower.contains('cancel') || lower.contains('abort');
+  }
+
+  /// 播放器诊断日志：控制台 + `<App 私有目录>/logs/proxy.log` 双写，
+  /// 救援链的每一步与结果都落盘，作为掉线根因证据。
+  static void _logFx(String message) {
+    debugPrint('FxPlayer: $message');
+    HlsProxyLog.write('FX $message');
+  }
+
+  static String _shortUrl(String url) =>
+      url.length <= 120 ? url : '${url.substring(0, 117)}...';
+
+  /// 无感救援链：① refreshPlay 换地址 ② 同地址重新 open 并 seek 回原进度
+  /// ③ 换下一条线路 seek 回原进度；①② 各先试 2 次。
+  /// 全程静默（画面保持 + 「缓冲中」），三步都失败才报一次「播放中断」。
+  /// 直播（[live]）不 seek，步骤② 直接重 open 直播地址。
+  Future<void> _runRescue(String reason) async {
+    if (_disposed || _rescueBusy || _value.hasError) return;
+    _rescueBusy = true;
+    final gen = _rescueGen;
+    final resume = _value.position;
+    final live = _value.duration <= Duration.zero;
+    _stallIndicated = true;
+    _rescueHold = true;
+    _setValue(
+      _value.copyWith(isBuffering: true, hasError: false, errorText: ''),
+    );
+    _logFx('RESCUE 开始：$reason；进度 ${resume.inSeconds}s live=$live');
+    try {
+      // ① refreshPlay 换新地址（最多 2 次）
+      final refresher = _refreshPlay;
+      if (refresher == null) {
+        _logFx('RESCUE ①-refresh 跳过：本次播放没有 refreshPlay');
+      } else {
+        for (var i = 1; i <= _rescueTries; i++) {
+          if (_disposed || gen != _rescueGen) return;
+          final fresh = await _safeRefreshPlay(refresher);
+          if (fresh == null) {
+            _logFx('RESCUE ①-refresh#$i 未拿到新地址');
+            continue;
+          }
+          _logFx('RESCUE ①-refresh#$i 换地址重开 ${_shortUrl(fresh)}');
+          final ok = await _rescueOpen(
+            fresh,
+            _sourceHeaders,
+            direct: _sourceDirect,
+            resume: resume,
+            live: live,
+            gen: gen,
+          );
+          _logFx('RESCUE ①-refresh#$i ${ok ? '成功' : '失败'}');
+          if (ok) return;
+        }
+      }
+
+      // ② 同地址重新 open（最多 2 次；直播走这里直接重开直播地址）
+      for (var i = 1; i <= _rescueTries; i++) {
+        if (_disposed || gen != _rescueGen) return;
+        _logFx('RESCUE ②-reopen#$i ${_shortUrl(_sourceUrl)}');
+        final ok = await _rescueOpen(
+          _sourceUrl,
+          _sourceHeaders,
+          direct: _sourceDirect,
+          resume: resume,
+          live: live,
+          gen: gen,
+        );
+        _logFx('RESCUE ②-reopen#$i ${ok ? '成功' : '失败'}');
+        if (ok) return;
+      }
+
+      // ③ 换下一条线路 seek 回原进度
+      final switcher = _lineRescue;
+      if (switcher == null) {
+        _logFx('RESCUE ③-next-line 跳过：页面未提供换线 hook');
+      } else if (!_disposed && gen == _rescueGen) {
+        FxLineSource? next;
+        try {
+          next = await switcher();
+        } catch (error) {
+          _logFx('RESCUE ③-next-line 取址失败: $error');
+        }
+        if (next == null) {
+          _logFx('RESCUE ③-next-line 没有下一条线路');
+        } else if (!_disposed && gen == _rescueGen) {
+          _logFx('RESCUE ③-next-line 换线重开 ${_shortUrl(next.url)}');
+          final ok = await _rescueOpen(
+            next.url,
+            next.headers,
+            direct: next.direct,
+            resume: resume,
+            live: live,
+            gen: gen,
+          );
+          _logFx('RESCUE ③-next-line ${ok ? '成功' : '失败'}');
+          if (ok) return;
+        }
+      }
+
+      if (_disposed || gen != _rescueGen) return;
+      _logFx('RESCUE 三步全部失败 → 播放中断');
+      _stallIndicated = false;
+      _fail('播放中断，自动恢复失败，请重试或切换线路');
+    } finally {
+      _rescueBusy = false;
+      _rescueHold = false;
+    }
+  }
+
+  Future<String?> _safeRefreshPlay(PlayUrlRefresher refresher) async {
+    try {
+      final raw = await refresher().timeout(const Duration(seconds: 15));
+      final url = raw?.trim() ?? '';
+      return url.isEmpty ? null : url;
+    } catch (error) {
+      _logFx('RESCUE ①-refresh 调用失败: $error');
+      return null;
+    }
+  }
+
+  /// 救援链的一步：解析地址（代理 / 直连）→ 重新 open → 等新流就绪 →
+  /// seek 回原进度 → 恢复播放。返回这一步是否成功。
+  Future<bool> _rescueOpen(
+    String url,
+    Map<String, String> headers, {
+    required bool direct,
+    required Duration resume,
+    required bool live,
+    required int gen,
+  }) async {
+    if (_disposed || gen != _rescueGen) return false;
+    final token = ++_openToken;
+    try {
+      final source = await _resolvePlaybackSource(
+        url,
+        headers,
+        direct: direct,
+        token: token,
+        waitForWarm: false,
+      );
+      if (source == null || _disposed || token != _openToken) {
+        _logFx('RESCUE 地址解析被取代或失败');
+        return false;
+      }
+      final mediaReady = Completer<void>();
+      // 提前挂一个空错误监听，避免等待期间出错变成未处理异常。
+      unawaited(mediaReady.future.catchError((Object _) {}));
+      _mediaReady = mediaReady;
+      try {
+        await _openMedia(source, play: true, token: token)
+            .timeout(_rescueOpenTimeout);
+        if (_disposed || token != _openToken) return false;
+        await mediaReady.future.timeout(_rescueOpenTimeout);
+      } on TimeoutException {
+        _logFx('RESCUE 等新流首帧超时(${_rescueOpenTimeout.inSeconds}s)');
+        return false;
+      } catch (error) {
+        _logFx('RESCUE 重开失败: $error');
+        return false;
+      } finally {
+        if (identical(_mediaReady, mediaReady)) _mediaReady = null;
+      }
+      if (_disposed || token != _openToken) return false;
+      if (!live && resume > Duration.zero) {
+        try {
+          await _player.seek(resume);
+          _logFx('RESCUE 已 seek 回 ${resume.inSeconds}s');
+        } catch (error) {
+          _logFx('RESCUE seek 回原进度失败: $error');
+        }
+      }
+      await _player.play();
+      _stallIndicated = false;
+      _lastFlowAt = DateTime.now();
+      return true;
+    } catch (error) {
+      _logFx('RESCUE 重开异常: $error');
+      return false;
+    }
   }
 
   void _setValue(FxPlayerValue next) {
@@ -729,6 +1191,14 @@ class _OpenRequest {
 
   final String key;
   final Future<void> future;
+}
+
+/// 解析完成后真正交给 mpv 的地址（可能已被本地 HLS 代理改写）。
+class _PlaybackSource {
+  const _PlaybackSource(this.url, this.headers);
+
+  final String url;
+  final Map<String, String> headers;
 }
 
 /// /api/play 结果缓存 + 下一集预解析（只请求，不创建播放器）。
