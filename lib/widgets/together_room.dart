@@ -10,6 +10,7 @@ import '../services/fx_player.dart';
 import '../theme.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
+import 'together_floating_chat.dart';
 import 'together_ui.dart';
 
 /* ========================================================================== */
@@ -228,14 +229,20 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               child: _buildVideo(context),
             ),
             if (!keyboard) _buildInfo(context),
-            Expanded(child: _buildChat(context)),
-            SafeArea(
-              top: false,
-              child: TogetherComposer(
-                enabled: true,
-                compact: keyboard,
-                hint: widget.online ? '说点什么…' : '正在重连，消息会保留可重试',
-                onSend: widget.onSendChat,
+            // 聊天改成悬浮层（右下角小标志 + 透明气泡），不再占屏幕。
+            // 观看时画面不被挤压，消息又不丢：未读数标在标志上。
+            Expanded(
+              child: Stack(
+                children: [
+                  // 键盘弹起时旧消息列表让位（气泡里能看到最新几条），
+                  // 避免「列表 + 气泡 + 键盘」三份内容挤在一起。
+                  if (!keyboard) _buildChat(context),
+                  TogetherFloatingChat(
+                    chat: widget.chat,
+                    onSend: widget.onSendChat,
+                    enabled: widget.online,
+                  ),
+                ],
               ),
             ),
           ],
