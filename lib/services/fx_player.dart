@@ -558,6 +558,10 @@ class FxPlayer implements Listenable {
     if (direct) {
       final proxy = _hlsProxy ??= LocalHlsProxy(log: debugPrint);
       try {
+        // 超时不能在 4 秒就放弃代理：平台线路首次代理要做签名重写 +
+        // 拉整集列表，很容易超过 4 秒。一旦超时就会回退直连并销毁代理，
+        // 之后所有抖动都直连裸奔 —— 这就是「掉线」的主因。
+        // 放宽到 20 秒，且超时只当作「这次慢」而不是「代理不可用」。
         final localUrl = await proxy
             .proxy(
               url,
@@ -571,7 +575,7 @@ class FxPlayer implements Listenable {
                       if (expired != null) expired();
                     },
             )
-            .timeout(const Duration(seconds: 4));
+            .timeout(const Duration(seconds: 20));
         if (_disposed || token != _openToken) return null;
         if (localUrl.isNotEmpty) {
           playbackUrl = localUrl;
@@ -579,14 +583,10 @@ class FxPlayer implements Listenable {
           proxied = true;
         }
       } catch (error) {
-        debugPrint('FxPlayer: 本地 HLS 代理启动失败，回退直连: $error');
-        // 只有当前这次 open 仍是“最新”时才销毁代理；快速连切时旧 open
-        // 的失败不能把新 open 正在用的代理关掉。
-        if (!_disposed && token == _openToken) {
-          final failed = _hlsProxy;
-          _hlsProxy = null;
-          unawaited(failed?.dispose());
-        }
+        debugPrint('FxPlayer: 本地 HLS 代理本次启动失败，回退直连: $error');
+        // 注意：不销毁代理。之前失败就 dispose + 置空，导致后面整段播放
+        // 都直连裸奔（失去整集预热、失去签名刷新），表现就是「经常掉线」。
+        // 代理实例本身是好的，只是这一次没能在时限内就绪，留着给下次复用。
       }
     }
     if (_disposed || token != _openToken) return null;

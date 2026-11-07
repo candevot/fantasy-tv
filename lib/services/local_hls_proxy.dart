@@ -286,6 +286,9 @@ class LocalHlsProxy {
 
   /// 最近一次播放器请求分片的时间，用于让预取避让。
   DateTime _lastPlaybackAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 正在跑的预取任务，seek 时统一标记取消。
+  final Set<_PrefetchTask> _prefetchRunning = <_PrefetchTask>{};
   int _generation = 0;
   int _tempSerial = 0;
   bool _refreshing = false;
@@ -1802,12 +1805,29 @@ class LocalHlsProxy {
     if (jumped) {
       _prefetchQueue.clear();
       _prefetchQueued.clear();
+      // 关键：把正在下载的预取也停掉。只清队列是不够的 —— 在跑的那几个
+      // 仍占着连接和带宽，seek 的分片还得排在它们后面。
+      for (final task in _prefetchRunning) {
+        task.cancelled = true;
+      }
     }
+  }
+
+  /// 预取并发按实测带宽动态定：网络快就多开几路把整集早点存完，
+  /// 网络一般就少开，避免和播放抢带宽。用户环境差异大，不能写死。
+  int get _effectivePrefetchConcurrency {
+    final speed = recentThroughput;
+    if (speed == null) return math.min(prefetchConcurrency, 2);
+    final mbps = speed / (1024 * 1024);
+    if (mbps >= 8) return math.max(prefetchConcurrency, 4);
+    if (mbps >= 3) return math.max(prefetchConcurrency, 3);
+    return math.min(prefetchConcurrency, 2);
   }
 
   void _pumpPrefetch() {
     if (_disposed) return;
-    while (_prefetchActive < prefetchConcurrency && _prefetchQueue.isNotEmpty) {
+    final limit = _effectivePrefetchConcurrency;
+    while (_prefetchActive < limit && _prefetchQueue.isNotEmpty) {
       final task = _prefetchQueue.removeAt(0);
       _prefetchActive++;
       unawaited(_runPrefetch(task));
@@ -1816,22 +1836,29 @@ class LocalHlsProxy {
 
   Future<void> _runPrefetch(_PrefetchTask task) async {
     final stopwatch = Stopwatch()..start();
+    _prefetchRunning.add(task);
     try {
-      if (_disposed || task.generation != _generation) return;
+      if (_disposed || task.cancelled || task.generation != _generation) return;
       // 播放刚请求过片子（最近 500ms 内有活动）：预取让一步，
       // 把连接和带宽优先留给正在播的位置。
       if (DateTime.now().difference(_lastPlaybackAt).inMilliseconds < 500) {
         await Future<void>.delayed(const Duration(milliseconds: 120));
-        if (_disposed || task.generation != _generation) return;
+        if (_disposed || task.cancelled || task.generation != _generation) {
+          return;
+        }
       }
       final data = await _loadSegment(task.segment);
+      if (task.cancelled) return; // 下载完才发现已 seek：不进缓存也不记日志
       _log(
         '预取完成 ${_short(task.segment.uri)} '
         '${_formatBytes(data.bytes.length)} ${stopwatch.elapsedMilliseconds}ms',
       );
     } catch (error) {
-      _log('预取失败 ${_short(task.segment.uri)}: $error');
+      if (!task.cancelled) {
+        _log('预取失败 ${_short(task.segment.uri)}: $error');
+      }
     } finally {
+      _prefetchRunning.remove(task);
       _prefetchQueued.remove(task.cacheKey);
       _prefetchActive--;
       _pumpPrefetch();
@@ -2598,11 +2625,16 @@ class _SegmentAlias {
 }
 
 class _PrefetchTask {
-  const _PrefetchTask(this.segment, this.generation, this.cacheKey);
+  _PrefetchTask(this.segment, this.generation, this.cacheKey);
 
   final _SegmentRef segment;
   final int generation;
   final String cacheKey;
+
+  /// seek 时把在跑的预取标废：它在下一次 await 后自行退出，
+  /// 并立刻释放连接给正在播的分片。腾讯能做到「怎么拖都秒播」，
+  /// 靠的就是拖动瞬间把非目标请求全部让路。
+  bool cancelled = false;
 }
 
 class _SegmentData {
