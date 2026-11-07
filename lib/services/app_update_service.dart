@@ -231,12 +231,14 @@ class AppUpdateService {
         throw AppUpdateException('下载失败：服务器返回的不是安装包');
       }
 
-      final dir = Directory(
-        '${(await getTemporaryDirectory()).path}${Platform.pathSeparator}updates',
-      );
+      // 直接下到用户能找到的地方：优先公共 Download 目录
+      // （/sdcard/Download/幻想影视/），拿不到权限再退回应用私有目录。
+      // 之前下到应用缓存 updates/ 里，用户在文件管理器里根本找不到，
+      // 更新完就没法再手动安装 / 转发给别人。
+      final dir = await _updateDownloadDir();
       await dir.create(recursive: true);
       final file = File(
-        '${dir.path}${Platform.pathSeparator}fantasy_update.apk',
+        '${dir.path}${Platform.pathSeparator}${_updateFileName()}',
       );
       final sink = file.openWrite();
       final clen = response.contentLength;
@@ -270,6 +272,56 @@ class AppUpdateService {
     } finally {
       client.close();
     }
+  }
+
+  /// 更新包的落盘目录。
+  ///
+  /// Android 的公共下载目录是 `/storage/emulated/0/Download`；App 通过
+  /// 系统提供的 Download 目录 API 拿到的通常是应用专属子目录，
+  /// 这里优先用 `/sdcard/Download/幻想影视`，写不进去再退回私有目录。
+  static Future<Directory> _updateDownloadDir() async {
+    if (Platform.isAndroid) {
+      for (final path in const <String>[
+        '/sdcard/Download/幻想影视',
+        '/storage/emulated/0/Download/幻想影视',
+      ]) {
+        try {
+          final dir = Directory(path);
+          await dir.create(recursive: true);
+          // 试写一个探针文件确认真的有权限（create 成功不代表可写）。
+          final probe = File('${dir.path}/.w');
+          await probe.writeAsString('1', flush: false);
+          await probe.delete();
+          return dir;
+        } catch (_) {
+          // 没权限就试下一个。
+        }
+      }
+    }
+    return Directory(
+      '${(await getTemporaryDirectory()).path}${Platform.pathSeparator}updates',
+    );
+  }
+
+  /// 安装包文件名带版本号和时间，用户一眼能看出是哪个版本、什么时候下的。
+  /// 形如：幻想影视-v4.4-20261107-2315.apk
+  static String _updateFileName() {
+    final now = DateTime.now();
+    String two(int v) => v < 10 ? '0$v' : '$v';
+    final stamp = '${now.year}${two(now.month)}${two(now.day)}'
+        '-${two(now.hour)}${two(now.minute)}';
+    final version = AppInfo.displayVersion.replaceAll(RegExp(r'[^0-9A-Za-z._-]'), '');
+    return '幻想影视-v$version-$stamp.apk';
+  }
+
+  /// 给用户看的短路径：/sdcard/Download/... 显示成 Download/...，
+  /// 私有目录则显示成「应用缓存」。
+  static String shortPath(String path) {
+    if (path.contains('/Download/')) {
+      final i = path.indexOf('/Download/');
+      return path.substring(i + 1);
+    }
+    return '应用缓存目录';
   }
 
   /// 调起系统安装器安装本地 APK（Android 8+ 走 FileProvider）。

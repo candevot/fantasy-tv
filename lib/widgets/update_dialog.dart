@@ -70,6 +70,10 @@ class _AppUpdateDialogState extends State<AppUpdateDialog> {
       // 下载期间用户关掉了弹窗：不再调起安装器打断用户。
       if (!mounted) return;
       setState(() => _progress = 1.0);
+      // 明确告诉用户安装包存到哪了：以后想重装 / 转发给别人能找到。
+      if (mounted) {
+        fxToast(context, '安装包已保存：${AppUpdateService.shortPath(file.path)}');
+      }
       await AppUpdateService.installApk(file);
       if (!mounted) return;
       // 安装器已接管，弹窗留着也没意义。
