@@ -3,7 +3,9 @@
 /*                                                                            */
 /*  · 时钟：offset = serverTime - 本地中点，取 3 次 ping 的中位数；             */
 /*  · 进度：expect = position + (now + offset - serverTime) / 1000；           */
-/*  · 纠偏：< 0.4s 不动，0.4–1.5s 微调 ±0.05 倍速，> 1.5s 硬 seek 一次。       */
+/*  · 纠偏：< 0.4s 不动，0.4–1.5s 微调 ±0.05 倍速，> 1.5s 硬 seek 一次；        */
+/*  · 房主缓冲：position 停住而时钟照走 → 判 stall，成员冻结期望、先降速吸收， */
+/*    落后太多就原地保持（暂停）等房主恢复，全程不往回跳。                      */
 /* ========================================================================== */
 
 /// 进度死区：小于该误差不调整，避免播放器/测量抖动导致反复变速。
@@ -22,7 +24,71 @@ const int togetherSeekCooldownMs = 2000;
 const double togetherMinRate = 0.25;
 const double togetherMaxRate = 4.0;
 
+/// 权威状态两次上报的间隔小于该值时，不足以判断房主是否卡住（心跳 9s、
+/// 缓冲上报 1s，正常都在这个量级以上）。
+const int togetherStallMinGapMs = 500;
+
+/// 「真实后退」门槛：position 往回走超过该秒数才可能是房主拖动进度；
+/// 小于它的回退一律视为房主端读数抖动（关键帧 / 段重载）。
+const double togetherStallFrozenBand = 0.5;
+
+/// 权威推进量低于 gap*rate 的该比例、且期望进度已经落后本地 → 房主在缓冲。
+const double togetherStallAdvanceRatio = 0.5;
+
+/// 房主缓冲期间成员落后多少就原地保持（暂停）而不是继续往前跑。
+const double togetherStallHoldDrift = 1.5;
+
+/// 保持期间落后回到该值以内就恢复播放（留 0.4s 死区，避免抖动式恢复）。
+const double togetherStallResumeDrift = 0.4;
+
+/// 房主停滞状态的最长保持时间：超时视为房主已断开，恢复正常外推。
+const int togetherStallTimeoutMs = 15000;
+
+/// 成员持续领先超过该时长、且超出硬 seek 阈值时，才允许往回跳。
+const int togetherBackSeekPersistMs = 1500;
+
+/// 时钟 offset 单次跳变超过该值时，先延长 seek 冷却吸收，不立刻纠偏。
+const int togetherClockJumpGuardMs = 300;
+
+/// 房主 position 读数持续回退超过该时长才如实上报（真实拖动进度）。
+const int togetherHostBacktrackGraceMs = 5000;
+
 enum TogetherSyncMove { none, rate, seek }
+
+/// 权威 state 相对上一份状态的变化类型。
+enum TogetherAuthorityChange {
+  /// 正常推进 / 小幅抖动：交给常规纠偏处理。
+  normal,
+
+  /// 房主主动拖动进度（前拖或后拖）：成员直接对齐。
+  seek,
+
+  /// 房主卡在缓冲：position 停住而房间时钟照走，成员不回跳。
+  stall,
+}
+
+class TogetherAuthorityVerdict {
+  const TogetherAuthorityVerdict({
+    required this.change,
+    this.gapMs = 0,
+    this.advance = 0,
+    this.deviation = 0,
+  });
+
+  final TogetherAuthorityChange change;
+
+  /// 两次权威上报之间的服务器时间差（毫秒）。
+  final int gapMs;
+
+  /// 权威 position 的实际推进量（秒）。
+  final double advance;
+
+  /// 权威 position 相对上一份状态外推值的偏差（秒，负 = 落后）。
+  final double deviation;
+
+  bool get isSeek => change == TogetherAuthorityChange.seek;
+  bool get isStall => change == TogetherAuthorityChange.stall;
+}
 
 class TogetherSyncDecision {
   const TogetherSyncDecision.none()
@@ -51,13 +117,16 @@ double togetherClampRate(double value) {
 /// 根据期望位置与本地位置的偏差决定下一步动作。
 ///
 /// [playing] 为 false 时无法用倍速追进度，只会在误差超过硬 seek 阈值时跳一次；
-/// [allowRate] 为 false 表示当前播放内核不支持足够精度的倍速微调，等下一次同步。
+/// [allowRate] 为 false 表示当前播放内核不支持足够精度的倍速微调，等下一次同步；
+/// [allowBackwardSeek] 为 false 时禁止「往回跳」（成员领先的一侧）——负向误差
+/// 先降速吸收，只有持续超出硬 seek 阈值（房主没在缓冲）才允许回跳。
 TogetherSyncDecision decideTogetherDrift({
   required double expected,
   required double current,
   required bool playing,
   required double baseRate,
   bool allowRate = true,
+  bool allowBackwardSeek = true,
 }) {
   if (!expected.isFinite || !current.isFinite) {
     return const TogetherSyncDecision.none();
@@ -67,6 +136,16 @@ TogetherSyncDecision decideTogetherDrift({
     return const TogetherSyncDecision.none();
   }
   if (drift.abs() > togetherDriftSeek) {
+    // 负向（成员领先）默认也直接回跳；房主缓冲 / 读数回退等场景会关掉它，
+    // 改成降速吸收，避免成员被反复拉回去。
+    if (drift < 0 && !allowBackwardSeek) {
+      if (playing && allowRate) {
+        return TogetherSyncDecision.rate(
+          togetherClampRate(baseRate - togetherMicroRateStep),
+        );
+      }
+      return const TogetherSyncDecision.none();
+    }
     return TogetherSyncDecision.seek(expected);
   }
   if (playing && allowRate) {
@@ -95,10 +174,68 @@ double togetherExpectedPosition({
   return value > 86400 ? 86400 : value;
 }
 
-/// 判断新 state 是否代表房主主动 seek（而不是正常播放推进 / 心跳）。
+/// 判断两份权威 state 之间发生了什么：正常推进 / 房主主动 seek / 房主卡缓冲。
 ///
-/// 正常心跳的 position 会随服务端时间前进；用上一份权威状态推算当前位置，
-/// 只有明显偏离（>0.5s）才视为 seek，避免把心跳误判成跳转。
+/// 房主缓冲时 position 会停住（甚至因段重载、关键帧对齐小幅回退），而房间
+/// 时钟 serverTime 照走；旧逻辑只要偏差 >0.5s 就当 seek 直接硬跳，于是房主
+/// 卡一下成员就被拉回去一次。这里按「推进量」区分：
+///
+///  · position 明显前进或后退（>1.5s 偏差，且真的动了）→ seek；
+///  · position 停住 / 慢推进、期望进度落后 → stall（房主在缓冲，成员别回跳）；
+///  · 其余 → normal，交给常规纠偏。
+TogetherAuthorityVerdict classifyTogetherAuthority({
+  required double prevPosition,
+  required int prevServerTime,
+  required bool prevPlaying,
+  required double prevRate,
+  required double position,
+  required int serverTime,
+  required bool playing,
+}) {
+  const normal = TogetherAuthorityVerdict(change: TogetherAuthorityChange.normal);
+  if (prevServerTime <= 0 || serverTime <= 0) return normal;
+  final gapMs = serverTime - prevServerTime;
+  if (gapMs < 0) return normal;
+  final gap = gapMs / 1000.0;
+  final rate = togetherClampRate(prevRate);
+  final expected = prevPosition + (prevPlaying ? gap * rate : 0);
+  final deviation = position - expected;
+  final advance = position - prevPosition;
+  TogetherAuthorityVerdict verdict(TogetherAuthorityChange change) =>
+      TogetherAuthorityVerdict(
+        change: change,
+        gapMs: gapMs,
+        advance: advance,
+        deviation: deviation,
+      );
+
+  // 暂停期间 position 只可能来自房主拖动：沿用 0.5s 阈值。
+  if (!(prevPlaying && playing)) {
+    return deviation.abs() > 0.5
+        ? verdict(TogetherAuthorityChange.seek)
+        : normal;
+  }
+  // 明显前拖。
+  if (deviation > togetherDriftSeek) {
+    return verdict(TogetherAuthorityChange.seek);
+  }
+  // 真实后退（房主往回拖 / 房主端确实回退过）：position 往回走了才算。
+  if (deviation < -togetherDriftSeek && advance < -togetherStallFrozenBand) {
+    return verdict(TogetherAuthorityChange.seek);
+  }
+  // 位置停住或慢推进、而期望进度已经落后 → 房主在缓冲。
+  if (gapMs >= togetherStallMinGapMs &&
+      advance < togetherStallAdvanceRatio * gap * rate &&
+      deviation < -togetherDriftDeadband) {
+    return verdict(TogetherAuthorityChange.stall);
+  }
+  return normal;
+}
+
+/// 判断新 state 是否代表房主主动 seek（而不是正常播放推进 / 心跳 / 缓冲）。
+///
+/// 只取 [classifyTogetherAuthority] 的 seek 结论；房主缓冲被判成 stall，
+/// 不再当成 seek 去硬跳成员。
 bool isTogetherSeekJump({
   required double prevPosition,
   required int prevServerTime,
@@ -106,14 +243,17 @@ bool isTogetherSeekJump({
   required double prevRate,
   required double position,
   required int serverTime,
+  bool playing = true,
 }) {
-  if (prevServerTime <= 0 || serverTime <= 0) return false;
-  final elapsed = (serverTime - prevServerTime) / 1000.0;
-  if (elapsed < 0) return false;
-  final expected =
-      prevPosition + (prevPlaying ? elapsed * togetherClampRate(prevRate) : 0);
-  // 正常心跳的偏差只有几十毫秒；0.5s 以上视为房主主动 seek（含暂停时拖动）。
-  return (position - expected).abs() > 0.5;
+  return classifyTogetherAuthority(
+    prevPosition: prevPosition,
+    prevServerTime: prevServerTime,
+    prevPlaying: prevPlaying,
+    prevRate: prevRate,
+    position: position,
+    serverTime: serverTime,
+    playing: playing,
+  ).isSeek;
 }
 
 /// 时钟偏移（serverTime - 本地时间）。
@@ -121,23 +261,37 @@ class TogetherClock {
   int _offsetMs = 0;
   int _rttMs = 0;
   bool _ready = false;
+  int _version = 0;
+  int _lastOffsetDeltaMs = 0;
 
   int get offsetMs => _offsetMs;
   int get rttMs => _rttMs;
   bool get ready => _ready;
 
+  /// 每次成功校准 +1，供上层发现「offset 台阶式变化」。
+  int get version => _version;
+
+  /// 最近一次校准相对上一次的 offset 变化量（首次 / reset 后为 0）。
+  int get lastOffsetDeltaMs => _lastOffsetDeltaMs;
+
   int nowServerMs(int localMs) => localMs + _offsetMs;
 
   void update({required int offsetMs, required int rttMs}) {
+    // 首次校准没有「上一次」可比，delta 记 0，避免把冷启动当成时钟跳变。
+    final delta = _ready ? offsetMs - _offsetMs : 0;
     _offsetMs = offsetMs;
     _rttMs = rttMs < 0 ? 0 : rttMs;
     _ready = true;
+    _lastOffsetDeltaMs = delta;
+    _version++;
   }
 
   void reset() {
     _offsetMs = 0;
     _rttMs = 0;
     _ready = false;
+    _version = 0;
+    _lastOffsetDeltaMs = 0;
   }
 
   /// 中位数：样本为空时返回 0。

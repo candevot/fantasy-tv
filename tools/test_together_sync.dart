@@ -230,5 +230,111 @@ void main() {
   );
   check(d.move == TogetherSyncMove.seek, '>1.5s 硬 seek');
 
+  // 时钟校准版本 / 增量：用于发现 offset 台阶。
+  final clock2 = TogetherClock();
+  check(clock2.version == 0 && clock2.lastOffsetDeltaMs == 0, '时钟初始版本');
+  clock2.update(offsetMs: 100, rttMs: 20);
+  check(clock2.version == 1 && clock2.lastOffsetDeltaMs == 0, '首次校准无增量');
+  clock2.update(offsetMs: 140, rttMs: 20);
+  check(clock2.version == 2 && clock2.lastOffsetDeltaMs == 40, '记录 offset 增量');
+  clock2.reset();
+  check(clock2.version == 0 && clock2.lastOffsetDeltaMs == 0, '重置清空版本');
+
+  // 权威 state 分类：房主缓冲（停滞）不再被当成 seek 拉回成员。
+  TogetherAuthorityVerdict v = classifyTogetherAuthority(
+    prevPosition: 48,
+    prevServerTime: 10000,
+    prevPlaying: true,
+    prevRate: 1,
+    position: 48,
+    playing: true,
+    serverTime: 19000,
+  );
+  check(v.isStall, 'position 停住 9 秒判为房主停滞');
+  check(!v.isSeek, '停滞不是 seek');
+
+  v = classifyTogetherAuthority(
+    prevPosition: 48,
+    prevServerTime: 10000,
+    prevPlaying: true,
+    prevRate: 1,
+    position: 50,
+    playing: true,
+    serverTime: 19000,
+  );
+  check(v.isStall, '慢推进（缓冲中）也判停滞');
+
+  v = classifyTogetherAuthority(
+    prevPosition: 100,
+    prevServerTime: 10000,
+    prevPlaying: true,
+    prevRate: 1,
+    position: 90,
+    playing: true,
+    serverTime: 11000,
+  );
+  check(v.isSeek, '房主往回拖 10s 判为 seek');
+
+  v = classifyTogetherAuthority(
+    prevPosition: 100,
+    prevServerTime: 10000,
+    prevPlaying: true,
+    prevRate: 1,
+    position: 200,
+    playing: true,
+    serverTime: 11000,
+  );
+  check(v.isSeek, '房主前拖判为 seek');
+
+  v = classifyTogetherAuthority(
+    prevPosition: 100,
+    prevServerTime: 10000,
+    prevPlaying: true,
+    prevRate: 1,
+    position: 109,
+    playing: true,
+    serverTime: 19000,
+  );
+  check(!v.isSeek && !v.isStall, '正常推进 9 秒既不是 seek 也不是停滞');
+
+  v = classifyTogetherAuthority(
+    prevPosition: 100,
+    prevServerTime: 10000,
+    prevPlaying: true,
+    prevRate: 1,
+    position: 99.8,
+    playing: true,
+    serverTime: 11000,
+  );
+  check(v.isStall, '读数小幅回退（<1.5s）当停滞吸收，不回跳');
+
+  // 负向 drift：默认允许回跳，关闭后先降速吸收。
+  d = decideTogetherDrift(
+    expected: 98.0,
+    current: 100.0,
+    playing: true,
+    baseRate: 1.0,
+  );
+  check(d.move == TogetherSyncMove.seek, '默认负向 >1.5s 仍可回跳');
+
+  d = decideTogetherDrift(
+    expected: 98.0,
+    current: 100.0,
+    playing: true,
+    baseRate: 1.0,
+    allowBackwardSeek: false,
+  );
+  check(d.move == TogetherSyncMove.rate, '禁止回跳时先降速吸收');
+  near(d.rate, 0.95, 1e-9, '禁止回跳 → 0.95x');
+
+  d = decideTogetherDrift(
+    expected: 98.0,
+    current: 100.0,
+    playing: false,
+    baseRate: 1.0,
+    allowBackwardSeek: false,
+  );
+  check(d.move == TogetherSyncMove.none, '禁止回跳且暂停 → 不动');
+
   print('together sync tests passed: $_passed checks');
 }

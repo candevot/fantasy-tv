@@ -170,6 +170,37 @@ class _TogetherPageState extends State<TogetherPage>
   /// 最近一次下发给内核的倍速，避免每 500ms 重复 setRate。
   double _lastRequestedRate = 1.0;
 
+  /// 房主停滞（缓冲）：position 停住而房间时钟照走，期间冻结期望进度。
+  bool _authStall = false;
+  int _authStallAt = 0;
+
+  /// 成员原地保持：房主卡住且本地已领先太多时先暂停，等房主追上再恢复。
+  bool _stallHold = false;
+  int _stallHoldAt = 0;
+
+  /// 成员持续领先的起点：超过 togetherBackSeekPersistMs 才允许往回跳。
+  int _aheadSince = 0;
+
+  /// 上次处理过的时钟校准版本（offset 台阶先吸收、不立刻 seek）。
+  int _lastClockVersion = 0;
+
+  /// 房主端：最近一次广播出去的权威 position / 时间 / 状态。
+  /// 正常播放时不让它因读数抖动往回走，成员才能稳定区分「房主卡住」
+  /// 和「房主在拖进度」。
+  double _hostReportedPos = -1;
+  int _hostReportedAt = 0;
+  String _hostReportedState = '';
+
+  /// 下一次上报强制用原始读数（房主主动 seek / 换集之后）。
+  bool _hostReportFresh = false;
+
+  /// 房主读数持续回退的起点：超过 togetherHostBacktrackGraceMs 才如实上报。
+  int _hostBacktrackAt = 0;
+
+  /// 房主缓冲上报节流：缓冲期间每秒报一次停住的 position（心跳 9s 太慢）。
+  bool _hostBuffering = false;
+  int _hostBufferReportAt = 0;
+
   List<TogetherMember> _members = const <TogetherMember>[];
 
   /// 成员实时列表：成员弹层打开期间也跟着进出（join / leave）即时更新。
@@ -398,6 +429,19 @@ class _TogetherPageState extends State<TogetherPage>
     _microRateRetryAt = 0;
     _microRateUnsupported = false;
     _lastRequestedRate = 1.0;
+    _authStall = false;
+    _authStallAt = 0;
+    _stallHold = false;
+    _stallHoldAt = 0;
+    _aheadSince = 0;
+    _lastClockVersion = _client.clockVersion;
+    _hostReportedPos = -1;
+    _hostReportedAt = 0;
+    _hostReportedState = '';
+    _hostReportFresh = false;
+    _hostBacktrackAt = 0;
+    _hostBuffering = false;
+    _hostBufferReportAt = 0;
   }
 
   void _onRoom(TogetherRoomInfo info) {
@@ -457,13 +501,15 @@ class _TogetherPageState extends State<TogetherPage>
     final startPosition = _resumePos ?? 0;
     _position.value = startPosition;
     if (_isHost && _online) {
-      _client.sendState(
+      _reportHostState(
         _resumePlaying ? 'play' : 'pause',
         startPosition,
         videoId: _videoId,
         ep: _ep,
         line: _videoLine,
         rate: _hostRate,
+        fresh: true,
+        mark: false,
       );
     }
     _syncVideo();
@@ -1146,17 +1192,14 @@ class _TogetherPageState extends State<TogetherPage>
       if (controller != null && controller.value.isInitialized) {
         final position = controller.value.position.inMilliseconds / 1000.0;
         final playing = controller.value.isPlaying;
-        if (_online) {
-          _client.sendState(
-            playing ? 'play' : 'pause',
-            position,
-            videoId: _videoId,
-            ep: _ep,
-            line: _videoLine,
-            rate: _hostRate,
-          );
-        }
-        _markRemote(playing ? 'play' : 'pause', position);
+        _reportHostState(
+          playing ? 'play' : 'pause',
+          position,
+          videoId: _videoId,
+          ep: _ep,
+          line: _videoLine,
+          rate: _hostRate,
+        );
       }
     } else {
       final state = _remote;
@@ -1177,8 +1220,7 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     final position = controller.value.position.inMilliseconds / 1000.0;
-    _client.sendState('play', position, rate: _hostRate);
-    _markRemote('play', position);
+    _reportHostState('play', position, rate: _hostRate);
   }
 
   /* ------------------------------------------------------------ 同步 */
@@ -1197,7 +1239,9 @@ class _TogetherPageState extends State<TogetherPage>
         position: state.position,
         serverTime: state.serverTime,
         nowServerMs: _client.nowServerMs(),
-        playing: state.playing && _client.synced,
+        // 房主停滞期间期望进度冻结：不能一边让权威停住、一边继续外推，
+        // 否则成员会越跑越前，等下一份 state 到达又整体回退。
+        playing: state.playing && _client.synced && !_authStall,
         rate: _baseRate(state),
       ),
     );
@@ -1211,6 +1255,12 @@ class _TogetherPageState extends State<TogetherPage>
       }
       final state = _remote;
       return state == null ? 0 : _targetPosition(state);
+    }
+    // 成员：进度条跟本地播放器走。权威值只在加载 / 播放器未起步时兜底，
+    // 这样权威 position 的任何回退（房主缓冲、段重载、读数抖动）都不会
+    // 在进度条上肉眼可见地来回跳。
+    if (!_videoLoading && controller != null && controller.value.isInitialized) {
+      return controller.value.position.inMilliseconds / 1000.0;
     }
     final state = _remote;
     if (state != null) return _targetPosition(state);
@@ -1268,6 +1318,13 @@ class _TogetherPageState extends State<TogetherPage>
         if (buffering) _stalled = false;
       }
 
+      // 时钟 offset 台阶会让期望进度突然跳一段：先延长冷却吸收，
+      // 不要把它当成 drift 去硬 seek。
+      _watchClockJump(now);
+
+      // 房主停滞期间的保持策略：落后太多先原地暂停，等房主追上。
+      _syncStallHold(state, now: now);
+
       if (buffering) {
         if (!_bufferingHold) {
           _bufferingHold = true;
@@ -1308,6 +1365,8 @@ class _TogetherPageState extends State<TogetherPage>
       baseRate: _baseRate(state),
       // 上次内核读数不支持微调时，等冷却结束再试一次，不是永久放弃。
       allowRate: !_microRateUnsupported || now >= _microRateRetryAt,
+      // 成员领先的一侧先降速吸收：只有持续超出硬 seek 阈值才允许回跳。
+      allowBackwardSeek: _allowBackSeek(expected, current, now),
     );
     if (decision.move == TogetherSyncMove.rate) {
       _setMicroRate(decision.rate, state);
@@ -1318,6 +1377,93 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     _restoreBaseRate(state);
+  }
+
+  /// 成员领先（负向 drift）时是否允许往回跳。
+  ///
+  /// 房主在缓冲 / 成员处于保持中一律禁止；否则要求「持续领先超过
+  /// togetherBackSeekPersistMs」——瞬时抖动先用降速吸收，别一见回退就跳。
+  bool _allowBackSeek(double expected, double current, int now) {
+    if (!expected.isFinite || !current.isFinite) return false;
+    if (expected >= current) {
+      _aheadSince = 0;
+      return true;
+    }
+    if (_authStall || _stallHold) {
+      _aheadSince = 0;
+      return false;
+    }
+    if (_aheadSince == 0) {
+      _aheadSince = now;
+      return false;
+    }
+    return now - _aheadSince >= togetherBackSeekPersistMs;
+  }
+
+  /// 时钟 offset 大跳检测：期望进度会因此出现台阶，先延长 seek 冷却吸收，
+  /// 不要立刻把它当成 drift 去硬跳。
+  void _watchClockJump(int now) {
+    final version = _client.clockVersion;
+    if (version == _lastClockVersion) return;
+    final delta = _client.clockOffsetDeltaMs;
+    _lastClockVersion = version;
+    if (delta.abs() <= togetherClockJumpGuardMs) return;
+    final guard = now + togetherSeekCooldownMs;
+    if (guard > _seekGuardUntil) _seekGuardUntil = guard;
+    _aheadSince = 0;
+  }
+
+  /// 房主停滞（缓冲）时的成员保持策略。
+  ///
+  /// 期望进度冻结后成员会继续往前跑；落后超过阈值就原地暂停保持同步状态，
+  /// 等房主恢复、期望进度追上来再继续播——全程不往回跳。
+  void _syncStallHold(TogetherRoomState state, {required int now}) {
+    // 房主长时间没再确认停滞（断开 / 退出）：恢复正常外推，别把成员卡死。
+    if (_authStall && now - _authStallAt > togetherStallTimeoutMs) {
+      _authStall = false;
+    }
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    final expected = _targetPosition(state);
+    final current = controller.value.position.inMilliseconds / 1000.0;
+    final drift = expected - current;
+    if (!_stallHold) {
+      if (!_authStall || !state.playing) return;
+      if (drift > -togetherStallHoldDrift) return;
+      if (_seeking || controller.value.isBuffering) return;
+      _stallHold = true;
+      _stallHoldAt = now;
+      _restoreBaseRate(state);
+      if (controller.value.isPlaying) {
+        unawaited(controller.pause().catchError((_) {}));
+      }
+      return;
+    }
+    // 保持中：期望进度追上（或停滞恢复正常外推）就恢复播放。
+    if (drift > -togetherStallResumeDrift ||
+        (!_authStall && now - _stallHoldAt > togetherStallTimeoutMs)) {
+      _stallHold = false;
+      if (state.playing && !controller.value.isPlaying) {
+        unawaited(controller.play().catchError((_) {}));
+      }
+    }
+  }
+
+  /// 跟随房主 play / pause；成员处于保持（房主缓冲）时只允许暂停。
+  void _followPlayIntent(TogetherRoomState state) {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    if (_stallHold) {
+      if (controller.value.isPlaying) {
+        unawaited(controller.pause().catchError((_) {}));
+      }
+      return;
+    }
+    if (state.playing && !controller.value.isPlaying) {
+      unawaited(controller.play().catchError((_) {}));
+    } else if (!state.playing && controller.value.isPlaying) {
+      unawaited(controller.pause().catchError((_) {}));
+    }
   }
 
   void _setControllerRate(double rate) {
@@ -1407,30 +1553,44 @@ class _TogetherPageState extends State<TogetherPage>
     if (mediaChanged) {
       // 新剧集 / 新线路由 _loadVideo 按最新 state 定位，避免先对旧流 seek。
       _restoreBaseRate(state);
+      _authStall = false;
+      _stallHold = false;
       return;
     }
     final now = DateTime.now().millisecondsSinceEpoch;
-    final wantPlay = state.playing;
-    final isPlaying = controller.value.isPlaying;
-    if (wantPlay && !isPlaying) {
-      unawaited(controller.play().catchError((_) {}));
-    } else if (!wantPlay && isPlaying) {
-      unawaited(controller.pause().catchError((_) {}));
-    }
-    _applyHoldUntil = now + 400;
-    if (!wantPlay) _restoreBaseRate(state);
 
-    final jump = prev != null &&
-        (prev.rate - state.rate).abs() < 0.001 &&
-        prev.playing == state.playing &&
-        isTogetherSeekJump(
-          prevPosition: prev.position,
-          prevServerTime: prev.serverTime,
-          prevPlaying: prev.playing,
-          prevRate: prev.rate,
-          position: state.position,
-          serverTime: state.serverTime,
-        );
+    // 1) 先分类这份权威变化：正常推进 / 房主主动 seek / 房主卡缓冲。
+    //    旧逻辑只要偏差 >0.5s 就当 seek 硬跳，房主缓冲一下成员就被拉回去。
+    final verdict = prev == null
+        ? const TogetherAuthorityVerdict(
+            change: TogetherAuthorityChange.normal,
+          )
+        : classifyTogetherAuthority(
+            prevPosition: prev.position,
+            prevServerTime: prev.serverTime,
+            prevPlaying: prev.playing,
+            prevRate: prev.rate,
+            position: state.position,
+            serverTime: state.serverTime,
+            playing: state.playing,
+          );
+    if (verdict.isStall) {
+      _authStall = true;
+      _authStallAt = now;
+      _aheadSince = 0;
+    } else if (_authStall &&
+        (verdict.isSeek ||
+            !state.playing ||
+            verdict.advance >=
+                togetherStallAdvanceRatio *
+                    (verdict.gapMs / 1000.0) *
+                    _baseRate(state) ||
+            now - _authStallAt > togetherStallTimeoutMs)) {
+      // 房主恢复推进 / 主动拖动 / 暂停 / 停滞超时：恢复正常外推对齐。
+      _authStall = false;
+    }
+
+    final wantPlay = state.playing;
     final expected = _targetPosition(state);
     final current = controller.value.position.inMilliseconds / 1000.0;
     final drift = expected - current;
@@ -1438,26 +1598,57 @@ class _TogetherPageState extends State<TogetherPage>
         prev.playing != state.playing ||
         (prev.rate - state.rate).abs() > 0.001;
 
+    // 2) 房主停滞期间的保持策略：期望进度冻结后成员会越跑越前，
+    //    落后太多就原地暂停，等房主追上再恢复——全程不往回跳。
+    _syncStallHold(state, now: now);
+
+    // 3) 跟随房主 play / pause（保持中只允许暂停）。
+    _followPlayIntent(state);
+    _applyHoldUntil = now + 400;
+    if (!wantPlay) _restoreBaseRate(state);
+
+    // 4) 房主在缓冲：不 seek、不追进度，先照常播着（或维持保持），
+    //    等房主恢复后自然收敛。
+    if (verdict.isStall) {
+      _restoreBaseRate(state);
+      return;
+    }
+
+    // 5) 明确的房主主动 seek：立即硬跳，不受上一次 seek 防抖限制。
+    if (verdict.isSeek) {
+      _stallHold = false;
+      _followPlayIntent(state);
+      _hardSeek(expected, state);
+      return;
+    }
+
     if (controller.value.isBuffering || _stalled) {
       _bufferingHold = true;
       _restoreBaseRate(state);
       return;
     }
-    if (jump) {
-      // 房主主动 seek：立即硬跳，不受上一次 seek 防抖限制。
-      _hardSeek(expected, state);
-      return;
-    }
     if (modeChanged) {
       if (!wantPlay) {
         // 暂停操作：位置差超过死区就一次对齐到房主暂停点。
-        if (drift.abs() >= togetherDriftDeadband) {
+        // 房主停滞 / 成员保持期间不往回跳（由 _syncStallHold 收敛）。
+        if (drift.abs() >= togetherDriftDeadband &&
+            !_authStall &&
+            !_stallHold) {
           _hardSeek(state.position, state);
         }
         return;
       }
       if (drift.abs() > togetherDriftSeek) {
-        _hardSeek(expected, state);
+        if (_allowBackSeek(expected, current, now)) {
+          _hardSeek(expected, state);
+          return;
+        }
+        // 成员领先的一侧：先降速吸收，不立刻回跳。
+        if (state.playing) {
+          _setMicroRate(_microRateFor(state, drift), state);
+        } else {
+          _restoreBaseRate(state);
+        }
         return;
       }
       if (drift.abs() >= togetherDriftDeadband) {
@@ -1488,6 +1679,126 @@ class _TogetherPageState extends State<TogetherPage>
     if (mounted) _position.value = position;
   }
 
+  /// 房主广播进度前的净化：正常播放时不让权威 position 因读数抖动往回走。
+  ///
+  /// 段重载 / 关键帧对齐会让播放器读数短暂回退（或停在旧位置），若照原样
+  /// 上报，成员端的权威进度就会跟着来回跳（48→50→49→51）。这里只冻结上报
+  /// 值、不造假位置：读数一旦真的往回拖（持续超过
+  /// togetherHostBacktrackGraceMs），照样如实上报，成员端会把它当成房主
+  /// 主动 seek 去对齐。
+  double _sanitizeHostPosition(
+    String state,
+    double position, {
+    bool fresh = false,
+  }) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final anchorOk = _hostReportedPos >= 0 &&
+        _hostReportedAt > 0 &&
+        _hostReportedState == 'play';
+    if (_isLive ||
+        state != 'play' ||
+        fresh ||
+        !anchorOk ||
+        !position.isFinite ||
+        position < 0) {
+      _setHostReportAnchor(state, position, now, clearBacktrack: true);
+      return position;
+    }
+    if (position >= _hostReportedPos) {
+      _setHostReportAnchor(state, position, now, clearBacktrack: true);
+      return position;
+    }
+    // 读数回退：先按上一次广播的值上报（等价于 position 停住），
+    // 成员端会判成房主停滞而不是被拉回去。
+    if (_hostBacktrackAt == 0) {
+      _hostBacktrackAt = now;
+    } else if (now - _hostBacktrackAt >= togetherHostBacktrackGraceMs) {
+      // 持续回退 = 房主真的往回拖（或真实回退），如实上报让成员对齐。
+      _setHostReportAnchor(state, position, now, clearBacktrack: true);
+      return position;
+    }
+    _hostReportedAt = now;
+    _hostReportedState = state;
+    _hostReportFresh = false;
+    return _hostReportedPos;
+  }
+
+  void _setHostReportAnchor(
+    String state,
+    double position,
+    int now, {
+    required bool clearBacktrack,
+  }) {
+    _hostReportedPos = position;
+    _hostReportedAt = now;
+    _hostReportedState = state;
+    _hostReportFresh = false;
+    if (clearBacktrack) _hostBacktrackAt = 0;
+  }
+
+  /// 房主主动拖过进度：下一次上报直接用原始读数，并把锚点挪到拖动目标。
+  void _noteHostSeek(double target) {
+    _setHostReportAnchor(
+      _remote?.playing == true ? 'play' : 'pause',
+      target,
+      DateTime.now().millisecondsSinceEpoch,
+      clearBacktrack: true,
+    );
+    _hostReportFresh = true;
+  }
+
+  /// 房主广播一份进度状态：净化 → 发送 →（可选）同步本地权威镜像。
+  /// 返回真正发出去的 position。
+  double _reportHostState(
+    String state,
+    double position, {
+    String? videoId,
+    int? ep,
+    String? line,
+    double? rate,
+    bool fresh = false,
+    bool mark = true,
+  }) {
+    final safe = _sanitizeHostPosition(
+      state,
+      position,
+      fresh: fresh || _hostReportFresh,
+    );
+    if (_online) {
+      _client.sendState(
+        state,
+        safe,
+        videoId: videoId,
+        ep: ep,
+        line: line,
+        rate: rate,
+      );
+    }
+    if (mark) _markRemote(state, safe, rate: rate);
+    return safe;
+  }
+
+  /// 房主缓冲上报：缓冲开始 / 结束各立即报一次，缓冲期间每秒报一次
+  /// 停住的 position（9 秒心跳太慢，成员会先跑飞再被拉回来）。
+  void _watchHostBuffering() {
+    final controller = _controller;
+    if (controller == null || !_isHost || _isLive || !_online) return;
+    final value = controller.value;
+    if (!value.isInitialized || _endedSent) return;
+    // 用「最后广播的播放意图」判断该不该报：缓冲期间 isPlaying 可能被内核
+    // 置 false，但房主仍处于播放态，成员需要每秒收到停住的 position。
+    final intent = _remote?.playing ?? value.isPlaying;
+    final buffering = value.isBuffering && intent;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (buffering == _hostBuffering) {
+      // 状态没变：只在「持续缓冲」时按 1 秒节流补报停住的进度。
+      if (!buffering || now - _hostBufferReportAt < 1000) return;
+    }
+    _hostBuffering = buffering;
+    _hostBufferReportAt = now;
+    _reportHostState('play', value.position.inMilliseconds / 1000.0);
+  }
+
   void _bounceToAuthority() {
     final state = _remote;
     if (state == null) return;
@@ -1515,13 +1826,13 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     if (_isLive) return; // 直播流没有「播放结束」和观看进度。
+    _watchHostBuffering();
     if (_endedSent || !_isHost || !value.isInitialized) return;
     if (value.duration.inMilliseconds <= 0) return;
     if (value.position >= value.duration - const Duration(milliseconds: 400)) {
       _endedSent = true;
       final position = value.position.inMilliseconds / 1000.0;
-      if (_online) _client.sendState('ended', position);
-      _markRemote('ended', position);
+      _reportHostState('ended', position);
       if (mounted) setState(() {});
     }
   }
@@ -1555,8 +1866,7 @@ class _TogetherPageState extends State<TogetherPage>
     final position = controller.value.position.inMilliseconds / 1000.0;
     if (controller.value.isPlaying) {
       controller.pause().catchError((_) {});
-      if (_online) _client.sendState('pause', position, rate: _hostRate);
-      _markRemote('pause', position);
+      _reportHostState('pause', position, rate: _hostRate);
       if (mounted) setState(() {});
       return;
     }
@@ -1568,8 +1878,8 @@ class _TogetherPageState extends State<TogetherPage>
     _endedSent = false;
     final start = ended ? 0.0 : position;
     controller.play().catchError((_) {});
-    if (_online) _client.sendState('play', start, rate: _hostRate);
-    _markRemote('play', start);
+    // 从片尾重播会把 position 拉回 0：这是主动重播，不能被当成读数回退。
+    _reportHostState('play', start, rate: _hostRate, fresh: ended);
     if (mounted) setState(() {});
   }
 
@@ -1590,6 +1900,8 @@ class _TogetherPageState extends State<TogetherPage>
     if (duration > 0 && target > duration) target = duration;
     _seekController(target);
     _endedSent = false;
+    // 主动拖动进度：把锚点挪到目标，别让后续上报被当成读数回退冻结。
+    _noteHostSeek(target);
     if (_online) {
       _client.sendSeek(target);
       _markRemote(_remote?.playing == true ? 'play' : 'pause', target);
@@ -1631,10 +1943,7 @@ class _TogetherPageState extends State<TogetherPage>
       controller.setRate(value).catchError((_) {});
     }
     // 倍速也是房主操作：立即广播，成员同帧跟随。
-    if (_online) {
-      _client.sendState(playing ? 'play' : 'pause', position, rate: value);
-    }
-    _markRemote(playing ? 'play' : 'pause', position, rate: value);
+    _reportHostState(playing ? 'play' : 'pause', position, rate: value);
     if (mounted) setState(() {});
   }
 
@@ -1742,13 +2051,15 @@ class _TogetherPageState extends State<TogetherPage>
     });
     _loadedKey = '';
     _loadingKey = '';
-    _client.sendState(
+    _reportHostState(
       playing ? 'play' : 'pause',
       0,
       videoId: card.id,
       ep: episode,
       line: lineId,
       rate: _hostRate,
+      fresh: true,
+      mark: false,
     );
     _syncVideo();
   }
@@ -1808,12 +2119,14 @@ class _TogetherPageState extends State<TogetherPage>
     final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
     _resumePos = 0;
     _resumePlaying = playing;
-    _client.sendState(
+    _reportHostState(
       playing ? 'play' : 'pause',
       0,
       ep: episode,
       line: _videoLine,
       rate: _hostRate,
+      fresh: true,
+      mark: false,
     );
   }
 
@@ -1846,12 +2159,14 @@ class _TogetherPageState extends State<TogetherPage>
     final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
     _resumePos = 0;
     _resumePlaying = playing;
-    _client.sendState(
+    _reportHostState(
       playing ? 'play' : 'pause',
       0,
       ep: next,
       line: _videoLine,
       rate: _hostRate,
+      fresh: true,
+      mark: false,
     );
   }
 
@@ -1998,13 +2313,15 @@ class _TogetherPageState extends State<TogetherPage>
     _loadedKey = '';
     _loadingKey = '';
     _syncVideo();
-    _client.sendState(
+    _reportHostState(
       playing ? 'play' : 'pause',
       position,
       videoId: _videoId,
       ep: _ep,
       line: picked,
       rate: _hostRate,
+      fresh: true,
+      mark: false,
     );
   }
 

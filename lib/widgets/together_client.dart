@@ -327,6 +327,12 @@ class TogetherClient {
   /// 最近一次 RTT（毫秒）。
   int get rtt => _clock.rttMs;
 
+  /// 时钟校准版本：每完成一轮 ping 校准 +1，页面据此发现 offset 台阶。
+  int get clockVersion => _clock.version;
+
+  /// 最近一次校准相对上一次的 offset 变化量（毫秒）。
+  int get clockOffsetDeltaMs => _clock.lastOffsetDeltaMs;
+
   /// 下一次自动重连的等待秒数（0 表示未在重连）。
   int get retryDelaySeconds => _retryDelaySec;
 
