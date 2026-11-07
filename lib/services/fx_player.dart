@@ -218,14 +218,16 @@ class FxPlayer implements Listenable {
     );
   }
 
-  /// 起播前向缓存 12MB（先出画）；首帧 / open 后升到 96MiB，
-  /// 4K 高码率在 seek、网络抖动时不至于瞬间断粮；回看缓存压到 8MB。
-  static const int _startupBufferBytes = 12 * 1024 * 1024;
-  static const int _steadyBufferBytes = 96 * 1024 * 1024;
-  static const int _backBufferBytes = 8 * 1024 * 1024;
+  /// 起播前向缓存：原 12MB 太小，网络好时也会因为等缓存而先转圈。
+  /// 提到 48MB 直接覆盖起播瞬间，首帧后升到 192MB，4K 高码率长播无压力。
+  /// 代理层已经整集预热到本地，这里再加一层 demuxer 缓冲，双保险。
+  static const int _startupBufferBytes = 48 * 1024 * 1024;
+  static const int _steadyBufferBytes = 192 * 1024 * 1024;
+  static const int _backBufferBytes = 16 * 1024 * 1024;
 
-  /// mpv demuxer 预读秒数（demuxer-readahead-secs），配合 96MiB 缓存抗抖动。
-  static const String _readaheadSeconds = '60';
+  /// mpv demuxer 预读秒数（demuxer-readahead-secs）：配合 192MiB 缓存，
+  /// 网络好时把后续内容尽量读进本地，播放过程不中断。
+  static const String _readaheadSeconds = '120';
 
   /// 看门狗采样间隔。
   static const Duration _watchdogTick = Duration(seconds: 2);
