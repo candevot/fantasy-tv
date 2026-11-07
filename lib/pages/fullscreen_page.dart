@@ -8,6 +8,7 @@ import '../models.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/fx_player.dart';
+import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
 import '../widgets/cast_sheet.dart';
@@ -169,11 +170,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 出错前的播放位置，重试时尽量接着播。
   Duration _positionBeforeError = Duration.zero;
 
-  static const List<DeviceOrientation> _landscape = <DeviceOrientation>[
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ];
-
   /// 与 main.dart 里保持一致，退出全屏后恢复
   static const SystemUiOverlayStyle _appOverlay = SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
@@ -231,6 +227,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 是否已切到后台：切后台 / inactive / paused 一律不暂停，继续播放，
   /// 回前台接着播（不重新 open、不 seek）；看门狗在后台停摆，避免误判卡顿。
   bool _backgrounded = false;
+
+  /// 切后台那一刻的播放位置与播放状态：系统可能冻结 libmpv 或把进度重置
+  /// 到片头，回前台按这两项判断要不要自愈（拉回原进度并继续播）。
+  Duration _backgroundAnchor = Duration.zero;
+  bool _backgroundWasPlaying = true;
 
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
@@ -484,6 +485,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         // 切后台：只复位长按倍速并记进度，永不暂停（系统 paused 也继续播；
         // 来电 / 被其它应用抢占音频属系统音频策略，不由 App 断播）。
         _backgrounded = true;
+        _backgroundAnchor = _controller?.value.position ?? _backgroundAnchor;
+        _backgroundWasPlaying = _controller?.value.isPlaying ?? true;
         _endHold2x();
         unawaited(_saveProgress());
         return;
@@ -491,7 +494,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         final wasBackgrounded = _backgrounded;
         _backgrounded = false;
         // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
-        if (wasBackgrounded) _remountVideoLayer();
+        if (wasBackgrounded) {
+          _remountVideoLayer();
+          unawaited(_recoverAfterBackground());
+        }
         return;
       case AppLifecycleState.detached:
         return;
@@ -508,26 +514,41 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() => _videoEpoch++);
   }
 
+  /// 回前台自愈：系统在后台可能冻结 libmpv（位置不动、playing=false）或把
+  /// 进度重置到片头，用户点播放就从 0 重来。按切后台时的位置拉回去并继续播。
+  Future<void> _recoverAfterBackground() async {
+    final c = _controller;
+    if (c == null || _loading || _error) return;
+    final anchor = _backgroundAnchor;
+    if (anchor <= Duration.zero) return;
+    final healed = await c.recoverAfterBackground(
+      anchor,
+      wasPlaying: _backgroundWasPlaying,
+    );
+    if (!mounted || !healed) return;
+    setState(() {});
+  }
+
   /* ------------------------------------------------------------------ 系统 */
 
   Future<void> _enterImmersive() async {
     try {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      await SystemChrome.setPreferredOrientations(_landscape);
       SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light);
     } catch (_) {
       // 桌面 / 模拟器上不支持也无所谓
     }
+    // 横屏必须走 SENSOR_LANDSCAPE：SystemChrome 的 landscape* 会被引擎映射成
+    // USER_LANDSCAPE，遵守系统「自动旋转」开关，竖屏锁定下转不了横屏。
+    await ScreenOrientation.landscape();
   }
 
   Future<void> _restoreSystemUi() async {
     try {
-      await SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-      ]);
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setSystemUIOverlayStyle(_appOverlay);
     } catch (_) {}
+    await ScreenOrientation.portrait();
   }
 
   /* ---------------------------------------------------------------- 数据 */

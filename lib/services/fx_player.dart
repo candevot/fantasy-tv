@@ -642,6 +642,47 @@ class FxPlayer implements Listenable {
   /// 兼容 video_player 命名。
   Future<void> seekTo(Duration position) => seek(position);
 
+  /// 切后台回来后的自愈：确认 mpv 还在出画、进度没被系统重置。
+  ///
+  /// Android 在后台可能回收音频焦点 / 冻结进程，回前台时 libmpv 会停在
+  /// 「有 duration 但位置不再推进、playing 变 false」的半死状态，也可能
+  /// 被系统 seek 回 0 —— 用户手动点播放就从片头重来（报障原话）。
+  ///
+  /// [expected] 是切后台那一刻的位置；[wasPlaying] 是切后台那一刻是否在播。
+  /// 用户切后台前就主动暂停的，回前台绝不自动续播，只按需把进度拉回去。
+  ///
+  /// 返回是否做了自愈（页面可据此刷新进度条）。
+  Future<bool> recoverAfterBackground(
+    Duration expected, {
+    bool wasPlaying = true,
+  }) async {
+    if (_disposed) return false;
+    final v = _value;
+    if (!v.isInitialized || v.hasError) return false;
+    final pos = v.position;
+    // 位置被系统重置到片头 / 明显回退。
+    final rewound = expected > const Duration(seconds: 5) &&
+        pos + const Duration(seconds: 3) < expected;
+    // 冻结：本该在播却停了（系统收回音频焦点 / 进程被挂起）。
+    final frozen = wasPlaying && !v.isPlaying;
+    if (!rewound && !frozen) return false;
+    _logFx(
+      'RESUME 自愈：rewound=$rewound frozen=$frozen wasPlaying=$wasPlaying '
+      'pos=${pos.inSeconds}s target=${expected.inSeconds}s',
+    );
+    try {
+      if (rewound) await _player.seek(expected);
+      // 只有本来就在播的才恢复播放；用户主动暂停的保持暂停。
+      if (wasPlaying) await _player.play();
+      _lastFlowAt = DateTime.now();
+      _lastFlowPos = expected;
+      return true;
+    } catch (error) {
+      _logFx('RESUME 自愈失败: $error');
+      return false;
+    }
+  }
+
   Future<void> setRate(double rate) => _player.setRate(rate);
 
   /// 兼容 video_player 命名。

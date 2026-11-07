@@ -35,6 +35,47 @@ IMPORTS = (
     'import androidx.core.content.ContextCompat',
 )
 
+ORIENTATION_FUNC = '''
+    // 播放器方向：Flutter 的 SystemChrome.setPreferredOrientations 会被引擎
+    // 映射成 USER_LANDSCAPE，遵守系统「自动旋转」开关；竖屏锁定下播放器就
+    // 转不到横屏。这里直接用 SENSOR_LANDSCAPE / PORTRAIT，与腾讯视频等
+    // 播放器一致，不看系统旋转锁。
+    private fun registerOrientationChannel(
+        flutterEngine: io.flutter.embedding.engine.FlutterEngine
+    ) {
+        io.flutter.plugin.common.MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fantasy_tv/orientation"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "sensorLandscape" -> {
+                    try {
+                        requestedOrientation =
+                            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("orientation", e.message, null)
+                    }
+                }
+                "portrait" -> {
+                    try {
+                        requestedOrientation =
+                            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("orientation", e.message, null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+'''
+
+ORIENTATION_CALL = '''
+        registerOrientationChannel(flutterEngine)'''
+
 CAST_BLOCK = '''
     private var castMulticastLock: android.net.wifi.WifiManager.MulticastLock? = null
 
@@ -161,6 +202,28 @@ def patch_cast(kt: str):
     return kt, True
 
 
+def patch_orientation(kt: str):
+    """在 MainActivity 里加屏幕方向通道（独立函数 + 在 configureFlutterEngine
+    里调用一次）；已存在则不动。"""
+    if 'fantasy_tv/orientation' in kt:
+        return kt, False
+    pattern = re.compile(
+        r'class\s+MainActivity\s*:\s*FlutterActivity\(\)\s*\{')
+    match = pattern.search(kt)
+    if not match:
+        return kt, False
+    # 1) 函数体插在类开头（无论后面 patch 谁插在哪，函数定义都在类内）。
+    kt = kt[:match.end()] + ORIENTATION_FUNC + kt[match.end():]
+    # 2) 在 configureFlutterEngine 的 super 调用后注册一次。
+    hook = 'super.configureFlutterEngine(flutterEngine)'
+    index = kt.find(hook)
+    if index < 0:
+        return kt, False
+    insert_at = index + len(hook)
+    kt = kt[:insert_at] + '\n' + ORIENTATION_CALL + kt[insert_at:]
+    return kt, True
+
+
 def main() -> int:
     styles = io.open(STYLE, encoding='utf-8').read()
     if 'windowLightNavigationBar' not in styles:
@@ -212,12 +275,17 @@ def main() -> int:
         print('cannot patch DLNA multicast lock channel in %s' % activity,
               file=sys.stderr)
         return 1
+    kt, orient_patched = patch_orientation(kt)
+    if 'fantasy_tv/orientation' not in kt:
+        print('cannot patch orientation channel in %s' % activity,
+              file=sys.stderr)
+        return 1
     if kt.count('{') != kt.count('}'):
         print('unbalanced braces after patching %s' % activity,
               file=sys.stderr)
         return 1
     io.open(activity, 'w', encoding='utf-8').write(kt)
-    if edge_patched or cast_patched:
+    if edge_patched or cast_patched or orient_patched:
         print('patched %s' % activity)
     else:
         print('keep %s' % activity)

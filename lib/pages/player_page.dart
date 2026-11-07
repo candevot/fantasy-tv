@@ -150,6 +150,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 回前台接着播（不重新 open、不 seek）；看门狗在后台停摆，避免误判卡顿。
   bool _backgrounded = false;
 
+  /// 切后台那一刻的播放位置与播放状态：系统在后台可能把 libmpv 冻结或把
+  /// 进度重置到片头，回前台按这两项判断要不要自愈（拉回原进度并继续播）。
+  Duration _backgroundAnchor = Duration.zero;
+  bool _backgroundWasPlaying = true;
+
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
 
@@ -515,13 +520,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       case AppLifecycleState.paused:
         // 切后台：只记进度，永不暂停（来电 / 抢占音频属系统音频策略）。
         _backgrounded = true;
+        _backgroundAnchor = _controller?.value.position ?? _backgroundAnchor;
+        _backgroundWasPlaying = _controller?.value.isPlaying ?? true;
         unawaited(_saveProgress());
         return;
       case AppLifecycleState.resumed:
         final wasBackgrounded = _backgrounded;
         _backgrounded = false;
         // 只有真正切过后台才重建画面层；通知栏 / 截屏回来不重建，避免闪帧。
-        if (wasBackgrounded) _remountVideoLayer();
+        if (wasBackgrounded) {
+          _remountVideoLayer();
+          unawaited(_recoverAfterBackground());
+        }
         return;
       case AppLifecycleState.detached:
         return;
@@ -536,6 +546,23 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void _remountVideoLayer() {
     if (!mounted) return;
     setState(() => _videoEpoch++);
+  }
+
+  /// 回前台自愈：系统在后台可能冻结 libmpv（位置不动、playing=false）或把
+  /// 进度重置到片头，用户点播放就从 0 重来。这里按切后台时的位置把它拉回
+  /// 去并继续播，全程静默；播放器已经正常推进时什么也不做。
+  Future<void> _recoverAfterBackground() async {
+    final c = _controller;
+    if (c == null || _loading || _error) return;
+    final anchor = _backgroundAnchor;
+    if (anchor <= Duration.zero) return;
+    final healed = await c.recoverAfterBackground(
+      anchor,
+      wasPlaying: _backgroundWasPlaying,
+    );
+    if (!mounted || !healed) return;
+    // 自愈改过播放状态 / 位置：刷新一次进度条，避免停在旧值。
+    setState(() {});
   }
 
   /* ------------------------------------------------------------ 画面过渡 */

@@ -88,20 +88,31 @@ class FsQualityPill extends StatelessWidget {
   final String label;
   final double size;
 
+  /// 胶囊固定宽度：分辨率从 720x480 变到 3840x2160 时，胶囊宽度不变，
+  /// 顶栏右侧的投屏 / 更多按钮就不会跟着左右跳（用户报的「控件位置不固定」）。
+  static const double fixedWidth = 88;
+
   @override
   Widget build(BuildContext context) {
-    if (label.isEmpty) return const SizedBox.shrink();
-    return PGlassPill(
-      padding: EdgeInsets.symmetric(horizontal: 10 * size, vertical: 5 * size),
-      child: Text(
-        label,
-        maxLines: 1,
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 11.5 * size,
-          fontWeight: FontWeight.w700,
-          letterSpacing: .2,
-          shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
+    // 未就绪时只占位、不画胶囊：否则分辨率一到，右侧按钮会突然左移。
+    if (label.isEmpty) return SizedBox(width: fixedWidth * size);
+    return SizedBox(
+      width: fixedWidth * size,
+      child: PGlassPill(
+        padding: EdgeInsets.symmetric(horizontal: 8 * size, vertical: 5 * size),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            label,
+            maxLines: 1,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 11.5 * size,
+              fontWeight: FontWeight.w700,
+              letterSpacing: .2,
+              shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
+            ),
+          ),
         ),
       ),
     );
@@ -190,6 +201,8 @@ class FsTopBar extends StatelessWidget {
     final s = compact ? .9 : 1.0;
     final gap = SizedBox(width: 7 * s);
     // 刘海 / 挖孔 / 圆角屏：先让出安全边距，按钮不压进屏幕圆角与摄像头。
+    // 这里只认「屏幕」安全区，不认画面宽高——控件位置必须固定，不能因为
+    // 片源是 4:3 / 21:9 就跟着画面矩形跑。
     final safe = MediaQuery.viewPaddingOf(context);
     return Container(
       padding: EdgeInsets.fromLTRB(
@@ -253,24 +266,37 @@ class FsTopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          if (qualityLabel.isNotEmpty) ...[
-            FsQualityPill(label: qualityLabel, size: s),
-            const SizedBox(width: 8),
-          ],
-          PGlassIcon(
-            icon: Icons.tv_rounded,
-            size: 32 * s,
-            iconSize: 17 * s,
-            tooltip: '投屏',
-            onTap: onCast,
-          ),
-          gap,
-          PGlassIcon(
-            icon: Icons.more_horiz_rounded,
-            size: 32 * s,
-            iconSize: 19 * s,
-            tooltip: '更多',
-            onTap: onMore,
+          // 右侧整组（分辨率胶囊 + 投屏 + 更多）包一层 scaleDown：
+          // 窄屏横屏 / 系统大字体下宁可整体缩小，也绝不挤出屏幕右边。
+          Flexible(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 无论分辨率是否已就绪都占住同一个槽位，避免右侧按钮
+                  // 随「分辨率出现 / 消失」左右跳动（控件位置不固定）。
+                  FsQualityPill(label: qualityLabel, size: s),
+                  const SizedBox(width: 8),
+                  PGlassIcon(
+                    icon: Icons.tv_rounded,
+                    size: 32 * s,
+                    iconSize: 17 * s,
+                    tooltip: '投屏',
+                    onTap: onCast,
+                  ),
+                  gap,
+                  PGlassIcon(
+                    icon: Icons.more_horiz_rounded,
+                    size: 32 * s,
+                    iconSize: 19 * s,
+                    tooltip: '更多',
+                    onTap: onMore,
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -304,11 +330,13 @@ class FsSideControls extends StatelessWidget {
       children: [
         Positioned(
           left: 14 + safe.left,
-          top: 0,
-          bottom: 0,
+          top: safe.top,
+          bottom: safe.bottom,
           child: Center(
             child: PGlassIcon(
-              icon: Icons.lock_outline_rounded,
+              // 未锁定态：闭合的锁 + 「锁定屏幕」，与锁定态的打开锁形成
+              // 明确对比，一眼能看出当前是否已锁定。
+              icon: Icons.lock_rounded,
               size: 42,
               iconSize: 21,
               tint: .16,
@@ -320,8 +348,8 @@ class FsSideControls extends StatelessWidget {
         if (showSeek)
           Positioned(
             right: 14 + safe.right,
-            top: 0,
-            bottom: 0,
+            top: safe.top,
+            bottom: safe.bottom,
             child: Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -385,7 +413,10 @@ class FsUnlockButton extends StatelessWidget {
           child: Opacity(
             opacity: .62,
             child: PGlassIcon(
-              icon: Icons.lock_rounded,
+              // 锁定态必须是「打开的锁」：旧实现用 Icons.lock_rounded
+              // （闭合锁），和未锁定态的锁屏按钮长得一样，用户看到的就是
+              // 「开锁 / 解锁都显示锁上」，分不清当前到底锁没锁。
+              icon: Icons.lock_open_rounded,
               size: size,
               iconSize: size * .48,
               tint: .12,

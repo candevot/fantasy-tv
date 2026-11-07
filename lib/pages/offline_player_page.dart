@@ -8,6 +8,7 @@ import '../services/app_settings.dart';
 import '../services/download_service.dart';
 import '../services/fx_display_settings.dart';
 import '../services/fx_player.dart';
+import '../services/screen_orientation.dart';
 import '../theme.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
@@ -48,7 +49,8 @@ class OfflinePlayerPage extends StatefulWidget {
   State<OfflinePlayerPage> createState() => _OfflinePlayerPageState();
 }
 
-class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
+class _OfflinePlayerPageState extends State<OfflinePlayerPage>
+    with WidgetsBindingObserver {
   final DownloadService _service = DownloadService.instance;
 
   /// 当前正在播放的集：选集 / 自动连播会就地切换，不重新入栈页面。
@@ -79,6 +81,12 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   bool _locked = false;
   bool _unlockVisible = true;
 
+  /// 切后台那一刻的播放位置：离线播放同样会被系统冻结 / 重置进度，
+  /// 回前台按它自愈（拉回原进度并继续播）。
+  bool _backgrounded = false;
+  Duration _backgroundAnchor = Duration.zero;
+  bool _backgroundWasPlaying = true;
+
   /// 该剧全部任务（选集面板用：已下载可直接切，其它显示状态）。
   List<DownloadTask> _episodes = const <DownloadTask>[];
 
@@ -89,11 +97,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
 
   /// 设置面板打开期间用于刷新面板自身的选中态。
   void Function(void Function())? _setSheet;
-
-  static const List<DeviceOrientation> _landscape = <DeviceOrientation>[
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ];
 
   static const SystemUiOverlayStyle _appOverlay = SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
@@ -110,12 +113,49 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _service.addListener(_onServiceChanged);
     _refreshEpisodes();
     unawaited(_prepareSettings());
     // 打开即横屏全屏：竖屏进、横屏播，退出时再恢复竖屏。
     unawaited(_enterLandscape());
     _open();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.detached:
+        return;
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        _backgrounded = true;
+        _backgroundAnchor = _player?.value.position ?? _backgroundAnchor;
+        _backgroundWasPlaying = _player?.value.isPlaying ?? true;
+        unawaited(_savePosition());
+        return;
+      case AppLifecycleState.resumed:
+        final wasBackgrounded = _backgrounded;
+        _backgrounded = false;
+        if (wasBackgrounded) unawaited(_recoverAfterBackground());
+        return;
+    }
+  }
+
+  /// 回前台自愈：冻结就继续播，进度被重置就拉回切后台时的位置。
+  Future<void> _recoverAfterBackground() async {
+    final player = _player;
+    if (player == null || _error != null) return;
+    final anchor = _backgroundAnchor;
+    if (anchor <= Duration.zero) return;
+    final healed = await player.recoverAfterBackground(
+      anchor,
+      wasPlaying: _backgroundWasPlaying,
+    );
+    if (!mounted || !healed) return;
+    setState(() {});
+    _wake();
   }
 
   Future<void> _prepareSettings() async {
@@ -210,17 +250,51 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   }
 
   /// 续播门槛与在线播放一致：不足 60 秒从头播，接近结尾也不回跳。
+  ///
+  /// 根因（v3.8 及以前「本地缓存不续播」）：这里用 [_duration] 判断时长是否
+  /// 就绪，而 [_open] 是在 `player.open()` 之后立刻调用本方法的——那时
+  /// `player.value.duration` 还是 0，于是永远走 `_pendingSeek` 分支；而
+  /// [_onPlayer] 只在 `value.duration > Duration.zero` 时才消费挂起点，本地
+  /// 文件 open 后位置/时长往往一次到位、后续不再有「从 0 变成有时长」的通知，
+  /// 挂起点就一直烂在字段里，续播永远不生效。
+  ///
+  /// 现在：时长已知就直接 seek；未知就把秒数挂在 [_pendingSeek]，
+  /// 由 [_onPlayer] 在「位置已推进」或「时长已到」任一条件下立刻消费。
   void _armResume(double saved) {
     _pendingSeek = null;
     if (saved < fxResumeMinSeconds) return;
     final seconds = saved.round();
-    if (_duration > Duration.zero) {
-      if (seconds < _duration.inSeconds - 5) {
-        unawaited(_player?.seek(Duration(seconds: seconds)));
+    final duration = _duration > Duration.zero
+        ? _duration
+        : (_player?.value.duration ?? Duration.zero);
+    if (duration > Duration.zero) {
+      // 存的进度太靠近结尾就直接从头播，别卡在最后一秒。
+      if (seconds < duration.inSeconds - 5) {
+        unawaited(_seekAfterOpen(seconds));
       }
       return;
     }
     _pendingSeek = seconds;
+  }
+
+  /// open 之后立刻 seek 可能被 mpv 的起播复位吃掉，稍微让一拍再落点。
+  Future<void> _seekAfterOpen(int seconds) async {
+    final player = _player;
+    if (player == null) return;
+    try {
+      await player.seek(Duration(seconds: seconds));
+    } catch (_) {
+      return;
+    }
+    // 复核：位置没落到目标附近（被起播流程复位）就再补一次。
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    if (!mounted || !identical(_player, player)) return;
+    final now = player.value.position;
+    if ((now.inSeconds - seconds).abs() > 5) {
+      try {
+        await player.seek(Duration(seconds: seconds));
+      } catch (_) {}
+    }
   }
 
   String _short(Object error) {
@@ -242,11 +316,18 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
       _playing = value.isPlaying;
       if (error != null) _error = error;
     });
+    // 续播挂起点：时长一到、或位置已经开始推进（本地文件常常一次就绪，
+    // 不会再有一次「时长从 0 变有时长」的通知）都要立刻消费，否则永远不续播。
     final pending = _pendingSeek;
-    if (pending != null && value.duration > Duration.zero) {
+    if (pending != null &&
+        (value.duration > Duration.zero ||
+            value.position > Duration.zero ||
+            value.isPlaying)) {
       _pendingSeek = null;
+      final duration = value.duration;
       // 存的进度太靠近结尾就直接从头播，别卡在最后一秒。
-      if (pending < value.duration.inSeconds - 5) {
+      if (duration <= Duration.zero ||
+          pending < duration.inSeconds - 5) {
         unawaited(player.seek(Duration(seconds: pending)));
       }
     }
@@ -470,22 +551,21 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
   Future<void> _enterLandscape() async {
     try {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      await SystemChrome.setPreferredOrientations(_landscape);
       SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light);
     } catch (_) {
       // 桌面 / 模拟器上不支持也无所谓
     }
+    // 与在线全屏同一套：SENSOR_LANDSCAPE，系统旋转锁开着也能横屏。
+    await ScreenOrientation.landscape();
   }
 
   /// 退出前恢复竖屏 + 常规系统栏。
   Future<void> _restorePortrait() async {
     try {
-      await SystemChrome.setPreferredOrientations(
-        const <DeviceOrientation>[DeviceOrientation.portraitUp],
-      );
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setSystemUIOverlayStyle(_appOverlay);
     } catch (_) {}
+    await ScreenOrientation.portrait();
   }
 
   /// 退出离线播放：先恢复竖屏再退栈，回到列表时已经是竖屏。
@@ -1308,6 +1388,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _openSeq++;
     _hideTimer?.cancel();
     _sleepTimer?.cancel();
