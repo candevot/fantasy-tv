@@ -244,16 +244,18 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 ),
               ],
             ),
-            // 悬浮聊天叠在整页最上层：不受视频区 / 键盘压缩影响，
-            // 气泡始终贴屏幕右下角，位置稳定。
+            // 悬浮聊天叠在整页最上层：不受视频区 / 键盘压缩影响。
+            // 注意不能 Positioned.fill —— 那样会铺满全屏挡住视频区手势
+            // （点击暂停、双击全屏、拖动进度全都点不到）。这里让子组件
+            // 自己用 Stack + 局部 Positioned 定位，只占它实际需要的那块。
+            // 只让悬浮层自己那小块参与命中测试：TogetherFloatingChat 内部
+            // 是 Stack，收起时只有小标志有 GestureDetector，其余区域不拦截，
+            // 视频区手势照常。
             Positioned.fill(
-              child: IgnorePointer(
-                ignoring: false,
-                child: TogetherFloatingChat(
-                  chat: widget.chat,
-                  onSend: widget.onSendChat,
-                  enabled: widget.online,
-                ),
+              child: TogetherFloatingChat(
+                chat: widget.chat,
+                onSend: widget.onSendChat,
+                enabled: widget.online,
               ),
             ),
           ],
