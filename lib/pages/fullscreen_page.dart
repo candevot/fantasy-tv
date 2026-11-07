@@ -897,19 +897,34 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return null;
   }
 
+  /// 平台线路（爱奇艺 /api/iqiyi.m3u8?tvid=...）返回站内相对地址，
+  /// 电视端拿不到，投屏前必须补成绝对 URL。
+  String _absoluteUrl(String raw) {
+    final url = raw.trim();
+    if (url.isEmpty) return url;
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    final base = Api.base.trim();
+    if (base.isEmpty) return url;
+    final root = base.replaceFirst(RegExp(r'/api/?$'), '');
+    if (url.startsWith('/')) return '$root$url';
+    return '$root/$url';
+  }
+
   String? _watchdogUrl() {
     final info = _info;
     if (info == null) return null;
     final key = _qualityKey;
     if (key != null) {
       for (final q in info.quality) {
-        if (q.key == key && q.url.trim().isNotEmpty) return q.url.trim();
+        if (q.key == key && q.url.trim().isNotEmpty) {
+          return _absoluteUrl(q.url);
+        }
       }
     }
     final main = info.url.trim();
-    if (main.isNotEmpty) return main;
+    if (main.isNotEmpty) return _absoluteUrl(main);
     for (final u in info.backup) {
-      if (u.trim().isNotEmpty) return u.trim();
+      if (u.trim().isNotEmpty) return _absoluteUrl(u);
     }
     return null;
   }

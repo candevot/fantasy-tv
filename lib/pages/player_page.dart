@@ -264,17 +264,33 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     );
   }
 
+  /// 投屏地址必须能落到绝对 URL。
+  /// 平台线路（爱奇艺 /api/iqiyi.m3u8?tvid=...）返回的是站内相对地址，
+  /// 直接交给电视会因 uri.host 为空被判定「不是 http(s) 直链」而投屏失败，
+  /// 这里统一补上服务器前缀。
+  String _absoluteUrl(String raw) {
+    final url = raw.trim();
+    if (url.isEmpty) return url;
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    final base = Api.base.trim();
+    if (base.isEmpty) return url;
+    // Api.base 形如 http://host:8787/api，站内地址以 /api/ 开头
+    final root = base.replaceFirst(RegExp(r'/api/?$'), '');
+    if (url.startsWith('/')) return '$root$url';
+    return '$root/$url';
+  }
+
   String _castUrl(PlayInfo info) {
     final key = _qualityKey;
     if (key != null) {
       for (final quality in info.quality) {
         if (quality.key == key && quality.url.trim().isNotEmpty) {
-          return quality.url.trim();
+          return _absoluteUrl(quality.url);
         }
       }
     }
     final main = info.url.trim();
-    if (main.isNotEmpty) return main;
+    if (main.isNotEmpty) return _absoluteUrl(main);
     for (final url in info.backup) {
       if (url.trim().isNotEmpty) return url.trim();
     }
