@@ -256,6 +256,12 @@ class FxPlayer implements Listenable {
   /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
   static const int _rescueTries = 2;
 
+  /// 同一次播放最多进几轮救援链。没有这个上限时，每轮救援结束都会
+  /// 重置 _lastFlowAt，于是又能再等 30 秒 → 再救 → 再等，表现就是
+  /// 「一直卡在那几秒、一直循环」。超过上限就把错误交给页面（换线路 / 提示），
+  /// 不再无限重连。
+  static const int _maxRescueRounds = 3;
+
   /// 救援重开时等待新流首帧 / 时长的上限。
   static const Duration _rescueOpenTimeout = Duration(seconds: 8);
 
@@ -303,6 +309,9 @@ class FxPlayer implements Listenable {
 
   /// 最近一次「有字节流动」的时间；停摆计时从它开始。
   DateTime _lastFlowAt = DateTime.now();
+
+  /// 本次播放已执行的救援轮数。
+  int _rescueRounds = 0;
   Duration _lastFlowPos = Duration.zero;
   Duration _lastFlowBuffered = Duration.zero;
   double _lastFlowPct = -1;
@@ -485,6 +494,7 @@ class FxPlayer implements Listenable {
     _rescueGen++;
     _rescueBusy = false;
     _rescueHold = false;
+    _rescueRounds = 0;
     _cacheRaised = false;
     _lastVideoPts = null;
     _lastVideoAt = DateTime.now();
@@ -1177,6 +1187,14 @@ class FxPlayer implements Listenable {
 
   Future<void> _runRescue(String reason) async {
     if (_disposed || _rescueBusy || _value.hasError) return;
+    if (_rescueRounds >= _maxRescueRounds) {
+      // 已经救过足够多轮还不行：说明这条线路本身不可用，
+      // 停止无限重连，交给页面提示换线路。
+      _logFx('RESCUE 放弃：已尝试 $_rescueRounds 轮，交给页面处理');
+      _fail('这条线路不稳定，请切换其它线路');
+      return;
+    }
+    _rescueRounds++;
     _rescueBusy = true;
     final gen = _rescueGen;
     final resume = _value.position;

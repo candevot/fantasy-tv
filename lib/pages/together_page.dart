@@ -151,6 +151,9 @@ class _TogetherPageState extends State<TogetherPage>
   // suspended after disconnect/resume until room_state has arrived again.
   bool _awaitingRoomState = false;
 
+  /// 等待房间状态的兜底定时器：room_state 迟迟不来时不能让画面一直转圈。
+  Timer? _awaitingStateTimer;
+
   bool get _canCorrectMember => togetherCanCorrectMember(
         online: _online,
         connected: _client.connected,
@@ -328,6 +331,8 @@ class _TogetherPageState extends State<TogetherPage>
     _ticker = null;
     _heartbeat = null;
     _enterTimer = null;
+    _awaitingStateTimer?.cancel();
+    _awaitingStateTimer = null;
     _frozenFadeTimer?.cancel();
     _frozenFallbackTimer?.cancel();
     _liveFirstFrameTimer?.cancel();
@@ -377,8 +382,7 @@ class _TogetherPageState extends State<TogetherPage>
       if (_stage == _TogetherStage.room) {
         // 不断连：socket 还在就直接要一次权威状态，否则重连。
         if (_client.connected) {
-          if (!_isHost) _awaitingRoomState = true;
-          _client.refreshRoom();
+          if (!_isHost) _armAwaitingState();
         } else {
           _client.connect();
         }
@@ -421,10 +425,29 @@ class _TogetherPageState extends State<TogetherPage>
     }
   }
 
+  /// 进入「等房间状态」并挂兜底：3 秒内没等到就放弃等待、按本地继续播。
+  ///
+  /// 之前只置 true 不设超时，room_state 一旦因为网络抖动没回来，
+  /// 画面就一直停在「转圈等同步」，用户看到的就是一起看一直卡。
+  void _armAwaitingState() {
+    _awaitingRoomState = true;
+    _awaitingStateTimer?.cancel();
+    _awaitingStateTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted || !_awaitingRoomState) return;
+      _awaitingRoomState = false;
+      // 放弃等待：让播放继续，下一次 room_state 到达再对齐。
+      final c = _controller;
+      if (c != null && !c.value.hasError) {
+        unawaited(c.play());
+      }
+      if (mounted) setState(() {});
+    });
+  }
+
   void _onDown() {
     if (!mounted) return;
     final wasOnline = _online;
-    _awaitingRoomState = true;
+    _armAwaitingState();
     // Losing the control socket must not leave a member locally paused while
     // the host's last playback intent was play. Do not extrapolate/seek against
     // that stale snapshot; let the media stream continue until rejoin succeeds.
@@ -454,6 +477,7 @@ class _TogetherPageState extends State<TogetherPage>
   void _resetSyncState() {
     _remote = null;
     _awaitingRoomState = false;
+    _awaitingStateTimer?.cancel();
     _seqGate.reset();
     _applyHoldUntil = 0;
     _seekGuardUntil = 0;
@@ -560,6 +584,7 @@ class _TogetherPageState extends State<TogetherPage>
     // 防重入：同一房间同一 seq 只应用一次；旧 seq 直接丢弃。
     final awaitingRoomState = _awaitingRoomState;
     _awaitingRoomState = false;
+    _awaitingStateTimer?.cancel();
     if (!_seqGate.accept(state.code, state.seq)) {
       // A refresh/rejoin can legitimately return the same revision. It still
       // confirms that this socket is back in the room and can release playback.

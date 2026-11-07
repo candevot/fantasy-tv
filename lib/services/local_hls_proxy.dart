@@ -1404,11 +1404,12 @@ class LocalHlsProxy {
     //   ≥6MB  → 12 路
     //   其余   → 原自适应级别
     // 仍受 _parallelLevel 上限约束（连续失败会自动降级到 4/2，不会打爆）。
+    // 大分片**不要**加并发：16 路同时打一个 CDN 会被限流，
+    // 表现就是「一直卡在那几秒、反复重连」。实测下来 6 路是稳定上限，
+    // 每块 2~7MB，单片仍能在播放耗尽前下完。
     var targetParallel = _parallelLevel;
-    if (length >= 16 * 1024 * 1024) {
-      targetParallel = math.max(_parallelLevel, 16);
-    } else if (length >= 6 * 1024 * 1024) {
-      targetParallel = math.max(_parallelLevel, 12);
+    if (length >= 6 * 1024 * 1024) {
+      targetParallel = math.min(_parallelLevel, 6);
     }
     final count = math.min(
       targetParallel,
@@ -1798,6 +1799,12 @@ class LocalHlsProxy {
     if (avgSegBytes > 0 && cacheLimitBytes > 0) {
       final affordable = ((cacheLimitBytes * 0.7) / avgSegBytes).floor();
       depth = math.min(prefetchCount, math.max(8, affordable));
+    }
+    // 4K 大分片（>6MB/片）不做深度预取：一集 2.4GB 根本缓存不下，
+    // 预取只会和正在播的那片抢带宽，反而制造卡顿。
+    // 只提前备 3 片，保证「下一片已就位」即可。
+    if (avgSegBytes >= 6 * 1024 * 1024) {
+      depth = math.min(depth, 3);
     }
     final end = math.min(playlist.segments.length, start + depth);
     for (var i = math.max(0, start); i < end; i++) {
