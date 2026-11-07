@@ -40,6 +40,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
   int _seen = 0;
   final TextEditingController _input = TextEditingController();
   final FocusNode _focus = FocusNode();
+  final ScrollController _scroll = ScrollController();
 
   /// 悬浮字条：最近发出的几条，几秒后自动消失。
   final List<_FloatLine> _floats = <_FloatLine>[];
@@ -67,6 +68,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     _floatTimer?.cancel();
     _input.dispose();
     _focus.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -77,14 +79,16 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     final last = list.last;
     // 对方（或系统）的新消息：气泡收起时浮一条字条 + 累加未读。
     final isSelf = last.mine;
+    // 只在气泡收起时浮字条：展开时消息就在气泡里，再浮一遍是重复。
     if (!_open && !isSelf && !last.system) {
       _pushFloat(last.text, fromPeer: true);
     }
-    if (!_open) {
-      setState(() => _seen = list.length);
-    } else {
-      setState(() => _seen = list.length);
-    }
+    // 未读数 = 总消息数 - 已读基线。
+    // 注意：收起状态下**不能**把 _seen 推到最新，否则未读永远是 0，
+    // 角标永远不出现（之前就是这样）。只有展开时才标记已读。
+    setState(() {
+      if (_open) _seen = list.length;
+    });
   }
 
   void _pushFloat(String text, {bool fromPeer = false}) {
@@ -108,6 +112,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
       if (_open) {
         _seen = widget.chat.value.length;
         _floats.clear();
+        _floatTimer?.cancel();
       }
     });
     if (_open) {
@@ -134,8 +139,9 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     final unread = (widget.chat.value.length - _seen).clamp(0, 99);
     return Stack(
       children: [
-        // 点气泡以外的任意位置收起，变回小图标。
-        // 用透明全屏层拦截：只在展开时出现，收起时完全不占交互。
+        // 点气泡以外的任意位置收起。
+        // 遮罩放在气泡**之前**（Stack 里更靠底层），气泡自身在上层拦截点击，
+        // 所以点输入框 / 滑消息列表不会被误收起。
         if (_open)
           Positioned.fill(
             child: GestureDetector(
@@ -231,62 +237,47 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     );
   }
 
-  /// 透明小聊天框：最新消息 + 输入行，整体半透明。
+  /// 透明悬浮窗：固定尺寸、可上下滑历史、带时间，整体半透明。
+  ///
+  /// 尺寸取 268×300：够放下 5~6 条消息和输入行，又不会盖住大半个画面。
   Widget _buildBubble(BuildContext context) {
     final messages = widget.chat.value;
-    final recent = messages.length <= 6
-        ? messages
-        : messages.sublist(messages.length - 6);
     return Container(
-      width: 250,
+      width: 268,
+      height: 300,
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: .42),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: Colors.white.withValues(alpha: .16)),
+        // 很淡的底色：文字仍清晰，但几乎不挡画面。
+        color: Colors.black.withValues(alpha: .30),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: .14)),
       ),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (recent.isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              child: Text(
-                '还没有消息',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.white.withValues(alpha: .5),
-                ),
-              ),
-            )
-          else
-            for (final m in recent)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: RichText(
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  text: TextSpan(
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      height: 1.35,
-                      color: Colors.white.withValues(alpha: .88),
+          Expanded(
+            child: messages.isEmpty
+                ? Center(
+                    child: Text(
+                      '还没有消息',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: Colors.white.withValues(alpha: .5),
+                      ),
                     ),
-                    children: [
-                      if (!m.system)
-                        TextSpan(
-                          text: '${m.user} ',
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: .5),
-                          ),
-                        ),
-                      TextSpan(text: m.text),
-                    ],
+                  )
+                : ListView.builder(
+                    controller: _scroll,
+                    reverse: true,
+                    padding: EdgeInsets.zero,
+                    itemCount: messages.length,
+                    itemBuilder: (context, i) {
+                      // reverse：从最新往回排。
+                      final m = messages[messages.length - 1 - i];
+                      return _ChatRow(message: m);
+                    },
                   ),
-                ),
-              ),
-          const SizedBox(height: 4),
+          ),
+          const SizedBox(height: 6),
           Row(
             children: [
               Expanded(
@@ -301,7 +292,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                     controller: _input,
                     focusNode: _focus,
                     enabled: widget.enabled,
-                    style: const TextStyle(fontSize: 12, color: Colors.white),
+                    style: const TextStyle(fontSize: 12.5, color: Colors.white),
                     cursorColor: Fx.accent,
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => _send(),
@@ -310,7 +301,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
                       border: InputBorder.none,
                       hintText: widget.enabled ? '说点什么…' : '正在重连…',
                       hintStyle: TextStyle(
-                        fontSize: 12,
+                        fontSize: 12.5,
                         color: Colors.white.withValues(alpha: .42),
                       ),
                     ),
@@ -339,6 +330,79 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
         ],
       ),
     );
+  }
+}
+
+/// 单条消息：昵称 + 时间 + 正文。时间用等宽小字靠右，不抢正文。
+class _ChatRow extends StatelessWidget {
+  const _ChatRow({required this.message});
+
+  final TogetherChatMessage message;
+
+  @override
+  Widget build(BuildContext context) {
+    final m = message;
+    if (m.system) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Text(
+          m.text,
+          style: TextStyle(
+            fontSize: 11,
+            color: Colors.white.withValues(alpha: .45),
+          ),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (m.user.isNotEmpty)
+                Flexible(
+                  child: Text(
+                    m.user,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: m.mine
+                          ? Fx.accent.withValues(alpha: .95)
+                          : Colors.white.withValues(alpha: .55),
+                    ),
+                  ),
+                ),
+              const SizedBox(width: 5),
+              Text(
+                _hhmm(m.time),
+                style: TextStyle(
+                  fontSize: 9.5,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                  color: Colors.white.withValues(alpha: .34),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 1),
+          Text(
+            m.text,
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.35,
+              color: Colors.white.withValues(alpha: .92),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _hhmm(DateTime t) {
+    String two(int v) => v < 10 ? '0$v' : '$v';
+    return '${two(t.hour)}:${two(t.minute)}';
   }
 }
 
