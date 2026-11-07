@@ -676,14 +676,18 @@ bool fxUrlNeedsClientProxy(String url) {
   final raw = url.trim();
   if (raw.isEmpty) return false;
   final lower = raw.toLowerCase();
-  // 站内包装地址：/api/... 或以我们服务器为 host 的相对路径。
-  if (raw.startsWith('/api/')) return true;
-  if (lower.contains('/api/iqiyi.m3u8') ||
-      lower.contains('/api/fyplay') ||
-      lower.contains('/api/mgtv')) {
-    return true;
-  }
-  return false;
+  // 实测（2026-11-07）三类线路的分片都能被 mpv 直接拉：
+  //   腾讯独家：https://apd-vlive.apdcdn.tc.qq.com/...（相对分片，相对 CDN）
+  //   爱奇艺：  /api/iqiyi.m3u8 返回 692 个绝对地址 pcw-data.video.iqiyi.com
+  //   幻想4K：  /api/proxy 包的上游 m3u8.meilinvps.com 直连 200 / 22.8MB
+  // 所以只要播放列表本身能被 mpv 拉到，分片就都能直连，
+  // 客户端代理只会多一层「整片下完再交给 mpv」的延迟。
+  //
+  // 只有播放列表地址本身是站内相对路径（没有 host）时才必须过代理：
+  // 那种地址 mpv 无法解析。这种情况极少，其余一律直连。
+  if (raw.startsWith('/')) return true;
+  return lower.startsWith('http://127.0.0.1') ||
+      lower.startsWith('http://localhost');
 }
 
 bool fxIsPlatformLine(LineInfo line) {
