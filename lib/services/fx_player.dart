@@ -256,6 +256,10 @@ class FxPlayer implements Listenable {
   /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
   static const int _rescueTries = 2;
 
+  /// mpv 磁盘缓存目录：放在系统临时目录，退出即清，不占用户存储。
+  String get _diskCacheDir =>
+      '${Directory.systemTemp.path}/fx_mpv_cache';
+
   /// 同一次播放最多进几轮救援链。没有这个上限时，每轮救援结束都会
   /// 重置 _lastFlowAt，于是又能再等 30 秒 → 再救 → 再等，表现就是
   /// 「一直卡在那几秒、一直循环」。超过上限就把错误交给页面（换线路 / 提示），
@@ -668,6 +672,20 @@ class FxPlayer implements Listenable {
       await platform.setProperty('demuxer-max-bytes', '$forwardBytes');
       await platform.setProperty('demuxer-max-back-bytes', '$_backBufferBytes');
       await platform.setProperty('demuxer-readahead-secs', _readaheadSeconds);
+      // 直连模式下没有客户端代理的整集缓存，开启 mpv 自己的磁盘缓存：
+      // 已播过的分片留在本地，往回 seek / 短暂卡顿都不用重新下载。
+      // 4K 码率高，磁盘缓存比内存划算，也不会占用 App 内存。
+      // 目录必须先存在，否则 mpv 会静默放弃磁盘缓存。
+      try {
+        final dir = Directory(_diskCacheDir);
+        if (!await dir.exists()) await dir.create(recursive: true);
+      } catch (_) {
+        // 建目录失败就只用内存缓存，不影响播放。
+      }
+      await platform.setProperty('cache', 'yes');
+      await platform.setProperty('cache-on-disk', 'yes');
+      await platform.setProperty('cache-dir', _diskCacheDir);
+      await platform.setProperty('demuxer-max-back-bytes', '$_backBufferBytes');
     } catch (_) {
       // 旧版本 / 特殊平台没有这些属性时静默跳过。
     }
@@ -1631,7 +1649,16 @@ class _CachedPlayInfo {
 class _FxHlsWarmup {
   static const Duration _budget = Duration(milliseconds: 1600);
   static const Duration _ttl = Duration(minutes: 8);
-  static const int _segmentPrefetchBytes = 256 * 1024;
+  /// 预热时真正预取的分片数。
+  ///
+  /// 直连模式下没有客户端代理的整集缓存，起播和 seek 都直接打 CDN。
+  /// 之前只暖首片 256KB，等于只做了 DNS/连接预热 —— 首帧仍要等第一个
+  /// 完整分片下完。这里改成预取前 3 片（4K 单片 10~40MB 时按字节上限
+  /// 截断），让 mpv 一起播就有货可解，起播不再空等。
+  static const int _segmentPrefetchCount = 3;
+
+  /// 预取总字节上限：4K 分片很大，不能无限预取。
+  static const int _prefetchBudgetBytes = 24 * 1024 * 1024;
   static final Map<String, DateTime> _warmed = <String, DateTime>{};
   static final Map<String, Future<void>> _inflight = <String, Future<void>>{};
 
@@ -1677,8 +1704,15 @@ class _FxHlsWarmup {
       final variants = _variants(body, playlistUri);
       if (variants.isEmpty) {
         // 已经是媒体 playlist：直接取第一个分片的前 256KB 暖 CDN。
-        final first = _firstSegment(body, playlistUri);
-        if (first != null) unawaited(_prefetchFirstSegment(first, headers));
+        // 直连没有代理层的整集缓存，开头多备几片，起播/小 seek 不用等。
+        final leading = _leadingSegments(
+          body,
+          playlistUri,
+          _segmentPrefetchCount,
+        );
+        for (final seg in leading) {
+          unawaited(_prefetchFirstSegment(seg, headers));
+        }
         return;
       }
       // master playlist：只等第一个子 playlist（拿到真实分片地址），
@@ -1686,8 +1720,14 @@ class _FxHlsWarmup {
       final firstVariant = variants.first;
       final firstBody = await _fetchPlaylistText(client, firstVariant, headers);
       if (firstBody != null) {
-        final first = _firstSegment(firstBody, firstVariant);
-        if (first != null) unawaited(_prefetchFirstSegment(first, headers));
+        final leading = _leadingSegments(
+          firstBody,
+          firstVariant,
+          _segmentPrefetchCount,
+        );
+        for (final seg in leading) {
+          unawaited(_prefetchFirstSegment(seg, headers));
+        }
       }
       if (variants.length > 1) {
         unawaited(_warmVariant(variants[1], headers));
@@ -1726,28 +1766,32 @@ class _FxHlsWarmup {
     }
   }
 
-  /// 取第一个分片的前 ~256KB：不保留响应，只为暖 CDN / DNS，
-  /// 让 libmpv 真正请求首分片时更快命中缓存。
+  /// 直连模式下的预热：把开头几个分片整片拉一遍。
+  ///
+  /// 不保留数据（mpv 自己会再拉一次并缓存），目的是：
+  ///   1. 暖 DNS / TCP / TLS，起播省掉握手；
+  ///   2. 让 CDN 边缘节点预热这几个对象，mpv 再拉时直接命中；
+  ///   3. 提前暴露「首片就 404/403」的坏线路，交给上层快速换线。
+  ///
+  /// 4K 单片 10~40MB，因此按 [_prefetchBudgetBytes] 截断，不会把带宽吃光。
   static Future<void> _prefetchFirstSegment(
     Uri uri,
     Map<String, String> headers,
   ) async {
     unawaited(_dnsPrefetch(uri));
     final client = http.Client();
+    var budget = _prefetchBudgetBytes;
     try {
-      final request = http.Request('GET', uri)
-        ..headers.addAll(headers)
-        ..headers['Range'] = 'bytes=0-${_segmentPrefetchBytes - 1}';
+      final request = http.Request('GET', uri)..headers.addAll(headers);
       final response = await client
           .send(request)
-          .timeout(const Duration(seconds: 2));
+          .timeout(const Duration(seconds: 3));
       if (response.statusCode >= 400) return;
-      var received = 0;
       await for (final chunk in response.stream.timeout(
-        const Duration(seconds: 2),
+        const Duration(seconds: 3),
       )) {
-        received += chunk.length;
-        if (received >= _segmentPrefetchBytes) break;
+        budget -= chunk.length;
+        if (budget <= 0) break;
       }
     } catch (_) {
       // 预取失败不影响播放。
@@ -1769,14 +1813,19 @@ class _FxHlsWarmup {
   }
 
   /// 从媒体 playlist 里取第一个分片地址，相对路径按 playlist 地址解析。
-  static Uri? _firstSegment(String playlist, Uri base) {
-    if (playlist.contains('#EXT-X-STREAM-INF')) return null;
+  /// 取 playlist 里前 [count] 个分片地址（用于直连预热）。
+  static List<Uri> _leadingSegments(String playlist, Uri base, int count) {
+    if (playlist.contains('#EXT-X-STREAM-INF')) return const <Uri>[];
+    final out = <Uri>[];
     for (final raw in const LineSplitter().convert(playlist)) {
       final line = raw.trim();
       if (line.isEmpty || line.startsWith('#')) continue;
-      return Uri.tryParse(base.resolve(line).toString());
+      final uri = Uri.tryParse(base.resolve(line).toString());
+      if (uri == null) continue;
+      out.add(uri);
+      if (out.length >= count) break;
     }
-    return null;
+    return out;
   }
 
   /// 从 master playlist 里取前两个变体地址（相对路径按 playlist 地址解析）。
