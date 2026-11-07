@@ -362,6 +362,17 @@ class _TogetherPageState extends State<TogetherPage>
       // 回前台只接回画面：换 key 重挂 Video 层，不重新拉流、不重置进度。
       if (wasBackground && _stage == _TogetherStage.room && mounted) {
         setState(() => _videoEpoch++);
+        // 画面层重建不等于流还活着：后台待久了连接会被回收、平台签名
+        // 也会过期。这里让播放器自检一次，真断了自动重连回原位置，
+        // 房主/房员都不用手动点重试。
+        final c = _controller;
+        if (c != null) {
+          unawaited(c.resumeSelfCheck());
+        } else if (_stage == _TogetherStage.room && _videoId.isNotEmpty) {
+          // 播放器已被释放（后台被系统回收）：按房间当前状态整段重建，
+          // 位置由随后的 room_state 对齐。
+          unawaited(_loadVideo(_videoId, _ep, _videoLine));
+        }
       }
       if (_stage == _TogetherStage.room) {
         // 不断连：socket 还在就直接要一次权威状态，否则重连。

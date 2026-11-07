@@ -525,7 +525,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       anchor,
       wasPlaying: _backgroundWasPlaying,
     );
-    if (!mounted || !healed) return;
+    if (!mounted) return;
+    if (!healed) {
+      // 同上：位置没异常也可能已经断流，交给播放器自检（断了自动重连）。
+      unawaited(c.resumeSelfCheck());
+      return;
+    }
     setState(() {});
   }
 

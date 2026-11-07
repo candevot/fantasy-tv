@@ -1095,6 +1095,86 @@ class FxPlayer implements Listenable {
   /// ③ 换下一条线路 seek 回原进度；①② 各先试 2 次。
   /// 全程静默（画面保持 + 「缓冲中」），三步都失败才报一次「播放中断」。
   /// 直播（[live]）不 seek，步骤② 直接重 open 直播地址。
+  /// 回前台自检：切后台期间流可能已经断了（系统冻结进程 / 连接被回收），
+  /// 回前台时只重挂画面层是不够的 —— 必须确认还在播，否则自动重连。
+  ///
+  /// 与 [_runRescue] 的区别：这里允许在 hasError 状态下执行（断流后
+  /// value 就是 hasError），并清掉错误态重新打开同一个地址，避免
+  /// 用户看到「加载失败」还得手动点重试。
+  Future<void> resumeSelfCheck() async {
+    if (_disposed || _rescueBusy) return;
+    final v = _value;
+    final url = _sourceUrl;
+    if (url.trim().isEmpty) return;
+    final wantPlay = _playIntent;
+    final target = v.position > Duration.zero ? v.position : _lastFlowPos;
+
+    // 判定是否需要重连：报错 / 未初始化 / 本该在播却不动。
+    final needReopen = v.hasError;
+    if (!needReopen) {
+      // 没报错也要确认真的在走：给 1.2 秒观察位置是否推进。
+      final before = v.position;
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      if (_disposed || _rescueBusy) return;
+      final after = _value.position;
+      final moved = after - before > const Duration(milliseconds: 300);
+      final stalled = wantPlay && !moved && !_value.isBuffering;
+      if (!stalled) return;
+      _logFx('RESUME 自检：位置未推进 ${before.inSeconds}s，准备重连');
+    } else {
+      _logFx('RESUME 自检：处于错误态（${v.errorText}），自动重连');
+    }
+    unawaited(_reopenAfterResume(target, wantPlay));
+  }
+
+  /// 静默重开同一地址并恢复到 [target]：不弹错误层，成功后继续播。
+  Future<void> _reopenAfterResume(Duration target, bool wantPlay) async {
+    if (_disposed || _rescueBusy) return;
+    _rescueBusy = true;
+    _rescueHold = true;
+    final gen = _rescueGen;
+    try {
+      _setValue(
+        _value.copyWith(isBuffering: true, hasError: false, errorText: ''),
+      );
+      // 平台线路先换新签名（后台待久了签名多半已过期）。
+      final refresher = _refreshPlay;
+      var url = _sourceUrl;
+      final headers = _sourceHeaders;
+      if (refresher != null) {
+        final fresh = await _safeRefreshPlay(refresher);
+        if (_disposed || gen != _rescueGen) return;
+        final trimmed = fresh?.trim() ?? '';
+        if (trimmed.startsWith('http')) url = trimmed;
+      }
+      if (_disposed || gen != _rescueGen) return;
+      await _player.open(Media(url, httpHeaders: headers.isEmpty ? null : headers));
+      if (_disposed || gen != _rescueGen) return;
+      if (target > Duration.zero) {
+        await _player.seek(target);
+        if (_disposed || gen != _rescueGen) return;
+      }
+      if (wantPlay) await _player.play();
+      _lastFlowAt = DateTime.now();
+      _lastFlowPos = target;
+      _setValue(
+        _value.copyWith(
+          isBuffering: false,
+          hasError: false,
+          errorText: '',
+          isPlaying: wantPlay,
+        ),
+      );
+      _logFx('RESUME 自检：重连完成，回到 ${target.inSeconds}s');
+    } catch (error) {
+      _logFx('RESUME 自检：重连失败 $error');
+      // 交给页面决定是否提示，这里不强制报错。
+    } finally {
+      _rescueHold = false;
+      _rescueBusy = false;
+    }
+  }
+
   Future<void> _runRescue(String reason) async {
     if (_disposed || _rescueBusy || _value.hasError) return;
     _rescueBusy = true;

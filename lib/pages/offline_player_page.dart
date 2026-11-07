@@ -153,7 +153,11 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
       anchor,
       wasPlaying: _backgroundWasPlaying,
     );
-    if (!mounted || !healed) return;
+    if (!mounted) return;
+    if (!healed) {
+      unawaited(player.resumeSelfCheck());
+      return;
+    }
     setState(() {});
     _wake();
   }
