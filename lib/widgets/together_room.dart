@@ -221,9 +221,11 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
         if (overflow > 0) {
           videoHeight = math.max(togetherRoomVideoMin, videoHeight - overflow);
         }
-        return Column(
+        return Stack(
           children: [
-            _buildHeader(context),
+            Column(
+              children: [
+                _buildHeader(context),
             SizedBox(
               height: videoHeight,
               child: _buildVideo(context),
@@ -237,12 +239,21 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   // 键盘弹起时旧消息列表让位（气泡里能看到最新几条），
                   // 避免「列表 + 气泡 + 键盘」三份内容挤在一起。
                   if (!keyboard) _buildChat(context),
-                  TogetherFloatingChat(
-                    chat: widget.chat,
-                    onSend: widget.onSendChat,
-                    enabled: widget.online,
-                  ),
                 ],
+                  ),
+                ),
+              ],
+            ),
+            // 悬浮聊天叠在整页最上层：不受视频区 / 键盘压缩影响，
+            // 气泡始终贴屏幕右下角，位置稳定。
+            Positioned.fill(
+              child: IgnorePointer(
+                ignoring: false,
+                child: TogetherFloatingChat(
+                  chat: widget.chat,
+                  onSend: widget.onSendChat,
+                  enabled: widget.online,
+                ),
               ),
             ),
           ],

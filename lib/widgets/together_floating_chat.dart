@@ -158,10 +158,14 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
             ),
           ),
         ),
-        // 小标志 / 气泡
+        // 小标志 / 气泡：贴右下角并让出安全区；键盘弹起时整体上移，
+        // 否则输入框会被键盘挡住（之前放在视频区 Expanded 里，
+        // 键盘一弹就被压出屏幕）。
         Positioned(
-          right: 12,
-          bottom: 96,
+          right: 12 + MediaQuery.viewPaddingOf(context).right,
+          bottom: 24 +
+              MediaQuery.viewPaddingOf(context).bottom +
+              MediaQuery.viewInsetsOf(context).bottom,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
