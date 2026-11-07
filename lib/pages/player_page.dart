@@ -132,6 +132,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   /// 正在切换线路（防止重复点击并发 open）。
   bool _switchingLine = false;
+
+  /// 切换卡死时暂存用户最新选择的线路，当前切换一结束就立刻执行。
+  (String, int)? _pendingSwitch;
+
+  /// 上一次切换开始时间，用于判定僵死。
+  DateTime _switchStartedAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 切换代号：被强制接管后，旧的那次必须放弃后续所有状态写入。
+  int _switchToken = 0;
   int? _pendingEp;
 
   /// 切换期间锁住 UI 进度，避免新播放器 open 时进度归零。
@@ -380,9 +389,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   Future<void> _switchLine(String targetLine, int targetEp) async {
     if (_switchingLine) {
-      // 切换中禁止重复点击：直接忽略新的线路请求，绝不允许并发 open。
-      return;
+      // 切换中禁止并发 open，但不能把用户永久锁死：卡顿/上游无响应时
+      // 上一次切换可能一直挂着，这时用户点线路会「点不动」。
+      // 记住这次请求，等当前切换结束时立即执行最新的那一次；
+      // 超过 12 秒仍未结束则判定前一次已僵死，直接接管。
+      _pendingSwitch = (targetLine, targetEp);
+      final stuckFor = DateTime.now().difference(_switchStartedAt);
+      if (stuckFor < const Duration(seconds: 12)) return;
+      debugPrint('[FX] 上一次切换已僵死 ${stuckFor.inSeconds}s，强制接管');
+      _switchToken++;
+      _switchingLine = false;
     }
+    final token = ++_switchToken;
+    _switchStartedAt = DateTime.now();
+    _pendingSwitch = null;
     _switchingLine = true;
     widget.onSwitchingChanged?.call(true);
     final old = _controller;
@@ -473,17 +493,33 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         widget.onLineFallback?.call(lastTried);
       }
     } finally {
-      if (mounted) {
-        setState(() => _switchingLine = false);
-      } else {
-        _switchingLine = false;
+      // 被强制接管的话，这次的结果已经过时，不写状态、不解锁。
+      final superseded = token != _switchToken;
+      if (!superseded) {
+        if (mounted) {
+          setState(() => _switchingLine = false);
+        } else {
+          _switchingLine = false;
+        }
+        widget.onSwitchingChanged?.call(false);
       }
-      widget.onSwitchingChanged?.call(false);
-      // 切换期间点过的下一集：等本次切换结束再执行，不并发 open。
-      final pendingEp = _pendingEp;
-      _pendingEp = null;
-      if (mounted && pendingEp != null && pendingEp != _ep) {
-        unawaited(_switchEpisodeFromParent(pendingEp));
+      if (!superseded) {
+        // 切换期间点过的下一集：等本次切换结束再执行，不并发 open。
+        final pendingEp = _pendingEp;
+        _pendingEp = null;
+        if (mounted && pendingEp != null && pendingEp != _ep) {
+          unawaited(_switchEpisodeFromParent(pendingEp));
+          return;
+        }
+        // 切换卡顿时用户点过的线路：现在立刻执行他最后选的那条，
+        // 不用再点第二次（这就是「卡的时候点不动」的修法）。
+        final pending = _pendingSwitch;
+        _pendingSwitch = null;
+        if (mounted &&
+            pending != null &&
+            (pending.$1 != _line || pending.$2 != _ep)) {
+          unawaited(_switchLine(pending.$1, pending.$2));
+        }
       }
     }
   }

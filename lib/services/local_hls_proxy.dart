@@ -1396,8 +1396,22 @@ class LocalHlsProxy {
 
   Future<_Downloaded> _downloadParallel(_SegmentRef ref, int length) async {
     // 并行分段数用自适应级别：连续 2 次失败后 8→4→2。
+    //
+    // 4K 片源的分片极大（实测单片 10~40MB，一集 97 片约 2.4GB），
+    // 8 路 2.5MB 一块时单片的下载时间仍然远超播放消耗，表现就是
+    // 「4K 经常卡」和「拖动要等很久」。这里按分片大小动态加路数：
+    //   ≥16MB → 16 路（每块约 1~2MB，和普通 1080P 分片一个量级）
+    //   ≥6MB  → 12 路
+    //   其余   → 原自适应级别
+    // 仍受 _parallelLevel 上限约束（连续失败会自动降级到 4/2，不会打爆）。
+    var targetParallel = _parallelLevel;
+    if (length >= 16 * 1024 * 1024) {
+      targetParallel = math.max(_parallelLevel, 16);
+    } else if (length >= 6 * 1024 * 1024) {
+      targetParallel = math.max(_parallelLevel, 12);
+    }
     final count = math.min(
-      _parallelLevel,
+      targetParallel,
       math.max(2, length ~/ _minChunkBytes),
     );
     if (count < 2) {
@@ -1775,7 +1789,17 @@ class LocalHlsProxy {
   /// 效果是整集边看边缓存，播放位置走到哪里缓存就跟到哪里。
   void _schedulePrefetch(_Playlist playlist, int start) {
     if (_disposed || prefetchCount <= 0 || playlist.isLive) return;
-    final end = math.min(playlist.segments.length, start + prefetchCount);
+    // 预缓冲深度按「缓存能装多少」倒推，而不是固定条数：
+    // 4K 一集 2.4GB，缓存上限 512MB，若还按 512 条排，前面的会被 LRU
+    // 反复淘汰又重下 —— 既卡又费流量。这里按缓存预算的 70% 折算条数，
+    // 保证「已预热的不会被自己挤掉」。
+    final avgSegBytes = _estimateSegmentBytes(playlist);
+    var depth = prefetchCount;
+    if (avgSegBytes > 0 && cacheLimitBytes > 0) {
+      final affordable = ((cacheLimitBytes * 0.7) / avgSegBytes).floor();
+      depth = math.min(prefetchCount, math.max(8, affordable));
+    }
+    final end = math.min(playlist.segments.length, start + depth);
     for (var i = math.max(0, start); i < end; i++) {
       // 缓存预算：留给正在播放的位置，避免把内存吃满导致整机卡顿。
       if (cacheLimitBytes > 0 && _cacheBytes >= cacheLimitBytes * 0.85) break;
@@ -1791,6 +1815,24 @@ class LocalHlsProxy {
       _prefetchQueued.add(cacheKey);
     }
     _pumpPrefetch();
+  }
+
+  /// 估算该播放列表的平均分片字节数：优先用已下载样本，
+  /// 其次用 EXTINF × 估算码率。拿不到就返回 0（走默认深度）。
+  int _estimateSegmentBytes(_Playlist playlist) {
+    final seen = <int>[];
+    for (final seg in playlist.segments) {
+      final alias = _segmentAliases[seg.cacheKey];
+      final key = alias?.cacheKey ?? 'seg:${seg.cacheKey}';
+      final entry = _cache[key];
+      if (entry != null) seen.add(entry.size);
+      if (seen.length >= 6) break;
+    }
+    if (seen.isNotEmpty) {
+      final sum = seen.fold<int>(0, (a, b) => a + b);
+      return sum ~/ seen.length;
+    }
+    return 0;
   }
 
   /// 播放取片时让路：清掉旧队列（它们基于上一个播放位置，多半已经用不上），
