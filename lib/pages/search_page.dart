@@ -6,7 +6,6 @@ import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
-import 'platform_play_page.dart';
 
 class SearchPage extends StatefulWidget {
   const SearchPage({super.key, this.openAi = false});
@@ -301,28 +300,11 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  /// 平台条目（`tx_` 腾讯 / `iq_` 爱奇艺）：片库里没有，直接进平台播放页。
-  void _openPlatformItem(VideoCard item) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => PlatformPlayPage(
-          id: item.id,
-          title: item.title,
-          cover: item.cover,
-          episodes: item.episodes > 0 ? item.episodes : 1,
-        ),
-      ),
-    );
-  }
 
-  /// 搜索结果点击：平台条目与片库条目分流。
-  void _openResult(VideoCard item) {
-    if (item.id.startsWith('tx_') || item.id.startsWith('iq_')) {
-      _openPlatformItem(item);
-    } else {
-      _openDetail(item.id);
-    }
-  }
+  /// 搜索结果点击：统一进详情页。
+  /// 平台条目（tx_/iq_）由服务端合成详情，线路卡 / 选集 / 播放 / 一起看 /
+  /// 下载与片库条目完全一致，客户端不再需要单独的简化播放页。
+  void _openResult(VideoCard item) => _openDetail(item.id);
 
   @override
   Widget build(BuildContext context) {
