@@ -1200,11 +1200,15 @@ class FxPlayer implements Listenable {
       // 提前挂一个空错误监听，避免等待期间出错变成未处理异常。
       unawaited(mediaReady.future.catchError((Object _) {}));
       _mediaReady = mediaReady;
+      // 只有「需要 seek 回原进度」的点播才先暂停打开：先播片头再 seek 会
+      // 让用户听到一小段错位音频。直播没有进度可回，而且直播流在暂停态
+      // 常常不产生首帧 / 时长，等 mediaReady 会白等到超时、把正常直播判死，
+      // 所以直播（以及从 0 开始的点播）一律直接带 play 打开。
+      final reopenPaused = !live && resume > Duration.zero;
       try {
-        // 先暂停打开，落回原位置后再播放；不能先播片头再 seek。
         await _openMedia(
           source,
-          play: false,
+          play: !reopenPaused,
           token: token,
         ).timeout(_rescueOpenTimeout);
         if (_disposed || token != _openToken) return false;
