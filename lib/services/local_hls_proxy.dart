@@ -162,7 +162,7 @@ class LocalHlsProxy {
     this.playlistRefreshInterval = const Duration(seconds: 90),
     this.platformRefreshTimeout = const Duration(seconds: 30),
     this.spoolThresholdBytes = 8 * 1024 * 1024,
-    this.spillToDiskBytes = 1024 * 1024,
+    this.spillToDiskBytes = 4 * 1024 * 1024,
     HlsProxyLogger? log,
   }) : assert(parallelism > 0),
        assert(prefetchCount >= 0),
@@ -203,7 +203,8 @@ class LocalHlsProxy {
   final int cacheLimitBytes;
 
   /// 超过这个大小的分片转存磁盘，内存只留文件引用。
-  /// 默认 1MB：直播/点播分片普遍 1~3MB，整集预缓冲必然落盘。
+  /// 默认 4MB：常见点播分片 1~3MB，留在内存里缓存命中是同步的（更快），
+  /// 只有真正的大分片才落盘，避免「整集预缓冲」把内存撑爆。
   final int spillToDiskBytes;
 
   /// 单段下载失败重试次数（默认 3，退避 200/600/1500ms）。
@@ -1181,8 +1182,9 @@ class LocalHlsProxy {
     final cached = _cacheGet(cacheKey);
     if (cached != null) {
       _cacheHits++;
-      // 落盘的分片从本地文件读回：整集预热后播放不再碰网络。
-      final bytes = await cached.readBytes();
+      // 内存缓存直接同步命中；只有落盘的大分片才读文件。
+      final bytes =
+          cached.file == null ? cached.bytes : await cached.readBytes();
       return _SegmentData(
         bytes,
         cached.contentType,
