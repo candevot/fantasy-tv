@@ -150,14 +150,19 @@ typedef PlayExpiredCallback = void Function();
 class LocalHlsProxy {
   LocalHlsProxy({
     this.parallelism = 8,
-    this.prefetchCount = 5,
-    this.prefetchConcurrency = 3,
-    this.cacheLimitBytes = 256 * 1024 * 1024,
+    // 整集预缓冲：不再只备 5 个分片。按缓存上限把当前这一集尽量都拉下来，
+    // 播放时直接命中内存/磁盘，上游抖动或签名过期都影响不到已缓存部分。
+    // 每片约 1~2MB，1800 片约 2~3 分钟量；具体条数由 _schedulePrefetch
+    // 按 cacheLimitBytes 与预缓冲预算裁剪。
+    this.prefetchCount = 512,
+    this.prefetchConcurrency = 6,
+    this.cacheLimitBytes = 512 * 1024 * 1024,
     this.retries = 3,
     this.retryDelay = const Duration(milliseconds: 300),
     this.playlistRefreshInterval = const Duration(seconds: 90),
     this.platformRefreshTimeout = const Duration(seconds: 30),
     this.spoolThresholdBytes = 8 * 1024 * 1024,
+    this.spillToDiskBytes = 1024 * 1024,
     HlsProxyLogger? log,
   }) : assert(parallelism > 0),
        assert(prefetchCount >= 0),
@@ -196,6 +201,10 @@ class LocalHlsProxy {
 
   /// 内存 LRU 缓存上限（默认 256MB）。
   final int cacheLimitBytes;
+
+  /// 超过这个大小的分片转存磁盘，内存只留文件引用。
+  /// 默认 1MB：直播/点播分片普遍 1~3MB，整集预缓冲必然落盘。
+  final int spillToDiskBytes;
 
   /// 单段下载失败重试次数（默认 3，退避 200/600/1500ms）。
   final int retries;
@@ -247,6 +256,9 @@ class LocalHlsProxy {
   StreamSubscription<HttpRequest>? _serverSub;
   HttpClient? _client;
   Directory? _tempDir;
+
+  /// 分片落盘目录（懒创建）。
+  Directory? _spoolDir;
   Timer? _refreshTimer;
   Future<void>? _starting;
   Map<String, String> _headers = const <String, String>{};
@@ -1169,8 +1181,10 @@ class LocalHlsProxy {
     final cached = _cacheGet(cacheKey);
     if (cached != null) {
       _cacheHits++;
+      // 落盘的分片从本地文件读回：整集预热后播放不再碰网络。
+      final bytes = await cached.readBytes();
       return _SegmentData(
-        cached.bytes,
+        bytes,
         cached.contentType,
         0,
         Duration.zero,
@@ -1701,6 +1715,8 @@ class LocalHlsProxy {
   void _primePrefetch(_Playlist playlist) {
     if (playlist.isMaster || playlist.isLive) return;
     if (!_primedPlaylists.add(playlist.key)) return;
+    // 打开播放列表就把整集排进预缓冲队列（受 prefetchCount / 缓存预算约束），
+    // 不等播放推进：网络好时很快整集落地，之后播放全程只读本地。
     _schedulePrefetch(playlist, 0);
   }
 
@@ -1717,10 +1733,17 @@ class LocalHlsProxy {
     }
   }
 
+  /// 预缓冲：把 [start] 之后的分片持续排进队列，直到集尾或缓存预算用尽。
+  ///
+  /// 之前只排 start+prefetchCount 这一批，播完就断了，等于「缓冲 5 个」；
+  /// 现在每次分片命中都会再排后续，配合调大的 prefetchCount，
+  /// 效果是整集边看边缓存，播放位置走到哪里缓存就跟到哪里。
   void _schedulePrefetch(_Playlist playlist, int start) {
     if (_disposed || prefetchCount <= 0 || playlist.isLive) return;
     final end = math.min(playlist.segments.length, start + prefetchCount);
     for (var i = math.max(0, start); i < end; i++) {
+      // 缓存预算：留给正在播放的位置，避免把内存吃满导致整机卡顿。
+      if (cacheLimitBytes > 0 && _cacheBytes >= cacheLimitBytes * 0.85) break;
       final segment = playlist.segments[i];
       final alias = _segmentAliases[segment.cacheKey];
       final cacheKey = alias?.cacheKey ?? 'seg:${segment.cacheKey}';
@@ -1767,8 +1790,17 @@ class LocalHlsProxy {
   void _startRefreshTimer() {
     if (playlistRefreshInterval <= Duration.zero) return;
     _refreshTimer?.cancel();
+    // 平台线路（临时签名）用更短的间隔提前换地址：签名一般 5 分钟过期，
+    // 90 秒一轮太慢，越拖到后面越容易正好跨过过期点导致断流。
+    // 普通采集线路没有签名，保持原间隔即可，避免无谓回源。
+    // 取 min(配置, 45s)：调用方显式设更短间隔时（测试 / 特例）以配置为准。
+    const platformInterval = Duration(seconds: 45);
+    final interval = _isPlatformPlaylist &&
+            playlistRefreshInterval > platformInterval
+        ? platformInterval
+        : playlistRefreshInterval;
     _refreshTimer = Timer.periodic(
-      playlistRefreshInterval,
+      interval,
       (_) => unawaited(_refreshActivePlaylists()),
     );
   }
@@ -1779,6 +1811,10 @@ class LocalHlsProxy {
     try {
       // 平台线路的 m3u8 是临时签名：重取同一个 URL 只会拿到同一份过期
       // 内容，必须回调宿主重新走 /api/play 拿新签名地址。
+      //
+      // 这里是「定期提前刷新」：不等分片 403 再补救。平台签名通常几分钟
+      // 就过期，靠 403 触发时 mpv 已经断流并报「加载失败」，恢复也来不及。
+      // 每 90 秒主动换一次地址，分片始终指向新鲜签名。
       if (_refreshPlay != null && _isPlatformPlaylist) {
         await _refreshPlatformShared();
         return;
@@ -2175,6 +2211,10 @@ class LocalHlsProxy {
   // --------------------------------------------------------------- helpers
 
   void _clearCaches() {
+    // 落盘的缓存文件一并清掉，避免切集后残留占满存储。
+    for (final entry in _cache.values) {
+      unawaited(_deleteCacheFile(entry));
+    }
     _cache.clear();
     _cacheBytes = 0;
     _segmentInflight.clear();
@@ -2189,17 +2229,74 @@ class LocalHlsProxy {
     return entry;
   }
 
+  /// 写入缓存。超过 [spillToDiskBytes] 的分片落盘，内存里只留文件引用：
+  /// 整集预缓冲会有几百个分片（300~600MB），全放内存会撑爆手机，
+  /// 落盘后播放读的是本地文件，上游抖动 / 签名过期都不再影响播放。
   void _cachePut(String key, _CachedBody body) {
-    if (_disposed || cacheLimitBytes <= 0 || body.bytes.isEmpty) return;
-    if (body.bytes.length > cacheLimitBytes) return;
+    if (_disposed || cacheLimitBytes <= 0) return;
+    if (body.file == null && body.bytes.isEmpty) return;
+    final size = body.file != null ? body.size : body.bytes.length;
+    if (size > cacheLimitBytes) return;
     final old = _cache.remove(key);
-    if (old != null) _cacheBytes -= old.bytes.length;
-    _cache[key] = body;
-    _cacheBytes += body.bytes.length;
+    if (old != null) {
+      _cacheBytes -= old.size;
+      unawaited(_deleteCacheFile(old));
+    }
+    // 大分片落盘；写盘失败就退回内存（内存预算不够时这条不进缓存）。
+    var entry = body;
+    if (body.file == null && body.bytes.length >= spillToDiskBytes) {
+      final spooled = _spillToDiskSync(key, body);
+      if (spooled != null) entry = spooled;
+    }
+    if (entry.file == null &&
+        _cacheBytes + entry.bytes.length > cacheLimitBytes) {
+      // 内存已达上限且无法落盘：放弃缓存这一片，不影响播放。
+      return;
+    }
+    _cache[key] = entry;
+    _cacheBytes += entry.size;
     while (_cacheBytes > cacheLimitBytes && _cache.isNotEmpty) {
       final oldestKey = _cache.keys.first;
       final removed = _cache.remove(oldestKey);
-      if (removed != null) _cacheBytes -= removed.bytes.length;
+      if (removed != null) {
+        _cacheBytes -= removed.size;
+        unawaited(_deleteCacheFile(removed));
+      }
+    }
+  }
+
+  /// 大分片落盘。用同步写避免并发写入时把播放线程拖出太多 async 缝隙；
+  /// 写入失败返回 null，调用方退回内存缓存。
+  _CachedBody? _spillToDiskSync(String key, _CachedBody body) {
+    var dir = _spoolDir;
+    if (dir == null) {
+      final temp = _tempDir;
+      if (temp == null) return null;
+      try {
+        dir = Directory('${temp.path}/spool');
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        _spoolDir = dir;
+      } catch (_) {
+        return null;
+      }
+    }
+    try {
+      final safe = key.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
+      final file = File('${dir.path}/$safe.bin');
+      file.writeAsBytesSync(body.bytes, flush: false);
+      return _CachedBody(Uint8List(0), body.contentType, file: file);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _deleteCacheFile(_CachedBody body) async {
+    final f = body.file;
+    if (f == null) return;
+    try {
+      if (await f.exists()) await f.delete();
+    } catch (_) {
+      // 清理失败不影响播放，下次启动会随临时目录一起清掉。
     }
   }
 
@@ -2357,10 +2454,23 @@ class LocalHlsProxy {
 }
 
 class _CachedBody {
-  const _CachedBody(this.bytes, this.contentType);
+  const _CachedBody(this.bytes, this.contentType, {this.file});
 
+  /// 内存中的字节；落盘后为空，改用 [file] 读回。
   final Uint8List bytes;
   final String? contentType;
+
+  /// 落盘后的分片文件。整集预缓冲会把几百个分片写到磁盘，
+  /// 全放内存会撑爆手机（一集 300~600MB），因此超过阈值的分片改存盘。
+  final File? file;
+
+  int get size => file != null ? file!.lengthSync() : bytes.length;
+
+  Future<Uint8List> readBytes() async {
+    final f = file;
+    if (f != null) return await f.readAsBytes();
+    return bytes;
+  }
 }
 
 class _CachedPlaylist {
