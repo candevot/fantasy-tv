@@ -176,7 +176,10 @@ class VideoCard {
         desc: _cleanDescription(j['desc']),
         rank: _asInt(j['rank']),
         tags: _asStrList(j['tags']),
-        sourceLabel: _cardSourceLabel(j['source'], j['lines']),
+        sourceLabel: _cardSourceLabel(
+          j['sourceLabel'] ?? j['source'],
+          j['lines'],
+        ),
       );
 }
 

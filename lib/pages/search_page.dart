@@ -6,6 +6,7 @@ import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
+import 'platform_play_page.dart';
 
 class SearchPage extends StatefulWidget {
   const SearchPage({super.key, this.openAi = false});
@@ -298,6 +299,29 @@ class _SearchPageState extends State<SearchPage> {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => DetailPage(id: id)),
     );
+  }
+
+  /// 平台条目（`tx_` 腾讯 / `iq_` 爱奇艺）：片库里没有，直接进平台播放页。
+  void _openPlatformItem(VideoCard item) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => PlatformPlayPage(
+          id: item.id,
+          title: item.title,
+          cover: item.cover,
+          episodes: item.episodes > 0 ? item.episodes : 1,
+        ),
+      ),
+    );
+  }
+
+  /// 搜索结果点击：平台条目与片库条目分流。
+  void _openResult(VideoCard item) {
+    if (item.id.startsWith('tx_') || item.id.startsWith('iq_')) {
+      _openPlatformItem(item);
+    } else {
+      _openDetail(item.id);
+    }
   }
 
   @override
@@ -873,7 +897,7 @@ class _SearchPageState extends State<SearchPage> {
                             bottom: i == _results.length - 1 ? 0 : 10),
                         child: FxSearchResultTile(
                           item: item,
-                          onTap: () => _openDetail(item.id),
+                          onTap: () => _openResult(item),
                         ),
                       );
                     },
