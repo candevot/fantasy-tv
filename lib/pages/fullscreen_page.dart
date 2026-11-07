@@ -893,7 +893,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (next.id == _line || next.id.trim().isEmpty) continue;
       try {
         final fresh = await Api.play(widget.videoId, _ep, next.id);
-        final freshUrl = fresh.url.trim();
+        // 救援换线也要补成绝对地址：站内相对路径补全后 mpv 才能直连，
+        // 否则这条新线路又退化成「走代理、整片下完才播」。
+        final freshUrl = fxAbsolutePlayUrl(fresh.url);
         if (freshUrl.isEmpty) continue;
         FxPlayCache.invalidate(widget.videoId, _ep, _line);
         if (mounted) setState(() => _line = next.id);

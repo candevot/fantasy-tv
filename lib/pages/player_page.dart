@@ -1043,7 +1043,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   try {
                     final fresh =
                         await Api.play(widget.videoId, ep, next.id);
-                    final freshUrl = fresh.url.trim();
+                    // 救援换线同样补成绝对地址，避免新线路退化成走代理。
+                    final freshUrl = fxAbsolutePlayUrl(fresh.url);
                     if (freshUrl.isEmpty) continue;
                     FxPlayCache.invalidate(widget.videoId, ep, line);
                     if (mounted && token == _loadToken) {

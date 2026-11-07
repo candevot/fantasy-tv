@@ -3102,11 +3102,12 @@ class _TogetherPageState extends State<TogetherPage>
       if (qualityKey != null) {
         for (final quality in play.quality) {
           if (quality.key == qualityKey && quality.url.trim().isNotEmpty) {
-            return quality.url.trim();
+            // 换签后也要补成绝对地址，保持直连（否则新地址会退化成走代理）。
+            return fxAbsolutePlayUrl(quality.url);
           }
         }
       }
-      final url = play.url.trim(); // Api.play resolves relative URLs.
+      final url = fxAbsolutePlayUrl(play.url);
       return url.isEmpty ? null : url;
     } catch (_) {
       return null;
