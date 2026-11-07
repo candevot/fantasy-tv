@@ -235,11 +235,20 @@ class LiveLine {
   final String id, name, url;
   final int height;
 
+  /// 服务端实测结果（/api/live/tested）：false 表示这条线路探测失败。
+  /// 老接口没这个字段时按「未知」处理（true），行为与升级前一致。
+  final bool ok;
+
+  /// 失效原因（如 http-404 / timeout），仅用于展示与排障。
+  final String deadReason;
+
   const LiveLine({
     required this.id,
     required this.name,
     required this.url,
     this.height = 0,
+    this.ok = true,
+    this.deadReason = '',
   });
 
   /// 展示用清晰度：优先真实分辨率 `宽x高`（如 `1920x1080`）——
@@ -295,6 +304,8 @@ class LiveLine {
           ? _asStr(j['url'])
           : _asStr(j['playUrl']),
       height: height,
+      ok: j['ok'] is bool ? j['ok'] as bool : true,
+      deadReason: _asStr(j['dead']),
     );
   }
 }

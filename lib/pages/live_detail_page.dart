@@ -145,7 +145,10 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     setState(() {
       _channel = channel;
       if (!_lines.any((line) => line.id == _lineId)) {
-        _lineId = _lines.first.id;
+        // 优先选服务端实测可用的线路：/api/live/tested 会把可用线路排前面
+        // 并标记 ok，失效线路（404 / 超时）直接跳过，避免「点进去打不开」。
+        final usable = _lines.where((line) => line.ok && line.url.trim().isNotEmpty);
+        _lineId = usable.isNotEmpty ? usable.first.id : _lines.first.id;
       }
     });
     await _open(_lineId);
@@ -243,6 +246,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
           for (var k = 1; k <= lines.length; k++) {
             final next = lines[(index + k) % lines.length];
             if (next.id == line.id || next.url.trim().isEmpty) continue;
+            // 实测已失效的线路不再浪费一轮重连（服务端标记 dead）。
+            if (!next.ok) continue;
             if (_rescueTried.contains(next.id)) continue;
             _rescueTried.add(next.id);
             if (!mounted || seq != _openSeq) return null;

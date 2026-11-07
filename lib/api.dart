@@ -188,7 +188,14 @@ class Api {
   /// 兼容两种历史结构：顶层 `items` 扁平数组、`data.items`。
   /// 404 / 空结构 / 脏数据一律返回空列表，由页面展示空态。
   static Future<List<LiveGroup>> liveGroups() async {
-    final r = await _send(() => http.get(_u('/live'), headers: _headers()));
+    // 优先用实测过的直播线路（/api/live/tested）：服务端会真实探测每条线路，
+    // 把可用的排到前面、失效的标记 dead。直接用 /api/live 全量列表时，
+    // 频道第一条线路经常是 404 / 超时，表现就是「点进去打不开」。
+    // 实测数据不可用时静默回落到全量列表，不影响可用性。
+    var r = await _send(() => http.get(_u('/live/tested'), headers: _headers()));
+    if (r.statusCode != 200) {
+      r = await _send(() => http.get(_u('/live'), headers: _headers()));
+    }
     if (r.statusCode == 404) return const <LiveGroup>[];
     dynamic j;
     try {

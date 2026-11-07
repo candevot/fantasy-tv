@@ -204,11 +204,13 @@ class FsTopBar extends StatelessWidget {
     // 这里只认「屏幕」安全区，不认画面宽高——控件位置必须固定，不能因为
     // 片源是 4:3 / 21:9 就跟着画面矩形跑。
     final safe = MediaQuery.viewPaddingOf(context);
+    // 右侧留白收到 6dp：分辨率胶囊 + 投屏 + 更多这一组要贴着屏幕右缘，
+    // 留 10dp 时在大屏横屏上视觉重心偏中间。
     return Container(
       padding: EdgeInsets.fromLTRB(
         14 + safe.left,
         8 + safe.top,
-        10 + safe.right,
+        6 + safe.right,
         18,
       ),
       decoration: BoxDecoration(
