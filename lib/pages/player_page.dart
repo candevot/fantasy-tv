@@ -974,9 +974,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       for (final u in info.backup)
         if (u.trim().isNotEmpty) u.trim(),
     ];
+    // 统一补成绝对地址：服务端有些线路给的是 /api/fyplay、/api/iqiyi.m3u8
+    // 这类站内相对路径，补全后 mpv 才能直接拉（否则只能走客户端代理，
+    // 而代理是整片下完再交给 mpv，4K 大分片会一直卡）。
     final candidates = <String>[];
     for (final u in all) {
-      if (!candidates.contains(u)) candidates.add(u);
+      final abs = fxAbsolutePlayUrl(u);
+      if (!candidates.contains(abs)) candidates.add(abs);
     }
     if (candidates.isEmpty) {
       if (reportFailure) {

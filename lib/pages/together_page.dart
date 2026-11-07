@@ -2927,11 +2927,13 @@ class _TogetherPageState extends State<TogetherPage>
       if (play.type.trim().toLowerCase() == 'parse') continue;
       _playInfo = play;
 
+      // 统一补成绝对地址：站内相对路径补全后 mpv 能直连，
+      // 不必再过客户端代理（代理是整片下完才播，4K 大分片会卡）。
       final urls = <String>[];
-      final primary = _qualityUrl(play);
+      final primary = fxAbsolutePlayUrl(_qualityUrl(play));
       if (primary.isNotEmpty) urls.add(primary);
       for (final raw in play.backup) {
-        final url = raw.trim();
+        final url = fxAbsolutePlayUrl(raw);
         if (url.isNotEmpty && !urls.contains(url)) urls.add(url);
       }
       if (urls.isEmpty) continue;

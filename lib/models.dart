@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'api.dart';
+
 // ---------------------------------------------------------------------------
 // JSON 安全取值：服务端数据脏（null、数字混进字符串、对象冒充数组）时，
 // 宁可让单个字段退化成默认值、单个条目跳过，也不让整个页面解析失败。
@@ -672,22 +674,42 @@ bool fxNeedsClientProxy(String lineId) {
 ///
 /// 走客户端代理是「整片下完再交给 mpv」，4K 分片 10~40MB 时会一直卡；
 /// 能直连就直连，让 mpv 自己边下边播。
+/// 把服务端给的站内地址补成绝对地址，让 mpv 能直接拉。
+///
+/// 服务端有些线路返回 `/api/fyplay?u=...`、`/api/iqiyi.m3u8?...`
+/// 这种没有主机名的相对路径。App 能靠 Api.base 补全，但**如果先交给
+/// 客户端代理，代理就会整片下完再给 mpv** —— 4K 分片 10~40MB 时
+/// 这就是卡顿来源。补全后 mpv 自己就能边下边播。
+String fxAbsolutePlayUrl(String url) {
+  final raw = url.trim();
+  if (raw.isEmpty) return raw;
+  if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+  final base = Api.base.trim();
+  if (base.isEmpty) return raw;
+  // Api.base 形如 http://host:8787/api → 取根 http://host:8787
+  final root = base.replaceFirst(RegExp(r'/api/?$'), '');
+  if (raw.startsWith('/')) return '$root$raw';
+  return '$root/$raw';
+}
+
+/// 这条播放地址是否仍然需要客户端代理。
+///
+/// 实测（2026-11-07）：腾讯独家、爱奇艺、幻想4K、幻想蓝光、红牛、量子
+/// 的播放列表**都能被 mpv 直接拉**（爱奇艺 692 个分片全绝对地址；
+/// 4K 上游 m3u8.meilinvps.com 直连 200 / 22.8MB）。所以补全成绝对地址后
+/// 一律直连，只有 mpv 完全无法解析的地址才退回代理。
+///
+/// 判定放在补全**之后**：补全完还不是 http(s) 的才走代理。
 bool fxUrlNeedsClientProxy(String url) {
   final raw = url.trim();
   if (raw.isEmpty) return false;
   final lower = raw.toLowerCase();
-  // 实测（2026-11-07）三类线路的分片都能被 mpv 直接拉：
-  //   腾讯独家：https://apd-vlive.apdcdn.tc.qq.com/...（相对分片，相对 CDN）
-  //   爱奇艺：  /api/iqiyi.m3u8 返回 692 个绝对地址 pcw-data.video.iqiyi.com
-  //   幻想4K：  /api/proxy 包的上游 m3u8.meilinvps.com 直连 200 / 22.8MB
-  // 所以只要播放列表本身能被 mpv 拉到，分片就都能直连，
-  // 客户端代理只会多一层「整片下完再交给 mpv」的延迟。
-  //
-  // 只有播放列表地址本身是站内相对路径（没有 host）时才必须过代理：
-  // 那种地址 mpv 无法解析。这种情况极少，其余一律直连。
-  if (raw.startsWith('/')) return true;
-  return lower.startsWith('http://127.0.0.1') ||
-      lower.startsWith('http://localhost');
+  if (lower.startsWith('http://') || lower.startsWith('https://')) {
+    // 指向本机回环的地址：电视 / 代理链路上不可达，仍走客户端代理兜底。
+    return lower.startsWith('http://127.0.0.1') ||
+        lower.startsWith('http://localhost');
+  }
+  return true;
 }
 
 bool fxIsPlatformLine(LineInfo line) {

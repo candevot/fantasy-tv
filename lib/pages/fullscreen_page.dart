@@ -683,9 +683,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       for (final u in source.backup)
         if (u.trim().isNotEmpty) u.trim(),
     ];
+    // 统一补成绝对地址，让 mpv 直连（避免客户端代理整片下完才播）。
     final candidates = <String>[];
     for (final u in all) {
-      if (!candidates.contains(u)) candidates.add(u);
+      final abs = fxAbsolutePlayUrl(u);
+      if (!candidates.contains(abs)) candidates.add(abs);
     }
     if (candidates.isEmpty) {
       _notifySourceFailed();
