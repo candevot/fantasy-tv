@@ -14,6 +14,9 @@ const double togetherDriftDeadband = 0.4;
 /// 超过该误差直接硬 seek；区间内用微调倍速追。
 const double togetherDriftSeek = 1.5;
 
+/// 缓冲中放宽的硬跳阈值：6 秒以内一律不动，让它自己缓冲完。
+const double togetherBufferingSeek = 6.0;
+
 /// 微调倍速的步长：房主 1.0x 时成员在 0.95x / 1.05x 之间追。
 const double togetherMicroRateStep = 0.05;
 
@@ -163,11 +166,19 @@ TogetherSyncDecision decideTogetherDrift({
   required double baseRate,
   bool allowRate = true,
   bool allowBackwardSeek = true,
+  /// 本地正在缓冲（网络跟不上）：放宽硬跳、优先让它自然缓冲完。
+  bool buffering = false,
 }) {
   if (!expected.isFinite || !current.isFinite) {
     return const TogetherSyncDecision.none();
   }
   final drift = expected - current;
+  // 缓冲中不硬跳：这时候 seek 只会让缓冲重新开始，越救越卡。
+  // 双方网络不同时，慢的一方缓冲中必然落后，照常硬跳就是
+  // 「跳过去 → 又卡 → 又跳」的循环。
+  if (buffering && drift.abs() <= togetherBufferingSeek) {
+    return const TogetherSyncDecision.none();
+  }
   if (drift.abs() < togetherDriftDeadband) {
     return const TogetherSyncDecision.none();
   }

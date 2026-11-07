@@ -1304,11 +1304,19 @@ class _TogetherPageState extends State<TogetherPage>
   /// expect = position + (now + clockOffset - serverTime) / 1000 * rate。
   /// 房主倍速不为 1 时，进度同样按倍速推进，否则 9 秒心跳之间会被误判成 drift。
   double _targetPosition(TogetherRoomState state) {
+    // 补偿单程延迟：state 里的 position 是房主「发出那一刻」的位置，
+    // 成员收到时已经过去了半个 RTT。不补这一下，网络正常也会凭空
+    // 产生几十~几百毫秒偏差，被纠偏逻辑当成落后 → 微调/硬跳 →
+    // 下一份 state 又反过来 → 来回跳。双方网络都不差却一直跳，
+    // 主因就是这里没扣延迟。
+    final rttSec = _client.rtt / 2000.0;
     return _clampPosition(
       togetherExpectedPosition(
         position: state.position,
         serverTime: state.serverTime,
-        nowServerMs: _client.nowServerMs(),
+        // 用「当前时刻 - 单程延迟」等价于把外推起点往前挪，
+        // 得到的是「此刻房主应该在的位置」。
+        nowServerMs: _client.nowServerMs() - (rttSec * 1000).round(),
         // 房主停滞期间期望进度冻结：不能一边让权威停住、一边继续外推，
         // 否则成员会越跑越前，等下一份 state 到达又整体回退。
         playing: state.playing && _client.synced && !_authStall,
@@ -1432,12 +1440,13 @@ class _TogetherPageState extends State<TogetherPage>
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    if (_seeking ||
-        now < _seekGuardUntil ||
-        now < _applyHoldUntil ||
-        controller.value.isBuffering) {
+    if (_seeking || now < _seekGuardUntil || now < _applyHoldUntil) {
       return;
     }
+    // 缓冲中交给 decideTogetherDrift 判断（放宽阈值、优先自然缓冲完）。
+    // 之前这里直接 return，缓冲结束时偏差已经远超硬跳阈值，
+    // 于是立刻被拉回去 → 又卡 → 又拉，表现就是一直原地循环。
+    final buffering = controller.value.isBuffering;
     final expected = _targetPosition(state);
     final current = controller.value.position.inMilliseconds / 1000.0;
     final decision = decideTogetherDrift(
@@ -1449,6 +1458,7 @@ class _TogetherPageState extends State<TogetherPage>
       allowRate: !_microRateUnsupported || now >= _microRateRetryAt,
       // 成员领先的一侧先降速吸收：只有持续超出硬 seek 阈值才允许回跳。
       allowBackwardSeek: _allowBackSeek(expected, current, now),
+      buffering: buffering,
     );
     if (decision.move == TogetherSyncMove.rate) {
       _setMicroRate(decision.rate, state);
@@ -1611,6 +1621,41 @@ class _TogetherPageState extends State<TogetherPage>
   }
 
   /// 成员硬 seek：seek 落位后再等 2 秒才允许下一次纠偏。
+  /// 与房主的进度偏差（秒，正数=自己落后）。没有权威状态时返回 0。
+  double _syncOffsetSeconds() {
+    final state = _remote;
+    final controller = _controller;
+    if (state == null || controller == null || !controller.value.isInitialized) {
+      return 0;
+    }
+    final expected = _targetPosition(state);
+    final current = controller.value.position.inMilliseconds / 1000.0;
+    return expected - current;
+  }
+
+  /// 手动同步到房主进度：一键对齐，用户自己决定何时跳。
+  ///
+  /// 自动纠偏只在超阈值时才硬跳（会打断缓冲），网络差的一方偶尔会
+  /// 长时间落后。给一个明确的手动入口，比让它反复自动跳体验更好。
+  Future<void> _syncToHostNow() async {
+    final state = _remote;
+    final controller = _controller;
+    if (state == null || controller == null || !controller.value.isInitialized) {
+      return;
+    }
+    final expected = _targetPosition(state);
+    _logSync('手动同步房主：当前 ${controller.value.position.inSeconds}s → '
+        '目标 ${expected.toStringAsFixed(1)}s');
+    _hardSeek(expected, state);
+    // 房主在播就跟着播。
+    if (state.playing) _followPlayIntent(state);
+    if (mounted) setState(() {});
+  }
+
+  void _logSync(String message) {
+    debugPrint('[Together] $message');
+  }
+
   void _hardSeek(double seconds, TogetherRoomState state) {
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
@@ -3342,6 +3387,8 @@ class _TogetherPageState extends State<TogetherPage>
       onSendChat: _sendChat,
       onRetry: _retryVideo,
       onHostOnly: _hostOnly,
+      onSyncToHost: _isHost ? null : () => unawaited(_syncToHostNow()),
+      syncOffsetSeconds: _syncOffsetSeconds(),
       keyboardVisible: keyboard,
     );
   }

@@ -55,6 +55,8 @@ class TogetherRoomView extends StatefulWidget {
     required this.onSendChat,
     required this.onRetry,
     required this.onHostOnly,
+    this.onSyncToHost,
+    this.syncOffsetSeconds = 0,
     this.keyboardVisible = false,
     this.isLive = false,
   });
@@ -102,6 +104,12 @@ class TogetherRoomView extends StatefulWidget {
 
   /// 成员操作被拒绝时的统一提示。
   final VoidCallback onHostOnly;
+
+  /// 手动「同步房主进度」。成员侧显示；房主不需要（他就是权威）。
+  final VoidCallback? onSyncToHost;
+
+  /// 与房主的进度偏差（秒，正数=自己落后）。为 0 或房主时按钮不高亮。
+  final double syncOffsetSeconds;
 
   /// 键盘是否弹起。由页面层（Scaffold 之上）读取 viewInsets 传入：
   /// Scaffold 在 resizeToAvoidBottomInset=true 时会把 body 的 viewInsets 清零。
@@ -304,6 +312,15 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
             accent: true,
             onTap: widget.onInvite,
           ),
+          // 手动对齐房主进度：成员侧才显示。偏差 >1 秒才高亮，
+          // 平时保持低调，不抢「邀请 / 换源」的视觉位置。
+          if (!widget.isHost && !widget.isLive && widget.onSyncToHost != null) ...[
+            const SizedBox(width: 6),
+            _SyncToHostPill(
+              offsetSeconds: widget.syncOffsetSeconds,
+              onTap: widget.onSyncToHost!,
+            ),
+          ],
           const SizedBox(width: 6),
           TogetherPill(
             text: widget.isLive ? '换线' : '换源',
@@ -932,6 +949,40 @@ class _RoomProgressState extends State<_RoomProgress> {
           ],
         );
       },
+    );
+  }
+}
+
+/// 「同步房主」按钮：显示与房主的进度偏差，点一下立刻对齐。
+///
+/// 设计取舍：一起看默认自动纠偏（倍速微调 + 超阈值硬跳），但网络差的一方
+/// 偶尔会持续落后。与其让它反复自动硬跳，不如给用户一个明确的手动入口，
+/// 偏差可见、一键追平，避免「一直来回跳」的观感。
+class _SyncToHostPill extends StatelessWidget {
+  const _SyncToHostPill({required this.offsetSeconds, required this.onTap});
+
+  /// 正数 = 自己落后房主，负数 = 自己领先。
+  final double offsetSeconds;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final off = offsetSeconds.abs();
+    final behind = offsetSeconds > 0;
+    // 1 秒以内算同步良好，不高亮、不显示秒数。
+    final synced = off < 1.0;
+    final label = synced
+        ? '已同步'
+        : '${behind ? '落后' : '领先'} ${off.toStringAsFixed(off >= 10 ? 0 : 1)}s';
+    return TogetherPill(
+      text: label,
+      icon: synced
+          ? Icons.check_circle_outline_rounded
+          : Icons.sync_rounded,
+      height: 30,
+      // 不同步时才用强调色，平时是普通胶囊。
+      accent: !synced,
+      onTap: onTap,
     );
   }
 }
