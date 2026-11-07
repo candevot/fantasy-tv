@@ -649,8 +649,13 @@ bool fxIsPlatformLine(LineInfo line) {
       lower.contains('tencent') ||
       lower.contains('mgtv') ||
       lower.contains('bilibili') ||
+      // 爱奇艺会员线路：id 是 pt_iqiyi，之前没识别出来，
+      // 客户端会误判「还没有平台线路」并反复重拉详情。
+      lower.contains('iqiyi') ||
+      lower.contains('pt_iqiyi') ||
       raw.contains('腾讯') ||
-      raw.contains('芒果');
+      raw.contains('芒果') ||
+      raw.contains('爱奇艺');
 }
 
 /// 合并两次 /api/detail 的线路表：以新返回的顺序为准（平台线路在服务端
