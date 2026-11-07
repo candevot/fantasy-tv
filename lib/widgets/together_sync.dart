@@ -53,6 +53,42 @@ const int togetherClockJumpGuardMs = 300;
 /// 房主 position 读数持续回退超过该时长才如实上报（真实拖动进度）。
 const int togetherHostBacktrackGraceMs = 5000;
 
+/// Clock reset on disconnect freezes extrapolation at the old snapshot. That
+/// frozen position is not a new authority seek; wait for both clock and rejoin.
+bool togetherCanCorrectMember({
+  required bool online,
+  required bool connected,
+  required bool clockSynced,
+  required bool awaitingRoomState,
+}) => online && connected && clockSynced && !awaitingRoomState;
+
+/// Track movement rather than a lifetime high-water mark: a backward seek must
+/// not look stalled until playback eventually catches the old position again.
+bool togetherPositionMoved(int positionMs, int previousMs) =>
+    (positionMs - previousMs).abs() > 20;
+
+/// Hold is only a temporary playback override, never an override of a host
+/// pause/seek. While held, periodic drift correction must not move the player.
+bool togetherShouldStallHold({
+  required bool holding,
+  required bool playing,
+  required bool authorityStalled,
+  required double drift,
+  bool authoritySeek = false,
+  bool timedOut = false,
+  bool seeking = false,
+  bool buffering = false,
+}) {
+  if (!playing || authoritySeek) return false;
+  if (holding) {
+    return drift <= -togetherStallResumeDrift && !timedOut;
+  }
+  return authorityStalled &&
+      drift <= -togetherStallHoldDrift &&
+      !seeking &&
+      !buffering;
+}
+
 enum TogetherSyncMove { none, rate, seek }
 
 /// 权威 state 相对上一份状态的变化类型。
@@ -150,9 +186,7 @@ TogetherSyncDecision decideTogetherDrift({
   }
   if (playing && allowRate) {
     final step = drift > 0 ? togetherMicroRateStep : -togetherMicroRateStep;
-    return TogetherSyncDecision.rate(
-      togetherClampRate(baseRate + step),
-    );
+    return TogetherSyncDecision.rate(togetherClampRate(baseRate + step));
   }
   return const TogetherSyncDecision.none();
 }
@@ -192,7 +226,9 @@ TogetherAuthorityVerdict classifyTogetherAuthority({
   required int serverTime,
   required bool playing,
 }) {
-  const normal = TogetherAuthorityVerdict(change: TogetherAuthorityChange.normal);
+  const normal = TogetherAuthorityVerdict(
+    change: TogetherAuthorityChange.normal,
+  );
   if (prevServerTime <= 0 || serverTime <= 0) return normal;
   final gapMs = serverTime - prevServerTime;
   if (gapMs < 0) return normal;
@@ -229,7 +265,7 @@ TogetherAuthorityVerdict classifyTogetherAuthority({
       deviation < -togetherDriftDeadband) {
     return verdict(TogetherAuthorityChange.stall);
   }
-  return normal;
+  return verdict(TogetherAuthorityChange.normal);
 }
 
 /// 判断新 state 是否代表房主主动 seek（而不是正常播放推进 / 心跳 / 缓冲）。

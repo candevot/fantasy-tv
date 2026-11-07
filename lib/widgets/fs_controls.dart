@@ -266,37 +266,29 @@ class FsTopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          // 右侧整组（分辨率胶囊 + 投屏 + 更多）包一层 scaleDown：
-          // 窄屏横屏 / 系统大字体下宁可整体缩小，也绝不挤出屏幕右边。
-          Flexible(
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.centerRight,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // 无论分辨率是否已就绪都占住同一个槽位，避免右侧按钮
-                  // 随「分辨率出现 / 消失」左右跳动（控件位置不固定）。
-                  FsQualityPill(label: qualityLabel, size: s),
-                  const SizedBox(width: 8),
-                  PGlassIcon(
-                    icon: Icons.tv_rounded,
-                    size: 32 * s,
-                    iconSize: 17 * s,
-                    tooltip: '投屏',
-                    onTap: onCast,
-                  ),
-                  gap,
-                  PGlassIcon(
-                    icon: Icons.more_horiz_rounded,
-                    size: 32 * s,
-                    iconSize: 19 * s,
-                    tooltip: '更多',
-                    onTap: onMore,
-                  ),
-                ],
-              ),
-            ),
+          // 分辨率胶囊固定 88dp 槽位（未就绪只占位不画），保证右侧按钮不随
+          // 分辨率出现 / 消失而左右跳。
+          //
+          // 注意：这三个必须是「非 flex」子项。之前用 Flexible 包了一层，
+          // 它会和标题的 Expanded 各分走一半宽度，而 FittedBox 只取内容自然
+          // 宽度，右端就空出一截 —— 表现就是「投屏 / 三点太靠中间」。
+          // 现在交给 Expanded 吃掉所有剩余空间，这组自然贴到屏幕右边。
+          FsQualityPill(label: qualityLabel, size: s),
+          const SizedBox(width: 8),
+          PGlassIcon(
+            icon: Icons.tv_rounded,
+            size: 32 * s,
+            iconSize: 17 * s,
+            tooltip: '投屏',
+            onTap: onCast,
+          ),
+          gap,
+          PGlassIcon(
+            icon: Icons.more_horiz_rounded,
+            size: 32 * s,
+            iconSize: 19 * s,
+            tooltip: '更多',
+            onTap: onMore,
           ),
         ],
       ),

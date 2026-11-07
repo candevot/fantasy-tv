@@ -147,6 +147,17 @@ class _TogetherPageState extends State<TogetherPage>
   TogetherRoomState? _remote;
   final TogetherSeqGate _seqGate = TogetherSeqGate();
 
+  // A socket hello is not a fresh room snapshot. Keep periodic corrections
+  // suspended after disconnect/resume until room_state has arrived again.
+  bool _awaitingRoomState = false;
+
+  bool get _canCorrectMember => togetherCanCorrectMember(
+        online: _online,
+        connected: _client.connected,
+        clockSynced: _client.synced,
+        awaitingRoomState: _awaitingRoomState,
+      );
+
   /// 应用房主操作后的短暂静默期：先让 play / pause / seek 落位，再开始纠偏。
   int _applyHoldUntil = 0;
 
@@ -355,6 +366,7 @@ class _TogetherPageState extends State<TogetherPage>
       if (_stage == _TogetherStage.room) {
         // 不断连：socket 还在就直接要一次权威状态，否则重连。
         if (_client.connected) {
+          if (!_isHost) _awaitingRoomState = true;
           _client.refreshRoom();
         } else {
           _client.connect();
@@ -401,6 +413,19 @@ class _TogetherPageState extends State<TogetherPage>
   void _onDown() {
     if (!mounted) return;
     final wasOnline = _online;
+    _awaitingRoomState = true;
+    // Losing the control socket must not leave a member locally paused while
+    // the host's last playback intent was play. Do not extrapolate/seek against
+    // that stale snapshot; let the media stream continue until rejoin succeeds.
+    final wasHeld = _stallHold;
+    _stallHold = false;
+    _authStall = false;
+    _aheadSince = 0;
+    final remote = _remote;
+    if (!_isHost && remote != null) {
+      _restoreBaseRate(remote);
+      if (wasHeld) _followPlayIntent(remote);
+    }
     setState(() => _online = false);
     if (!_entered && _stage == _TogetherStage.entering) {
       _backToEntry();
@@ -417,6 +442,7 @@ class _TogetherPageState extends State<TogetherPage>
   /// 建房 / 加入 / 退出时清空同步游标与防抖状态。
   void _resetSyncState() {
     _remote = null;
+    _awaitingRoomState = false;
     _seqGate.reset();
     _applyHoldUntil = 0;
     _seekGuardUntil = 0;
@@ -517,13 +543,21 @@ class _TogetherPageState extends State<TogetherPage>
 
   void _onState(TogetherRoomState state) {
     if (!mounted || !_wantsRoom) return;
-    if (_stage == _TogetherStage.entering &&
-        _roomCode.isNotEmpty &&
-        state.code != _roomCode) {
+    if (_roomCode.isNotEmpty && state.code != _roomCode) {
       return; // 忽略上一个房间迟到的状态
     }
     // 防重入：同一房间同一 seq 只应用一次；旧 seq 直接丢弃。
-    if (!_seqGate.accept(state.code, state.seq)) return;
+    final awaitingRoomState = _awaitingRoomState;
+    _awaitingRoomState = false;
+    if (!_seqGate.accept(state.code, state.seq)) {
+      // A refresh/rejoin can legitimately return the same revision. It still
+      // confirms that this socket is back in the room and can release playback.
+      if (awaitingRoomState && !_isHost && !_isLive) {
+        final remote = _remote;
+        if (remote != null) _followPlayIntent(remote);
+      }
+      return;
+    }
     final prev = _remote;
     final incomingLive = state.liveChannel;
     if (_isLive || state.isLive) {
@@ -1259,7 +1293,9 @@ class _TogetherPageState extends State<TogetherPage>
     // 成员：进度条跟本地播放器走。权威值只在加载 / 播放器未起步时兜底，
     // 这样权威 position 的任何回退（房主缓冲、段重载、读数抖动）都不会
     // 在进度条上肉眼可见地来回跳。
-    if (!_videoLoading && controller != null && controller.value.isInitialized) {
+    if (!_videoLoading &&
+        controller != null &&
+        controller.value.isInitialized) {
       return controller.value.position.inMilliseconds / 1000.0;
     }
     final state = _remote;
@@ -1285,10 +1321,14 @@ class _TogetherPageState extends State<TogetherPage>
     }
     final controller = _controller;
     final state = _remote;
+    // Buffering can stop value notifications entirely; the timer must keep
+    // publishing the frozen host position instead of relying on that stream.
+    if (_isHost && _foreground) _watchHostBuffering();
     // 后台不与服务器做 seek / 变速对齐：那时心跳和网络都可能被系统限流，
     // 强行追进度会造成声音断层；回前台拿到最新 room_state 再对齐。
     if (!_isHost &&
         _foreground &&
+        _canCorrectMember &&
         controller != null &&
         controller.value.isInitialized &&
         state != null) {
@@ -1299,7 +1339,7 @@ class _TogetherPageState extends State<TogetherPage>
 
       // 卡顿检测：播放中进度 1.2s 不前进视为 stall；恢复后只纠一次。
       if (playing && !buffering) {
-        if (positionMs > _lastProgressPositionMs + 20) {
+        if (togetherPositionMoved(positionMs, _lastProgressPositionMs)) {
           _lastProgressPositionMs = positionMs;
           _lastProgressAt = now;
           if (_stalled) {
@@ -1346,7 +1386,13 @@ class _TogetherPageState extends State<TogetherPage>
 
   /// 周期纠偏：<0.4s 不动；0.4–1.5s 微调 ±0.05 倍速；>1.5s 硬 seek。
   void _correctDrift(TogetherRoomState state) {
-    if (_isHost || !_foreground) return;
+    if (_isHost ||
+        !_foreground ||
+        !_canCorrectMember ||
+        !state.playing ||
+        _stallHold) {
+      return;
+    }
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -1417,7 +1463,11 @@ class _TogetherPageState extends State<TogetherPage>
   ///
   /// 期望进度冻结后成员会继续往前跑；落后超过阈值就原地暂停保持同步状态，
   /// 等房主恢复、期望进度追上来再继续播——全程不往回跳。
-  void _syncStallHold(TogetherRoomState state, {required int now}) {
+  void _syncStallHold(
+    TogetherRoomState state, {
+    required int now,
+    bool authoritySeek = false,
+  }) {
     // 房主长时间没再确认停滞（断开 / 退出）：恢复正常外推，别把成员卡死。
     if (_authStall && now - _authStallAt > togetherStallTimeoutMs) {
       _authStall = false;
@@ -1427,26 +1477,23 @@ class _TogetherPageState extends State<TogetherPage>
     final expected = _targetPosition(state);
     final current = controller.value.position.inMilliseconds / 1000.0;
     final drift = expected - current;
-    if (!_stallHold) {
-      if (!_authStall || !state.playing) return;
-      if (drift > -togetherStallHoldDrift) return;
-      if (_seeking || controller.value.isBuffering) return;
-      _stallHold = true;
+    final hold = togetherShouldStallHold(
+      holding: _stallHold,
+      playing: state.playing,
+      authorityStalled: _authStall,
+      drift: drift,
+      authoritySeek: authoritySeek,
+      timedOut: !_authStall && now - _stallHoldAt > togetherStallTimeoutMs,
+      seeking: _seeking,
+      buffering: controller.value.isBuffering,
+    );
+    if (hold == _stallHold) return;
+    _stallHold = hold;
+    if (hold) {
       _stallHoldAt = now;
       _restoreBaseRate(state);
-      if (controller.value.isPlaying) {
-        unawaited(controller.pause().catchError((_) {}));
-      }
-      return;
     }
-    // 保持中：期望进度追上（或停滞恢复正常外推）就恢复播放。
-    if (drift > -togetherStallResumeDrift ||
-        (!_authStall && now - _stallHoldAt > togetherStallTimeoutMs)) {
-      _stallHold = false;
-      if (state.playing && !controller.value.isPlaying) {
-        unawaited(controller.play().catchError((_) {}));
-      }
-    }
+    _followPlayIntent(state);
   }
 
   /// 跟随房主 play / pause；成员处于保持（房主缓冲）时只允许暂停。
@@ -1496,12 +1543,19 @@ class _TogetherPageState extends State<TogetherPage>
       _restoreBaseRate(state);
       return;
     }
+    final requestedController = _controller;
+    final generation = _videoSeq;
     _setControllerRate(target);
     unawaited(
       Future<void>.delayed(const Duration(milliseconds: 250), () {
-        if (!mounted) return;
+        if (!mounted || generation != _videoSeq) return;
         final controller = _controller;
-        if (controller == null || !controller.value.isInitialized) return;
+        if (controller == null ||
+            !identical(controller, requestedController) ||
+            !controller.value.isInitialized ||
+            (_lastRequestedRate - target).abs() > 0.001) {
+          return;
+        }
         if ((controller.rate - target).abs() <= 0.02) return;
         _microRateUnsupported = true;
         _microRateRetryAt = DateTime.now().millisecondsSinceEpoch + 10000;
@@ -1527,6 +1581,9 @@ class _TogetherPageState extends State<TogetherPage>
     final target = _clampPosition(seconds);
     final token = ++_seekToken;
     _seeking = true;
+    _stalled = false;
+    _lastProgressPositionMs = (target * 1000).round();
+    _lastProgressAt = DateTime.now().millisecondsSinceEpoch;
     _restoreBaseRate(state);
     final future = controller.seekTo(
       Duration(milliseconds: (target * 1000).round()),
@@ -1535,8 +1592,11 @@ class _TogetherPageState extends State<TogetherPage>
       future.catchError((_) {}).whenComplete(() {
         if (!mounted || token != _seekToken) return;
         _seeking = false;
-        _seekGuardUntil =
-            DateTime.now().millisecondsSinceEpoch + togetherSeekCooldownMs;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        _stalled = false;
+        _lastProgressPositionMs = controller.value.position.inMilliseconds;
+        _lastProgressAt = now;
+        _seekGuardUntil = now + togetherSeekCooldownMs;
       }),
     );
   }
@@ -1562,9 +1622,7 @@ class _TogetherPageState extends State<TogetherPage>
     // 1) 先分类这份权威变化：正常推进 / 房主主动 seek / 房主卡缓冲。
     //    旧逻辑只要偏差 >0.5s 就当 seek 硬跳，房主缓冲一下成员就被拉回去。
     final verdict = prev == null
-        ? const TogetherAuthorityVerdict(
-            change: TogetherAuthorityChange.normal,
-          )
+        ? const TogetherAuthorityVerdict(change: TogetherAuthorityChange.normal)
         : classifyTogetherAuthority(
             prevPosition: prev.position,
             prevServerTime: prev.serverTime,
@@ -1581,10 +1639,11 @@ class _TogetherPageState extends State<TogetherPage>
     } else if (_authStall &&
         (verdict.isSeek ||
             !state.playing ||
-            verdict.advance >=
-                togetherStallAdvanceRatio *
-                    (verdict.gapMs / 1000.0) *
-                    _baseRate(state) ||
+            (verdict.gapMs >= togetherStallMinGapMs &&
+                verdict.advance >=
+                    togetherStallAdvanceRatio *
+                        (verdict.gapMs / 1000.0) *
+                        _baseRate(state)) ||
             now - _authStallAt > togetherStallTimeoutMs)) {
       // 房主恢复推进 / 主动拖动 / 暂停 / 停滞超时：恢复正常外推对齐。
       _authStall = false;
@@ -1600,7 +1659,7 @@ class _TogetherPageState extends State<TogetherPage>
 
     // 2) 房主停滞期间的保持策略：期望进度冻结后成员会越跑越前，
     //    落后太多就原地暂停，等房主追上再恢复——全程不往回跳。
-    _syncStallHold(state, now: now);
+    _syncStallHold(state, now: now, authoritySeek: verdict.isSeek);
 
     // 3) 跟随房主 play / pause（保持中只允许暂停）。
     _followPlayIntent(state);
@@ -1622,22 +1681,24 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
 
+    if (_stallHold) {
+      _restoreBaseRate(state);
+      return;
+    }
+    if (modeChanged && !wantPlay) {
+      // A host pause is an explicit position command, not periodic recovery.
+      // Apply it once even if the old local progress detector marked a stall.
+      if (drift.abs() >= togetherDriftDeadband) {
+        _hardSeek(state.position, state);
+      }
+      return;
+    }
     if (controller.value.isBuffering || _stalled) {
       _bufferingHold = true;
       _restoreBaseRate(state);
       return;
     }
     if (modeChanged) {
-      if (!wantPlay) {
-        // 暂停操作：位置差超过死区就一次对齐到房主暂停点。
-        // 房主停滞 / 成员保持期间不往回跳（由 _syncStallHold 收敛）。
-        if (drift.abs() >= togetherDriftDeadband &&
-            !_authStall &&
-            !_stallHold) {
-          _hardSeek(state.position, state);
-        }
-        return;
-      }
       if (drift.abs() > togetherDriftSeek) {
         if (_allowBackSeek(expected, current, now)) {
           _hardSeek(expected, state);
@@ -1796,7 +1857,12 @@ class _TogetherPageState extends State<TogetherPage>
     }
     _hostBuffering = buffering;
     _hostBufferReportAt = now;
-    _reportHostState('play', value.position.inMilliseconds / 1000.0);
+    // Buffering ending because the host pressed pause is not a new play
+    // command. Preserve the last explicit room intent on that transition.
+    _reportHostState(
+      intent ? 'play' : 'pause',
+      value.position.inMilliseconds / 1000.0,
+    );
   }
 
   void _bounceToAuthority() {
@@ -2713,6 +2779,15 @@ class _TogetherPageState extends State<TogetherPage>
     final key = '$videoId|$ep|$line';
     _loadingKey = key;
     final seq = ++_videoSeq;
+    _seekToken++;
+    _seeking = false;
+    _stalled = false;
+    _bufferingHold = false;
+    _authStall = false;
+    _stallHold = false;
+    _aheadSince = 0;
+    _lastProgressAt = 0;
+    _lastProgressPositionMs = 0;
     _endedSent = false;
     // 切剧 / 切集发起时记下本地的「继续播放」意图：加载期间 room_state
     // 可能先到并清掉 _resume*，不能让它把这次切换变成暂停。
@@ -2785,7 +2860,16 @@ class _TogetherPageState extends State<TogetherPage>
         FxPlayer? controller;
         try {
           controller = FxPlayer.create();
-          await controller.open(url, headers: play.headers);
+          final qualityKey = _qualityKey;
+          await controller.open(
+            url,
+            headers: play.headers,
+            direct: play.direct && play.isHls,
+            // Capture this load's media/line: a later room switch must not let
+            // an old proxy refresh fetch or publish a different episode.
+            refreshPlay: () =>
+                _refreshTogetherUrl(videoId, ep, lineInfo.id, qualityKey, seq),
+          );
           if (!mounted || seq != _videoSeq) {
             await _releasePlayer(controller);
             return;
@@ -2910,6 +2994,35 @@ class _TogetherPageState extends State<TogetherPage>
       _videoLoading = false;
       _videoError = '暂时无法播放，请重试或让房主切换线路';
     });
+  }
+
+  Future<String?> _refreshTogetherUrl(
+    String videoId,
+    int ep,
+    String line,
+    String? qualityKey,
+    int seq,
+  ) async {
+    if (!mounted || seq != _videoSeq) return null;
+    try {
+      final play = await Api.play(videoId, ep, line, fresh: true);
+      if (!mounted ||
+          seq != _videoSeq ||
+          play.type.trim().toLowerCase() == 'parse') {
+        return null;
+      }
+      if (qualityKey != null) {
+        for (final quality in play.quality) {
+          if (quality.key == qualityKey && quality.url.trim().isNotEmpty) {
+            return quality.url.trim();
+          }
+        }
+      }
+      final url = play.url.trim(); // Api.play resolves relative URLs.
+      return url.isEmpty ? null : url;
+    } catch (_) {
+      return null;
+    }
   }
 
   String _qualityUrl(PlayInfo play) {

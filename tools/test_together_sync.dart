@@ -336,5 +336,126 @@ void main() {
   );
   check(d.move == TogetherSyncMove.none, '禁止回跳且暂停 → 不动');
 
+  check(
+    togetherCanCorrectMember(
+      online: true, connected: true, clockSynced: true,
+      awaitingRoomState: false,
+    ),
+    '已校准且拿到新房间状态才周期纠偏',
+  );
+  check(
+    !togetherCanCorrectMember(
+      online: false, connected: false, clockSynced: false,
+      awaitingRoomState: true,
+    ),
+    '断线重置时钟不拿冻结旧进度反复 seek',
+  );
+  check(
+    !togetherCanCorrectMember(
+      online: true, connected: true, clockSynced: false,
+      awaitingRoomState: false,
+    ),
+    '重连 room_state 先到也须等时钟校准',
+  );
+  check(
+    !togetherCanCorrectMember(
+      online: true, connected: true, clockSynced: true,
+      awaitingRoomState: true,
+    ),
+    'hello/pong 不代表重新入房，仍等权威快照',
+  );
+  check(togetherPositionMoved(10000, 100000), '后拖重置进度锚点，不永久 stall');
+  check(togetherPositionMoved(10500, 10000), '后拖后正常推进可恢复纠偏');
+  check(!togetherPositionMoved(10010, 10000), '小幅测量抖动仍不算推进');
+
+  // Normal verdicts must retain progress evidence. Previously they returned
+  // gap=advance=0, so 0 >= 0 made duplicate snapshots release a stall.
+  v = classifyTogetherAuthority(
+    prevPosition: 48,
+    prevServerTime: 10000,
+    prevPlaying: true,
+    prevRate: 1,
+    position: 49,
+    serverTime: 11000,
+    playing: true,
+  );
+  check(!v.isStall && !v.isSeek, '恢复推进属于 normal');
+  check(v.gapMs == 1000, 'normal 保留采样时间差');
+  near(v.advance, 1, 1e-9, 'normal 保留真实推进量');
+  near(v.deviation, 0, 1e-9, 'normal 保留外推偏差');
+
+  bool holding = togetherShouldStallHold(
+    holding: false,
+    playing: true,
+    authorityStalled: true,
+    drift: -2,
+  );
+  check(holding, '房主停滞且成员领先 2s → hold');
+  holding = togetherShouldStallHold(
+    holding: holding,
+    playing: false,
+    authorityStalled: false,
+    drift: -2,
+  );
+  check(!holding, '明确暂停立即释放 hold，允许暂停点对齐');
+  check(
+    !togetherShouldStallHold(
+      holding: true,
+      playing: true,
+      authorityStalled: false,
+      authoritySeek: true,
+      drift: -20,
+    ),
+    '房主后拖时立即释放 hold，不先 pause 再 play',
+  );
+  check(
+    togetherShouldStallHold(
+      holding: true,
+      playing: true,
+      authorityStalled: true,
+      drift: -1,
+    ),
+    '保持中尚未追上，仍暂停',
+  );
+  check(
+    !togetherShouldStallHold(
+      holding: true,
+      playing: true,
+      authorityStalled: false,
+      drift: -0.3,
+    ),
+    '房主追上死区即恢复',
+  );
+  check(
+    !togetherShouldStallHold(
+      holding: true,
+      playing: true,
+      authorityStalled: false,
+      drift: -20,
+      timedOut: true,
+    ),
+    '权威停滞已过期时，hold 超时释放',
+  );
+  check(
+    !togetherShouldStallHold(
+      holding: false,
+      playing: true,
+      authorityStalled: true,
+      drift: -2,
+      buffering: true,
+    ),
+    '本地缓冲中不新建 pause hold',
+  );
+  check(
+    !togetherShouldStallHold(
+      holding: false,
+      playing: true,
+      authorityStalled: true,
+      drift: -2,
+      seeking: true,
+    ),
+    'seek 未落位时不新建 pause hold',
+  );
+
   print('together sync tests passed: $_passed checks');
 }

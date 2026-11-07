@@ -45,6 +45,9 @@ Future<void> main() async {
     await _testRangePlaylist(origin, proxies, client);
     await _testSignedSegmentSelfHeal(origin, proxies, client);
     await _testPeriodicRefresh(origin, proxies, client);
+    await _testPlatformWrapperRefresh(origin, proxies, client);
+    await _testMasterPlatformRefresh(origin, proxies, client);
+    await _testRefreshGuards(origin, proxies, client);
     await _testLru(origin, proxies, client);
     await _testTempSpoolAndDispose(origin, proxies, client);
     print('\nALL PASS ($_passed checks)');
@@ -91,22 +94,18 @@ Future<void> _testMasterAndSegment(
   check(masterText.contains('/playlist?u='), 'master 变体改写为本地 /playlist');
   final variants = _httpLines(masterText);
   check(variants.length == 1, 'master 只有一个变体');
-  check(
-    origin.masterRequests == 1,
-    'master 只向源站拉取一次',
-  );
+  check(origin.masterRequests == 1, 'master 只向源站拉取一次');
 
   final mediaText = await _getText(client, variants.first);
   check(mediaText.contains('#EXTM3U'), '子列表仍是合法 m3u8');
   final segLines = _httpLines(mediaText);
   check(segLines.length == 3, '3 个分片全部改写为本地地址');
-  check(
-    segLines.every((line) => line.contains('/seg?i=')),
-    '/seg 地址带 i 序号',
-  );
+  check(segLines.every((line) => line.contains('/seg?i=')), '/seg 地址带 i 序号');
   check(mediaText.contains('/key?u='), 'EXT-X-KEY 改写为本地 /key');
-  check(mediaText.contains('#EXT-X-MAP:URI="http://127.0.0.1:'),
-      'EXT-X-MAP 改写为本地 /seg');
+  check(
+    mediaText.contains('#EXT-X-MAP:URI="http://127.0.0.1:'),
+    'EXT-X-MAP 改写为本地 /seg',
+  );
   check(!mediaText.contains('seg/0.ts'), '播放列表里不再暴露源分片地址');
 
   final keyUrl = _firstUriAttribute(mediaText, '#EXT-X-KEY:');
@@ -124,12 +123,23 @@ Future<void> _testMasterAndSegment(
   final firstMs = DateTime.now().difference(firstStarted).inMilliseconds;
   check(first.length == 2 * 1024 * 1024, '首个 2MB 分片长度与源一致');
   check(_bytesEqual(first, origin.segmentBytes(0)), '首个分片内容与源逐字节一致');
-  check(origin.maxConcurrentSegmentGets >= 2,
-      '分片使用多连接 Range 并行下载（max=${origin.maxConcurrentSegmentGets}）');
+  check(
+    origin.maxConcurrentSegmentGets >= 2,
+    '分片使用多连接 Range 并行下载（max=${origin.maxConcurrentSegmentGets}）',
+  );
   check(origin.rangeRequests >= 2, '源站收到多个 Range 请求');
   check(firstMs < 1000, '首个分片下载耗时正常 ($firstMs ms)');
-  check(logs.any((line) => line.contains('并行下载')), '日志包含并行下载统计');
-  check(logs.any((line) => line.contains('未命中缓存')), '日志标记未命中缓存');
+  check(logs.any((line) => line.contains('parallel=8')), '日志包含 8 路并行下载统计');
+  check(
+    logs.any(
+      (line) =>
+          line.contains('SEG') &&
+          line.contains('200') &&
+          line.contains('parallel=8') &&
+          !line.contains('cache-hit'),
+    ),
+    '首次分片日志标记实际下载而非缓存命中',
+  );
 
   final hitsBefore = proxy.cacheHits;
   final secondStarted = DateTime.now();
@@ -139,12 +149,14 @@ Future<void> _testMasterAndSegment(
   check(proxy.cacheHits > hitsBefore, '二次请求命中内存缓存');
   check(proxy.cacheMisses >= 1, '首次请求计入 miss');
   check(secondMs < 20, '二次请求命中缓存 <20ms (${secondMs}ms)');
-  check(logs.any((line) => line.contains('命中缓存')), '日志包含命中缓存');
+  check(logs.any((line) => line.contains('cache-hit')), '日志包含命中缓存');
 
   final firstHitMs = DateTime.now().millisecondsSinceEpoch;
   await _getBytes(client, firstUrl);
-  check(DateTime.now().millisecondsSinceEpoch - firstHitMs < 40,
-      '缓存命中稳定（<40ms 含调度）');
+  check(
+    DateTime.now().millisecondsSinceEpoch - firstHitMs < 40,
+    '缓存命中稳定（<40ms 含调度）',
+  );
 }
 
 Future<void> _testWrapperPlaylist(
@@ -206,8 +218,10 @@ Future<void> _testPrefetch(
     '后台预取至少 5 个分片',
   );
   check(proxy.cacheEntryCount >= 5, '预取写入了 5 个分片缓存');
-  check(origin.maxConcurrentSegmentGets <= 3,
-      '预取并发不超过 3（max=${origin.maxConcurrentSegmentGets}）');
+  check(
+    origin.maxConcurrentSegmentGets <= 3,
+    '预取并发不超过 3（max=${origin.maxConcurrentSegmentGets}）',
+  );
   final media = await _getText(client, local);
   final first = _httpLines(media).first;
   final cached = await _getBytes(client, first);
@@ -241,10 +255,7 @@ Future<void> _testRangePlaylist(
   final blob = origin.blob;
   check(first.length == 100000, 'byterange 分片长度正确');
   check(
-    _bytesEqual(
-      first,
-      Uint8List.sublistView(blob, 50000, 150000),
-    ),
+    _bytesEqual(first, Uint8List.sublistView(blob, 50000, 150000)),
     'byterange 分片内容为源文件对应区间',
   );
   final second = await _getBytes(client, lines[1]);
@@ -282,7 +293,9 @@ Future<void> _testSignedSegmentSelfHeal(
   check(origin.forbidden >= 1, '源站确实返回过 403');
   check(origin.playlistRequests >= 2, '403 后重新拉取了 playlist');
   check(
-    logs.any((line) => line.contains('已刷新列表并重试新地址')),
+    logs.any(
+      (line) => line.contains('HTTP 403') && line.contains('refresh-ok'),
+    ),
     '日志记录 403 自愈过程',
   );
 
@@ -328,6 +341,346 @@ Future<void> _testPeriodicRefresh(
   check(bytes.length == 64 * 1024, '定时刷新后旧本地地址仍可播放');
   await proxy.dispose();
   proxies.remove(proxy);
+}
+
+Future<void> _testPlatformWrapperRefresh(
+  _Origin origin,
+  List<LocalHlsProxy> proxies,
+  HttpClient client,
+) async {
+  print('\n[5b] 自有 API 平台包装地址：定时器调用签名刷新回调');
+  for (final path in <String>['/api/iqiyi.m3u8', '/api/fyplay']) {
+    origin.resetStats();
+    var refreshCalls = 0;
+    final logs = <String>[];
+    final proxy = LocalHlsProxy(
+      prefetchCount: 0,
+      playlistRefreshInterval: const Duration(milliseconds: 150),
+      log: logs.add,
+    );
+    proxies.add(proxy);
+    final local = await proxy.proxy(
+      '${origin.base}$path',
+      <String, String>{},
+      refreshPlay: () async {
+        refreshCalls++;
+        return '${origin.base}/rotating.m3u8';
+      },
+    );
+    final oldSegment = _httpLines(await _getText(client, local)).first;
+    origin.expireTokens();
+    await waitFor(
+      () => logs.any((line) => line.contains('平台线路签名已刷新')),
+      '$path 定时器走平台刷新而非仅重取原列表',
+    );
+    check(refreshCalls >= 1, '$path 定时调用 refreshPlay');
+    check(origin.playlistRequests >= 2, '$path 拉取回调返回的新播放列表');
+    final bytes = await _getBytes(client, oldSegment);
+    check(bytes.length == 64 * 1024, '$path 刷新后旧分片别名可播放');
+    check(origin.forbidden == 0, '$path 定时换签成功，无需等分片 403');
+    await proxy.dispose();
+    proxies.remove(proxy);
+
+    // 没有回调时仍应普通重取，不把包装地址变成不可刷新的特殊情况。
+    final plain = LocalHlsProxy(
+      prefetchCount: 0,
+      playlistRefreshInterval: const Duration(milliseconds: 150),
+      log: _ignore,
+    );
+    proxies.add(plain);
+    await plain.proxy('${origin.base}$path', <String, String>{});
+    final before = origin.playlistRequests;
+    await waitFor(
+      () => origin.playlistRequests > before,
+      '$path 没有 refreshPlay 时仍普通定时刷新',
+    );
+    check(origin.playlistRequests > before, '$path 无回调保留普通刷新');
+    await plain.dispose();
+    proxies.remove(plain);
+  }
+}
+
+Future<void> _testMasterPlatformRefresh(
+  _Origin origin,
+  List<LocalHlsProxy> proxies,
+  HttpClient client,
+) async {
+  print('\n[5c] master 刷新：子列表按身份匹配，歧义/时间轴变化拒绝提交');
+  var version = 1;
+  var mode = 'ok';
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((request) async {
+    request.response.headers.contentType = ContentType(
+      'application',
+      'vnd.apple.mpegurl',
+    );
+    if (request.uri.path == '/api/fyplay') {
+      final children = version == 1 ? <String>['a', 'b'] : <String>['b', 'a'];
+      request.response.write('#EXTM3U\n');
+      for (final child in children) {
+        final quality = mode == 'unknown' ? '${child}changed' : child;
+        request.response.write(
+          '#EXT-X-STREAM-INF:BANDWIDTH=${child == 'a' ? 100 : 200}\n'
+          '/$child.m3u8?quality=$quality&token=$version\n',
+        );
+      }
+      if (mode == 'ambiguous') {
+        request.response.write(
+          '#EXT-X-STREAM-INF:BANDWIDTH=300\n'
+          '/a.m3u8?quality=a&token=duplicate\n',
+        );
+      }
+    } else {
+      final duration = mode == 'timeline' ? 11 : 10;
+      request.response.write(
+        '#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n'
+        '#EXTINF:$duration,\n${origin.base}/seg/10.ts?token=$version\n#EXT-X-ENDLIST\n',
+      );
+    }
+    await request.response.close();
+  });
+  final logs = <String>[];
+  var expired = 0;
+  final proxy = LocalHlsProxy(
+    prefetchCount: 0,
+    playlistRefreshInterval: Duration.zero,
+    log: logs.add,
+  );
+  proxies.add(proxy);
+  try {
+    final root = 'http://127.0.0.1:${server.port}/api/fyplay';
+    final local = await proxy.proxy(
+      root,
+      <String, String>{},
+      refreshPlay: () async => root,
+      onPlayExpired: () => expired++,
+    );
+    final children = _httpLines(await _getText(client, local));
+    final oldChild = children.first;
+    final oldSegment = _httpLines(await _getText(client, oldChild)).first;
+    version = 2;
+    await proxy.refreshPlaylists();
+    final text = await _getText(client, oldChild);
+    final source = Uri.parse(_httpLines(text).first).queryParameters['u']!;
+    final decoded = utf8.decode(base64Url.decode(base64Url.normalize(source)));
+    check(decoded.contains('token=2'), '重排后旧子列表逻辑 key 指向新签名');
+    origin.accepted = 2;
+    final bytes = await _getBytes(client, oldSegment);
+    check(bytes.length == 64 * 1024, 'master 刷新后旧分片别名仍可播放');
+    mode = 'ambiguous';
+    version = 3;
+    await proxy.refreshPlaylists();
+    check(
+      logs.any((line) => line.contains('ambiguous or changed child identity')),
+      '重复子列表身份拒绝刷新',
+    );
+    check(await _getText(client, oldChild) == text, '拒绝刷新保留旧播放列表');
+    mode = 'timeline';
+    await proxy.refreshPlaylists();
+    check(
+      logs.any((line) => line.contains('changed media timeline')),
+      '时间轴变化拒绝刷新',
+    );
+    check(expired == 1, '连续失败通知宿主救援而不伪报成功');
+    mode = 'unknown';
+    final failures = logs.where((line) => line.contains('签名刷新失败')).length;
+    await proxy.refreshPlaylists();
+    check(
+      logs.where((line) => line.contains('签名刷新失败')).length == failures + 1,
+      '未知 query 字段变化拒绝映射，不误切其他清晰度',
+    );
+    mode = 'ok';
+    await proxy.refreshPlaylists();
+    final refreshedRoot = _httpLines(await _getText(client, local));
+    check(refreshedRoot.contains(oldChild), '连续刷新保留旧逻辑子列表 key');
+  } finally {
+    await proxy.dispose();
+    proxies.remove(proxy);
+    await server.close(force: true);
+  }
+}
+
+Future<void> _testRefreshGuards(
+  _Origin origin,
+  List<LocalHlsProxy> proxies,
+  HttpClient client,
+) async {
+  print('\n[5d] 刷新保护：代际/期限/DAG/live/KEY/MAP');
+  var mode = 'plain';
+  var revision = 1;
+  var slow = false;
+  final requests = <String, int>{};
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((request) async {
+    final path = request.uri.path;
+    requests[path] = (requests[path] ?? 0) + 1;
+    if (slow) await Future<void>.delayed(const Duration(milliseconds: 250));
+    String body;
+    if (mode == 'cycle') {
+      body = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\n/api/fyplay\n';
+    } else if (mode == 'dag' &&
+        (path == '/api/fyplay' || path == '/one' || path == '/two')) {
+      final children = path == '/api/fyplay'
+          ? <String>['one', 'two']
+          : <String>['shared'];
+      body =
+          '#EXTM3U\n' +
+          children
+              .map((child) => '#EXT-X-STREAM-INF:BANDWIDTH=100\n/$child\n')
+              .join();
+    } else {
+      final extra = (mode == 'key' || mode == 'iv')
+          ? '#EXT-X-KEY:METHOD=AES-128,URI="/key?token=${mode == 'iv' ? 1 : revision}",IV=0x$revision\n'
+          : mode == 'map'
+          ? '#EXT-X-MAP:URI="/init?token=$revision"\n'
+          : '';
+      body =
+          '#EXTM3U\n$extra#EXTINF:10,\n${origin.base}/seg/10.ts\n'
+          '${mode == 'live' ? '' : '#EXT-X-ENDLIST\n'}';
+    }
+    try {
+      request.response.write(body);
+      await request.response.close();
+    } catch (_) {}
+  });
+  final root = 'http://127.0.0.1:${server.port}/api/fyplay';
+  try {
+    for (final guardedMode in <String>['key', 'iv', 'map']) {
+      mode = guardedMode;
+      revision = 1;
+      final logs = <String>[];
+      final proxy = LocalHlsProxy(
+        prefetchCount: 0,
+        playlistRefreshInterval: Duration.zero,
+        log: logs.add,
+      );
+      proxies.add(proxy);
+      final local = await proxy.proxy(
+        root,
+        <String, String>{},
+        refreshPlay: () async => root,
+      );
+      final old = await _getText(client, local);
+      revision = 2;
+      await proxy.refreshPlaylists();
+      check(
+        logs.any((line) => line.contains('changed key or map metadata')),
+        '$guardedMode 变化明确拒绝刷新',
+      );
+      check(await _getText(client, local) == old, '$guardedMode 拒绝后旧缓存未被污染');
+      await proxy.dispose();
+      proxies.remove(proxy);
+    }
+    mode = 'live';
+    final liveLogs = <String>[];
+    final live = LocalHlsProxy(
+      prefetchCount: 0,
+      playlistRefreshInterval: Duration.zero,
+      log: liveLogs.add,
+    );
+    proxies.add(live);
+    await live.proxy(root, <String, String>{}, refreshPlay: () async => root);
+    await live.refreshPlaylists();
+    check(
+      liveLogs.any((line) => line.contains('签名已刷新')),
+      'live 根列表仍正常刷新，无 index 别名交换',
+    );
+    await live.dispose();
+    proxies.remove(live);
+
+    mode = 'dag';
+    final dagLogs = <String>[];
+    final dag = LocalHlsProxy(
+      prefetchCount: 0,
+      playlistRefreshInterval: Duration.zero,
+      log: dagLogs.add,
+    );
+    proxies.add(dag);
+    final dagRoot = await dag.proxy(
+      root,
+      <String, String>{},
+      refreshPlay: () async => root,
+    );
+    for (final parent in _httpLines(await _getText(client, dagRoot))) {
+      for (final child in _httpLines(await _getText(client, parent))) {
+        await _getText(client, child);
+      }
+    }
+    final before = requests['/shared'] ?? 0;
+    await dag.refreshPlaylists();
+    check(dagLogs.any((line) => line.contains('签名已刷新')), '共享子列表 DAG 不误判循环');
+    check(requests['/shared'] == before + 1, 'DAG 共享子列表只拉取一次');
+    await dag.dispose();
+    proxies.remove(dag);
+
+    mode = 'cycle';
+    final cycleLogs = <String>[];
+    final cycle = LocalHlsProxy(
+      prefetchCount: 0,
+      playlistRefreshInterval: Duration.zero,
+      log: cycleLogs.add,
+    );
+    proxies.add(cycle);
+    await cycle.proxy(root, <String, String>{}, refreshPlay: () async => root);
+    await cycle.refreshPlaylists();
+    check(
+      cycleLogs.any((line) => line.contains('cyclic child tree')),
+      '真正循环明确拒绝，无无限递归',
+    );
+    await cycle.dispose();
+    proxies.remove(cycle);
+
+    mode = 'plain';
+    final pending = Completer<String?>();
+    final genLogs = <String>[];
+    final gen = LocalHlsProxy(
+      prefetchCount: 0,
+      playlistRefreshInterval: Duration.zero,
+      log: genLogs.add,
+    );
+    proxies.add(gen);
+    await gen.proxy(
+      root,
+      <String, String>{},
+      refreshPlay: () => pending.future,
+    );
+    final oldRefresh = gen.refreshPlaylists();
+    await gen.proxy('${origin.base}/rotating.m3u8', <String, String>{});
+    pending.complete(root);
+    await oldRefresh;
+    check(
+      !genLogs.any((line) => line.contains('签名已刷新') || line.contains('签名刷新失败')),
+      '切源后旧回调不提交也不累计新源失败',
+    );
+    await gen.dispose();
+    proxies.remove(gen);
+
+    final deadlineLogs = <String>[];
+    final deadlineProxy = LocalHlsProxy(
+      prefetchCount: 0,
+      playlistRefreshInterval: Duration.zero,
+      platformRefreshTimeout: const Duration(milliseconds: 60),
+      log: deadlineLogs.add,
+    );
+    proxies.add(deadlineProxy);
+    final local = await deadlineProxy.proxy(
+      root,
+      <String, String>{},
+      refreshPlay: () async => root,
+    );
+    final original = await _getText(client, local);
+    slow = true;
+    final watch = Stopwatch()..start();
+    await deadlineProxy.refreshPlaylists();
+    check(watch.elapsedMilliseconds < 200, '总刷新期限限制整个阶段');
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    check(!deadlineLogs.any((line) => line.contains('签名已刷新')), '超时操作稍后返回也不提交');
+    check(await _getText(client, local) == original, '超时后旧播放列表保持不变');
+    await deadlineProxy.dispose();
+    proxies.remove(deadlineProxy);
+  } finally {
+    await server.close(force: true);
+  }
 }
 
 Future<void> _testLru(
@@ -428,8 +781,9 @@ List<String> _httpLines(String playlist) {
   return const LineSplitter()
       .convert(playlist)
       .map((line) => line.trim())
-      .where((line) =>
-          line.startsWith('http://127.0.0.1') && !line.startsWith('#'))
+      .where(
+        (line) => line.startsWith('http://127.0.0.1') && !line.startsWith('#'),
+      )
       .toList();
 }
 
@@ -544,6 +898,8 @@ media.m3u8?token=${issued + 1}
         case '/range.m3u8':
           await _text(request, _rangeBody);
           break;
+        case '/api/iqiyi.m3u8':
+        case '/api/fyplay':
         case '/rotating.m3u8':
           await _mediaPlaylist(request, _rotatingBody);
           break;
@@ -597,7 +953,8 @@ media.m3u8?token=${issued + 1}
     await _text(request, body(token));
   }
 
-  String _mediaBody(int token) => '''
+  String _mediaBody(int token) =>
+      '''
 #EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:10
@@ -613,7 +970,8 @@ seg/2.ts?token=$token
 #EXT-X-ENDLIST
 ''';
 
-  String _rotatingBody(int token) => '''
+  String _rotatingBody(int token) =>
+      '''
 #EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:10
@@ -668,8 +1026,10 @@ blob.bin
     final token = int.tryParse(request.uri.queryParameters['token'] ?? '');
     segmentRequests++;
     activeSegmentGets++;
-    maxConcurrentSegmentGets =
-        math.max(maxConcurrentSegmentGets, activeSegmentGets);
+    maxConcurrentSegmentGets = math.max(
+      maxConcurrentSegmentGets,
+      activeSegmentGets,
+    );
     try {
       if (token != null && token != accepted) {
         forbidden++;
@@ -696,8 +1056,9 @@ blob.bin
     var end = bytes.length - 1;
     var partial = false;
     if (rangeHeader != null) {
-      final match =
-          RegExp(r'^bytes=(\d+)-(\d*)$').firstMatch(rangeHeader.trim());
+      final match = RegExp(
+        r'^bytes=(\d+)-(\d*)$',
+      ).firstMatch(rangeHeader.trim());
       if (match != null) {
         start = int.parse(match.group(1)!);
         if (match.group(2)!.isNotEmpty) {

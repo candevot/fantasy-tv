@@ -11,6 +11,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../api.dart';
 import '../models.dart';
 import 'local_hls_proxy.dart';
+import 'playback_recovery.dart';
 
 /// FxPlayer 打开/播放失败时抛出的异常，调用方可据此尝试备用地址。
 class FxPlayerException implements Exception {
@@ -113,10 +114,7 @@ class FxPlayerValue {
   final double aspectRatio;
 
   /// 画面尺寸，未就绪时宽高为 0。
-  Size get size => Size(
-        (width ?? 0).toDouble(),
-        (height ?? 0).toDouble(),
-      );
+  Size get size => Size((width ?? 0).toDouble(), (height ?? 0).toDouble());
 
   /// 形如 `1920x1080` 的分辨率文案；未就绪时返回空串。
   String get resolutionText {
@@ -183,9 +181,7 @@ class FxPlayerValue {
 /// - 以 Stream 形式暴露 position / duration / buffering / error / completed；
 /// - [buildVideo] 返回可直接放进页面的视频 Widget。
 class FxPlayer implements Listenable {
-  FxPlayer._({
-    this.readyTimeout = const Duration(seconds: 20),
-  }) {
+  FxPlayer._({this.readyTimeout = const Duration(seconds: 20)}) {
     final android = defaultTargetPlatform == TargetPlatform.android;
     _player = Player(
       configuration: const PlayerConfiguration(
@@ -265,7 +261,19 @@ class FxPlayer implements Listenable {
 
   FxPlayerValue _value = const FxPlayerValue();
   bool _disposed = false;
+  bool _playIntent = false;
+  int _decodeErrorSerial = 0;
   int _openToken = 0;
+
+  /// 画面层代际：每次真正 open（含救援链重开）都 +1。
+  ///
+  /// 内部救援重开同样要通知共享画面层重新挂载。重挂是画面输出异常的
+  /// 恢复措施，不代表已证明具体设备的黑屏一定由旧纹理造成；真实显示
+  /// 仍需要设备验证，解码截图只能证明解码器产生了画面。
+  int _renderEpoch = 0;
+
+  /// 当前画面层代际；页面在监听回调里比对它来决定是否重建 Video。
+  int get renderEpoch => _renderEpoch;
   Completer<void>? _ready;
   Timer? _cacheGuardTimer;
 
@@ -280,6 +288,12 @@ class FxPlayer implements Listenable {
   Duration _lastFlowBuffered = Duration.zero;
   double _lastFlowPct = -1;
   int? _lastFlowStreamPos;
+
+  // 网络/音频进度仍前进时，也单独检查视频时间戳，避免音频掩盖视频停摆。
+  double? _lastVideoPts;
+  Duration _lastVideoPosition = Duration.zero;
+  DateTime _lastVideoAt = DateTime.now();
+  bool _videoProbeBusy = false;
 
   /// 救援链正在执行（防止看门狗 / 错误事件重复进入）。
   bool _rescueBusy = false;
@@ -423,17 +437,12 @@ class FxPlayer implements Listenable {
     });
   }
 
-  static String _openKey(
-    String url,
-    Map<String, String> headers,
-    bool direct,
-  ) {
+  static String _openKey(String url, Map<String, String> headers, bool direct) {
     final suffix = direct ? '|direct=1' : '';
     if (headers.isEmpty) return '$url$suffix';
-    final entries = headers.entries
-        .map((entry) => '${entry.key}=${entry.value}')
-        .toList()
-      ..sort();
+    final entries =
+        headers.entries.map((entry) => '${entry.key}=${entry.value}').toList()
+          ..sort();
     return '$url$suffix|${entries.join('&')}';
   }
 
@@ -447,10 +456,15 @@ class FxPlayer implements Listenable {
     PlayExpiredCallback? onPlayExpired,
     FxLineRescue? rescueLines,
   ) async {
+    _playIntent = play;
     final token = ++_openToken;
     // 新的 open 取代正在进行的救援链。
     _rescueGen++;
+    _rescueBusy = false;
+    _rescueHold = false;
     _cacheRaised = false;
+    _lastVideoPts = null;
+    _lastVideoAt = DateTime.now();
     _value = const FxPlayerValue();
     _notify();
     // 记住当前播放源：救援链（refresh → 重开 → 换线路）全程要用。
@@ -480,8 +494,7 @@ class FxPlayer implements Listenable {
         return;
       }
       // 2) 交给 mpv：12MB 小缓冲先出画，open 发出后立刻调到 96MiB。
-      await _openMedia(source, play: play, token: token)
-          .timeout(readyTimeout);
+      await _openMedia(source, play: play, token: token).timeout(readyTimeout);
     } catch (error) {
       if (_disposed || token != _openToken) {
         // 已被新的播放请求取代：不报错，也不去污染新 open 的状态。
@@ -587,6 +600,12 @@ class FxPlayer implements Listenable {
       // 立即解除暂停，先出画面，不等 duration / 全部元数据。
       play: play,
     );
+    // 这次 open 会重建 mpv 的视频输出：画面层代际 +1，通知页面重建 Video，
+    // 否则救援链重开之后就是「有声音没画面」。
+    _renderEpoch++;
+    _notify();
+    _lastVideoPts = null;
+    _lastVideoAt = DateTime.now();
     unawaited(_setCacheLimits(_steadyBufferBytes));
     await opening;
   }
@@ -607,26 +626,27 @@ class FxPlayer implements Listenable {
     if (platform is! NativePlayer) return;
     try {
       await platform.setProperty('demuxer-max-bytes', '$forwardBytes');
-      await platform.setProperty(
-        'demuxer-max-back-bytes',
-        '$_backBufferBytes',
-      );
-      await platform.setProperty(
-        'demuxer-readahead-secs',
-        _readaheadSeconds,
-      );
+      await platform.setProperty('demuxer-max-back-bytes', '$_backBufferBytes');
+      await platform.setProperty('demuxer-readahead-secs', _readaheadSeconds);
     } catch (_) {
       // 旧版本 / 特殊平台没有这些属性时静默跳过。
     }
   }
 
-  Future<void> play() => _player.play();
+  Future<void> play() {
+    _playIntent = true;
+    // 成员同步可能在救援期间请求 play；先记意图，落点验证完成后执行。
+    if (_rescueHold) return Future<void>.value();
+    return _player.play();
+  }
 
-  Future<void> pause() => _player.pause();
+  Future<void> pause() {
+    _playIntent = false;
+    return _player.pause();
+  }
 
-  /// 播放 / 暂停切换：直接交给 media_kit 处理，
-  /// 页面不要用本地布尔自行改状态，避免和真实播放状态互相覆盖。
-  Future<void> playOrPause() => _player.playOrPause();
+  /// 显式播放意图与缓冲状态分开，防止报错亮缓冲后把主动暂停误当播放。
+  Future<void> playOrPause() => _player.state.playing ? pause() : play();
 
   /// 播放器真实播放状态（libmpv 当前值），按钮图标以此为准。
   bool get isPlaying => _player.state.playing;
@@ -661,7 +681,8 @@ class FxPlayer implements Listenable {
     if (!v.isInitialized || v.hasError) return false;
     final pos = v.position;
     // 位置被系统重置到片头 / 明显回退。
-    final rewound = expected > const Duration(seconds: 5) &&
+    final rewound =
+        expected > const Duration(seconds: 5) &&
         pos + const Duration(seconds: 3) < expected;
     // 冻结：本该在播却停了（系统收回音频焦点 / 进程被挂起）。
     final frozen = wasPlaying && !v.isPlaying;
@@ -673,7 +694,7 @@ class FxPlayer implements Listenable {
     try {
       if (rewound) await _player.seek(expected);
       // 只有本来就在播的才恢复播放；用户主动暂停的保持暂停。
-      if (wasPlaying) await _player.play();
+      if (wasPlaying) await play();
       _lastFlowAt = DateTime.now();
       _lastFlowPos = expected;
       return true;
@@ -754,20 +775,20 @@ class FxPlayer implements Listenable {
       _player.stream.position.listen((position) {
         // 救援重开期间新流的 position 会先归零：保留原进度显示，
         // 避免 UI 进度条 / 观看进度回写读到 0。
-        if (_rescueHold && position <= Duration.zero) return;
-        final initialized = _value.isInitialized || position > Duration.zero;
         if (position > Duration.zero) _signalMediaReady();
-        _setValue(
-          _value.copyWith(
-            isInitialized: initialized,
-            position: position,
-          ),
+        final shown = recoveryVisiblePosition(
+          holding: _rescueHold,
+          previous: _value.position,
+          incoming: position,
         );
+        final initialized = _value.isInitialized || position > Duration.zero;
+        _setValue(_value.copyWith(isInitialized: initialized, position: shown));
       }),
     );
     _subscriptions.add(
       _player.stream.duration.listen((duration) {
         if (duration > Duration.zero) _signalMediaReady();
+        if (_rescueHold && duration <= Duration.zero) return;
         _setValue(
           _value.copyWith(
             isInitialized: _value.isInitialized || duration > Duration.zero,
@@ -776,12 +797,10 @@ class FxPlayer implements Listenable {
         );
       }),
     );
-    _subscriptions.add(
-      _player.stream.videoParams.listen(_onVideoParams),
-    );
+    _subscriptions.add(_player.stream.videoParams.listen(_onVideoParams));
     _subscriptions.add(
       _player.stream.buffering.listen((buffering) {
-        _setValue(_value.copyWith(isBuffering: buffering));
+        _setValue(_value.copyWith(isBuffering: _rescueHold || buffering));
       }),
     );
     _subscriptions.add(
@@ -801,6 +820,7 @@ class FxPlayer implements Listenable {
     );
     _subscriptions.add(
       _player.stream.completed.listen((completed) {
+        if (_rescueHold) return;
         _setValue(_value.copyWith(isCompleted: completed));
       }),
     );
@@ -857,6 +877,7 @@ class FxPlayer implements Listenable {
       _logFx('忽略 mpv 取消事件(cancelled 不算失败): $message');
       return;
     }
+    _decodeErrorSerial++;
     // 救援重开正在等新流就绪：立刻结束等待，让这一步判失败。
     final mediaReady = _mediaReady;
     if (mediaReady != null && !mediaReady.isCompleted) {
@@ -910,6 +931,8 @@ class FxPlayer implements Listenable {
       _clearStallIndication();
       return;
     }
+    await _checkVideoProgress();
+    if (_disposed || _rescueBusy) return;
     final flowing = await _bytesFlowing();
     if (_disposed || _rescueBusy) return;
     if (flowing) {
@@ -925,6 +948,51 @@ class FxPlayer implements Listenable {
     final stalled = DateTime.now().difference(_lastFlowAt);
     if (stalled < _stallTimeout) return;
     unawaited(_runRescue('连续 ${stalled.inSeconds}s 无字节流动'));
+  }
+
+  Future<void> _checkVideoProgress() async {
+    final state = WidgetsBinding.instance.lifecycleState;
+    if (state != null && state != AppLifecycleState.resumed) {
+      // 系统允许后台只解音频，不能把后台视频停摆当成断流。
+      _lastVideoAt = DateTime.now();
+      _lastVideoPts = null;
+      return;
+    }
+    final platform = _player.platform;
+    if (_videoProbeBusy || platform is! NativePlayer) return;
+    _videoProbeBusy = true;
+    final token = _openToken;
+    try {
+      final raw = await platform
+          .getProperty('video-pts', waitForInitialization: false)
+          .timeout(const Duration(seconds: 1));
+      if (_disposed || token != _openToken || _rescueBusy) return;
+      final pts = double.tryParse(raw);
+      if (pts == null ||
+          !pts.isFinite ||
+          !_value.isPlaying ||
+          _value.isBuffering) {
+        // 不支持此属性时不猜测。未就绪/正常缓冲也不算视频卡死。
+        _lastVideoPts = null;
+        _lastVideoAt = DateTime.now();
+        return;
+      }
+      final previous = _lastVideoPts;
+      final audioAdvanced = _value.position > _lastVideoPosition;
+      _lastVideoPosition = _value.position;
+      _lastVideoPts = pts;
+      if (previous == null || (pts - previous).abs() > .001 || !audioAdvanced) {
+        _lastVideoAt = DateTime.now();
+      } else if (DateTime.now().difference(_lastVideoAt) >= _stallTimeout) {
+        _logFx('VIDEO 视频时间戳停摆，音频状态=${_value.isPlaying}');
+        unawaited(_runRescue('视频时间戳连续30秒未推进'));
+      }
+    } catch (_) {
+      _lastVideoAt = DateTime.now();
+      _lastVideoPts = null;
+    } finally {
+      _videoProbeBusy = false;
+    }
   }
 
   /// 字节是否还在流动：位置 / 已缓存时长 / 缓冲百分比 / stream-pos
@@ -1085,8 +1153,10 @@ class FxPlayer implements Listenable {
       _stallIndicated = false;
       _fail('播放中断，自动恢复失败，请重试或切换线路');
     } finally {
-      _rescueBusy = false;
-      _rescueHold = false;
+      if (gen == _rescueGen) {
+        _rescueBusy = false;
+        _rescueHold = false;
+      }
     }
   }
 
@@ -1113,6 +1183,7 @@ class FxPlayer implements Listenable {
   }) async {
     if (_disposed || gen != _rescueGen) return false;
     final token = ++_openToken;
+    final errorSerial = _decodeErrorSerial;
     try {
       final source = await _resolvePlaybackSource(
         url,
@@ -1130,8 +1201,12 @@ class FxPlayer implements Listenable {
       unawaited(mediaReady.future.catchError((Object _) {}));
       _mediaReady = mediaReady;
       try {
-        await _openMedia(source, play: true, token: token)
-            .timeout(_rescueOpenTimeout);
+        // 先暂停打开，落回原位置后再播放；不能先播片头再 seek。
+        await _openMedia(
+          source,
+          play: false,
+          token: token,
+        ).timeout(_rescueOpenTimeout);
         if (_disposed || token != _openToken) return false;
         await mediaReady.future.timeout(_rescueOpenTimeout);
       } on TimeoutException {
@@ -1150,11 +1225,70 @@ class FxPlayer implements Listenable {
           _logFx('RESCUE 已 seek 回 ${resume.inSeconds}s');
         } catch (error) {
           _logFx('RESCUE seek 回原进度失败: $error');
+          return false;
         }
       }
-      await _player.play();
+      if (_disposed || token != _openToken || gen != _rescueGen) return false;
+      // 暂停态核实 seek 落点，避免高速播放后离开 ±5 秒窗口而误判。
+      // duration / 音频进度不是视频恢复的证据。必须在本次 open 后
+      // 能取到解码画面，并确认 seek 已落到目标附近，才算恢复成功。
+      final deadline = DateTime.now().add(_rescueOpenTimeout);
+      var verified = false;
+      while (!_disposed &&
+          token == _openToken &&
+          gen == _rescueGen &&
+          errorSerial == _decodeErrorSerial &&
+          DateTime.now().isBefore(deadline)) {
+        final position = _player.state.position;
+        final landed = recoverySeekLanded(
+          live: live,
+          target: resume,
+          actual: position,
+        );
+        if (landed) {
+          try {
+            // raw BGRA 避免高分辨率 JPEG 编码占满播放器锁。
+            final frame = await _player
+                .screenshot(format: null)
+                .timeout(const Duration(seconds: 4));
+            if (frame != null && frame.isNotEmpty) {
+              verified = true;
+              break;
+            }
+          } on TimeoutException {
+            // timeout 不会取消底层截图；不再排队提交第二次截图。
+            _logFx('RESCUE 解码画面检查超时');
+            return false;
+          } catch (_) {
+            // 可能尚未解码出画面，在同一预算内等待下一次采样。
+          }
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+      }
+      if (!verified ||
+          _disposed ||
+          token != _openToken ||
+          gen != _rescueGen ||
+          errorSerial != _decodeErrorSerial) {
+        _logFx('RESCUE 未确认解码画面或 seek 落点，继续恢复链');
+        return false;
+      }
+      if (_playIntent) await _player.play();
+      if (_disposed || token != _openToken || gen != _rescueGen) return false;
+      _sourceUrl = url;
+      _sourceHeaders = headers;
+      _sourceDirect = direct;
+      _rescueHold = false;
       _stallIndicated = false;
+      _setValue(
+        _value.copyWith(
+          position: _player.state.position,
+          isPlaying: _player.state.playing,
+          isBuffering: false,
+        ),
+      );
       _lastFlowAt = DateTime.now();
+      _logFx('RESCUE 已确认解码画面与进度');
       return true;
     } catch (error) {
       _logFx('RESCUE 重开异常: $error');
@@ -1369,10 +1503,7 @@ class _FxHlsWarmup {
   static final Map<String, DateTime> _warmed = <String, DateTime>{};
   static final Map<String, Future<void>> _inflight = <String, Future<void>>{};
 
-  static Future<void> prepare(
-    String url,
-    Map<String, String> headers,
-  ) {
+  static Future<void> prepare(String url, Map<String, String> headers) {
     if (url.isEmpty || !_looksLikeHls(url)) return Future<void>.value();
     // 离线缓存播的是本地 index.m3u8，不需要联网预热。
     final scheme = Uri.tryParse(url)?.scheme ?? '';
@@ -1454,10 +1585,7 @@ class _FxHlsWarmup {
   }
 
   /// 第二个码率只在后台暖连接，不占用等待时间。
-  static Future<void> _warmVariant(
-    Uri uri,
-    Map<String, String> headers,
-  ) async {
+  static Future<void> _warmVariant(Uri uri, Map<String, String> headers) async {
     final client = http.Client();
     try {
       await _fetchPlaylistText(client, uri, headers);
@@ -1478,12 +1606,14 @@ class _FxHlsWarmup {
       final request = http.Request('GET', uri)
         ..headers.addAll(headers)
         ..headers['Range'] = 'bytes=0-${_segmentPrefetchBytes - 1}';
-      final response =
-          await client.send(request).timeout(const Duration(seconds: 2));
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 2));
       if (response.statusCode >= 400) return;
       var received = 0;
-      await for (final chunk
-          in response.stream.timeout(const Duration(seconds: 2))) {
+      await for (final chunk in response.stream.timeout(
+        const Duration(seconds: 2),
+      )) {
         received += chunk.length;
         if (received >= _segmentPrefetchBytes) break;
       }
@@ -1498,8 +1628,9 @@ class _FxHlsWarmup {
     final https = uri.isScheme('https');
     if (uri.host.isEmpty || !(https || uri.isScheme('http'))) return;
     try {
-      await InternetAddress.lookup(uri.host)
-          .timeout(const Duration(milliseconds: 800));
+      await InternetAddress.lookup(
+        uri.host,
+      ).timeout(const Duration(milliseconds: 800));
     } catch (_) {
       // DNS 失败交给真正请求时的系统解析。
     }

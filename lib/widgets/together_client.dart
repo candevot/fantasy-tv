@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../api.dart';
 import '../models.dart';
+import 'together_host_credential.dart';
 import 'together_sync.dart';
 import 'together_ui.dart';
 
@@ -289,6 +290,7 @@ class TogetherClient {
   /// 当前房间号 / 是否房主。断线重连先 rejoin 原房间，只有 not_found 才重建。
   String code = '';
   bool host = false;
+  final _hostCredential = TogetherHostCredential();
 
   String _hostVideoId = '';
   int _hostEp = 1;
@@ -568,7 +570,7 @@ class TogetherClient {
   void refreshRoom() {
     if (!_connected || code.isEmpty) return;
     _rejoining = true;
-    _send({'action': 'join', 'code': code});
+    _send(_hostCredential.joinPayload(code));
   }
 
   bool _send(Map<String, dynamic> payload) {
@@ -601,6 +603,7 @@ class TogetherClient {
     _hostChannelId = channelId;
     _hostLive = live;
     host = true;
+    _hostCredential.clear();
     code = '';
     _rejoining = false;
     _pendingCreate = _createPayload();
@@ -636,12 +639,13 @@ class TogetherClient {
       onError('bad_code', '房间号必须是 6 位数字');
       return false;
     }
+    if (value != code) _hostCredential.clear();
     code = value;
     host = false;
     _pendingCreate = null;
     _rejoining = true;
     if (_connected) {
-      _send({'action': 'join', 'code': value});
+      _send(_hostCredential.joinPayload(value));
     }
     return true;
   }
@@ -707,6 +711,7 @@ class TogetherClient {
 
   void leave() {
     if (_connected && code.isNotEmpty) _send({'action': 'leave'});
+    _hostCredential.clear();
     code = '';
     host = false;
     _pendingCreate = null;
@@ -714,6 +719,7 @@ class TogetherClient {
   }
 
   void dispose() {
+    _hostCredential.clear();
     _closed = true;
     _retry?.cancel();
     _ping?.cancel();
@@ -751,7 +757,9 @@ class TogetherClient {
         break;
       case 'room':
         final info = TogetherRoomInfo.fromJson(togetherMap(msg['room']));
-        if (info.code.isEmpty) return;
+        if (info.code.isEmpty || _pendingCreate == null) return;
+        _hostCredential.clear();
+        _hostCredential.capture(info.code, msg);
         code = info.code;
         host = true;
         _pendingCreate = null;
@@ -786,6 +794,7 @@ class TogetherClient {
             rejoinFailed &&
             code.isNotEmpty &&
             _pendingCreate == null) {
+          _hostCredential.clear();
           final payload = _createPayload();
           _pendingCreate = payload;
           onSystem('房间已失效，正在重新创建…');
@@ -799,10 +808,12 @@ class TogetherClient {
           // 只有 join / create 的 not_found 才代表房间没了；
           // state 带错 videoId 的 not_found 不能把房主踢出仍然存在的房间。
           if (rejoinFailed || createFailed) {
+            _hostCredential.clear();
             code = '';
             host = false;
           }
         } else if (errCode == 'room_full' || _isPasswordError(errCode)) {
+          _hostCredential.clear();
           code = '';
           host = false;
           _pendingCreate = null;
@@ -810,6 +821,7 @@ class TogetherClient {
         onError(errCode, errMsg);
         break;
       case 'closed':
+        _hostCredential.clear();
         code = '';
         host = false;
         _pendingCreate = null;
@@ -842,7 +854,7 @@ class TogetherClient {
       _send(pending);
     } else if (code.isNotEmpty) {
       _rejoining = true;
-      _send({'action': 'join', 'code': code});
+      _send(_hostCredential.joinPayload(code));
     }
     onOpen(TogetherMember(
       id: selfId,

@@ -86,7 +86,9 @@ String fxPlayerQuality(FxPlayer? player) {
   final value = player?.value;
   if (value == null || !value.isInitialized) return '';
   final width = (value.videoWidth ?? 0) > 0 ? value.videoWidth : value.width;
-  final height = (value.videoHeight ?? 0) > 0 ? value.videoHeight : value.height;
+  final height = (value.videoHeight ?? 0) > 0
+      ? value.videoHeight
+      : value.height;
   return fxResolutionText(width, height);
 }
 
@@ -97,11 +99,11 @@ const double fxSubtitleMinBottom = 96;
 /// - 适应 / 填充 / 拉伸 → contain / cover / fill；
 /// - 16:9 / 4:3 / 1:1 固定比例档 → 框内裁满（外圈黑边交给 [fxAspectFrame]）。
 BoxFit fxAspectFit(FxAspectMode mode) => switch (mode) {
-      FxAspectMode.contain => BoxFit.contain,
-      FxAspectMode.cover => BoxFit.cover,
-      FxAspectMode.fill => BoxFit.fill,
-      _ => BoxFit.cover,
-    };
+  FxAspectMode.contain => BoxFit.contain,
+  FxAspectMode.cover => BoxFit.cover,
+  FxAspectMode.fill => BoxFit.fill,
+  _ => BoxFit.cover,
+};
 
 /// 固定比例档外框：按目标比例居中裁出一个框（框内画面裁满），
 /// 框外留黑边；适应 / 填充 / 拉伸三档原样返回，交给 BoxFit 处理。
@@ -172,11 +174,21 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   /// 重复写属性，同时保证换播放器实例（切线路 / 换集）后重新写一次。
   bool? _subtitleVisible;
   Object? _subtitlePlayer;
+  int _renderEpoch = 0;
+
+  // 放在共享画面层处理，普通播放、直播、离线和一起看都不会漏接。
+  void _onPlayerChanged() {
+    final epoch = widget.player.renderEpoch;
+    if (!mounted || epoch == _renderEpoch) return;
+    setState(() => _renderEpoch = epoch);
+  }
 
   @override
   void initState() {
     super.initState();
     FxDisplaySettings.instance.addListener(_onSettingsChanged);
+    widget.player.addListener(_onPlayerChanged);
+    _renderEpoch = widget.player.renderEpoch;
     // 幂等：读回已保存的画面比例 / 镜像档位，读完会再通知一次。
     unawaited(FxDisplaySettings.instance.ensureLoaded());
     _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
@@ -186,6 +198,9 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   void didUpdateWidget(covariant FxPlayerSurface oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (identical(oldWidget.player, widget.player)) return;
+    oldWidget.player.removeListener(_onPlayerChanged);
+    widget.player.addListener(_onPlayerChanged);
+    _renderEpoch = widget.player.renderEpoch;
     // 换了播放器实例：新 mpv 的 sub-visibility 是默认值，需要按当前镜像档位重写。
     _subtitlePlayer = null;
     _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
@@ -221,6 +236,7 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   @override
   void dispose() {
     FxDisplaySettings.instance.removeListener(_onSettingsChanged);
+    widget.player.removeListener(_onPlayerChanged);
     super.dispose();
   }
 
@@ -234,6 +250,7 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
         ? fxSubtitleMinBottom
         : widget.subtitleBottom;
     final video = Video(
+      key: ValueKey<int>(_renderEpoch),
       controller: widget.player.videoController,
       controls: NoVideoControls,
       fit: fxAspectFit(aspect),
@@ -423,8 +440,10 @@ class PGlassIcon extends StatelessWidget {
               ? Fx.accent.withValues(alpha: .82)
               : Colors.white.withValues(alpha: tint),
           shape: BoxShape.circle,
-          border:
-              Border.all(color: Colors.white.withValues(alpha: .32), width: 1),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: .32),
+            width: 1,
+          ),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: .10),
@@ -461,14 +480,19 @@ class PGlassPill extends StatelessWidget {
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: .14),
         borderRadius: BorderRadius.circular(20),
-        border:
-            Border.all(color: Colors.white.withValues(alpha: .28), width: 1),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: .28),
+          width: 1,
+        ),
       ),
       child: child,
     );
     if (onTap == null) return box;
     return GestureDetector(
-        onTap: onTap, behavior: HitTestBehavior.opaque, child: box);
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: box,
+    );
   }
 }
 
@@ -568,9 +592,9 @@ class _PProgressBarState extends State<PProgressBar> {
   }
 
   Duration _targetFor(double fraction) => Duration(
-        milliseconds:
-            (widget.duration.inMilliseconds * fraction.clamp(0.0, 1.0)).round(),
-      );
+    milliseconds: (widget.duration.inMilliseconds * fraction.clamp(0.0, 1.0))
+        .round(),
+  );
 
   void _seekTo(double fraction) {
     if (!_hasDuration || !widget.enabled) return;
@@ -586,8 +610,10 @@ class _PProgressBarState extends State<PProgressBar> {
         final activeWidth = math.max(0.0, width * f);
         final bufferedWidth = math.max(0.0, width * _bufferedFraction);
         final thumb = widget.thumbSize;
-        final touchHeight =
-            math.max(32.0, math.max(widget.touchHeight, thumb + 10));
+        final touchHeight = math.max(
+          32.0,
+          math.max(widget.touchHeight, thumb + 10),
+        );
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           // 单击松手才 seek；拖动过程中只跟手改高亮。
@@ -644,7 +670,8 @@ class _PProgressBarState extends State<PProgressBar> {
                   child: Container(
                     height: widget.height,
                     decoration: BoxDecoration(
-                      color: widget.trackColor ??
+                      color:
+                          widget.trackColor ??
                           Colors.white.withValues(alpha: .28),
                       borderRadius: BorderRadius.circular(widget.height),
                     ),
@@ -657,7 +684,8 @@ class _PProgressBarState extends State<PProgressBar> {
                     width: bufferedWidth,
                     height: widget.height,
                     decoration: BoxDecoration(
-                      color: widget.bufferedColor ??
+                      color:
+                          widget.bufferedColor ??
                           Colors.white.withValues(alpha: .34),
                       borderRadius: BorderRadius.circular(widget.height),
                     ),
@@ -678,7 +706,9 @@ class _PProgressBarState extends State<PProgressBar> {
                 if (widget.showThumb)
                   Positioned(
                     left: math.max(
-                        0.0, math.min(width - thumb, activeWidth - thumb / 2)),
+                      0.0,
+                      math.min(width - thumb, activeWidth - thumb / 2),
+                    ),
                     child: Container(
                       width: thumb,
                       height: thumb,
@@ -823,8 +853,11 @@ class _FxSeekRowState extends State<FxSeekRow> {
         SizedBox(width: widget.gap),
         SizedBox(
           width: widget.labelWidth,
-          child: Text(fxTime(widget.duration),
-              style: style, textAlign: TextAlign.right),
+          child: Text(
+            fxTime(widget.duration),
+            style: style,
+            textAlign: TextAlign.right,
+          ),
         ),
       ],
     );
@@ -864,8 +897,8 @@ class FxLoadingOverlay extends StatelessWidget {
     final safePercent = percent == null
         ? null
         : percent!.isFinite
-            ? percent!.clamp(0.0, 99.0).toDouble()
-            : null;
+        ? percent!.clamp(0.0, 99.0).toDouble()
+        : null;
     final value = safePercent == null ? null : safePercent / 100;
     final ring = compact ? 44.0 : 62.0;
     return IgnorePointer(
@@ -886,7 +919,9 @@ class FxLoadingOverlay extends StatelessWidget {
                     shape: BoxShape.circle,
                     color: Colors.white.withValues(alpha: .14),
                     border: Border.all(
-                        color: Colors.white.withValues(alpha: .34), width: 1),
+                      color: Colors.white.withValues(alpha: .34),
+                      width: 1,
+                    ),
                     boxShadow: [
                       BoxShadow(
                         color: Colors.black.withValues(alpha: .16),
@@ -930,7 +965,9 @@ class FxLoadingOverlay extends StatelessWidget {
                 color: Colors.black.withValues(alpha: .42),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(
-                    color: Colors.white.withValues(alpha: .26), width: 1),
+                  color: Colors.white.withValues(alpha: .26),
+                  width: 1,
+                ),
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withValues(alpha: .14),

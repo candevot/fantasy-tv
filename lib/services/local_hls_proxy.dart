@@ -88,7 +88,8 @@ class HlsProxyLog {
       }
       final file = File(path);
       await file.parent.create(recursive: true);
-      final rewrite = _fileLines == 0 ||
+      final rewrite =
+          _fileLines == 0 ||
           _fileLines > maxLines + 100 ||
           DateTime.now().difference(_lastRewrite) > _rewriteInterval;
       if (rewrite) {
@@ -155,16 +156,18 @@ class LocalHlsProxy {
     this.retries = 3,
     this.retryDelay = const Duration(milliseconds: 300),
     this.playlistRefreshInterval = const Duration(seconds: 90),
+    this.platformRefreshTimeout = const Duration(seconds: 30),
     this.spoolThresholdBytes = 8 * 1024 * 1024,
     HlsProxyLogger? log,
-  })  : assert(parallelism > 0),
-        assert(prefetchCount >= 0),
-        assert(prefetchConcurrency > 0),
-        assert(cacheLimitBytes >= 0),
-        assert(retries >= 0),
-        assert(!playlistRefreshInterval.isNegative),
-        _parallelLevel = parallelism,
-        _logger = log ?? _defaultLog;
+  }) : assert(parallelism > 0),
+       assert(prefetchCount >= 0),
+       assert(prefetchConcurrency > 0),
+       assert(cacheLimitBytes >= 0),
+       assert(retries >= 0),
+       assert(!playlistRefreshInterval.isNegative),
+       assert(platformRefreshTimeout > Duration.zero),
+       _parallelLevel = parallelism,
+       _logger = log ?? _defaultLog;
 
   static const Duration _connectTimeout = Duration(seconds: 8);
   static const Duration _playlistTimeout = Duration(seconds: 12);
@@ -203,6 +206,9 @@ class LocalHlsProxy {
   /// 定期重取 playlist 的间隔，默认 90 秒；传 [Duration.zero] 关闭。
   final Duration playlistRefreshInterval;
 
+  /// Total platform refresh budget, including callback and loaded child tree.
+  final Duration platformRefreshTimeout;
+
   /// 超过该大小的分片，并发下载时用临时文件拼装（默认 8MB）。
   final int spoolThresholdBytes;
 
@@ -219,7 +225,6 @@ class LocalHlsProxy {
 
   /// 平台签名刷新的共享 future：并发分片同时要刷新时只打一次 /api/play。
   Future<bool>? _refreshInflight;
-
 
   final LinkedHashMap<String, _CachedBody> _cache =
       LinkedHashMap<String, _CachedBody>();
@@ -557,7 +562,10 @@ class LocalHlsProxy {
     try {
       if (request.method != 'GET' && request.method != 'HEAD') {
         await _writeText(
-            request, HttpStatus.methodNotAllowed, 'method not allowed');
+          request,
+          HttpStatus.methodNotAllowed,
+          'method not allowed',
+        );
         return;
       }
       switch (request.uri.path) {
@@ -711,7 +719,8 @@ class LocalHlsProxy {
         index: index,
         status: '200',
         retry: data.retryCount,
-        detail: '${stopwatch.elapsedMilliseconds}ms ${data.cacheHit ? 'cache-hit' : 'parallel=${data.parallelCount}'} '
+        detail:
+            '${stopwatch.elapsedMilliseconds}ms ${data.cacheHit ? 'cache-hit' : 'parallel=${data.parallelCount}'} '
             '${_formatBytes(data.bytes.length)}',
       ),
     );
@@ -738,7 +747,8 @@ class LocalHlsProxy {
             requested.start + requested.length,
           );
           status = HttpStatus.partialContent;
-          contentRange = 'bytes ${requested.start}-'
+          contentRange =
+              'bytes ${requested.start}-'
               '${requested.start + requested.length - 1}/${data.bytes.length}';
         }
       }
@@ -870,11 +880,13 @@ class LocalHlsProxy {
       fetched.finalUri,
       playlistKey: uri.toString(),
     );
-    _playlistCache[uri.toString()] = _CachedPlaylist(
-      rewritten,
-      DateTime.now(),
-    );
+    _storePlaylist(rewritten);
+    return rewritten;
+  }
+
+  void _storePlaylist(_RewrittenPlaylist rewritten) {
     final playlist = rewritten.playlist;
+    _playlistCache[playlist.key] = _CachedPlaylist(rewritten, DateTime.now());
     if (!playlist.isMaster && !playlist.isLive) {
       _activePlaylistKeys.add(playlist.key);
       // 用 index 建立稳定映射：签名换新后，旧本地分片地址仍能映射到
@@ -889,7 +901,6 @@ class LocalHlsProxy {
       }
       _trimAliases();
     }
-    return rewritten;
   }
 
   Future<_FetchedPlaylist> _fetchPlaylistText(Uri uri) async {
@@ -906,7 +917,7 @@ class LocalHlsProxy {
     }
     final contentType =
         response.headers.value(HttpHeaders.contentTypeHeader)?.toLowerCase() ??
-            '';
+        '';
     if (contentType.startsWith('video/') || contentType.startsWith('audio/')) {
       try {
         await response.listen(null).cancel();
@@ -956,18 +967,31 @@ class LocalHlsProxy {
     String text,
     Uri base, {
     required String playlistKey,
+    bool preserveChildKeys = true,
   }) {
-    final isMaster = text.contains('#EXT-X-STREAM-INF') ||
+    final isMaster =
+        text.contains('#EXT-X-STREAM-INF') ||
         text.contains('#EXT-X-I-FRAME-STREAM-INF') ||
         text.contains('#EXT-X-MEDIA:');
     // ENDLIST / PLAYLIST-TYPE:VOD 都表示点播；否则按直播处理，不做
     // 跨刷新的 index 映射（直播窗口会滑动，index 对应的内容会变）。
-    final isLive = !text.contains('#EXT-X-ENDLIST') &&
+    final isLive =
+        !text.contains('#EXT-X-ENDLIST') &&
         !text.contains('#EXT-X-PLAYLIST-TYPE:VOD');
     final lines = const LineSplitter().convert(text);
     final out = <String>[];
     final segments = <_SegmentRef>[];
     final variants = <Uri>[];
+    Uri childKey(Uri actual) {
+      if (preserveChildKeys) {
+        final old = _playlistCache[playlistKey]?.value.playlist;
+        for (final logical in old?.variants ?? <Uri>[]) {
+          if (_sourceOverrides[logical.toString()] == actual) return logical;
+        }
+      }
+      return actual;
+    }
+
     final lastRangeEnd = <String, int>{};
     _RangeSpec? pendingRange;
     var segmentIndex = 0;
@@ -979,8 +1003,9 @@ class LocalHlsProxy {
         continue;
       }
       if (line.startsWith('#EXT-X-BYTERANGE:')) {
-        final spec =
-            _parseByteRange(line.substring('#EXT-X-BYTERANGE:'.length));
+        final spec = _parseByteRange(
+          line.substring('#EXT-X-BYTERANGE:'.length),
+        );
         if (spec == null) {
           out.add(raw);
         } else {
@@ -993,32 +1018,24 @@ class LocalHlsProxy {
       if (line.startsWith('#EXT-X-KEY:') ||
           line.startsWith('#EXT-X-SESSION-KEY:')) {
         out.add(
-          _rewriteUriAttribute(
-            line,
-            base,
-            (uri) => _localUrl('/key', uri),
-          ),
+          _rewriteUriAttribute(line, base, (uri) => _localUrl('/key', uri)),
         );
         continue;
       }
       if (line.startsWith('#EXT-X-MAP:')) {
         out.add(
-          _rewriteUriAttribute(
-            line,
-            base,
-            (uri) => _localUrl('/seg', uri),
-          ),
+          _rewriteUriAttribute(line, base, (uri) => _localUrl('/seg', uri)),
         );
         continue;
       }
       if (line.startsWith('#EXT-X-MEDIA:') ||
           line.startsWith('#EXT-X-I-FRAME-STREAM-INF:')) {
         out.add(
-          _rewriteUriAttribute(
-            line,
-            base,
-            (uri) => _localUrl('/playlist', uri),
-          ),
+          _rewriteUriAttribute(line, base, (uri) {
+            final logical = childKey(uri);
+            variants.add(logical);
+            return _localUrl('/playlist', logical);
+          }),
         );
         continue;
       }
@@ -1032,23 +1049,14 @@ class LocalHlsProxy {
           _rewriteUriAttribute(line, base, (uri) {
             final ref = _SegmentRef(uri, range);
             segments.add(ref);
-            return _localUrl(
-              '/seg',
-              uri,
-              index: segmentIndex++,
-              range: range,
-            );
+            return _localUrl('/seg', uri, index: segmentIndex++, range: range);
           }),
         );
         continue;
       }
       if (line.startsWith('#EXT-X-PRELOAD-HINT:')) {
         out.add(
-          _rewriteUriAttribute(
-            line,
-            base,
-            (uri) => _localUrl('/seg', uri),
-          ),
+          _rewriteUriAttribute(line, base, (uri) => _localUrl('/seg', uri)),
         );
         continue;
       }
@@ -1067,8 +1075,9 @@ class LocalHlsProxy {
         continue;
       }
       if (isMaster) {
-        variants.add(uri);
-        out.add(_localUrl('/playlist', uri));
+        final logical = childKey(uri);
+        variants.add(logical);
+        out.add(_localUrl('/playlist', logical));
         continue;
       }
 
@@ -1083,14 +1092,7 @@ class LocalHlsProxy {
       }
       final ref = _SegmentRef(uri, range);
       segments.add(ref);
-      out.add(
-        _localUrl(
-          '/seg',
-          uri,
-          index: segmentIndex++,
-          range: range,
-        ),
-      );
+      out.add(_localUrl('/seg', uri, index: segmentIndex++, range: range));
     }
 
     final playlist = _Playlist(
@@ -1100,6 +1102,31 @@ class LocalHlsProxy {
       isLive: isLive,
       segments: segments,
       variants: variants,
+      timeline: lines
+          .map((line) {
+            final trimmed = line.trim();
+            if (trimmed.startsWith('#EXT-X-KEY:') ||
+                trimmed.startsWith('#EXT-X-SESSION-KEY:') ||
+                trimmed.startsWith('#EXT-X-MAP:')) {
+              return _rewriteUriAttribute(
+                trimmed,
+                base,
+                (uri) => uri.toString(),
+              );
+            }
+            return trimmed;
+          })
+          .where(
+            (line) =>
+                line.startsWith('#EXTINF:') ||
+                line.startsWith('#EXT-X-MEDIA-SEQUENCE:') ||
+                line.startsWith('#EXT-X-DISCONTINUITY') ||
+                line.startsWith('#EXT-X-BYTERANGE:') ||
+                line.startsWith('#EXT-X-KEY:') ||
+                line.startsWith('#EXT-X-SESSION-KEY:') ||
+                line.startsWith('#EXT-X-MAP:'),
+          )
+          .join('\n'),
     );
     final body = Uint8List.fromList(utf8.encode(out.join('\n')));
     return _RewrittenPlaylist(body, playlist);
@@ -1126,12 +1153,7 @@ class LocalHlsProxy {
     });
   }
 
-  String _localUrl(
-    String path,
-    Uri source, {
-    int? index,
-    _RangeSpec? range,
-  }) {
+  String _localUrl(String path, Uri source, {int? index, _RangeSpec? range}) {
     final query = <String>[];
     if (index != null) query.add('i=$index');
     query.add('u=${_encodeUrl(source.toString())}');
@@ -1217,8 +1239,7 @@ class LocalHlsProxy {
           );
           throw _CancelledException(error);
         }
-        final http =
-            error is _HttpStatusException ? error.statusCode : null;
+        final http = error is _HttpStatusException ? error.statusCode : null;
         final expired =
             http == HttpStatus.forbidden || http == HttpStatus.notFound;
         if (retry >= retries) {
@@ -1253,8 +1274,7 @@ class LocalHlsProxy {
             index: index,
             status: http == null ? 'retry' : 'HTTP $http',
             retry: retry,
-            detail:
-                'err=$error backoff=${delay.inMilliseconds}ms $action',
+            detail: 'err=$error backoff=${delay.inMilliseconds}ms $action',
           ),
         );
         await Future<void>.delayed(delay);
@@ -1289,22 +1309,14 @@ class LocalHlsProxy {
           _log('并行下载失败回退单连接 ${_short(ref.uri)}: $error');
           return _finishDownload(
             ref,
-            await _downloadWhole(
-              ref,
-              expectedLength: length,
-              attempts: 1,
-            ),
+            await _downloadWhole(ref, expectedLength: length, attempts: 1),
             stopwatch,
           );
         } catch (error) {
           _log('并行下载失败回退单连接 ${_short(ref.uri)}: $error');
           return _finishDownload(
             ref,
-            await _downloadWhole(
-              ref,
-              expectedLength: length,
-              attempts: 1,
-            ),
+            await _downloadWhole(ref, expectedLength: length, attempts: 1),
             stopwatch,
           );
         }
@@ -1383,8 +1395,10 @@ class LocalHlsProxy {
       offset += chunk.bytes.length;
     }
     if (offset != length) {
-      throw HttpException('parallel size mismatch ($offset != $length)',
-          uri: ref.uri);
+      throw HttpException(
+        'parallel size mismatch ($offset != $length)',
+        uri: ref.uri,
+      );
     }
     return _Downloaded(bytes, first.contentType, 1 + rest.length);
   }
@@ -1451,11 +1465,7 @@ class LocalHlsProxy {
     }
   }
 
-  Future<_RangeFetch> _fetchRangeWithRetry(
-    Uri uri,
-    int start,
-    int end,
-  ) async {
+  Future<_RangeFetch> _fetchRangeWithRetry(Uri uri, int start, int end) async {
     Object? lastError;
     for (var attempt = 0; attempt <= retries; attempt++) {
       final epoch = _clientEpoch;
@@ -1494,10 +1504,7 @@ class LocalHlsProxy {
   }
 
   Future<_RangeFetch> _fetchRange(Uri uri, int start, int end) async {
-    final response = await _get(
-      uri,
-      range: 'bytes=$start-$end',
-    );
+    final response = await _get(uri, range: 'bytes=$start-$end');
     final status = response.statusCode;
     final contentType = response.headers.value(HttpHeaders.contentTypeHeader);
     if (status != HttpStatus.ok && status != HttpStatus.partialContent) {
@@ -1543,8 +1550,9 @@ class LocalHlsProxy {
               : 'bytes=${ref.range!.effectiveStart}-${ref.range!.end}',
         );
         final status = response.statusCode;
-        final contentType =
-            response.headers.value(HttpHeaders.contentTypeHeader);
+        final contentType = response.headers.value(
+          HttpHeaders.contentTypeHeader,
+        );
         if (status != HttpStatus.ok && status != HttpStatus.partialContent) {
           final code = status;
           await _drainQuietly(response);
@@ -1556,14 +1564,12 @@ class LocalHlsProxy {
           final spec = ref.range!;
           final start = spec.effectiveStart;
           if (status == HttpStatus.ok && raw.length >= start + spec.length) {
-            bytes = Uint8List.sublistView(
-              raw,
-              start,
-              start + spec.length,
-            );
+            bytes = Uint8List.sublistView(raw, start, start + spec.length);
           } else if (status == HttpStatus.ok && raw.length != spec.length) {
-            throw HttpException('byte-range response size mismatch',
-                uri: ref.uri);
+            throw HttpException(
+              'byte-range response size mismatch',
+              uri: ref.uri,
+            );
           }
           if (bytes.length != spec.length) {
             throw HttpException('byte-range length mismatch', uri: ref.uri);
@@ -1616,8 +1622,9 @@ class LocalHlsProxy {
       final response = await request.close().timeout(_connectTimeout);
       final status = response.statusCode;
       final length = response.contentLength;
-      final acceptRanges =
-          response.headers.value(HttpHeaders.acceptRangesHeader);
+      final acceptRanges = response.headers.value(
+        HttpHeaders.acceptRangesHeader,
+      );
       final contentType = response.headers.value(HttpHeaders.contentTypeHeader);
       await _drainQuietly(response);
       if (status < 200 || status >= 400 || length <= 0) return null;
@@ -1837,10 +1844,20 @@ class LocalHlsProxy {
   Future<bool> _refreshPlatformPlaylist() async {
     final refresher = _refreshPlay;
     if (_disposed || refresher == null) return false;
+    final generation = _generation;
+    final rootKey = _activeRootUri?.toString();
+    final deadline = DateTime.now().add(platformRefreshTimeout);
+    bool current() => !_disposed && generation == _generation;
+    Future<T> bounded<T>(Future<T> operation) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero)
+        throw TimeoutException('platform refresh deadline');
+      return operation.timeout(remaining);
+    }
+
     try {
-      final raw = await refresher().timeout(
-        const Duration(seconds: 20),
-      );
+      final raw = await bounded(refresher());
+      if (!current()) return false;
       final fresh = Uri.tryParse(raw?.trim() ?? '');
       if (fresh == null ||
           !fresh.hasScheme ||
@@ -1848,21 +1865,36 @@ class LocalHlsProxy {
           fresh.host.isEmpty) {
         throw StateError('未取到新的平台播放地址');
       }
-      final rootKey = _activeRootUri?.toString();
       final rootUri = rootKey == null ? null : Uri.tryParse(rootKey);
       if (rootKey == null || rootUri == null) {
         throw StateError('没有可刷新的播放列表');
       }
-      // 只重写根列表：新地址就是 /api/play 给的根地址，分片别名按 playlistKey
-      // 索引，重取根列表后别名会自动指向新分片；拿根地址去顶子列表会把
-      // master 当 media 喂给播放器。
-      _sourceOverrides[rootKey] = fresh;
-      await _loadPlaylist(rootUri, ttl: Duration.zero);
+      // Stage the entire loaded playlist tree before publishing any override.
+      // A master reload alone cannot renew the player's existing child aliases.
+      final staged = <String, _RewrittenPlaylist>{};
+      final overrides = <String, Uri>{};
+      await bounded(
+        _stagePlatformRefresh(
+          rootKey,
+          fresh,
+          staged,
+          overrides,
+          <String>{},
+          deadline,
+          generation,
+        ),
+      );
+      if (!current() || DateTime.now().isAfter(deadline)) return false;
+      _sourceOverrides.addAll(overrides);
+      for (final rewritten in staged.values) {
+        _storePlaylist(rewritten);
+      }
       _platformRefreshFails = 0;
       _platformExpiredNotified = false;
       _log('平台线路签名已刷新 ${_short(fresh)}');
       return true;
     } catch (error) {
+      if (!current()) return false;
       _platformRefreshFails++;
       _log('平台线路签名刷新失败（第 $_platformRefreshFails 次）: $error');
       if (_platformRefreshFails >= 2 && !_platformExpiredNotified) {
@@ -1878,13 +1910,184 @@ class LocalHlsProxy {
     }
   }
 
+  String _playlistIdentity(Uri uri) {
+    const signingFields = <String>{
+      'sign',
+      'signature',
+      'expire',
+      'expires',
+      'deadline',
+      'token',
+      'auth_key',
+      'wstime',
+      'wssecret',
+    };
+    final names =
+        uri.queryParametersAll.keys
+            .where((key) => !signingFields.contains(key.toLowerCase()))
+            .toList()
+          ..sort();
+    final query = <String, dynamic>{
+      for (final name in names) name: uri.queryParametersAll[name],
+    };
+    return uri.replace(queryParameters: query, fragment: '').toString();
+  }
+
+  Future<void> _stagePlatformRefresh(
+    String key,
+    Uri fresh,
+    Map<String, _RewrittenPlaylist> staged,
+    Map<String, Uri> overrides,
+    Set<String> visiting,
+    DateTime deadline,
+    int generation,
+  ) async {
+    void guard() {
+      if (_disposed ||
+          generation != _generation ||
+          !DateTime.now().isBefore(deadline)) {
+        throw StateError('platform refresh cancelled or deadline exceeded');
+      }
+    }
+
+    guard();
+    if (visiting.contains(key)) {
+      throw StateError('unsupported playlist refresh: cyclic child tree');
+    }
+    if (staged.containsKey(key)) {
+      if (overrides[key] != fresh)
+        throw StateError('conflicting shared playlist');
+      return;
+    }
+    if (staged.length >= 64 || visiting.length >= 8) {
+      throw StateError('unsupported playlist refresh: tree limit exceeded');
+    }
+    visiting.add(key);
+    final previous = _playlistCache[key]?.value.playlist;
+    final fetched = await _fetchPlaylistText(
+      fresh,
+    ).timeout(deadline.difference(DateTime.now()));
+    guard();
+    final rewritten = _rewritePlaylist(
+      fetched.text,
+      fetched.finalUri,
+      playlistKey: key,
+      preserveChildKeys: false,
+    );
+    final next = rewritten.playlist;
+    if (previous != null) {
+      if (previous.isMaster != next.isMaster ||
+          previous.isLive != next.isLive) {
+        throw StateError('unsupported playlist refresh: changed playlist type');
+      }
+      String encryptionMetadata(_Playlist playlist) => playlist.timeline
+          .split('\n')
+          .where(
+            (line) =>
+                line.startsWith('#EXT-X-KEY:') ||
+                line.startsWith('#EXT-X-SESSION-KEY:') ||
+                line.startsWith('#EXT-X-MAP:'),
+          )
+          .join('\n');
+      if (encryptionMetadata(previous) != encryptionMetadata(next)) {
+        throw StateError(
+          'unsupported playlist refresh: changed key or map metadata',
+        );
+      }
+      if (!next.isMaster &&
+          !next.isLive &&
+          (previous.segments.length != next.segments.length ||
+              previous.timeline != next.timeline)) {
+        throw StateError(
+          'unsupported playlist refresh: changed media timeline',
+        );
+      }
+    }
+    staged[key] = rewritten;
+    overrides[key] = fresh;
+    if (previous == null || !next.isMaster) {
+      visiting.remove(key);
+      return;
+    }
+    final oldChildren = <String, List<Uri>>{};
+    final newChildren = <String, List<Uri>>{};
+    for (final uri in previous.variants.toSet()) {
+      // Logical children can already have a refreshed actual URI.
+      final actual = _sourceOverrides[uri.toString()] ?? uri;
+      oldChildren.putIfAbsent(_playlistIdentity(actual), () => []).add(uri);
+    }
+    for (final uri in next.variants.toSet()) {
+      newChildren.putIfAbsent(_playlistIdentity(uri), () => []).add(uri);
+    }
+    var body = utf8.decode(rewritten.body);
+    final stableChildren = <String, Uri>{};
+    for (final entry in oldChildren.entries) {
+      final matches = newChildren[entry.key];
+      if (entry.value.length != 1 || matches == null || matches.length != 1) {
+        throw StateError(
+          'unsupported master refresh: ambiguous or changed child identity',
+        );
+      }
+      final oldChild = entry.value.single;
+      final newChild = matches.single;
+      final priorOverride = overrides[oldChild.toString()];
+      if (priorOverride != null && priorOverride != newChild) {
+        throw StateError('conflicting shared playlist');
+      }
+      overrides[oldChild.toString()] = newChild;
+      stableChildren[newChild.toString()] = oldChild;
+      body = body.replaceAll(
+        _localUrl('/playlist', newChild),
+        _localUrl('/playlist', oldChild),
+      );
+      if (_playlistCache.containsKey(oldChild.toString())) {
+        await _stagePlatformRefresh(
+          oldChild.toString(),
+          newChild,
+          staged,
+          overrides,
+          visiting,
+          deadline,
+          generation,
+        );
+      }
+    }
+    visiting.remove(key);
+    staged[key] = _RewrittenPlaylist(
+      Uint8List.fromList(utf8.encode(body)),
+      _Playlist(
+        key: next.key,
+        base: next.base,
+        isMaster: next.isMaster,
+        isLive: next.isLive,
+        segments: next.segments,
+        variants: next.variants
+            .map((uri) => stableChildren[uri.toString()] ?? uri)
+            .toList(),
+        timeline: next.timeline,
+      ),
+    );
+  }
+
   /// 当前播放列表是否属于平台 CDN（临时签名，必须重新走 /api/play）。
   bool get _isPlatformPlaylist {
     final uri = _activeRootUri;
     if (uri == null) return false;
     final host = uri.host.toLowerCase();
     if (host.isEmpty) return false;
-    return host == 'qq.com' ||
+    // Server-hosted platform wrappers retain the API host, not the CDN host.
+    // Re-fetching these stable endpoints alone may reuse resolved signed URLs;
+    // when a refresher is available, renew through /api/play first.
+    final isPlatformWrapper =
+        uri.path == '/api/iqiyi.m3u8' || uri.path == '/api/fyplay';
+    return isPlatformWrapper ||
+        host == 'iqiyi.com' ||
+        host.endsWith('.iqiyi.com') ||
+        host == 'iqiyipic.com' ||
+        host.endsWith('.iqiyipic.com') ||
+        host == 'qiyipic.com' ||
+        host.endsWith('.qiyipic.com') ||
+        host == 'qq.com' ||
         host.endsWith('.qq.com') ||
         host.contains('mgtv') ||
         host.endsWith('mgtv.com') ||
@@ -2039,9 +2242,7 @@ class LocalHlsProxy {
   static String? _decodeUrl(String value) {
     try {
       final padding = (4 - value.length % 4) % 4;
-      return utf8.decode(
-        base64Url.decode(value + '=' * padding),
-      );
+      return utf8.decode(base64Url.decode(value + '=' * padding));
     } catch (_) {
       return null;
     }
@@ -2088,8 +2289,9 @@ class LocalHlsProxy {
 
   static _ContentRange? _parseContentRange(String? value) {
     if (value == null) return null;
-    final match =
-        RegExp(r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$').firstMatch(value.trim());
+    final match = RegExp(
+      r'^bytes\s+(\d+)-(\d+)/(\d+|\*)$',
+    ).firstMatch(value.trim());
     if (match == null) return null;
     final start = int.tryParse(match.group(1)!);
     final total = int.tryParse(match.group(3)!);
@@ -2183,6 +2385,7 @@ class _Playlist {
     required this.isLive,
     required this.segments,
     required this.variants,
+    required this.timeline,
   });
 
   final String key;
@@ -2191,6 +2394,7 @@ class _Playlist {
   final bool isLive;
   final List<_SegmentRef> segments;
   final List<Uri> variants;
+  final String timeline;
 }
 
 class _SegmentRef {
