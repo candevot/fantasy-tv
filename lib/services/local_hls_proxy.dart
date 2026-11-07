@@ -155,7 +155,9 @@ class LocalHlsProxy {
     // 每片约 1~2MB，1800 片约 2~3 分钟量；具体条数由 _schedulePrefetch
     // 按 cacheLimitBytes 与预缓冲预算裁剪。
     this.prefetchCount = 512,
-    this.prefetchConcurrency = 6,
+    // 预取并发保持低值：整集预热是「后台慢慢存」，不能和当前播放
+    // 抢带宽 —— 之前调到 6，seek 要等预取任务腾出连接，秒切就做不到。
+    this.prefetchConcurrency = 2,
     this.cacheLimitBytes = 512 * 1024 * 1024,
     this.retries = 3,
     this.retryDelay = const Duration(milliseconds: 300),
@@ -278,6 +280,12 @@ class LocalHlsProxy {
   int _cacheHits = 0;
   int _cacheMisses = 0;
   int _prefetchActive = 0;
+
+  /// 最近一次播放器请求的分片序号，用于识别 seek。
+  int _lastPlaybackIndex = -1;
+
+  /// 最近一次播放器请求分片的时间，用于让预取避让。
+  DateTime _lastPlaybackAt = DateTime.fromMillisecondsSinceEpoch(0);
   int _generation = 0;
   int _tempSerial = 0;
   bool _refreshing = false;
@@ -700,8 +708,12 @@ class LocalHlsProxy {
       ),
     );
 
-    // 先把接下来 5 个分片排进预取队列（当前分片可能还在下载）。
+    // 播放器来要分片时，预缓冲必须让路：seek / 起播都是「等不起」的请求，
+    // 之前 512 个预取任务把带宽和并发占满，seek 要排队等前面几片下完，
+    // 表现就是「不能秒切进度」。
+    // 这里先按播放位置重置预取（丢弃跑偏的旧任务），并把并发让给正片。
     if (alias != null) {
+      _yieldPrefetchToPlayback(alias.index);
       final playlist = _playlistCache[alias.playlistKey]?.value.playlist;
       if (playlist != null) _schedulePrefetch(playlist, alias.index + 1);
     }
@@ -1778,6 +1790,21 @@ class LocalHlsProxy {
     _pumpPrefetch();
   }
 
+  /// 播放取片时让路：清掉旧队列（它们基于上一个播放位置，多半已经用不上），
+  /// 并记录最近播放位置，供预唤起时判断是否是 seek（跳变就重置）。
+  void _yieldPrefetchToPlayback(int index) {
+    if (_disposed) return;
+    final jumped = _lastPlaybackIndex >= 0 && (index - _lastPlaybackIndex).abs() > 3;
+    _lastPlaybackIndex = index;
+    _lastPlaybackAt = DateTime.now();
+    // 队列里排的是「顺着往下看」的分片；seek 之后大概率全废，直接清掉，
+    // 把并发立刻腾给当前请求。非 seek 时保留队列（顺序播放继续预热）。
+    if (jumped) {
+      _prefetchQueue.clear();
+      _prefetchQueued.clear();
+    }
+  }
+
   void _pumpPrefetch() {
     if (_disposed) return;
     while (_prefetchActive < prefetchConcurrency && _prefetchQueue.isNotEmpty) {
@@ -1791,6 +1818,12 @@ class LocalHlsProxy {
     final stopwatch = Stopwatch()..start();
     try {
       if (_disposed || task.generation != _generation) return;
+      // 播放刚请求过片子（最近 500ms 内有活动）：预取让一步，
+      // 把连接和带宽优先留给正在播的位置。
+      if (DateTime.now().difference(_lastPlaybackAt).inMilliseconds < 500) {
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        if (_disposed || task.generation != _generation) return;
+      }
       final data = await _loadSegment(task.segment);
       _log(
         '预取完成 ${_short(task.segment.uri)} '

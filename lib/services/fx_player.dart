@@ -205,11 +205,12 @@ class FxPlayer implements Listenable {
     );
     _bindStreams();
     unawaited(_setCacheLimits(_startupBufferBytes));
-    // 长播兜底：每 5 分钟把缓存升到稳定值并重压回看缓存，
-    // 播 10 分钟以上内存也不会无限涨。
+    // 长播兜底：每 5 分钟压一次回看缓存，避免长播内存无限涨。
+    // 注意不能无条件写回 _steadyBufferBytes —— 那会覆盖首帧后按网速
+    // 算出的自适应值（之前就是这样被打回 192MB 的）。
     _cacheGuardTimer = Timer.periodic(
       const Duration(minutes: 5),
-      (_) => unawaited(_setCacheLimits(_steadyBufferBytes)),
+      (_) => unawaited(_setCacheLimits(_currentForwardBuffer)),
     );
     // 稳定性看门狗：只看「字节是否还在流动」，缓冲中不算失败。
     _watchdogTimer = Timer.periodic(
@@ -218,22 +219,26 @@ class FxPlayer implements Listenable {
     );
   }
 
-  /// 起播前向缓存：24MB 是折中值 —— 网络一般的人不必等 48MB 才出画，
-  /// 网络好的人首帧后按实测吞吐再放大（见 [_steadyBufferFor]）。
-  static const int _startupBufferBytes = 24 * 1024 * 1024;
+  /// 起播前向缓存：16MB。代理层已在本地整集预热，mpv 不需要靠大缓冲
+  /// 去对抗网络抖动，起播要的是「尽快出画」。
+  static const int _startupBufferBytes = 16 * 1024 * 1024;
 
-  /// 稳态缓存上限：首帧后按实测吞吐在 64~256MB 之间自适应。
-  static const int _minSteadyBufferBytes = 64 * 1024 * 1024;
-  static const int _steadyBufferBytes = 192 * 1024 * 1024;
-  static const int _maxSteadyBufferBytes = 256 * 1024 * 1024;
-  static const int _backBufferBytes = 16 * 1024 * 1024;
+  /// 稳态缓存上限：首帧后按实测吞吐在 32~96MB 之间自适应。
+  ///
+  /// 不要再往大调：mpv 的 cache-buffering-state 是「缓存填满多少」，
+  /// 上限设 192~256MB 时 4K 码率下要缓很久才填满，界面就长期停在
+  /// 「缓冲中 99%」。而且代理层已经把整集预热到本地，mpv 这层只需要
+  /// 一小段前向缓冲兜住解复用抖动即可，两层都做大是重复占用。
+  static const int _minSteadyBufferBytes = 32 * 1024 * 1024;
+  static const int _steadyBufferBytes = 64 * 1024 * 1024;
+  static const int _maxSteadyBufferBytes = 96 * 1024 * 1024;
+  static const int _backBufferBytes = 8 * 1024 * 1024;
 
-  /// 按实测吞吐挑稳态缓冲：取「约 60 秒的码率量」，夹在上下限之间。
-  /// 网络一般（2MB/s）约 120MB，网络很好（8MB/s）直接到上限 256MB，
-  /// 这样两边都不会为了不存在的带宽去等缓存。
+  /// 按实测吞吐挑稳态缓冲：取「约 30 秒的码率量」，夹在 32~96MB。
+  /// 网络一般（2MB/s）约 60MB，网络很好（8MB/s）到上限 96MB。
   static int _steadyBufferFor(double? throughput) {
     if (throughput == null || throughput <= 0) return _steadyBufferBytes;
-    final target = (throughput * 60).round();
+    final target = (throughput * 30).round();
     return target.clamp(_minSteadyBufferBytes, _maxSteadyBufferBytes);
   }
 
@@ -338,6 +343,10 @@ class FxPlayer implements Listenable {
 
   /// 本集是否已经把起播小缓冲提升到稳定值。
   bool _cacheRaised = false;
+
+  /// 当前生效的前向缓冲字节数。首帧后按实测网速定，之后兜底定时器
+  /// 复用它，避免把自适应结果覆盖成固定值。
+  int _currentForwardBuffer = _startupBufferBytes;
 
   /// 直链 HLS 的本地分片代理；只在 direct 模式下懒创建。
   LocalHlsProxy? _hlsProxy;
@@ -633,7 +642,8 @@ class FxPlayer implements Listenable {
     if (_disposed || _cacheRaised) return;
     _cacheRaised = true;
     final throughput = _hlsProxy?.recentThroughput;
-    unawaited(_setCacheLimits(_steadyBufferFor(throughput)));
+    _currentForwardBuffer = _steadyBufferFor(throughput);
+    unawaited(_setCacheLimits(_currentForwardBuffer));
   }
 
   /// 限制 demuxer 前向 / 回看缓存并固定 60 秒预读（demuxer-readahead-secs，
@@ -641,6 +651,7 @@ class FxPlayer implements Listenable {
   /// 长播时不会因为回看缓存累积而内存无限增长。
   Future<void> _setCacheLimits(int forwardBytes) async {
     if (_disposed) return;
+    _currentForwardBuffer = forwardBytes;
     final platform = _player.platform;
     if (platform is! NativePlayer) return;
     try {
