@@ -387,6 +387,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     );
   }
 
+  /// 这条线路是否需要经过本地代理。
+  ///
+  /// 只有平台会员线路（腾讯/爱奇艺/芒果，地址是 /api/fyplay、/api/iqiyi.m3u8
+  /// 这类需要服务端签名、且会过期的包装地址）才走代理；
+  /// 采集线路（红牛/量子/幻想蓝光/4K）是可直接访问的 m3u8，
+  /// 交给 mpv 自己拉流最快，也能边下边播大分片。
+  bool _needsProxyLine(String line) => fxNeedsClientProxy(line);
+
   Future<void> _switchLine(String targetLine, int targetEp) async {
     if (_switchingLine) {
       // 切换中禁止并发 open，但不能把用户永久锁死：卡顿/上游无响应时
@@ -1004,7 +1012,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               headers: info.headers,
               play: shouldPlay,
               waitForWarm: waitForWarm,
-              direct: info.direct && info.isHls,
+              // 只有「平台签名线路」才走本地代理（需要代理改写签名、
+              // 定时换新地址）。普通采集线路直接交给 mpv 边下边播。
+              //
+              // 这是 4K 卡顿的根因：代理是「整片下完再交给 mpv」，
+              // 1080P 分片 1~2MB 看不出来，4K 分片 10~40MB 时
+              // mpv 要等整个分片下完才能解码，表现就是一直卡、
+              // 一直转圈。别的播放器没这问题就是因为它直接让 mpv 拉流。
+              direct: _needsProxyLine(line),
               // 平台线路签名过期时，代理会回调这里重新走 /api/play。
               refreshPlay: () => _refreshPlatformUrl(line, ep),
               onPlayExpired: () {

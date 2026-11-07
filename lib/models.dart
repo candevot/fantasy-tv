@@ -642,6 +642,24 @@ List<LineInfo> mergeLines(List<LineInfo> lines) {
 ///
 /// 服务端平台匹配改成异步后，首屏 /api/detail 可能暂时只返回采集线路，
 /// 客户端据此决定要不要再拉几次 detail 把平台线补齐。
+/// 这条线路是否需要经过「客户端本地代理」。
+///
+/// 只有平台会员线路（腾讯 / 爱奇艺 / 芒果，地址是 /api/fyplay、
+/// /api/iqiyi.m3u8 这类需要服务端签名、会过期的包装地址）才需要：
+/// 代理负责重写分片签名、定时换新地址。
+///
+/// 采集线路（红牛 / 量子 / 幻想蓝光 / 幻想4K）不要走代理 ——
+/// 服务端返回的播放列表里分片已经是绝对地址（指向服务器 /api/proxy），
+/// mpv 自己就能边下边播。走客户端代理时是「整片下完再交给 mpv」，
+/// 1080P 分片 1~2MB 看不出来，4K 分片 10~40MB 就会一直卡、一直转圈。
+bool fxNeedsClientProxy(String lineId) {
+  final raw = lineId.toLowerCase();
+  return raw.startsWith('pt_') ||
+      raw.contains('tencent') ||
+      raw.contains('iqiyi') ||
+      raw.contains('mgtv');
+}
+
 bool fxIsPlatformLine(LineInfo line) {
   final raw = '${line.id} ${line.name} ${line.source ?? ''} ${line.from ?? ''} ${line.type}';
   final lower = raw.toLowerCase();

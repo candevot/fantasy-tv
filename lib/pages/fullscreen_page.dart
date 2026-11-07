@@ -712,7 +712,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               headers: source.headers,
               play: continuePlayback,
               waitForWarm: waitForWarm,
-              direct: source.direct && source.isHls,
+              // 采集线路直连（mpv 边下边播）；只有平台签名线路走代理。
+              direct: source.direct &&
+                  source.isHls &&
+                  fxNeedsClientProxy(_line),
               refreshPlay: _refreshPlatformUrl,
               onPlayExpired: _onPlatformExpired,
               rescueLines: _rescueLineSource,
@@ -796,7 +799,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             url,
             headers: headers,
             play: wasPlaying,
-            direct: direct,
+            direct: direct && fxNeedsClientProxy(_line),
             refreshPlay: _refreshPlatformUrl,
             onPlayExpired: _onPlatformExpired,
             rescueLines: _rescueLineSource,
@@ -893,7 +896,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         return FxLineSource(
           url: freshUrl,
           headers: fresh.headers,
-          direct: fresh.direct && fresh.isHls,
+          direct: fresh.direct && fresh.isHls && fxNeedsClientProxy(_line),
         );
       } catch (_) {
         // 这条取不到地址就继续试下一条线路。
@@ -1135,7 +1138,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       headers: headers,
       resume: resume,
       wasPlaying: true,
-      direct: (_info?.direct ?? false) && (_info?.isHls ?? false),
+      direct: (_info?.direct ?? false) &&
+          (_info?.isHls ?? false) &&
+          fxNeedsClientProxy(_line),
     );
     if (!mounted || token != _loadToken) return;
     if (!ok) {
