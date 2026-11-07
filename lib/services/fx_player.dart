@@ -218,12 +218,24 @@ class FxPlayer implements Listenable {
     );
   }
 
-  /// 起播前向缓存：原 12MB 太小，网络好时也会因为等缓存而先转圈。
-  /// 提到 48MB 直接覆盖起播瞬间，首帧后升到 192MB，4K 高码率长播无压力。
-  /// 代理层已经整集预热到本地，这里再加一层 demuxer 缓冲，双保险。
-  static const int _startupBufferBytes = 48 * 1024 * 1024;
+  /// 起播前向缓存：24MB 是折中值 —— 网络一般的人不必等 48MB 才出画，
+  /// 网络好的人首帧后按实测吞吐再放大（见 [_steadyBufferFor]）。
+  static const int _startupBufferBytes = 24 * 1024 * 1024;
+
+  /// 稳态缓存上限：首帧后按实测吞吐在 64~256MB 之间自适应。
+  static const int _minSteadyBufferBytes = 64 * 1024 * 1024;
   static const int _steadyBufferBytes = 192 * 1024 * 1024;
+  static const int _maxSteadyBufferBytes = 256 * 1024 * 1024;
   static const int _backBufferBytes = 16 * 1024 * 1024;
+
+  /// 按实测吞吐挑稳态缓冲：取「约 60 秒的码率量」，夹在上下限之间。
+  /// 网络一般（2MB/s）约 120MB，网络很好（8MB/s）直接到上限 256MB，
+  /// 这样两边都不会为了不存在的带宽去等缓存。
+  static int _steadyBufferFor(double? throughput) {
+    if (throughput == null || throughput <= 0) return _steadyBufferBytes;
+    final target = (throughput * 60).round();
+    return target.clamp(_minSteadyBufferBytes, _maxSteadyBufferBytes);
+  }
 
   /// mpv demuxer 预读秒数（demuxer-readahead-secs）：配合 192MiB 缓存，
   /// 网络好时把后续内容尽量读进本地，播放过程不中断。
@@ -583,8 +595,8 @@ class FxPlayer implements Listenable {
     return _PlaybackSource(playbackUrl, playbackHeaders);
   }
 
-  /// 把地址交给 mpv：先按 12MB 小缓冲起播（首帧优先），open 一发出就
-  /// 把 demuxer 缓存放大到 96MiB + readahead 60s（4K 高码率抗抖动）。
+  /// 把地址交给 mpv：先按 24MB 起播（首帧优先），首帧后按实测吞吐
+  /// 把 demuxer 缓存在 64~256MB 之间自适应，并加大 readahead。
   Future<void> _openMedia(
     _PlaybackSource source, {
     required bool play,
@@ -612,11 +624,16 @@ class FxPlayer implements Listenable {
     await opening;
   }
 
-  /// 首帧后把前向缓存从 12MB 升到 96MiB；每集只升一次。
+  /// 首帧后按实测吞吐提升前向缓存；每集只升一次。
+  ///
+  /// 网络好（代理已整集预热，吞吐样本很快就有）直接给到 192~256MB，
+  /// 长播不再回源；网络一般则停在 64~128MB，避免为了不可能的带宽
+  /// 去占内存、也避免起播阶段等太久。
   void _raiseCacheAfterStart() {
     if (_disposed || _cacheRaised) return;
     _cacheRaised = true;
-    unawaited(_setCacheLimits(_steadyBufferBytes));
+    final throughput = _hlsProxy?.recentThroughput;
+    unawaited(_setCacheLimits(_steadyBufferFor(throughput)));
   }
 
   /// 限制 demuxer 前向 / 回看缓存并固定 60 秒预读（demuxer-readahead-secs，

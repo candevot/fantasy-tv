@@ -271,6 +271,10 @@ class LocalHlsProxy {
   int _platformRefreshFails = 0;
   bool _platformExpiredNotified = false;
   int _cacheBytes = 0;
+
+  /// 最近若干次真实下载的吞吐（字节/秒），用于让播放器按实测网速
+  /// 调整 demuxer 缓冲：网络好就多缓，网络一般就别等那么久才出画。
+  final List<double> _recentSpeeds = <double>[];
   int _cacheHits = 0;
   int _cacheMisses = 0;
   int _prefetchActive = 0;
@@ -293,6 +297,14 @@ class LocalHlsProxy {
 
   /// 当前缓存字节数。
   int get cacheBytes => _cacheBytes;
+
+  /// 近几次分片下载的中位吞吐（字节/秒）。样本不足返回 null，
+  /// 调用方据此跳过自适应、保持默认缓冲。
+  double? get recentThroughput {
+    if (_recentSpeeds.length < 3) return null;
+    final sorted = List<double>.of(_recentSpeeds)..sort();
+    return sorted[sorted.length ~/ 2];
+  }
 
   /// 当前缓存条目数。
   int get cacheEntryCount => _cache.length;
@@ -353,8 +365,14 @@ class LocalHlsProxy {
   }
 
   /// 记一次成功的分片下载：清零连续失败计数。
-  void _noteSegmentSuccess() {
+  void _noteSegmentSuccess([_SegmentData? data]) {
     if (_failStreak != 0) _failStreak = 0;
+    if (data == null || data.cacheHit) return;
+    final us = data.elapsed.inMicroseconds;
+    if (us <= 0 || data.bytes.isEmpty) return;
+    final speed = data.bytes.length * 1000000 / us;
+    _recentSpeeds.add(speed);
+    if (_recentSpeeds.length > 8) _recentSpeeds.removeAt(0);
   }
 
   /// 记一次整片失败：连续 2 次就把该流的并行分段数砍半并记日志。
@@ -1228,7 +1246,7 @@ class LocalHlsProxy {
       final epoch = _clientEpoch;
       try {
         final data = await _downloadSegment(target);
-        _noteSegmentSuccess();
+        _noteSegmentSuccess(data);
         if (retry == 0) return data;
         return _SegmentData(
           data.bytes,
