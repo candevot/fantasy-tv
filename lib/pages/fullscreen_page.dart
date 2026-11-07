@@ -31,6 +31,7 @@ class FullPlayerResult {
     this.qualityKey,
     this.loaded = false,
     this.requestLineChange = false,
+    this.sourceFailed = false,
   });
 
   /// 退出时的集数
@@ -57,6 +58,11 @@ class FullPlayerResult {
 
   /// 全屏错误页点了「换线路」：退出后由竖屏页负责切下一条线路。
   final bool requestLineChange;
+
+  /// 全屏内连续播放失败/平台签名过期后自动请求换线（不是用户点的）。
+  /// 为 true 时竖屏走与竖屏失败完全相同的路径：先原线重试一次（带缓冲），
+  /// 重试仍失败才记入失败线路并切下一条。
+  final bool sourceFailed;
 }
 
 /// 全屏横屏播放页
@@ -991,7 +997,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _registerFailure() {
     _failStreak++;
     if (_failStreak >= 2 && widget.canChangeLine && !_exiting) {
-      unawaited(_exit(requestLineChange: true));
+      // sourceFailed：竖屏按「先原线重试一次（带缓冲），仍失败再换线」处理，
+      // 与竖屏自身的失败路径完全一致。
+      unawaited(_exit(requestLineChange: true, sourceFailed: true));
       return true;
     }
     return false;
@@ -1043,7 +1051,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!mounted || _exiting) return;
     _resetHold2x();
     if (widget.canChangeLine) {
-      unawaited(_exit(requestLineChange: true));
+      unawaited(_exit(requestLineChange: true, sourceFailed: true));
       return;
     }
     _failWith('该平台线路已失效，请切换线路');
@@ -1724,7 +1732,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() => _mark = mark);
   }
 
-  Future<void> _exit({bool requestLineChange = false}) async {
+  Future<void> _exit({
+    bool requestLineChange = false,
+    bool sourceFailed = false,
+  }) async {
     if (_exiting) return;
     _exiting = true;
     // 长按快进中直接退出全屏时，把倍速恢复成交给竖屏前的值。
@@ -1752,6 +1763,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         loaded:
             _loadedEp == _ep && !_error && (c != null && c.value.isInitialized),
         requestLineChange: requestLineChange,
+        sourceFailed: sourceFailed,
       ),
     );
   }

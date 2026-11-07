@@ -74,6 +74,11 @@ class _DetailPageState extends State<DetailPage>
   /// 本轮自动切线路已经失败过的线路，避免 A/B 反复乒乓。
   final Set<String> _failedLines = <String>{};
 
+  /// 已经在原线路上重试过的线路 id：第一次失败先原线重试一次
+  /// （带缓冲态），重试单独计数、不占 _autoLineTries 的换线预算；
+  /// 重试仍失败才记入 _failedLines 换下一条。稳定播放后清零。
+  String? _retriedLine;
+
   /// 稳定播放 3 秒后才清零重试预算与失败集合。
   Timer? _stableTimer;
 
@@ -548,6 +553,7 @@ class _DetailPageState extends State<DetailPage>
     _stableTimer?.cancel();
     // 用户手动选线路视为重新开始，允许重试这一条。
     _failedLines.remove(line.id);
+    _retriedLine = null;
     setState(() {
       _lineId = line.id;
       _autoLineTries = 0;
@@ -575,8 +581,10 @@ class _DetailPageState extends State<DetailPage>
       _showPlaybackError(issue: issue);
       return;
     }
-    // 自动兜底最多试 2 条线路（当前 1 条 + 下一条），全失败才展示错误页。
-    if (auto && _autoLineTries >= 1) {
+    // 自动兜底逐条换线直到每条线路都试过（每条最多换入一次、
+    // 每条最多原线重试一次，_retriedLine 单独计数不占这里），
+    // 全失败才展示错误页——原线重试不能挤掉换线预算导致漏换线路。
+    if (auto && _autoLineTries >= lines.length - 1) {
       _showPlaybackError(issue: issue);
       return;
     }
@@ -637,11 +645,26 @@ class _DetailPageState extends State<DetailPage>
     }
   }
 
-  /// PlayerView 报告当前线路不可播：记为失败并按原因切下一条。
+  /// PlayerView 报告当前线路不可播：第一次先在原线路上重试一次（带缓冲态），
+  /// 重试仍失败才记为失败线路并按原因切下一条。
   void _reportLineIssue(SourceIssue issue) {
     if (!mounted) return;
     _stableTimer?.cancel();
-    if (_lineId.isNotEmpty) _failedLines.add(_lineId);
+    final lineId = _lineId;
+    final player = _playerKey.currentState;
+    // 第一次失败：原线重试。reload() 一进来就置 _loading=true、清掉错误层，
+    // 重试期间显示缓冲态，不瞬间判死也不闪错误页；重试单独计数，
+    // 不占用 _autoLineTries 的换线预算。
+    if (lineId.isNotEmpty &&
+        !_failedLines.contains(lineId) &&
+        _retriedLine != lineId &&
+        player != null) {
+      _retriedLine = lineId;
+      fxToast(context, '线路播放失败，正在原线路重试…');
+      unawaited(player.reload());
+      return;
+    }
+    if (lineId.isNotEmpty) _failedLines.add(lineId);
     _switchNextLine(auto: true, issue: issue);
   }
 
@@ -658,6 +681,7 @@ class _DetailPageState extends State<DetailPage>
       if (!mounted) return;
       _failedLines.clear();
       _autoLineTries = 0;
+      _retriedLine = null;
     });
   }
 
@@ -754,6 +778,7 @@ class _DetailPageState extends State<DetailPage>
     _stableTimer?.cancel();
     _failedLines.clear();
     _autoLineTries = 0;
+    _retriedLine = null;
     fxToast(context, '正在刷新播放源…');
     final state = _playerKey.currentState;
     if (state != null) {

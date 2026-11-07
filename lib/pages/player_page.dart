@@ -1244,6 +1244,16 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 详情页「刷新」/错误重试可以调用
   Future<void> reload() async {
     if (_switchingLine) return;
+    // 重试一进来就进入缓冲态并清掉错误层：失败上报与重试在同一个事件循环
+    // 里完成，UI 不会先闪一下错误页再变回加载。
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _suppressLoading = false;
+        _error = false;
+        _errorText = '';
+      });
+    }
     await _saveProgress();
     if (!mounted) return;
     // 重试时强制刷新播放地址，避免复用已经失效的直链。
@@ -1414,8 +1424,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       }
       if (switched && result.loaded) widget.onEpChange?.call(result.ep);
       if (result.requestLineChange) {
-        // 全屏错误页点了「换线路」：退出后切下一条线路。
-        widget.onChangeLine?.call();
+        if (result.sourceFailed && widget.onSourceFailed != null) {
+          // 全屏里连续播放失败自动换线：交回与竖屏失败完全相同的路径
+          // （先原线重试一次、带缓冲态，仍失败才记入失败线路换下一条）。
+          widget.onSourceFailed!();
+        } else {
+          // 全屏错误页点了「换线路」：退出后直接切下一条线路。
+          widget.onChangeLine?.call();
+        }
       }
     }
     // 先同步完集数/进度归属，再交回视频层并恢复监听，避免全屏里
@@ -1423,7 +1439,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (mounted && _fullscreenActive) {
       setState(() => _fullscreenActive = false);
     }
-    if (c.value.hasError && !_error) {
+    // _loading 时说明刚按上面的失败回调进入重试（缓冲态），
+    // 这时不能再把错误层盖回去，否则会先闪一下错误页。
+    if (c.value.hasError && !_error && !_loading) {
       // 全屏里播放器已坏，位置可能被重置为 0；不要再拿它覆盖原进度。
       _loadedEp = null;
       setState(() {
