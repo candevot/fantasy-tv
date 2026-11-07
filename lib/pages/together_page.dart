@@ -2947,7 +2947,10 @@ class _TogetherPageState extends State<TogetherPage>
             headers: play.headers,
             // 采集线路直连（让 mpv 边下边播），只有平台签名线路才走代理。
             // 一起看卡顿的主因就是这里：4K/大分片走代理要整片下完才播。
-            direct: play.direct && play.isHls && fxNeedsClientProxy(lineInfo.id),
+            // 按实际地址判断（腾讯直连是 CDN 绝对地址，不需要代理）。
+            direct: play.direct &&
+                play.isHls &&
+                fxUrlNeedsClientProxy(play.url),
             // Capture this load's media/line: a later room switch must not let
             // an old proxy refresh fetch or publish a different episode.
             refreshPlay: () =>

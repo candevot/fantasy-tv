@@ -660,6 +660,32 @@ bool fxNeedsClientProxy(String lineId) {
       raw.contains('mgtv');
 }
 
+/// 按「实际播放地址」判断是否需要客户端代理，比按线路 id 准确得多。
+///
+/// 实测（2026-11-07）：
+///  · 腾讯独家直连返回的是 https://apd-vlive.apdcdn.tc.qq.com/... 这类
+///    CDN 绝对地址，278 个分片全是相对路径、不经我们的服务器，
+///    签名也不会变（两次请求 URL 完全相同）→ 不需要代理；
+///  · 爱奇艺返回 /api/iqiyi.m3u8?tvid=... 这种站内包装地址，
+///    必须由服务端拼 dash 并回源 → 需要代理；
+///  · 采集线路返回绝对地址（指向服务器 /api/proxy），也不需要客户端代理。
+///
+/// 走客户端代理是「整片下完再交给 mpv」，4K 分片 10~40MB 时会一直卡；
+/// 能直连就直连，让 mpv 自己边下边播。
+bool fxUrlNeedsClientProxy(String url) {
+  final raw = url.trim();
+  if (raw.isEmpty) return false;
+  final lower = raw.toLowerCase();
+  // 站内包装地址：/api/... 或以我们服务器为 host 的相对路径。
+  if (raw.startsWith('/api/')) return true;
+  if (lower.contains('/api/iqiyi.m3u8') ||
+      lower.contains('/api/fyplay') ||
+      lower.contains('/api/mgtv')) {
+    return true;
+  }
+  return false;
+}
+
 bool fxIsPlatformLine(LineInfo line) {
   final raw = '${line.id} ${line.name} ${line.source ?? ''} ${line.from ?? ''} ${line.type}';
   final lower = raw.toLowerCase();
