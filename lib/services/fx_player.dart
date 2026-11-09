@@ -66,6 +66,8 @@ class FxPlayerValue {
     this.videoWidth,
     this.videoHeight,
     this.aspectRatio = 16 / 9,
+    this.bytesPerSecond = 0,
+    this.measuredBufferPercent = 0,
   });
 
   /// 是否已经拿到视频参数/时长，可以开始渲染与 seek。
@@ -78,7 +80,20 @@ class FxPlayerValue {
   final bool isBuffering;
 
   /// libmpv 的真实缓冲百分比（cache-buffering-state，0–100）。
+  ///
+  /// 注意：这个值在缓存快满时会长期停在 99，**不能直接拿去当进度环**，
+  /// 否则界面永远显示「缓冲中 99%」（用户报障原话）。起播进度请用
+  /// [measuredBufferPercent]。
   final double bufferingPercentage;
+
+  /// 起播缓冲进度（0–100，按真实下载字节算，能到 100）。
+  ///
+  /// 与 [bufferingPercentage] 的区别：这个是「为了起播还差多少」，
+  /// 由代理层已下载字节 / 起播目标字节得出，涨到头就是 100 并结束。
+  final double measuredBufferPercent;
+
+  /// 实时下载速度（字节/秒）；0 表示还没测到。
+  final double bytesPerSecond;
 
   /// 已缓冲 / 已解码的媒体时长（demuxer-cache-time）。
   final Duration buffered;
@@ -133,8 +148,26 @@ class FxPlayerValue {
   /// 「已缓存时长 ÷ 总时长」只是全片下载比例——停在百分之十几、缓存够了
   /// 又瞬间跳满，看起来像假进度，不再拿来显示数字。
   double? get bufferingPercent {
+    // 优先用代理层按真实字节算的起播进度：它涨到 100 会结束，
+    // 不会像 mpv 的 cache-buffering-state 那样长期停在 99 假装还在缓。
+    if (measuredBufferPercent > 0) {
+      return measuredBufferPercent.clamp(0.0, 100.0);
+    }
+    // 没有代理进度（直连 / 非 HLS）时退回 mpv 的百分比。
     if (bufferingPercentage > 0) return bufferingPercentage.clamp(0.0, 99.0);
     return null;
+  }
+
+  /// 起播进度是否已经到顶（可以隐藏进度环）。
+  bool get bufferingSettled => measuredBufferPercent >= 100;
+
+  /// 把字节/秒格式化成「3.2 MB/s」这类文案；0 返回空串。
+  String get speedText {
+    final b = bytesPerSecond;
+    if (b <= 0) return '';
+    if (b >= 1024 * 1024) return '${(b / 1024 / 1024).toStringAsFixed(1)} MB/s';
+    if (b >= 1024) return '${(b / 1024).toStringAsFixed(0)} KB/s';
+    return '${b.toStringAsFixed(0)} B/s';
   }
 
   FxPlayerValue copyWith({
@@ -142,6 +175,8 @@ class FxPlayerValue {
     bool? isPlaying,
     bool? isBuffering,
     double? bufferingPercentage,
+    double? measuredBufferPercent,
+    double? bytesPerSecond,
     Duration? buffered,
     bool? isCompleted,
     bool? hasError,
@@ -159,6 +194,9 @@ class FxPlayerValue {
       isPlaying: isPlaying ?? this.isPlaying,
       isBuffering: isBuffering ?? this.isBuffering,
       bufferingPercentage: bufferingPercentage ?? this.bufferingPercentage,
+      measuredBufferPercent:
+          measuredBufferPercent ?? this.measuredBufferPercent,
+      bytesPerSecond: bytesPerSecond ?? this.bytesPerSecond,
       buffered: buffered ?? this.buffered,
       isCompleted: isCompleted ?? this.isCompleted,
       hasError: hasError ?? this.hasError,
@@ -1004,8 +1042,29 @@ class FxPlayer implements Listenable {
   ///
   /// 缓冲中（字节仍在进来）绝不计入失败，也不弹错误层，只让页面显示
   /// 「缓冲中 xx%」；连续 [_stallTimeout]（30 秒）毫无流动才进救援链。
+  /// 把代理层的真实起播进度 / 下载速度同步到 value。
+  ///
+  /// 每 2 秒一次（跟看门狗同频）：够平滑，也不会因为高频 setState
+  /// 让播放页每帧重建。
+  void _syncProxyProgress() {
+    final proxy = _hlsProxy;
+    if (proxy == null) return;
+    final pct = proxy.startupPercent;
+    final speed = proxy.liveSpeed;
+    if (pct == _value.measuredBufferPercent && speed == _value.bytesPerSecond) {
+      return;
+    }
+    _setValue(
+      _value.copyWith(
+        measuredBufferPercent: pct,
+        bytesPerSecond: speed,
+      ),
+    );
+  }
+
   Future<void> _watchdogTickAsync() async {
     if (_disposed || _rescueBusy) return;
+    _syncProxyProgress();
     final v = _value;
     // 救援 / 最终失败之后都由新的 open 接管，看门狗不再自作主张。
     if (v.hasError) return;

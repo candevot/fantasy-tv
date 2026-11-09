@@ -281,6 +281,17 @@ class LocalHlsProxy {
   int _cacheMisses = 0;
   int _prefetchActive = 0;
 
+  /// 起播缓冲统计：本次播放已就绪的分片数与整集分片总数。
+  /// 播放页用它算真实起播进度（0–100），而不是拿 mpv 的
+  /// cache-buffering-state —— 那个值快满时会长期停在 99，
+  /// 界面就会永远显示「缓冲中 99%」。
+  int _readySegments = 0;
+  int _totalSegments = 0;
+
+  /// 最近一次实测的下载速度（字节/秒），单次下载即更新，
+  /// 用于界面上显示「3.2 MB/s」。0 表示还没测到。
+  double _liveSpeed = 0;
+
   /// 最近一次播放器请求的分片序号，用于识别 seek。
   int _lastPlaybackIndex = -1;
 
@@ -308,6 +319,19 @@ class LocalHlsProxy {
 
   /// 当前缓存字节数。
   int get cacheBytes => _cacheBytes;
+
+  /// 起播进度（0–100）：已就绪分片 / 整集分片。
+  ///
+  /// 到 100 说明首屏要用的内容已经齐了，界面可以收起进度环。
+  /// 拿不到总片数时返回 0（调用方退回不确定态圆环）。
+  double get startupPercent {
+    if (_totalSegments <= 0) return 0;
+    final pct = _readySegments * 100 / _totalSegments;
+    return pct.clamp(0, 100).toDouble();
+  }
+
+  /// 实时下载速度（字节/秒）；0 表示还没测到。
+  double get liveSpeed => _liveSpeed;
 
   /// 近几次分片下载的中位吞吐（字节/秒）。样本不足返回 null，
   /// 调用方据此跳过自适应、保持默认缓冲。
@@ -375,13 +399,22 @@ class LocalHlsProxy {
     return text.contains('cancel') || text.contains('abort');
   }
 
-  /// 记一次成功的分片下载：清零连续失败计数。
+  /// 记一次成功的分片下载：清零连续失败计数，并推进起播进度。
+  ///
+  /// 缓存命中的分片也算「已就绪」—— 它们本来就在本地，播放不用等，
+  /// 起播进度应该把它们计入，否则命中缓存时进度会虚低。
   void _noteSegmentSuccess([_SegmentData? data]) {
     if (_failStreak != 0) _failStreak = 0;
-    if (data == null || data.cacheHit) return;
+    if (data == null) return;
+    if (data.cacheHit) {
+      _readySegments++;
+      return;
+    }
+    _readySegments++;
     final us = data.elapsed.inMicroseconds;
     if (us <= 0 || data.bytes.isEmpty) return;
     final speed = data.bytes.length * 1000000 / us;
+    _liveSpeed = speed;
     _recentSpeeds.add(speed);
     if (_recentSpeeds.length > 8) _recentSpeeds.removeAt(0);
   }
@@ -577,6 +610,9 @@ class LocalHlsProxy {
       unawaited(_prefetchFirstVariant(rewritten.playlist));
     } else {
       _activePlaylistKeys.add(rewritten.playlist.key);
+      // 记下整集分片总数，供起播进度用（真实百分比，不会卡在 99）。
+      _totalSegments = rewritten.playlist.segments.length;
+      _readySegments = 0;
       _primePrefetch(rewritten.playlist);
     }
     _startRefreshTimer();

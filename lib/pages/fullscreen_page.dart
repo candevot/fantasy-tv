@@ -1984,6 +1984,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       return FxLoadingOverlay(
         title: loading,
         percent: v.bufferingPercent,
+        speedText: v.speedText,
         dim: _frozenFrame == null,
       );
     }
@@ -1992,6 +1993,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return FxLoadingOverlay(
       title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
       percent: percent,
+      speedText: v.speedText,
       dim: false,
       compact: true,
     );

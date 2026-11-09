@@ -193,13 +193,14 @@ class FsTopBar extends StatelessWidget {
 
   final VoidCallback onBack;
   final VoidCallback onCast;
+  /// 保留字段：顶栏已不再渲染「更多」按钮（重复入口），
+  /// 播放设置统一走底栏。调用方仍可传，留作将来放其它功能。
   final VoidCallback onMore;
   final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final s = compact ? .9 : 1.0;
-    final gap = SizedBox(width: 7 * s);
     // 刘海 / 挖孔 / 圆角屏：先让出安全边距，按钮不压进屏幕圆角与摄像头。
     // 这里只认「屏幕」安全区，不认画面宽高——控件位置必须固定，不能因为
     // 片源是 4:3 / 21:9 就跟着画面矩形跑。
@@ -284,14 +285,8 @@ class FsTopBar extends StatelessWidget {
             tooltip: '投屏',
             onTap: onCast,
           ),
-          gap,
-          PGlassIcon(
-            icon: Icons.more_horiz_rounded,
-            size: 32 * s,
-            iconSize: 19 * s,
-            tooltip: '更多',
-            onTap: onMore,
-          ),
+          // 顶栏不再放「更多」：底栏右下角的「播放设置」是唯一入口，
+          // 两个 ⋯ 并存在竖屏 / 横屏里都会被误认为重复功能。
         ],
       ),
     );

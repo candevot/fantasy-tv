@@ -877,6 +877,7 @@ class FxLoadingOverlay extends StatelessWidget {
     super.key,
     required this.title,
     this.percent,
+    this.speedText = '',
     this.dim = true,
     this.compact = false,
   });
@@ -884,9 +885,15 @@ class FxLoadingOverlay extends StatelessWidget {
   /// 主文案（加载页由 [fxLoadingLineText] 生成，含当前线路名）。
   final String title;
 
-  /// 0–100；为 null 时圆环不确定进度。即使调用方传 100 也会锁到 99，
-  /// 缓冲进度不能显示假的 100%（媒体缓存经常先到 duration 但仍在缓冲）。
+  /// 0–100；为 null 时圆环不确定进度。
+  ///
+  /// 传进来的应该是代理层按真实下载字节算的起播进度（能到 100，
+  /// 到 100 就说明首屏内容齐了）。mpv 的 cache-buffering-state
+  /// 不能直接用 —— 它快满时会长期停在 99，界面就成了假进度。
   final double? percent;
+
+  /// 实时网速文案（如「3.2 MB/s」）；空串不显示。
+  final String speedText;
 
   final bool dim;
   final bool compact;
@@ -987,6 +994,18 @@ class FxLoadingOverlay extends StatelessWidget {
                 ),
               ),
             ),
+            // 实时网速：让用户看到「在动」，而不是盯着不动的圆环猜。
+            if (speedText.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                speedText,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: .72),
+                  fontSize: compact ? 10 : 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
           ],
         ),
       ),

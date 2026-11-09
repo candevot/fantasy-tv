@@ -546,10 +546,10 @@ class _DetailPageState extends State<DetailPage>
   }
 
   void _selectLine(LineInfo line) {
-    if (_playerSwitchingLine) {
-      fxToast(context, '正在切换线路，请稍候');
-      return;
-    }
+    // 切换中仍然接受点击：播放器会把这次选择记成 pendingSwitch，
+    // 当前切换一结束就立刻执行，最多 12 秒僵死也会强制接管。
+    // 之前这里直接 return，用户会觉得「点了没反应」。
+    if (line.id == _lineId && !_playerSwitchingLine) return;
     _stableTimer?.cancel();
     // 用户手动选线路视为重新开始，允许重试这一条。
     _failedLines.remove(line.id);
@@ -1183,8 +1183,11 @@ class _DetailPageState extends State<DetailPage>
                         active: line.id == _lineId,
                         // degraded 线路照常展示并可点，只在卡片名后补灰色小字。
                         unstable: line.degraded,
-                        onTap:
-                            _playerSwitchingLine ? null : () => _selectLine(line),
+                        // 切换/重试期间不禁用点击：播放器内部有 _pendingSwitch
+                        // 排队机制（记住最后一次选择，当前切换一结束就执行）。
+                        // 这里把 onTap 置 null 的话，用户点线路完全没反应，
+                        // 就是「重试线路时没法手动切换」的根因。
+                        onTap: () => _selectLine(line),
                       ),
                     );
                   },

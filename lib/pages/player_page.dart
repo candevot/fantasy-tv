@@ -78,7 +78,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   static const Duration _openReadyTimeout = Duration(seconds: 8);
 
   /// 切线路时最多尝试的线路数（含用户选中的目标线路）。
-  static const int _maxLineAttempts = 2;
+  /// 换线时最多依次尝试几条线路（含目标线路）。
+  /// 一部片通常有 3~6 条线路，只试 2 条会在前两条都坏时直接报错，
+  /// 而后面明明还有可用线路。3 条是「多给一次机会」与「别让用户干等」
+  /// 之间的折中：每条 8~20 秒，三条最坏也就半分钟左右。
+  static const int _maxLineAttempts = 3;
 
   /// 停摆 / 出错的自愈已整体搬进 FxPlayer：连续 30 秒无字节流动才判定
   /// 失败（缓冲中只显示「缓冲中 xx%」），随后静默跑
@@ -542,12 +546,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         break;
       }
     }
-    for (var step = 0;
-        step < lines.length && attempts.length < _maxLineAttempts;
-        step++) {
+    // 候补按「是否已知不健康」排：degraded 线路放最后，
+    // 优先把机会给检测正常的线路，减少用户等待时间。
+    final rest = <LineInfo>[];
+    for (var step = 0; step < lines.length; step++) {
       final candidate =
           index >= 0 ? lines[(index + 1 + step) % lines.length] : lines[step];
       if (candidate.id.isEmpty || attempts.contains(candidate.id)) continue;
+      if (rest.any((l) => l.id == candidate.id)) continue;
+      rest.add(candidate);
+    }
+    rest.sort((a, b) {
+      if (a.degraded == b.degraded) return 0;
+      return a.degraded ? 1 : -1;
+    });
+    for (final candidate in rest) {
+      if (attempts.length >= _maxLineAttempts) break;
       attempts.add(candidate.id);
     }
     return attempts.take(_maxLineAttempts).toList(growable: false);
@@ -1620,6 +1634,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                       title:
                           percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
                       percent: percent,
+                      speedText: v.speedText,
                       dim: false,
                       compact: true,
                     );
@@ -1653,6 +1668,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         builder: (context, _) => FxLoadingOverlay(
           title: title,
           percent: c.value.bufferingPercent,
+          speedText: c.value.speedText,
           compact: true,
         ),
       ),

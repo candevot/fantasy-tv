@@ -481,6 +481,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                   return FxLoadingOverlay(
                     title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
                     percent: percent,
+                    speedText: value.speedText,
                     dim: false,
                     compact: true,
                   );
@@ -489,11 +490,21 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             ),
           if (widget.loading)
             Positioned.fill(
-              child: FxLoadingOverlay(
-                title: fxLoadingEpisodeText(widget.ep),
-                // 有最后一帧时不再压暗，让切换过程继续看得到画面。
-                dim: widget.frozenFrame == null,
-              ),
+              child: widget.player == null
+                  ? FxLoadingOverlay(
+                      title: fxLoadingEpisodeText(widget.ep),
+                      dim: widget.frozenFrame == null,
+                    )
+                  : AnimatedBuilder(
+                      animation: widget.player!,
+                      builder: (context, _) => FxLoadingOverlay(
+                        title: fxLoadingEpisodeText(widget.ep),
+                        percent: widget.player!.value.bufferingPercent,
+                        speedText: widget.player!.value.speedText,
+                        // 有最后一帧时不再压暗，让切换过程继续看得到画面。
+                        dim: widget.frozenFrame == null,
+                      ),
+                    ),
             ),
           if (!_locked)
             Positioned.fill(
