@@ -213,6 +213,9 @@ Future<void> _testPrefetch(
     '${origin.base}/prefetch.m3u8',
     <String, String>{'User-Agent': 'Mozilla/5.0 test'},
   );
+  // 生产环境里预取要等「首帧出来」才开（markFirstFrameReady），
+  // 这里没有播放器，手动放行，否则预取永远不启动。
+  proxy.markFirstFrameReady();
   await waitFor(
     () => origin.segmentRequests >= 5 && proxy.cacheEntryCount >= 5,
     '后台预取至少 5 个分片',
