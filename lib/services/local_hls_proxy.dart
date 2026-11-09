@@ -177,7 +177,13 @@ class LocalHlsProxy {
        _logger = log ?? _defaultLog;
 
   static const Duration _connectTimeout = Duration(seconds: 8);
-  static const Duration _playlistTimeout = Duration(seconds: 12);
+  /// 播放列表单次请求超时。
+  ///
+  /// 起播链路上这一步是**串行阻塞**的：拿不到完整列表就没法改写、没法起播。
+  /// 原来 12 秒，实测上游 CDN 限速时（腾讯 apd-vlive 只有 ~1KB/s）
+  /// 用户就是干等十几秒什么都看不到。压到 6 秒：正常列表 0.1~2 秒就回来了，
+  /// 超过 6 秒基本可以判定这条链路当下不可用，让上层尽快回退直连。
+  static const Duration _playlistTimeout = Duration(seconds: 6);
   static const Duration _segmentTimeout = Duration(seconds: 60);
   static const Duration _playlistTtl = Duration(seconds: 3);
   static const int _minParallelBytes = 128 * 1024;

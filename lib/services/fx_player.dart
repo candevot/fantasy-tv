@@ -284,6 +284,15 @@ class FxPlayer implements Listenable {
   /// 网络好时把后续内容尽量读进本地，播放过程不中断。
   static const String _readaheadSeconds = '120';
 
+  /// 起播「还在进展」时的最长等待：只要代理层还在往下拉字节，
+  /// 就不把这次 open 判成失败。
+  ///
+  /// 原先是死等 [readyTimeout]（20 秒），大分片 4K 源（单片 13~22MB）
+  /// 在网络很好的情况下也可能超过 20 秒 —— 于是「好线路被判定成不可用」
+  /// 并触发自动换线（用户报障原话）。现在改成：有字节进来就继续等，
+  /// 只有「连续 [_stallTimeout] 没有任何进展」才算真失败。
+  static const Duration _openHardCap = Duration(minutes: 2);
+
   /// 看门狗采样间隔。
   static const Duration _watchdogTick = Duration(seconds: 2);
 
@@ -607,17 +616,58 @@ class FxPlayer implements Listenable {
     }
     if (_disposed || token != _openToken) return;
     try {
-      await ready.future.timeout(readyTimeout);
-    } on TimeoutException {
-      if (token == _openToken) {
-        _fail('播放超时，线路可能不可用');
-        throw const FxPlayerException('播放超时');
-      }
+      // 不再用固定的 readyTimeout 死等：那会把「大分片加载慢」误判成
+      // 「线路不可用」并自动换线。这里只要代理层还在拉字节就一直等，
+      // 连续 _stallTimeout 毫无进展才放弃；另外加一个硬上限兜底。
+      await _awaitReadyOrProgress(ready.future, token);
     } finally {
       if (identical(_ready, ready)) _ready = null;
     }
     // 首帧 / 时长已就绪：把起播小缓冲动态升到 96MiB，长播更稳。
     _raiseCacheAfterStart();
+  }
+
+  /// 等首帧，但把「还在下载」和「卡死」区分开。
+  ///
+  /// 判据是代理层的已下载字节数：数值在涨就说明线路活着，继续等；
+  /// 连续 [_stallTimeout] 字节不动才算这次 open 失败。整体另有
+  /// [_openHardCap] 硬上限。
+  Future<void> _awaitReadyOrProgress(Future<void> ready, int token) async {
+    final startedAt = DateTime.now();
+    var lastBytes = -1;
+    var lastProgressAt = DateTime.now();
+    while (true) {
+      if (_disposed || token != _openToken) return;
+      try {
+        await ready.timeout(const Duration(seconds: 1));
+        return; // 首帧到了
+      } on TimeoutException {
+        // 还没好，继续看有没有进展。
+      }
+      if (_disposed || token != _openToken) return;
+
+      final proxy = _hlsProxy;
+      final bytes = proxy == null ? -1 : proxy.cacheBytes;
+      final now = DateTime.now();
+      if (bytes > lastBytes) {
+        lastBytes = bytes;
+        lastProgressAt = now;
+      }
+      // 直连（没有代理）时无从判断进度，退回按 readyTimeout 兜底。
+      final idle = proxy == null
+          ? now.difference(startedAt)
+          : now.difference(lastProgressAt);
+      if (idle >= _stallTimeout) {
+        _logFx('OPEN 放弃：${idle.inSeconds}s 无下载进展');
+        _fail('播放超时，线路可能不可用');
+        throw const FxPlayerException('播放超时');
+      }
+      if (now.difference(startedAt) >= _openHardCap) {
+        _logFx('OPEN 放弃：超过硬上限 ${_openHardCap.inSeconds}s');
+        _fail('播放超时，线路可能不可用');
+        throw const FxPlayerException('播放超时');
+      }
+    }
   }
 
   /// 解析出真正交给 mpv 的地址：直链先过本地分片代理（代理失败回退
@@ -652,7 +702,9 @@ class FxPlayer implements Listenable {
                       if (expired != null) expired();
                     },
             )
-            .timeout(const Duration(seconds: 20));
+            // 8 秒拿不到本地列表就回退直连：代理的意义是「更快更稳」，
+            // 一旦它比直连还慢，就不该让用户继续等。代理实例保留不销毁。
+            .timeout(const Duration(seconds: 8));
         if (_disposed || token != _openToken) return null;
         if (localUrl.isNotEmpty) {
           playbackUrl = localUrl;

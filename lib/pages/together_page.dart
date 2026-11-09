@@ -2942,6 +2942,8 @@ class _TogetherPageState extends State<TogetherPage>
         if (!mounted || seq != _videoSeq) return;
         FxPlayer? controller;
         try {
+          // 和主播放页用同一套起播超时策略：慢线路不再被 20 秒一刀切，
+          // 只要还在下载就继续等（FxPlayer 内部按下载进展判定）。
           controller = FxPlayer.create();
           final qualityKey = _qualityKey;
           await controller.open(
@@ -2957,6 +2959,11 @@ class _TogetherPageState extends State<TogetherPage>
             // an old proxy refresh fetch or publish a different episode.
             refreshPlay: () =>
                 _refreshTogetherUrl(videoId, ep, lineInfo.id, qualityKey, seq),
+            // 无感救援链第③步：本线路 refresh / 重开都失败后自动换下一条，
+            // 并 seek 回房主的进度。之前一起看点播没有这条，线路一坏就
+            // 只能干等或退出房间重进。
+            rescueLines: () =>
+                _nextTogetherLineSource(videoId, ep, lineInfo, qualityKey, seq),
           );
           if (!mounted || seq != _videoSeq) {
             await _releasePlayer(controller);
@@ -3112,6 +3119,58 @@ class _TogetherPageState extends State<TogetherPage>
     } catch (_) {
       return null;
     }
+  }
+
+  /// 救援换线：当前线路彻底不可用时，按房间线路表顺延找下一条能出地址的，
+  /// 并 seek 回房主的进度（由 FxPlayer 的救援链负责 seek）。
+  ///
+  /// 只在「本线路 refresh + 重开都失败」后才会被调用，属于最后一层兜底；
+  /// 失败返回 null，播放器会把错误交给页面提示。
+  Future<FxLineSource?> _nextTogetherLineSource(
+    String videoId,
+    int ep,
+    LineInfo current,
+    String? qualityKey,
+    int seq,
+  ) async {
+    if (!mounted || seq != _videoSeq) return null;
+    final lines = _lines;
+    if (lines.length < 2) return null;
+    final index = lines.indexWhere((l) => l.id == current.id);
+    for (var k = 1; k <= lines.length; k++) {
+      if (!mounted || seq != _videoSeq) return null;
+      final next = lines[(index + k) % lines.length];
+      if (next.id == current.id || next.id.trim().isEmpty) continue;
+      try {
+        final play = await Api.play(videoId, ep, next.id);
+        if (!mounted || seq != _videoSeq) return null;
+        if (play.type.trim().toLowerCase() == 'parse') continue;
+        final url = fxAbsolutePlayUrl(_qualityUrlFor(play, qualityKey));
+        if (url.isEmpty) continue;
+        return FxLineSource(
+          url: url,
+          headers: play.headers,
+          direct: play.direct &&
+              play.isHls &&
+              fxUrlNeedsClientProxy(play.url),
+        );
+      } catch (_) {
+        // 这条也取不到地址就继续试下一条。
+      }
+    }
+    return null;
+  }
+
+  /// 按指定清晰度取地址；没有就退回默认地址。
+  String _qualityUrlFor(PlayInfo play, String? qualityKey) {
+    if (qualityKey != null) {
+      for (final item in play.quality) {
+        if (item.key == qualityKey && item.url.trim().isNotEmpty) {
+          return item.url.trim();
+        }
+      }
+    }
+    return play.url.trim();
   }
 
   String _qualityUrl(PlayInfo play) {
