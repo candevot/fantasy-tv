@@ -227,7 +227,7 @@ class _TogetherPageState extends State<TogetherPage>
 
   String _videoId = '';
   int _ep = 1;
-  String _videoLine = 'l1';
+  String _videoLine = '';
   String _videoTitle = '';
   String _videoCover = '';
 
@@ -312,7 +312,10 @@ class _TogetherPageState extends State<TogetherPage>
       if (videoId.isNotEmpty) {
         _videoId = videoId;
         _ep = widget.ep < 1 ? 1 : widget.ep;
-        _videoLine = widget.line.trim().isEmpty ? 'l1' : widget.line.trim();
+        // 线路为空时不能假定 'l1'：我们的线路 id 是真实值
+        // （平台线路 pt_xxx、采集线路是服务端生成的 id），根本没有 l1。
+        // 留空，等 _createRoom 拿到详情后再取第一条真实线路。
+        _videoLine = widget.line.trim();
         // 从详情页进入时沿用当前进度；不足 60 秒视为刚看片头，从头开始。
         _resumePos =
             widget.position >= fxResumeMinSeconds ? widget.position : 0;
@@ -995,7 +998,16 @@ class _TogetherPageState extends State<TogetherPage>
     _stageText = '正在创建房间…';
     _videoId = videoId;
     _ep = ep < 1 ? 1 : ep;
-    if (_videoLine.trim().isEmpty) _videoLine = 'l1';
+    // 线路留空时，用详情里的第一条真实线路（详情已在上面拿到）。
+    // 之前写死 'l1'，而服务端从来没有这个 id，导致一起看里线路名显示成
+    // 原始 id、切线路也对不上 —— 用户报的「一起看的线路完全对不上」。
+    if (_videoLine.trim().isEmpty) {
+      _videoLine = _lines.isNotEmpty
+          ? _lines.first.id
+          : (detail?.lines.isNotEmpty ?? false)
+              ? detail!.lines.first.id
+              : '';
+    }
     _qualityKey = null;
     _playInfo = null;
     // 选集面板已经拿到的详情直接带进来，不再多请求一次 /api/detail。
@@ -1123,7 +1135,7 @@ class _TogetherPageState extends State<TogetherPage>
       _episodes = const <Episode>[];
       _lines = const <LineInfo>[];
       _ep = 1;
-      _videoLine = 'l1';
+      _videoLine = '';
       _playInfo = null;
       _qualityKey = null;
       _loadedKey = '';
@@ -2175,9 +2187,11 @@ class _TogetherPageState extends State<TogetherPage>
     }
     // 换剧视为「继续播放」：切换前暂停才保持暂停。
     final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
+    // 没有详情时留空，交给 _loadVideo 重新拉详情后再定线路；
+    // 写死 'l1' 会让切剧后线路对不上（服务端没有这个 id）。
     final lineId = detail != null && detail.lines.isNotEmpty
         ? detail.lines.first.id
-        : 'l1';
+        : '';
     // 房主本地立即切到新片，再广播 room_state；其它成员收到后重新拉流。
     // 最后一帧由 _loadVideo 抓取，切剧不黑屏。
     setState(() {
@@ -2904,9 +2918,12 @@ class _TogetherPageState extends State<TogetherPage>
     var playable = _lines.where((item) => !item.needsParse).toList();
     if (playable.isEmpty) {
       // 详情拿不到时仍尝试一次默认线路，避免房间完全不可看。
-      playable = <LineInfo>[
-        LineInfo(line.isEmpty ? 'l1' : line, '默认线路', 'hls', 0),
-      ];
+      // 详情拿不到时仍尝试一次当前线路，避免房间完全不可看。
+      // 注意：line 为空时不能用假 id（'l1'），否则 /api/play 必然失败；
+      // 这种情况下直接不给兜底，让上层展示错误而不是播一个坏地址。
+      playable = line.isEmpty
+          ? <LineInfo>[]
+          : <LineInfo>[LineInfo(line, '默认线路', 'hls', 0)];
     }
     final ordered = <LineInfo>[
       for (final item in playable)
@@ -3302,7 +3319,7 @@ class _TogetherPageState extends State<TogetherPage>
     _lines = detail?.lines ?? const <LineInfo>[];
     _videoLine = detail != null && detail.lines.isNotEmpty
         ? detail.lines.first.id
-        : 'l1';
+        : '';
     // 主动选片建房视为「开始观看」，从第 1 集（或用户选的那集）自动播放。
     _resumePos = 0;
     _resumePlaying = true;
