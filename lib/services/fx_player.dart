@@ -314,6 +314,31 @@ class FxPlayer implements Listenable {
   static int _instanceSeq = 0;
   final String _instanceId = 'p${DateTime.now().microsecondsSinceEpoch}_${_instanceSeq++}';
 
+  /// 本地分片代理的缓存上限（字节）。
+  ///
+  /// 无限预加载要把整集拉到本地，缓存太小会「拉进来又被淘汰」，
+  /// 拖回去还得重下。按设备内存的 1/8 给，夹在 512MB~2GB。
+  static int get _proxyCacheLimit {
+    final total = _deviceMemoryMb();
+    if (total <= 0) return 512 * 1024 * 1024;
+    final bytes = (total * 1024 * 1024) ~/ 8;
+    const min = 512 * 1024 * 1024;
+    const max = 2 * 1024 * 1024 * 1024;
+    return bytes.clamp(min, max);
+  }
+
+  /// 设备物理内存（MB）；拿不到返回 0。
+  static int _deviceMemoryMb() {
+    try {
+      final info = File('/proc/meminfo').readAsStringSync();
+      final m = RegExp(r'MemTotal:\s+(\d+)\s+kB').firstMatch(info);
+      if (m == null) return 0;
+      return (int.parse(m.group(1)!) / 1024).round();
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// 清理超过 1 天没动过的缓存目录（异常退出的残留）。
   static Future<void> _sweepStaleCacheDirs() async {
     try {
@@ -692,7 +717,16 @@ class FxPlayer implements Listenable {
     var playbackHeaders = headers;
     var proxied = false;
     if (direct) {
-      final proxy = _hlsProxy ??= LocalHlsProxy(log: debugPrint);
+      // 缓存上限按设备内存定：无限预加载要把整集尽量拉下来，
+      // 512MB 对 1080P（一集 300~600MB）刚好够，但对 4K 完全不够。
+      // 这里取可用内存的 1/8，夹在 512MB~2GB：
+      //   · 6GB 机 → 768MB   · 8GB 机 → 1GB   · 12GB 机 → 1.5GB
+      // 上限同时被 mpv 那层（demuxer 96MB）和系统可用内存兜住，
+      // 不会因为开太大把整机拖垮。
+      final proxy = _hlsProxy ??= LocalHlsProxy(
+        log: debugPrint,
+        cacheLimitBytes: _proxyCacheLimit,
+      );
       try {
         // 超时不能在 4 秒就放弃代理：平台线路首次代理要做签名重写 +
         // 拉整集列表，很容易超过 4 秒。一旦超时就会回退直连并销毁代理，

@@ -2099,14 +2099,22 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           top: 0,
           left: 0,
           right: 0,
-          child: FsTopBar(
-            title: _title,
-            epLabel: _isLive ? 'LIVE · 直播中' : _epLabel,
-            compact: compact,
-            qualityLabel: _qualityText,
-            onBack: () => unawaited(_exit()),
-            onCast: () => unawaited(_openCastSheet()),
-            onMore: () => unawaited(_openMorePanel()),
+          child: AnimatedBuilder(
+            // 网速每 2 秒刷新一次（FxPlayer 看门狗同步），
+            // 只重建顶栏这一小块，不影响画面层。
+            animation: _controller ?? const AlwaysStoppedAnimation<double>(0),
+            builder: (context, _) => FsTopBar(
+              title: _title,
+              epLabel: _isLive ? 'LIVE · 直播中' : _epLabel,
+              compact: compact,
+              qualityLabel: _qualityText,
+              speedText: _isLive
+                  ? ''
+                  : (_controller?.value.speedText ?? ''),
+              onBack: () => unawaited(_exit()),
+              onCast: () => unawaited(_openCastSheet()),
+              onMore: () => unawaited(_openMorePanel()),
+            ),
           ),
         ),
         Positioned.fill(

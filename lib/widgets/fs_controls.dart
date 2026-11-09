@@ -183,6 +183,7 @@ class FsTopBar extends StatelessWidget {
     required this.onMore,
     this.compact = false,
     this.qualityLabel = '',
+    this.speedText = '',
   });
 
   final String title;
@@ -190,6 +191,9 @@ class FsTopBar extends StatelessWidget {
 
   /// 真实分辨率胶囊（`1920x1080`）；空串自动隐藏。
   final String qualityLabel;
+
+  /// 实时网速（如「3.2 MB/s」），显示在分辨率胶囊左边；空串隐藏。
+  final String speedText;
 
   final VoidCallback onBack;
   final VoidCallback onCast;
@@ -205,13 +209,18 @@ class FsTopBar extends StatelessWidget {
     // 这里只认「屏幕」安全区，不认画面宽高——控件位置必须固定，不能因为
     // 片源是 4:3 / 21:9 就跟着画面矩形跑。
     final safe = MediaQuery.viewPaddingOf(context);
-    // 右侧留白收到 6dp：分辨率胶囊 + 投屏 + 更多这一组要贴着屏幕右缘，
-    // 留 10dp 时在大屏横屏上视觉重心偏中间。
+    // 右侧留白：分辨率胶囊 + 投屏这一组不能贴着屏幕边缘。
+    //
+    // 手机是弧形圆角屏（不是直边），横屏时右上角就是圆的 —— 只留 6dp 时
+    // 这一组会压进圆角里被裁掉一截。这里按「屏幕圆角半径」估一个安全值：
+    // 竖屏圆角通常在 24~40dp，横屏顶栏高度约 50dp，右上角圆弧大约占
+    // 20~28dp，所以右侧留 24dp + safe.right 才稳。
+    final cornerGuard = (safe.right > 0 ? 10.0 : 24.0);
     return Container(
       padding: EdgeInsets.fromLTRB(
         14 + safe.left,
         8 + safe.top,
-        6 + safe.right,
+        cornerGuard + safe.right,
         18,
       ),
       decoration: BoxDecoration(
@@ -269,6 +278,22 @@ class FsTopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
+          // 实时网速：放在分辨率胶囊左边。用户要的是「能看出在动」，
+          // 光有进度环不够 —— 网络卡住时网速会掉到 0，一眼就知道。
+          if (speedText.isNotEmpty) ...[
+            Text(
+              speedText,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: .85),
+                fontSize: 10.5 * s,
+                fontWeight: FontWeight.w600,
+                shadows: const [
+                  Shadow(color: Colors.black54, blurRadius: 4),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
           // 分辨率胶囊固定 88dp 槽位（未就绪只占位不画），保证右侧按钮不随
           // 分辨率出现 / 消失而左右跳。
           //

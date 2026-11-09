@@ -155,6 +155,14 @@ class LocalHlsProxy {
     // 每片约 1~2MB，1800 片约 2~3 分钟量；具体条数由 _schedulePrefetch
     // 按 cacheLimitBytes 与预缓冲预算裁剪。
     this.prefetchCount = 512,
+    // 无限预加载：把整集尽量全部拉到本地，播放时全程读本地。
+    //
+    // 这是「随便拖进度都秒开」的关键（对标咕噜咕噜的 setInfinitePreload）。
+    // 之前的限制是「按缓存预算 70% 折算片数」+「≥6MB 分片只备 3 片」，
+    // 结果 4K 只预取 3 片、1080P 约 100 片，往后一拖就要现下。
+    // 打开后：预取到缓存上限为止（缓存上限本身随内存自适应），
+    // 而不是预先砍到很小；同时在拖进度时仍会立即让位给播放请求。
+    this.infinitePreload = true,
     // 预取并发保持低值：整集预热是「后台慢慢存」，不能和当前播放
     // 抢带宽 —— 之前调到 6，seek 要等预取任务腾出连接，秒切就做不到。
     this.prefetchConcurrency = 2,
@@ -203,6 +211,14 @@ class LocalHlsProxy {
 
   /// 播放列表就绪后向前预取的分片数（默认 5）。
   final int prefetchCount;
+
+  /// 是否把整集尽量预加载到本地（默认开）。
+  ///
+  /// true：预取深度只受 [cacheLimitBytes] 约束，不再按 70% 折半、
+  /// 也不再对 ≥6MB 的大分片砍到 3 片 —— 只要缓存装得下就一直往前备，
+  /// 这样任意位置拖进度都是读本地。
+  /// false：退回旧的保守策略（省内存/省流量）。
+  final bool infinitePreload;
 
   /// 预取同时进行的下载数（默认 3）。
   final int prefetchConcurrency;
@@ -1838,15 +1854,27 @@ class LocalHlsProxy {
     // 保证「已预热的不会被自己挤掉」。
     final avgSegBytes = _estimateSegmentBytes(playlist);
     var depth = prefetchCount;
-    if (avgSegBytes > 0 && cacheLimitBytes > 0) {
-      final affordable = ((cacheLimitBytes * 0.7) / avgSegBytes).floor();
-      depth = math.min(prefetchCount, math.max(8, affordable));
-    }
-    // 4K 大分片（>6MB/片）不做深度预取：一集 2.4GB 根本缓存不下，
-    // 预取只会和正在播的那片抢带宽，反而制造卡顿。
-    // 只提前备 3 片，保证「下一片已就位」即可。
-    if (avgSegBytes >= 6 * 1024 * 1024) {
-      depth = math.min(depth, 3);
+    if (infinitePreload) {
+      // 无限预加载：按「缓存能装下多少」全量往前备，不再按 70% 折半、
+      // 也不再对大分片砍到 3 片。这是「任意位置拖进度都秒开」的关键。
+      //
+      // 缓存上限本身已经随设备内存自适应（见 FxPlayer 的 cacheLimitBytes），
+      // 所以这里放开深度不会把内存吃爆；真正到顶时下面还有
+      // `_cacheBytes >= cacheLimitBytes * 0.85` 的硬刹车。
+      if (avgSegBytes > 0 && cacheLimitBytes > 0) {
+        final affordable = (cacheLimitBytes / avgSegBytes).floor();
+        depth = math.min(prefetchCount, math.max(8, affordable));
+      }
+    } else {
+      if (avgSegBytes > 0 && cacheLimitBytes > 0) {
+        final affordable = ((cacheLimitBytes * 0.7) / avgSegBytes).floor();
+        depth = math.min(prefetchCount, math.max(8, affordable));
+      }
+      // 4K 大分片（>6MB/片）不做深度预取：一集 2.4GB 根本缓存不下，
+      // 预取只会和正在播的那片抢带宽，反而制造卡顿。
+      if (avgSegBytes >= 6 * 1024 * 1024) {
+        depth = math.min(depth, 3);
+      }
     }
     final end = math.min(playlist.segments.length, start + depth);
     for (var i = math.max(0, start); i < end; i++) {
@@ -1906,13 +1934,18 @@ class LocalHlsProxy {
 
   /// 预取并发按实测带宽动态定：网络快就多开几路把整集早点存完，
   /// 网络一般就少开，避免和播放抢带宽。用户环境差异大，不能写死。
+  ///
+  /// 无限预加载开启时上限更高（最高 6 路）：目标是在片头几十秒内把整集
+  /// 拉到本地，之后任意拖进度都是读本地。播放请求永远优先 ——
+  /// `_yieldPrefetchToPlayback` 会在 seek 时把预取全部让位。
   int get _effectivePrefetchConcurrency {
     final speed = recentThroughput;
-    if (speed == null) return math.min(prefetchConcurrency, 2);
+    final cap = infinitePreload ? 6 : prefetchConcurrency;
+    if (speed == null) return math.min(cap, 2);
     final mbps = speed / (1024 * 1024);
-    if (mbps >= 8) return math.max(prefetchConcurrency, 4);
-    if (mbps >= 3) return math.max(prefetchConcurrency, 3);
-    return math.min(prefetchConcurrency, 2);
+    if (mbps >= 8) return math.max(math.min(cap, 4), infinitePreload ? 6 : 4);
+    if (mbps >= 3) return math.max(math.min(cap, 3), infinitePreload ? 4 : 3);
+    return math.min(cap, 2);
   }
 
   void _pumpPrefetch() {
