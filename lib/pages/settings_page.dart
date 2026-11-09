@@ -13,6 +13,7 @@ import 'change_password_page.dart';
 import 'download_settings_page.dart';
 import 'feedback_page.dart';
 import 'login_page.dart';
+import '../utils/fx_route.dart';
 
 /// 设置页：账号安全 / 播放设置 / 下载与缓存 / 关于 / 退出登录。
 class SettingsPage extends StatefulWidget {
@@ -78,17 +79,17 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _openChangePassword() async {
     if (Auth.instance.user == null) {
       await Navigator.of(context)
-          .push(MaterialPageRoute(builder: (_) => const LoginPage()));
+          .push(FxPageRoute(builder: (_) => const LoginPage()));
       if (!mounted || Auth.instance.user == null) return;
     }
     if (!mounted) return;
     await Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => const ChangePasswordPage()));
+        .push(FxPageRoute(builder: (_) => const ChangePasswordPage()));
   }
 
   Future<void> _openDownloadSettings() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const DownloadSettingsPage()),
+      FxPageRoute(builder: (_) => const DownloadSettingsPage()),
     );
     if (!mounted) return;
     await _downloads.refreshUsage();
@@ -97,13 +98,13 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _openAbout() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const AboutPage()),
+      FxPageRoute(builder: (_) => const AboutPage()),
     );
   }
 
   Future<void> _openFeedback() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const FeedbackPage()),
+      FxPageRoute(builder: (_) => const FeedbackPage()),
     );
   }
 

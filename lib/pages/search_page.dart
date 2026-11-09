@@ -6,6 +6,7 @@ import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
+import '../utils/fx_route.dart';
 
 class SearchPage extends StatefulWidget {
   const SearchPage({super.key, this.openAi = false});
@@ -31,7 +32,6 @@ class _SearchPageState extends State<SearchPage> {
   String? _mode;
   String? _lastQuery;
   String? _error;
-  bool _showAi = false;
   bool _loading = false;
   bool _loadingMore = false;
   bool _moreError = false;
@@ -44,7 +44,6 @@ class _SearchPageState extends State<SearchPage> {
   @override
   void initState() {
     super.initState();
-    _showAi = widget.openAi;
     _q.addListener(_onQueryChanged);
     _scroll.addListener(_onScroll);
     _loadHistory();
@@ -174,7 +173,6 @@ class _SearchPageState extends State<SearchPage> {
       _results = [];
       _error = null;
       _loading = true;
-      _showAi = false;
       _page = 1;
       _hasMore = true;
       _loadingMore = false;
@@ -245,7 +243,6 @@ class _SearchPageState extends State<SearchPage> {
       _results = [];
       _error = null;
       _loading = true;
-      _showAi = true;
       _hasMore = false;
       _loadingMore = false;
       _moreError = false;
@@ -296,7 +293,7 @@ class _SearchPageState extends State<SearchPage> {
 
   void _openDetail(String id) {
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => DetailPage(id: id)),
+      FxPageRoute(builder: (_) => DetailPage(id: id)),
     );
   }
 
@@ -467,7 +464,6 @@ class _SearchPageState extends State<SearchPage> {
         const SizedBox(height: 12),
         _hotCard(),
         const SizedBox(height: 12),
-        _aiCard(),
         const SizedBox(height: 20),
         const Center(
           child: Text('内容来自幻想影视片库 · 每日更新',
@@ -667,163 +663,6 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  Widget _aiCard() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Fx.accent.withValues(alpha: .10), Fx.accent2.withValues(alpha: .07)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: .95)),
-        boxShadow: [
-          BoxShadow(
-            color: Fx.accent.withValues(alpha: .08),
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 34,
-                height: 34,
-                decoration: BoxDecoration(
-                  gradient: Fx.brand,
-                  borderRadius: BorderRadius.circular(10),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Fx.accent.withValues(alpha: .3),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: const Icon(Icons.auto_awesome_rounded,
-                    size: 18, color: Colors.white),
-              ),
-              const SizedBox(width: 9),
-              const Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('AI 找片',
-                      style: TextStyle(
-                          fontSize: 17,
-                          height: 1.2,
-                          fontWeight: FontWeight.w600,
-                          color: Fx.ink)),
-                  SizedBox(height: 2),
-                  Text('一句话，从片库里找到它',
-                      style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w400,
-                          color: Fx.sub)),
-                ],
-              ),
-              const Spacer(),
-              GestureDetector(
-                onTap: () => setState(() => _showAi = !_showAi),
-                child: Icon(
-                  _showAi
-                      ? Icons.keyboard_arrow_up_rounded
-                      : Icons.keyboard_arrow_down_rounded,
-                  size: 20,
-                  color: Fx.sub,
-                ),
-              ),
-            ],
-          ),
-          if (_showAi) ...[
-            const SizedBox(height: 12),
-            const Text(
-              '描述剧情、题材或氛围，例如「想找一部反转不断的悬疑剧」',
-              style: TextStyle(
-                  fontSize: 12,
-                  height: 1.5,
-                  fontWeight: FontWeight.w400,
-                  color: Fx.sub),
-            ),
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: .78),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: Colors.white),
-              ),
-              child: TextField(
-                controller: _ai,
-                focusNode: _aiFocus,
-                minLines: 1,
-                maxLines: 2,
-                textInputAction: TextInputAction.done,
-                onSubmitted: (_) => _aiFind(),
-                style: const TextStyle(fontSize: 13, color: Fx.ink),
-                cursorColor: Fx.accent,
-                decoration: const InputDecoration(
-                  isDense: true,
-                  border: InputBorder.none,
-                  hintText: '比如：2024 年高分悬疑，最好有反转',
-                  hintStyle: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w400,
-                      color: Color(0xFFB3BECD)),
-                  contentPadding: EdgeInsets.symmetric(vertical: 9),
-                ),
-              ),
-            ),
-            const SizedBox(height: 9),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                for (final e in ['悬疑反转', '周末治愈', '高分古装'])
-                  GestureDetector(
-                    onTap: () {
-                      _ai.text = e;
-                      setState(() {});
-                      _aiFocus.requestFocus();
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 9, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: .6),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(e,
-                          style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w400,
-                              color: Fx.sub)),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              height: 40,
-              child: GradButton(
-                text: '帮我找片',
-                icon: Icons.auto_awesome_rounded,
-                height: 40,
-                onTap: _aiFind,
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
   Widget _resultsView() {
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     return Column(
@@ -958,7 +797,6 @@ class _SearchPageState extends State<SearchPage> {
                 _mode = null;
                 _lastQuery = null;
                 _results = [];
-                _showAi = true;
               });
               _aiFocus.requestFocus();
             } else {

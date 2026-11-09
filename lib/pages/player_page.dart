@@ -17,6 +17,7 @@ import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
 import 'history_page.dart' show FxStore;
+import '../utils/fx_route.dart';
 
 /// 当前线路不能直接播放的原因，交给外层决定换线路与提示文案。
 enum SourceIssue { parse, empty, expired, error }
@@ -1501,8 +1502,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     FullPlayerResult? result;
     try {
       result = await Navigator.of(context).push<FullPlayerResult>(
-        PageRouteBuilder<FullPlayerResult>(
-          transitionDuration: const Duration(milliseconds: 260),
+        // 进全屏用「淡入 + 放大 2%」而不是横向推：
+        // 视频画面横向滑动会让人以为画面在动。
+        FxFadeScaleRoute<FullPlayerResult>(
           pageBuilder: (context, animation, secondaryAnimation) =>
               FullPlayerPage(
             player: c,

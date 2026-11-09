@@ -4,6 +4,7 @@ import '../models.dart';
 import '../theme.dart';
 import '../widgets/fx_cards.dart';
 import 'live_detail_page.dart';
+import '../utils/fx_route.dart';
 
 /// 直播 Tab 的固定分组顺序：央视 → 卫视 → 少儿 → 地方 → 港澳台 → 体育 → 其他。
 const List<String> kLiveSectionOrder = <String>[
@@ -201,12 +202,12 @@ void openLiveSection(BuildContext context, LiveSection section) {
   if (section.channels.isEmpty) return;
   if (section.hasSubgroups) {
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => LiveProvincePage(section: section)),
+      FxPageRoute(builder: (_) => LiveProvincePage(section: section)),
     );
     return;
   }
   Navigator.of(context).push(
-    MaterialPageRoute(
+    FxPageRoute(
       builder: (_) => LiveDetailPage(
         channel: section.channels.first,
         groupName: section.name,
@@ -220,7 +221,7 @@ void openLiveSection(BuildContext context, LiveSection section) {
 void openLiveChannel(BuildContext context, LiveChannel channel) {
   Navigator.of(
     context,
-  ).push(MaterialPageRoute(builder: (_) => LiveDetailPage(channel: channel)));
+  ).push(FxPageRoute(builder: (_) => LiveDetailPage(channel: channel)));
 }
 
 /// 地方频道的省份索引：卡片式 2–3 列，不把 143 台铺在一页。

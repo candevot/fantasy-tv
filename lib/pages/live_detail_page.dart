@@ -17,6 +17,7 @@ import '../widgets/player_theme.dart';
 import 'history_page.dart' show FxStore;
 import 'fullscreen_page.dart';
 import 'together_page.dart';
+import '../utils/fx_route.dart';
 
 /// 直播频道详情页。
 ///
@@ -443,7 +444,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     _hideTimer?.cancel();
     final line = _line;
     await Navigator.of(context).push<FullPlayerResult>(
-      MaterialPageRoute(
+      FxPageRoute(
         builder: (_) => FullPlayerPage(
           player: player,
           title: _channel.title,
@@ -582,7 +583,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       await _dropPlayer(player);
       if (!mounted) return;
       final result = await Navigator.of(context).push<TogetherExitResult>(
-        MaterialPageRoute(
+        FxPageRoute(
           builder: (_) =>
               TogetherPage.live(liveChannel: _channel, liveLineId: _lineId),
         ),

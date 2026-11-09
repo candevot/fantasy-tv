@@ -23,6 +23,7 @@ import 'pages/detail_page.dart';
 import 'pages/search_page.dart';
 import 'pages/together_page.dart';
 import 'pages/player_page.dart';
+import 'utils/fx_route.dart';
 
 void main() {
   // 所有 Dart 异步异常的最后一道网；Framework / 平台异常另行接管。
@@ -605,11 +606,11 @@ class _BootRetryBannerState extends State<_BootRetryBanner> {
 class Nav {
   static Future<void> detail(BuildContext c, String id,
           {int ep = 1, String line = ''}) =>
-      Navigator.of(c).push(MaterialPageRoute(
+      Navigator.of(c).push(FxPageRoute(
           builder: (_) => DetailPage(id: id, ep: ep, line: line)));
 
   static Future<void> search(BuildContext c) => Navigator.of(c)
-      .push(MaterialPageRoute(builder: (_) => const SearchPage()));
+      .push(FxPageRoute(builder: (_) => const SearchPage()));
 
   static Future<TogetherExitResult?> together(
     BuildContext c, {
@@ -619,7 +620,7 @@ class Nav {
     double position = 0,
     bool playing = false,
   }) =>
-      Navigator.of(c).push<TogetherExitResult>(MaterialPageRoute(
+      Navigator.of(c).push<TogetherExitResult>(FxPageRoute(
           builder: (_) => TogetherPage(
                 videoId: videoId,
                 ep: ep ?? 1,
@@ -630,6 +631,6 @@ class Nav {
 
   static Future<void> player(BuildContext c,
           {required String id, int ep = 1, String line = ''}) =>
-      Navigator.of(c).push(MaterialPageRoute(
+      Navigator.of(c).push(FxPageRoute(
           builder: (_) => PlayerPage(videoId: id, ep: ep, line: line)));
 }

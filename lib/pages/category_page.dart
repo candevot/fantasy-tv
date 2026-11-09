@@ -5,6 +5,7 @@ import '../models.dart';
 import '../theme.dart';
 import '../widgets/fx_cards.dart';
 import 'detail_page.dart';
+import '../utils/fx_route.dart';
 
 // 通用海报 / 分区 / 骨架组件已抽到 widgets/fx_cards.dart；
 // 这里继续 export，保持历史 `import 'category_page.dart'` 的页面可用。
@@ -711,7 +712,7 @@ class _CategoryPageState extends State<CategoryPage> {
 
   void _openDetail(String id) {
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => DetailPage(id: id)),
+      FxPageRoute(builder: (_) => DetailPage(id: id)),
     );
   }
 

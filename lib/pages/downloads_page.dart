@@ -5,6 +5,7 @@ import '../theme.dart';
 import 'category_page.dart';
 import 'download_series_page.dart';
 import 'offline_player_page.dart';
+import '../utils/fx_route.dart';
 
 /* ========================================================================== */
 /*  离线缓存：标准 AppBar + 「下载中 / 已下载」两个分区                        */
@@ -171,7 +172,7 @@ class _DownloadsPageState extends State<DownloadsPage>
       return;
     }
     await Navigator.of(context).push(
-      MaterialPageRoute(
+      FxPageRoute(
         builder: (_) => OfflinePlayerPage(task: task, file: file),
       ),
     );
@@ -183,7 +184,7 @@ class _DownloadsPageState extends State<DownloadsPage>
   /// 想补齐时点顶部「继续补下」。
   Future<void> _openSeries(_SeriesGroup group, {bool cachedOnly = false}) async {
     await Navigator.of(context).push(
-      MaterialPageRoute(
+      FxPageRoute(
         builder: (_) => DownloadSeriesPage(
           seriesId: group.id,
           cachedOnly: cachedOnly,

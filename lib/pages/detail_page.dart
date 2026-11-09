@@ -18,6 +18,7 @@ import 'history_page.dart' show FxStore;
 import 'offline_player_page.dart';
 import 'player_page.dart';
 import 'together_page.dart' show TogetherExitResult;
+import '../utils/fx_route.dart';
 
 /// 详情播放页：顶部内嵌 PlayerView（自动播放当前线路当前集），
 /// 下方「视频 / 评论」双 Tab、公告、简介、5 圆钮、线路、选集、相关推荐。
@@ -736,7 +737,7 @@ class _DetailPageState extends State<DetailPage>
     if (!mounted) return;
     try {
       await Navigator.of(context).push(
-        MaterialPageRoute(
+        FxPageRoute(
           builder: (_) => OfflinePlayerPage(task: task, file: file),
         ),
       );

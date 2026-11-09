@@ -6,6 +6,7 @@ import '../theme.dart';
 import '../widgets/player_theme.dart' show fxToast;
 import 'category_page.dart';
 import 'detail_page.dart';
+import '../utils/fx_route.dart';
 
 class _RankType {
   const _RankType(this.key, this.label);
@@ -133,7 +134,7 @@ class _RankPageState extends State<RankPage> {
 
   void _openDetail(String id) {
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => DetailPage(id: id)),
+      FxPageRoute(builder: (_) => DetailPage(id: id)),
     );
   }
 

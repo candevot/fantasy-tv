@@ -7,6 +7,7 @@ import '../main.dart' show Nav;
 import '../theme.dart';
 import 'category_page.dart';
 import 'search_page.dart';
+import '../utils/fx_route.dart';
 
 /* ========================================================================== */
 /*  本地记录仓库（详情页 / 播放页可复用）                                      */
@@ -389,7 +390,7 @@ class _HistoryPageState extends State<HistoryPage> {
         subtitle: '去挑一部好片，看到一半也会替你记住',
         actionText: '去搜片',
         onAction: () => Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => const SearchPage()),
+          FxPageRoute(builder: (_) => const SearchPage()),
         ),
       );
     }

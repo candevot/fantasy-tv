@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
 import 'api.dart';
+import 'utils/fx_route.dart';
 
 /// 大字体上限：跟随系统字号，但最多放大到 1.3 倍。
 /// 超过 1.3 倍的极端字号会把固定高度的卡片 / 导航撑破，统一在根部截断。
@@ -40,6 +41,10 @@ class FxTheme {
         displayColor: Fx.ink,
       ),
       splashFactory: InkSparkle.splashFactory,
+      // 全局页面过渡：横向轻推 + 淡入（见 utils/fx_route.dart）。
+      // 默认的 ZoomPageTransitionsBuilder 是「整页从中心涨开」，
+      // 首页→详情→播放连切两次时重心乱跳，观感很生硬。
+      pageTransitionsTheme: fxPageTransitionsTheme,
     );
   }
 }

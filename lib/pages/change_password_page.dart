@@ -5,6 +5,7 @@ import '../auth.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'login_page.dart';
+import '../utils/fx_route.dart';
 
 /// 修改密码：旧密码 / 新密码 / 确认新密码 → `POST /api/user/password`。
 /// 成功后 toast 提示并返回上一页（POST 契约下旧 token 继续有效，无需重新登录）。
@@ -108,7 +109,7 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
       actionText: '去登录',
       onAction: () async {
         await Navigator.of(context)
-            .push(MaterialPageRoute(builder: (_) => const LoginPage()));
+            .push(FxPageRoute(builder: (_) => const LoginPage()));
         if (mounted) setState(() {});
       },
     );

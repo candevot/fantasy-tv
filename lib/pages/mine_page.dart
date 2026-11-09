@@ -13,6 +13,7 @@ import 'favorite_page.dart';
 import 'history_page.dart';
 import 'login_page.dart';
 import 'settings_page.dart';
+import '../utils/fx_route.dart';
 
 class _Entry {
   const _Entry(this.icon, this.label, this.subtitle, this.color, this.builder);
@@ -70,7 +71,7 @@ class _MinePageState extends State<MinePage> {
   }
 
   Future<void> _open(Widget page) async {
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+    await Navigator.of(context).push(FxPageRoute(builder: (_) => page));
     if (mounted) _load();
   }
 
@@ -92,7 +93,7 @@ class _MinePageState extends State<MinePage> {
 
   Future<void> _openLogin() async {
     await Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => const LoginPage()));
+        .push(FxPageRoute(builder: (_) => const LoginPage()));
     if (!mounted) return;
     Auth.instance.refresh();
   }

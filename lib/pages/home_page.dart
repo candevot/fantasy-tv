@@ -11,6 +11,7 @@ import 'detail_page.dart';
 import 'live_groups_page.dart';
 import 'search_page.dart';
 import 'together_page.dart';
+import '../utils/fx_route.dart';
 
 class _Channel {
   const _Channel(this.key, this.label);
@@ -289,18 +290,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void _openSearch({bool ai = false}) {
     Navigator.of(
       context,
-    ).push(MaterialPageRoute(builder: (_) => SearchPage(openAi: ai)));
+    ).push(FxPageRoute(builder: (_) => SearchPage(openAi: ai)));
   }
 
   void _openDetail(String id) {
     Navigator.of(
       context,
-    ).push(MaterialPageRoute(builder: (_) => DetailPage(id: id)));
+    ).push(FxPageRoute(builder: (_) => DetailPage(id: id)));
   }
 
   void _openCategory(String type, String title) {
     Navigator.of(context).push(
-      MaterialPageRoute(
+      FxPageRoute(
         builder: (_) => CategoryPage(
           initialType: type,
           initialTitle: title,
@@ -379,7 +380,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final data = _cache[_channel];
-    return SafeArea(
+    // 频道切换时给内容一层淡入：之前是 setState 直接换列表，内容硬切，
+    // 观感像「闪一下」。这里用 key 绑定频道，切换时旧内容淡出、新内容淡入，
+    // 时长 180ms —— 够遮住跳变，又不会拖慢操作手感。
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 180),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      // 默认的 FadeTransition 会让两层同时占位导致高度跳动，
+      // 用 layoutBuilder 固定为「只显示新层」，避免滚动位置被顶歪。
+      layoutBuilder: (currentChild, previousChildren) => currentChild ?? const SizedBox.shrink(),
+      child: KeyedSubtree(
+        key: ValueKey<String>(_channel),
+        child: SafeArea(
       bottom: false,
       child: RefreshIndicator(
         color: Fx.accent,
@@ -395,6 +408,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ..._body(data),
             const SliverToBoxAdapter(child: SizedBox(height: 104)),
           ],
+        ),
+      ),
         ),
       ),
     );
@@ -777,7 +792,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 behavior: HitTestBehavior.opaque,
                 onTap: () => Navigator.of(
                   context,
-                ).push(MaterialPageRoute(builder: (_) => const TogetherPage())),
+                ).push(FxPageRoute(builder: (_) => const TogetherPage())),
                 child: Tooltip(
                   message: '一起看',
                   child: Semantics(
@@ -869,36 +884,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                     color: Fx.sub,
                   ),
                 ),
-              ),
-            ),
-          ),
-          GestureDetector(
-            onTap: () => _openSearch(ai: true),
-            child: Container(
-              height: 26,
-              padding: const EdgeInsets.symmetric(horizontal: 9),
-              decoration: BoxDecoration(
-                gradient: Fx.brand,
-                borderRadius: BorderRadius.circular(13),
-              ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.auto_awesome_rounded,
-                    size: 12,
-                    color: Colors.white,
-                  ),
-                  SizedBox(width: 3),
-                  Text(
-                    'AI 找片',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
-                ],
               ),
             ),
           ),

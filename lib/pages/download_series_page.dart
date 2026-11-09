@@ -4,6 +4,7 @@ import '../services/download_service.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'offline_player_page.dart';
+import '../utils/fx_route.dart';
 
 /* ========================================================================== */
 /*  整部剧的「离线详情」：标题 + 分组集数列表（全程不联网）                    */
@@ -71,7 +72,7 @@ class _DownloadSeriesPageState extends State<DownloadSeriesPage> {
       return;
     }
     await Navigator.of(context).push(
-      MaterialPageRoute(
+      FxPageRoute(
         builder: (_) => OfflinePlayerPage(task: task, file: file),
       ),
     );

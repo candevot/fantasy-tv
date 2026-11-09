@@ -5,6 +5,7 @@ import '../services/app_info.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'legal_page.dart';
+import '../utils/fx_route.dart';
 
 /// 关于页：真实版本号、简介、内置隐私政策 / 用户协议、联系邮箱。
 class AboutPage extends StatefulWidget {
@@ -49,7 +50,7 @@ class _AboutPageState extends State<AboutPage> {
 
   Future<void> _open(LegalDocument document) async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => LegalPage(document: document)),
+      FxPageRoute(builder: (_) => LegalPage(document: document)),
     );
   }
 

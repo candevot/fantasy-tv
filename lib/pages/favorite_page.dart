@@ -7,6 +7,7 @@ import 'category_page.dart';
 import 'detail_page.dart';
 import 'history_page.dart';
 import 'live_detail_page.dart';
+import '../utils/fx_route.dart';
 
 /* ========================================================================== */
 /*  收藏                                                                       */
@@ -196,12 +197,12 @@ class _FavoritePageState extends State<FavoritePage> {
         lines: r.lines,
       );
       Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => LiveDetailPage(channel: channel)),
+        FxPageRoute(builder: (_) => LiveDetailPage(channel: channel)),
       );
       return;
     }
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => DetailPage(id: r.id)),
+      FxPageRoute(builder: (_) => DetailPage(id: r.id)),
     );
   }
 
