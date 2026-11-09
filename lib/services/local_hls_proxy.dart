@@ -154,7 +154,10 @@ class LocalHlsProxy {
     // 播放时直接命中内存/磁盘，上游抖动或签名过期都影响不到已缓存部分。
     // 每片约 1~2MB，1800 片约 2~3 分钟量；具体条数由 _schedulePrefetch
     // 按 cacheLimitBytes 与预缓冲预算裁剪。
-    this.prefetchCount = 512,
+    // 预取条数上限。原来 512：红牛/量子一集 630 片时只能覆盖前 512 片，
+    // 拖到后面就得现下。提到 4096 —— 覆盖任何常见一集的全部片数；
+    // 真正的闸门是下面的缓存预算（装不下就停），不是这个数。
+    this.prefetchCount = 4096,
     // 无限预加载：把整集尽量全部拉到本地，播放时全程读本地。
     //
     // 这是「随便拖进度都秒开」的关键（对标咕噜咕噜的 setInfinitePreload）。
@@ -1855,15 +1858,22 @@ class LocalHlsProxy {
     final avgSegBytes = _estimateSegmentBytes(playlist);
     var depth = prefetchCount;
     if (infinitePreload) {
-      // 无限预加载：按「缓存能装下多少」全量往前备，不再按 70% 折半、
-      // 也不再对大分片砍到 3 片。这是「任意位置拖进度都秒开」的关键。
+      // 无限预加载：按「缓存装得下多少」全量往前备。
       //
-      // 缓存上限本身已经随设备内存自适应（见 FxPlayer 的 cacheLimitBytes），
-      // 所以这里放开深度不会把内存吃爆；真正到顶时下面还有
-      // `_cacheBytes >= cacheLimitBytes * 0.85` 的硬刹车。
+      // 分两种情况：
+      //  · 整集装得下（1080P：一集 300~600MB < 缓存上限）→ 整集备齐，
+      //    任意位置拖进度都是读本地，这是秒拖的关键。
+      //  · 整集装不下（4K：一集 2.4GB > 1~2GB 缓存）→ 硬要全备只会
+      //    把前面的挤掉、反复重下。这种就退化为「当前片 + 后续 N 片」，
+      //    保证顺序播放不断流；拖到远处时走正常请求（首片会快，
+      //    因为 4K 单片本来就 10~20MB，CDN 给得动）。
       if (avgSegBytes > 0 && cacheLimitBytes > 0) {
+        final wholeFits = avgSegBytes * playlist.segments.length <= cacheLimitBytes;
         final affordable = (cacheLimitBytes / avgSegBytes).floor();
-        depth = math.min(prefetchCount, math.max(8, affordable));
+        depth = math.min(
+          prefetchCount,
+          math.max(8, wholeFits ? affordable : math.min(affordable, 48)),
+        );
       }
     } else {
       if (avgSegBytes > 0 && cacheLimitBytes > 0) {
@@ -1879,7 +1889,9 @@ class LocalHlsProxy {
     final end = math.min(playlist.segments.length, start + depth);
     for (var i = math.max(0, start); i < end; i++) {
       // 缓存预算：留给正在播放的位置，避免把内存吃满导致整机卡顿。
-      if (cacheLimitBytes > 0 && _cacheBytes >= cacheLimitBytes * 0.85) break;
+      // 缓存刹车：留一点余量给正在播的分片和 mpv 自身，不要卡在 85% 就停 ——
+      // 85% 会让「整集刚好装得下」的情况永远差最后一段。
+      if (cacheLimitBytes > 0 && _cacheBytes >= cacheLimitBytes - 64 * 1024 * 1024) break;
       final segment = playlist.segments[i];
       final alias = _segmentAliases[segment.cacheKey];
       final cacheKey = alias?.cacheKey ?? 'seg:${segment.cacheKey}';
