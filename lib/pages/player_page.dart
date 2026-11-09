@@ -1037,7 +1037,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               // 一直转圈。别的播放器没这问题就是因为它直接让 mpv 拉流。
               // 按实际地址判断：腾讯直连是 CDN 绝对地址，不需要代理；
               // 只有爱奇艺 /api/iqiyi.m3u8 这类站内包装地址才需要。
-              direct: info.direct && info.isHls && fxUrlNeedsClientProxy(url),
+              // HLS 一律交给本地代理：整集预加载 / 预取让位 / 下一片保护
+              // 全都做在代理里，采集线路（红牛/量子/蓝光/4K）也是公网直链，
+              // 之前被判「不需要代理」就完全享受不到这些优化。
+              direct: fxShouldUseHlsProxy(url, isHls: info.isHls),
               // 平台线路签名过期时，代理会回调这里重新走 /api/play。
               refreshPlay: () => _refreshPlatformUrl(line, ep),
               onPlayExpired: () {

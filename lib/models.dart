@@ -712,6 +712,28 @@ bool fxUrlNeedsClientProxy(String url) {
   return true;
 }
 
+/// 这条地址是否应该交给「本地 HLS 代理」接管。
+///
+/// 和 [fxUrlNeedsClientProxy] 的区别：那个判断的是「mpv 自己能不能拉」，
+/// 这个判断的是「要不要为了让预加载生效而接管」。
+///
+/// 为什么要接管：整集预加载、预取让位播放、下一片保护这些优化全都做在
+/// 本地代理里。之前只有站内包装地址（/api/fyplay、/api/iqyiyi.m3u8）走代理，
+/// 采集线路（红牛 / 量子 / 蓝光 / 4K）是公网直链，被判定为「不需要代理」，
+/// 于是**完全享受不到预加载** —— 用户看到的差距就在这里。
+///
+/// 现在凡是 http(s) 的 m3u8 都交给代理：mpv 拿到的仍是本地地址，
+/// 代理负责下载、缓存、预取，分片仍然是直连 CDN（不额外消耗服务器带宽）。
+bool fxShouldUseHlsProxy(String url, {required bool isHls}) {
+  if (!isHls) return false;
+  final raw = url.trim().toLowerCase();
+  if (raw.isEmpty) return false;
+  if (!raw.startsWith('http://') && !raw.startsWith('https://')) return false;
+  // 非 m3u8 扩展名也可能是 HLS（平台包装地址），由 isHls 决定；
+  // 这里只排除明显不是 HLS 的情况（mp4 直链等），由调用方的 isHls 把关。
+  return true;
+}
+
 bool fxIsPlatformLine(LineInfo line) {
   final raw = '${line.id} ${line.name} ${line.source ?? ''} ${line.from ?? ''} ${line.type}';
   final lower = raw.toLowerCase();

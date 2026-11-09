@@ -717,9 +717,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               // 采集线路直连（mpv 边下边播）；只有平台签名线路走代理。
               // 按实际地址判断：腾讯直连是 CDN 绝对地址，不需要代理；
               // 只有爱奇艺 /api/iqiyi.m3u8 这类站内包装地址才需要。
-              direct: source.direct &&
-                  source.isHls &&
-                  fxUrlNeedsClientProxy(url),
+              // HLS 一律交给本地代理，才能享受整集预加载（与主播放页一致）。
+              direct: fxShouldUseHlsProxy(url, isHls: source.isHls),
               refreshPlay: _refreshPlatformUrl,
               onPlayExpired: _onPlatformExpired,
               rescueLines: _rescueLineSource,
@@ -803,7 +802,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             url,
             headers: headers,
             play: wasPlaying,
-            direct: direct && fxUrlNeedsClientProxy(url),
+            direct: fxShouldUseHlsProxy(url, isHls: true),
             refreshPlay: _refreshPlatformUrl,
             onPlayExpired: _onPlatformExpired,
             rescueLines: _rescueLineSource,
@@ -902,7 +901,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         return FxLineSource(
           url: freshUrl,
           headers: fresh.headers,
-          direct: fresh.direct && fresh.isHls && fxUrlNeedsClientProxy(freshUrl),
+          direct: fxShouldUseHlsProxy(freshUrl, isHls: fresh.isHls),
         );
       } catch (_) {
         // 这条取不到地址就继续试下一条线路。
@@ -1144,9 +1143,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       headers: headers,
       resume: resume,
       wasPlaying: true,
-      direct: (_info?.direct ?? false) &&
-          (_info?.isHls ?? false) &&
-          fxUrlNeedsClientProxy(url),
+      direct: fxShouldUseHlsProxy(url, isHls: _info?.isHls ?? false),
     );
     if (!mounted || token != _loadToken) return;
     if (!ok) {

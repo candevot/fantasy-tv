@@ -1141,11 +1141,20 @@ class FxPlayer implements Listenable {
   ///
   /// 每 2 秒一次（跟看门狗同频）：够平滑，也不会因为高频 setState
   /// 让播放页每帧重建。
+  /// 把「起播进度 + 实时网速」同步到 value。
+  ///
+  /// 两条来源：
+  ///  · 走了本地代理（平台线路）：用代理层按真实下载字节算的进度和速度，
+  ///    这是最准的；
+  ///  · 直连 mpv（采集线路：红牛 / 量子 / 蓝光 / 4K）：代理层根本不存在，
+  ///    之前 speed 恒为 0 —— 用户看到的就是「没有实时网速」。
+  ///    这里改用 mpv 自己的 `cache-speed`（字节/秒）读速度。
   void _syncProxyProgress() {
     final proxy = _hlsProxy;
-    if (proxy == null) return;
-    final pct = proxy.startupPercent;
-    final speed = proxy.liveSpeed;
+    final pct = proxy?.startupPercent ?? _value.measuredBufferPercent;
+    double speed = proxy?.liveSpeed ?? 0;
+    // 代理不存在或还没测到速度时，退回 mpv 的 cache-speed。
+    if (speed <= 0 && _cachedMpvSpeed > 0) speed = _cachedMpvSpeed;
     if (pct == _value.measuredBufferPercent && speed == _value.bytesPerSecond) {
       return;
     }
@@ -1157,8 +1166,32 @@ class FxPlayer implements Listenable {
     );
   }
 
+  /// mpv `cache-speed`（字节/秒）的最近一次读数。
+  ///
+  /// 单独缓存在这里，而不是每次同步都去 getProperty —— 读属性要走
+  /// 平台通道，2 秒一次已经够；读失败就保持上一次的值，不要闪成 0。
+  double _cachedMpvSpeed = 0;
+
+  /// 从 mpv 读实时下载速度（cache-speed，字节/秒）。直连线路用它显示网速。
+  Future<void> _readMpvSpeed() async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    if (_disposed || _rescueBusy) return;
+    try {
+      final raw = await platform
+          .getProperty('cache-speed', waitForInitialization: false)
+          .timeout(const Duration(seconds: 1));
+      final v = double.tryParse(raw.trim());
+      if (v != null && v.isFinite && v >= 0) _cachedMpvSpeed = v;
+    } catch (_) {
+      // 不支持此属性 / 读取超时：保持上一次的值，不清零。
+    }
+  }
+
   Future<void> _watchdogTickAsync() async {
     if (_disposed || _rescueBusy) return;
+    // 直连线路没有代理层，速度只能问 mpv。
+    if (_hlsProxy == null) await _readMpvSpeed();
     _syncProxyProgress();
     final v = _value;
     // 救援 / 最终失败之后都由新的 open 接管，看门狗不再自作主张。
@@ -1287,6 +1320,15 @@ class FxPlayer implements Listenable {
 
   /// 救援重开时的新流就绪信号（首帧 / 时长 / 位置任一到达）。
   void _signalMediaReady() {
+    // 首帧已出：放开本地代理的整集预热。
+    //
+    // 对标咕噜咕噜的做法 —— 它的 APK 里有两条明确日志：
+    //   「Playlist preload paused:」（起播期间暂停预取）
+    //   「Rebalanced to deepen protected next preload:」（首帧后再加深预取）
+    // 也就是说它**先保证首片拿满带宽，再开始后台预热**。
+    // 我们之前一拿到播放列表就开 6 路预取，首片被挤到后面排队，
+    // 这就是「4K 起播比它慢」的直接原因。
+    _hlsProxy?.markFirstFrameReady();
     final completer = _mediaReady;
     if (completer != null && !completer.isCompleted) completer.complete();
   }

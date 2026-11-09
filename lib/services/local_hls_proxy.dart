@@ -317,6 +317,23 @@ class LocalHlsProxy {
   /// 用于界面上显示「3.2 MB/s」。0 表示还没测到。
   double _liveSpeed = 0;
 
+  /// 首帧是否已经出来（播放器已经成功取到并解码了第一个分片）。
+  ///
+  /// 首帧之前**不跑预取**：起播时播放器要抢第一个分片，预取一开就是
+  /// 4~6 路并发抢连接，首片只能排队 —— 这就是「4K 起播比别家慢」的主因。
+  /// 首帧出来后由 [markFirstFrameReady] 打开，才开始整集预热。
+  bool _firstFrameReady = false;
+
+  /// 播放器报告首帧已出：放开预取。
+  ///
+  /// 同时把「首屏要用的那几个分片」从队列里摘掉（它们已经在缓存里了），
+  /// 让预取直接跳到播放位置之后，避免重复排队。
+  void markFirstFrameReady() {
+    if (_firstFrameReady) return;
+    _firstFrameReady = true;
+    _pumpPrefetch();
+  }
+
   /// 最近一次播放器请求的分片序号，用于识别 seek。
   int _lastPlaybackIndex = -1;
 
@@ -1887,10 +1904,31 @@ class LocalHlsProxy {
       }
     }
     final end = math.min(playlist.segments.length, start + depth);
-    for (var i = math.max(0, start); i < end; i++) {
+    // 预取顺序：紧邻播放位置的「下一片」最先，然后按顺序往后。
+    //
+    // 对标咕噜的「Rebalanced to deepen protected next preload」——
+    // 它把「下一片」当成受保护对象优先拉。顺序播放时下一片必须已经在本地，
+    // 否则每次换片都要等一次网络往返，看起来就是「一卡一卡」。
+    // 这里把 start 之后的前 3 片插到队首，其余按顺序排在后面。
+    final priorityEnd = math.min(end, math.max(0, start) + 3);
+    for (var i = math.max(0, start); i < priorityEnd; i++) {
       // 缓存预算：留给正在播放的位置，避免把内存吃满导致整机卡顿。
       // 缓存刹车：留一点余量给正在播的分片和 mpv 自身，不要卡在 85% 就停 ——
       // 85% 会让「整集刚好装得下」的情况永远差最后一段。
+      if (cacheLimitBytes > 0 && _cacheBytes >= cacheLimitBytes - 64 * 1024 * 1024) break;
+      final segment = playlist.segments[i];
+      final alias = _segmentAliases[segment.cacheKey];
+      final cacheKey = alias?.cacheKey ?? 'seg:${segment.cacheKey}';
+      if (_cache.containsKey(cacheKey) ||
+          _prefetchQueued.contains(cacheKey) ||
+          _segmentInflight.containsKey(cacheKey)) {
+        continue;
+      }
+      _prefetchQueue.insert(0, _PrefetchTask(segment, _generation, cacheKey));
+      _prefetchQueued.add(cacheKey);
+    }
+    // 其余分片按顺序排在后面
+    for (var i = priorityEnd; i < end; i++) {
       if (cacheLimitBytes > 0 && _cacheBytes >= cacheLimitBytes - 64 * 1024 * 1024) break;
       final segment = playlist.segments[i];
       final alias = _segmentAliases[segment.cacheKey];
@@ -1962,6 +2000,10 @@ class LocalHlsProxy {
 
   void _pumpPrefetch() {
     if (_disposed) return;
+    // 首帧之前一律不预取：把连接和带宽全部留给「起播要的那几个分片」。
+    // 这是 4K 起播速度的关键 —— 之前一拿到播放列表就开 6 路预取，
+    // 首片只能排在后面等。
+    if (!_firstFrameReady) return;
     final limit = _effectivePrefetchConcurrency;
     while (_prefetchActive < limit && _prefetchQueue.isNotEmpty) {
       final task = _prefetchQueue.removeAt(0);
