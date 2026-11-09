@@ -122,9 +122,18 @@ class FsBottomBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = compact ? .9 : 1.0;
     // 刘海 / 圆角屏：左右让出安全边距，底栏按钮不压进屏幕圆角。
+    //
+    // 右侧比左侧多让 8dp：手机是弧形圆角屏，横屏时右下角也是圆的，
+    // 只留 16dp 时「选集 / 播放设置 / 退出全屏」这一组会压进圆角被裁一截。
+    // 顶栏同理（见 fs_controls 的 cornerGuard），两处保持一致。
     final safe = MediaQuery.viewPaddingOf(context);
     return Container(
-      padding: EdgeInsets.fromLTRB(16 + safe.left, 26, 16 + safe.right, 6 + bottomInset),
+      padding: EdgeInsets.fromLTRB(
+        16 + safe.left,
+        26,
+        24 + safe.right,
+        6 + bottomInset,
+      ),
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,

@@ -361,7 +361,9 @@ class FsSideControls extends StatelessWidget {
         ),
         if (showSeek)
           Positioned(
-            right: 14 + safe.right,
+            // 右侧侧栏同样让开弧形圆角：14dp 太贴边，横屏时快进/快退按钮
+            // 会压进右下圆角。跟顶栏、底栏统一到 24dp。
+            right: 24 + safe.right,
             top: safe.top,
             bottom: safe.bottom,
             child: Center(
