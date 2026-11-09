@@ -603,7 +603,16 @@ class FxPlayer implements Listenable {
         return;
       }
       // 2) 交给 mpv：12MB 小缓冲先出画，open 发出后立刻调到 96MiB。
-      await _openMedia(source, play: play, token: token).timeout(readyTimeout);
+      //
+      // 这里**不能**再用 readyTimeout 一刀切：_openMedia 内部要先等本地代理
+      // 起好、mpv 接受 URL，大分片源在这一步就可能超过 20 秒。
+      // 用 _openHardCap 兜底，真正的「卡死」由后面的 _awaitReadyOrProgress
+      // 按下载进展判定，避免把慢线路误判成坏线路。
+      await _openMedia(
+        source,
+        play: play,
+        token: token,
+      ).timeout(_openHardCap);
     } catch (error) {
       if (_disposed || token != _openToken) {
         // 已被新的播放请求取代：不报错，也不去污染新 open 的状态。
