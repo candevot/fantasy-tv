@@ -1505,8 +1505,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 进全屏用「淡入 + 放大 2%」而不是横向推：
         // 视频画面横向滑动会让人以为画面在动。
         FxFadeScaleRoute<FullPlayerResult>(
-          pageBuilder: (context, animation, secondaryAnimation) =>
-              FullPlayerPage(
+          builder: (context) => FullPlayerPage(
             player: c,
             videoId: widget.videoId,
             ep: _ep,
@@ -1521,9 +1520,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             canChangeLine: widget.onChangeLine != null,
             castOwner: this,
           ),
-          transitionsBuilder: (context, animation, secondaryAnimation, child) {
-            return FadeTransition(opacity: animation, child: child);
-          },
         ),
       );
     } finally {

@@ -224,6 +224,8 @@ class _SearchPageState extends State<SearchPage> {
     }
   }
 
+  // 入口已移除（用户要求删掉 AI 找片），逻辑保留以备恢复。
+  // ignore: unused_element
   Future<void> _aiFind() async {
     final prompt = _ai.text.trim();
     if (prompt.isEmpty) {
