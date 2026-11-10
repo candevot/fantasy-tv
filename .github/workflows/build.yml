@@ -14,9 +14,12 @@ jobs:
           java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
-          # Flutter 3.32.8 = Dart 3.8.1；配合 AGP 8.13 / compileSdk 36
-          # 满足 media_kit libmpv 1.1.7 与 Android 16KB 页要求。
-          flutter-version: '3.32.8'
+          # Flutter 3.47.9 = Dart 3.13.7（2026-10-29 stable）。
+          # 升到这里是为了能用 better_player / video_player / chewie 这些
+          # 要求 Flutter >=3.44 的包 —— 它们底层是 ExoPlayer(Media3)，
+          # 也就是腾讯/阿里播放器同款内核，能根治「4K 只播 19 秒」和
+          # 「每片都要跳一次 302」这类 libmpv 的 HLS 兼容问题。
+          flutter-version: '3.47.9'
           channel: stable
           cache: true
       - name: Show Flutter version
