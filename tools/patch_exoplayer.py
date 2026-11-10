@@ -70,7 +70,18 @@ def patch_gradle():
         # Kotlin DSL: dependencies { ... }
         m = re.search(r'dependencies\s*\{', src)
         if not m:
-            fail('build.gradle.kts 里没有 dependencies 块')
+            # Flutter 3.47 的模板可能把 dependencies 写在别处，
+            # 兜底：直接追加到文件末尾（Gradle 允许顶层 dependencies 块）
+            print('  未找到 dependencies 块，追加到文件末尾')
+            extra = ('\n\ndependencies {\n'
+                     '    implementation("androidx.media3:media3-exoplayer:%s")\n'
+                     '    implementation("androidx.media3:media3-exoplayer-hls:%s")\n'
+                     '    implementation("androidx.media3:media3-ui:%s")\n'
+                     '    implementation("androidx.media3:media3-datasource:%s")\n'
+                     '}\n') % (MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION)
+            io.open(path, 'w', encoding='utf-8').write(src + extra)
+            print('  已追加 Media3 依赖 -> %s' % path)
+            return path
         ins = '\n'.join(
             "    implementation(\"androidx.media3:media3-exoplayer:%s\")" % MEDIA3_VERSION,
             # 占位，下面重写
@@ -85,7 +96,10 @@ def patch_gradle():
     else:
         m = re.search(r'dependencies\s*\{', src)
         if not m:
-            fail('build.gradle 里没有 dependencies 块')
+            print('  未找到 dependencies 块，追加到文件末尾')
+            io.open(path, 'w', encoding='utf-8').write(src + '\n\ndependencies {\n' + DEPS + '}\n')
+            print('  已追加 Media3 依赖 -> %s' % path)
+            return path
         pos = m.end()
         src = src[:pos] + '\n' + DEPS + src[pos:]
 
@@ -94,16 +108,30 @@ def patch_gradle():
     return path
 
 
+def find_main_activity():
+    """在 android/app/src 下递归找 MainActivity（包名/语言都可能变）"""
+    root = 'android/app/src/main'
+    hits = []
+    for base, _dirs, files in os.walk(root):
+        for f in files:
+            if f in ('MainActivity.kt', 'MainActivity.java'):
+                hits.append(os.path.join(base, f))
+    if not hits:
+        # 打印实际目录帮助定位
+        print('  android/app/src/main 下的文件树：')
+        for base, _dirs, files in os.walk(root):
+            for f in files:
+                print('    ' + os.path.join(base, f))
+        fail('找不到 MainActivity')
+    # 优先 kotlin 路径
+    hits.sort(key=lambda p: (0 if p.endswith('.kt') else 1, len(p)))
+    return hits[0]
+
+
 def patch_main_activity():
     """在 MainActivity.configureFlutterEngine 里注册 ExoPlayer 插件"""
-    cands = [
-        'android/app/src/main/kotlin/%s/MainActivity.kt' % PKG_PATH,
-        'android/app/src/main/java/%s/MainActivity.kt' % PKG_PATH,
-        'android/app/src/main/java/%s/MainActivity.java' % PKG_PATH,
-    ]
-    path = next((p for p in cands if os.path.exists(p)), None)
-    if not path:
-        fail('找不到 MainActivity（找过：%s）' % ', '.join(cands))
+    path = find_main_activity()
+    print('  找到 MainActivity: ' + path)
     src = io.open(path, encoding='utf-8').read()
     if REGISTER_MARK in src:
         print('  ExoPlayer 注册已存在，跳过')
