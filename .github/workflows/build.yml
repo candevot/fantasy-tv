@@ -64,6 +64,12 @@ jobs:
           # 冒号两侧带空格；用独立脚本匹配，避免 patch 静默失效。
           # 同时注册 fantasy_tv/cast 通道，SSDP 搜索时申请 MulticastLock。
           python3 tools/patch_edge_to_edge.py
+      - name: Inject ExoPlayer (Media3) kernel
+        run: |
+          # 把 android_src/ 里的 ExoPlayer 桥接插件注入 CI 生成的工程，
+          # 并注册到 MainActivity + 加 media3 依赖。
+          # 这是换内核的第一步：先让插件能编译进包，Dart 侧还没切过去。
+          python3 tools/patch_exoplayer.py
       - name: Check Android 8+ / 16KB compatibility
         run: |
           python3 tools/check_android_compat.py
