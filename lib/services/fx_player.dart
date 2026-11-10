@@ -222,7 +222,9 @@ class FxPlayer implements Listenable {
   FxPlayer._({this.readyTimeout = const Duration(seconds: 20)}) {
     final android = defaultTargetPlatform == TargetPlatform.android;
     _player = Player(
-      configuration: const PlayerConfiguration(
+      // 注意：不能加 const —— bufferSize 现在是按设备内存算的 getter，
+      // const 构造要求所有参数是编译期常量。
+      configuration: PlayerConfiguration(
         title: '幻想影视',
         // 字幕 / ASS 交给 libass，复杂样式不走 Flutter 层。
         libass: true,
