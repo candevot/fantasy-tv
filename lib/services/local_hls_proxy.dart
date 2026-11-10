@@ -811,11 +811,18 @@ class LocalHlsProxy {
     // 解码出画；同时把字节攒在内存里，传完之后照常写进缓存 ——
     // 下次 seek 回来还是缓存命中，不牺牲后续体验。
     //
-    // 只在不带 Range、且缓存未命中时走这条路：
+    // 只在不带 Range、且缓存未命中、且分片足够大（值得流式）时走这条路：
     //   · 带 Range（seek）需要精确偏移，必须整片下载后再切片；
-    //   · 缓存命中本来就是内存里现成的，直接走原路径更快。
+    //   · 缓存命中本来就是内存里现成的，直接走原路径更快；
+    //   · 小分片（≤1MB）并行 Range 下载更快 —— 8 路并发压满带宽，
+    //     流式单连接反而慢，回归测试里就是这条断言抓到的。
+    //
+    // 阈值取 1MB：小于等于它的分片用并行下载（通常 1~3 百毫秒就完成，
+    // 流式省下的那点首包延迟没有意义）；大于它的（4K 的 2.8~8.5MB）
+    // 才值得边下边发，让播放器尽早开始解码。
     final rangeParam = request.uri.queryParameters['r'];
-    if (rangeParam == null || rangeParam.isEmpty) {
+    final bigEnough = _segmentLikelyLarge(alias);
+    if ((rangeParam == null || rangeParam.isEmpty) && bigEnough) {
       final cacheKey0 = _segmentAliases[ref.cacheKey]?.cacheKey ?? 'seg:${ref.cacheKey}';
       if (_cacheGet(cacheKey0) == null) {
         final streamed = await _tryServeSegmentStreamed(
@@ -1358,6 +1365,24 @@ class LocalHlsProxy {
         _segmentInflight.remove(cacheKey);
       }
     }
+  }
+
+  /// 流式转发的最小分片阈值：小于它的走并行 Range 下载。
+  ///
+  /// 8 路并发能把带宽压满，1MB 以内的分片 100~300ms 就完成了，
+  /// 流式省下的首包延迟抵不过并行带来的吞吐提升。
+  static const int _streamThresholdBytes = 1 * 1024 * 1024;
+
+  /// 判断这个分片是否「值得流式转发」。
+  ///
+  /// 优先看播放列表里 EXTINF 已知的码率估算；拿不到就退回保守判断
+  /// （默认不流式）—— 宁可慢一点，也不要因为猜错把并行下载关掉。
+  bool _segmentLikelyLarge(_SegmentAlias? alias) {
+    if (alias == null) return false;
+    final playlist = _playlistCache[alias.playlistKey]?.value.playlist;
+    if (playlist == null) return false;
+    final avg = _estimateSegmentBytes(playlist);
+    return avg > _streamThresholdBytes;
   }
 
   /// 边下边转发一个分片；成功接管响应时返回 true。
