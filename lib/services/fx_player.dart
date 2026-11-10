@@ -845,6 +845,23 @@ class FxPlayer implements Listenable {
       await platform.setProperty('cache-on-disk', 'yes');
       await platform.setProperty('cache-dir', _diskCacheDir);
       await platform.setProperty('demuxer-max-back-bytes', '$_backBufferBytes');
+      // ── 以下四条照搬腾讯云播放器的策略（从咕噜 APK 的 droppedCap /
+      //    concurrentThreads 逆出来的思路），目的是「网络一抖不卡死」：
+      //
+      // 1) video-sync=audio：以音频为主时钟。默认的 display-resample 会在
+      //    掉帧时反复微调音调，弱网下表现为声音发飘；跟音频走最稳。
+      await platform.setProperty('video-sync', 'audio');
+      // 2) framedrop=vo：解码跟不上时**丢帧**而不是停下来等。
+      //    腾讯云的 droppedCap 就是这个语义 —— 宁可少几帧，也不要卡住。
+      await platform.setProperty('framedrop', 'vo');
+      // 3) 解码线程数按 CPU 核数给（腾讯云的 concurrentThreads）。
+      //    太少解不动 4K，太多抢 CPU 反而掉帧。
+      final cores = Platform.numberOfProcessors;
+      final threads = cores <= 4 ? 2 : (cores <= 6 ? 3 : 4);
+      await platform.setProperty('vd-lavc-threads', '$threads');
+      // 4) cache-pause-wait 调小：缓冲补到 1.5 秒就继续播，
+      //    默认 10 秒意味着「卡一下要等满 10 秒才恢复」。
+      await platform.setProperty('cache-pause-wait', '1.5');
     } catch (_) {
       // 旧版本 / 特殊平台没有这些属性时静默跳过。
     }
