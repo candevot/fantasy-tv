@@ -276,7 +276,7 @@ class _FxBackgroundState extends State<FxBackground>
     super.didChangeDependencies();
     // 跟随最近的 TickerMode：被 IndexedStack 隐藏的 Tab、被新页面盖住的
     // 路由、以及显式 TickerMode(enabled:false) 都会自动暂停动画。
-    final mode = TickerMode.getNotifier(context);
+    final mode = TickerMode.getValuesNotifier(context);
     if (!identical(mode, _modeNotifier)) {
       _modeNotifier?.removeListener(_onTickerModeChanged);
       _modeNotifier = mode..addListener(_onTickerModeChanged);

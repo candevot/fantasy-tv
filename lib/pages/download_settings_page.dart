@@ -360,7 +360,7 @@ class _DownloadSettingsPageState extends State<DownloadSettingsPage> {
                             ),
                             Switch.adaptive(
                               value: _settings.wifiOnlyDownload,
-                              activeColor: Fx.accent,
+                              activeThumbColor: Fx.accent,
                               onChanged: (value) async {
                                 await _settings.setWifiOnlyDownload(value);
                                 if (!mounted) return;

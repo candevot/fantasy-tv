@@ -79,7 +79,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.didChangeDependencies();
     // Tab 切走 / 被详情页盖住时，TickerMode 会变 false：banner 定时器
     // 随可见性启停，不再在后台空转。
-    final mode = TickerMode.getNotifier(context);
+    final mode = TickerMode.getValuesNotifier(context);
     if (!identical(mode, _tickerMode)) {
       _tickerMode?.removeListener(_onTickerModeChanged);
       _tickerMode = mode..addListener(_onTickerModeChanged);

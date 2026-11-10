@@ -946,7 +946,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
           ),
           Switch(
             value: value,
-            activeColor: Colors.white,
             activeTrackColor: Fx.accent,
             onChanged: onChanged,
           ),
