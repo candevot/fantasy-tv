@@ -1248,7 +1248,16 @@ class LocalHlsProxy {
                 line.startsWith('#EXT-X-BYTERANGE:') ||
                 line.startsWith('#EXT-X-KEY:') ||
                 line.startsWith('#EXT-X-SESSION-KEY:') ||
-                line.startsWith('#EXT-X-MAP:'),
+                line.startsWith('#EXT-X-MAP:') ||
+                // 这几个是**点播列表的结束标记**，漏掉它们播放器会当成直播：
+                // 只播「当前窗口」里的分片，播完就停。
+                // 用户报的「4K 只能播 19 秒」就是这里 —— 服务端列表有
+                // #EXT-X-ENDLIST（152 片/2872 秒完整），但客户端重写时把它
+                // 丢了，mpv 判成 live 流，播完头几个分片就结束。
+                line.startsWith('#EXT-X-ENDLIST') ||
+                line.startsWith('#EXT-X-PLAYLIST-TYPE:') ||
+                line.startsWith('#EXT-X-TARGETDURATION:') ||
+                line.startsWith('#EXT-X-VERSION:'),
           )
           .join('\n'),
     );
