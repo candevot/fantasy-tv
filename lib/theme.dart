@@ -263,7 +263,8 @@ class _FxBackgroundState extends State<FxBackground>
   double _phaseBase = 0;
   bool _tickerMode = true;
   bool _resumed = true;
-  ValueListenable<bool>? _modeNotifier;
+  // getValuesNotifier 的类型是 TickerModeData，取 .enabled 才是 bool。
+  ValueListenable<TickerModeData>? _modeNotifier;
 
   @override
   void initState() {
@@ -276,17 +277,18 @@ class _FxBackgroundState extends State<FxBackground>
     super.didChangeDependencies();
     // 跟随最近的 TickerMode：被 IndexedStack 隐藏的 Tab、被新页面盖住的
     // 路由、以及显式 TickerMode(enabled:false) 都会自动暂停动画。
+    // getValuesNotifier 的值是 TickerModeData，.enabled 才是 bool。
     final mode = TickerMode.getValuesNotifier(context);
     if (!identical(mode, _modeNotifier)) {
       _modeNotifier?.removeListener(_onTickerModeChanged);
       _modeNotifier = mode..addListener(_onTickerModeChanged);
-      _tickerMode = mode.value;
+      _tickerMode = mode.value.enabled;
     }
     _syncTicker();
   }
 
   void _onTickerModeChanged() {
-    _tickerMode = _modeNotifier?.value ?? true;
+    _tickerMode = _modeNotifier?.value.enabled ?? true;
     _syncTicker();
   }
 

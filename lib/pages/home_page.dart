@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+// TickerModeData（TickerMode.getValuesNotifier 的返回类型）在 scheduler 里。
+import 'package:flutter/scheduler.dart';
 
 import '../api.dart';
 import '../models.dart';
@@ -49,7 +51,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _dragging = false;
   bool _tabVisible = true;
   bool _appResumed = true;
-  ValueListenable<bool>? _tickerMode;
+  // getValuesNotifier 的类型是 TickerModeData，取 .enabled 才是 bool。
+  ValueListenable<TickerModeData>? _tickerMode;
   String? _error;
 
   /// 直播频道单独维护：接口可能为空 / 404，失败也按空态处理，不弹错误。
@@ -79,16 +82,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.didChangeDependencies();
     // Tab 切走 / 被详情页盖住时，TickerMode 会变 false：banner 定时器
     // 随可见性启停，不再在后台空转。
+    // Flutter 3.35 起 getValuesNotifier 返回 ValueListenable<TickerModeData>，
+    // 里面 .enabled 才是「是否在播放动画」的 bool（.value 是 TickerModeData）。
     final mode = TickerMode.getValuesNotifier(context);
     if (!identical(mode, _tickerMode)) {
       _tickerMode?.removeListener(_onTickerModeChanged);
       _tickerMode = mode..addListener(_onTickerModeChanged);
-      _tabVisible = mode.value;
+      _tabVisible = mode.value.enabled;
     }
   }
 
   void _onTickerModeChanged() {
-    final visible = _tickerMode?.value ?? true;
+    final visible = _tickerMode?.value.enabled ?? true;
     if (visible == _tabVisible) return;
     _tabVisible = visible;
     _syncAuto();
