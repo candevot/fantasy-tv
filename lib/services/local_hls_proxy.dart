@@ -800,6 +800,37 @@ class LocalHlsProxy {
     }
 
     final stopwatch = Stopwatch()..start();
+
+    // ── 流式快路径：缓存未命中且不需要 Range 时，边下边转发给播放器 ──
+    //
+    // 之前所有分片都要「整片下完」才回给 mpv：4K 分片 2.8~4.4MB，
+    // 首片要等 1.2 秒才拿到第一个字节，mpv 这期间完全没数据可解，
+    // 用户看到的就是「首次加载十几秒」。
+    //
+    // 现在改成：上游来一块就往下游写一块，mpv 收到头几十 KB 就能开始
+    // 解码出画；同时把字节攒在内存里，传完之后照常写进缓存 ——
+    // 下次 seek 回来还是缓存命中，不牺牲后续体验。
+    //
+    // 只在不带 Range、且缓存未命中时走这条路：
+    //   · 带 Range（seek）需要精确偏移，必须整片下载后再切片；
+    //   · 缓存命中本来就是内存里现成的，直接走原路径更快。
+    final rangeParam = request.uri.queryParameters['r'];
+    if (rangeParam == null || rangeParam.isEmpty) {
+      final cacheKey0 = _segmentAliases[ref.cacheKey]?.cacheKey ?? 'seg:${ref.cacheKey}';
+      if (_cacheGet(cacheKey0) == null) {
+        final streamed = await _tryServeSegmentStreamed(
+          request,
+          ref,
+          alias,
+          index: index,
+          source: source,
+          stopwatch: stopwatch,
+          cacheKey: cacheKey0,
+        );
+        if (streamed) return;
+      }
+    }
+
     _SegmentData data;
     try {
       data = await _loadSegment(ref);
@@ -1327,6 +1358,98 @@ class LocalHlsProxy {
         _segmentInflight.remove(cacheKey);
       }
     }
+  }
+
+  /// 边下边转发一个分片；成功接管响应时返回 true。
+  ///
+  /// 返回 false 表示「这条路走不通，请调用方回退到整片下载」—— 比如
+  /// 上游状态码异常、客户端中途断开、或者这次请求本身被取消。
+  Future<bool> _tryServeSegmentStreamed(
+    HttpRequest request,
+    _SegmentRef ref,
+    _SegmentAlias? alias, {
+    required int? index,
+    required Uri source,
+    required Stopwatch stopwatch,
+    required String cacheKey,
+  }) async {
+    final target = _latestSegment(alias) ?? ref;
+    HttpClientResponse response;
+    try {
+      response = await _get(target.uri);
+    } catch (_) {
+      return false; // 连不上就让整片下载路径带重试去处理
+    }
+    final status = response.statusCode;
+    if (status != HttpStatus.ok) {
+      await _drainQuietly(response);
+      return false; // 403/404 需要 refreshPlay 自愈，交给整片路径
+    }
+
+    final contentType = response.headers.value(HttpHeaders.contentTypeHeader);
+    final builder = BytesBuilder(copy: false);
+    var started = false;
+    var firstByteMs = -1;
+    try {
+      await for (final chunk in response) {
+        builder.add(chunk);
+        if (!started) {
+          // 收到第一块才回表头：上游若提前报错，上面已经回退，
+          // 不会出现「头已经发出去、正文却是空的」这种半截响应。
+          started = true;
+          firstByteMs = stopwatch.elapsedMilliseconds;
+          final out = request.response;
+          out.statusCode = HttpStatus.ok;
+          out.headers.set(
+            HttpHeaders.contentTypeHeader,
+            _segmentContentType(source, contentType),
+          );
+          out.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+          // 不设 contentLength：长度未知时让 Dart 用 chunked 编码，
+          // 播放器拿到就能解，不必等整片。
+          await out.flush();
+        }
+        request.response.add(chunk);
+        await request.response.flush();
+      }
+    } catch (error) {
+      // 中途断了：已经给播放器发过数据就不能再回退重试，
+      // 只能把这次传输记成失败，让它下一次请求重新拉。
+      _log(
+        _reqLine(
+          'SEG',
+          source,
+          index: index,
+          status: 'stream-abort',
+          cancelled: _isLocalCancel(error),
+          detail: '$error',
+        ),
+      );
+      try {
+        await request.response.close();
+      } catch (_) {}
+      return true;
+    }
+
+    if (!started) {
+      await _drainQuietly(response);
+      return false; // 上游 200 但一个字节都没有
+    }
+
+    final bytes = builder.takeBytes();
+    await request.response.close();
+    _cachePut(cacheKey, _CachedBody(bytes, contentType));
+    _log(
+      _reqLine(
+        'SEG',
+        source,
+        index: index,
+        status: '200',
+        detail: '${firstByteMs}ms 首包 / ${stopwatch.elapsedMilliseconds}ms 完成 '
+            'stream ${_formatBytes(bytes.length)}',
+      ),
+    );
+    return true;
   }
 
   /// 下载分片（带自愈重试）：
