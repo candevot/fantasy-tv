@@ -231,9 +231,19 @@ def verify_zip(gate, apk):
     has_sf = any(n.upper().endswith('.SF') for n in sig_names)
     has_block = any(n.upper().endswith(('.RSA', '.DSA', '.EC'))
                     for n in sig_names)
-    gate.require('META-INF v1 signature entries',
-                 has_sf and has_block and 'META-INF/MANIFEST.MF' in names,
-                 ', '.join(sig_names) or 'none')
+    # Flutter 3.47 + AGP 8.13 起，release 构建**只出 V2/V3 签名，不再生成
+    # META-INF 的 V1 条目**（v1SigningEnabled 默认关掉）。V1 从 Android 7.0
+    # 起就不是必需的了，V2 已经覆盖完整性校验。
+    #
+    # 所以这里不再强制要求 V1，而是「有 V1 就校验，没有就只记录」；
+    # 真正的签名有效性交给下面的 apksigner verify（它会同时检查 v1/v2/v3）。
+    if sig_names:
+        gate.require('META-INF v1 signature entries',
+                     has_sf and has_block and 'META-INF/MANIFEST.MF' in names,
+                     ', '.join(sig_names))
+    else:
+        gate.skip('META-INF v1 signature entries',
+                  'V2-only signing (Flutter 3.47+ / AGP 8.13 默认关闭 V1)')
     return zf
 
 
