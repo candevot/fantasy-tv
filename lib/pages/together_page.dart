@@ -286,6 +286,47 @@ class _TogetherPageState extends State<TogetherPage>
 
   Timer? _ticker;
   Timer? _heartbeat;
+
+  /// 房主进度推送间隔（毫秒）。
+  ///
+  /// 之前房主只在 9 秒心跳和播放/暂停事件时上报进度，成员只能靠本地时钟
+  /// 外推 —— 网络一抖就偏，表现出来就是「成员慢半拍 / 一直原地循环」。
+  /// 咕噜咕噜把这件事做成服务器下发的 `room_play_push_interval_ms`，
+  /// 这里同样做成可调：默认 1.5 秒（够平滑，又不至于把房间消息刷爆）。
+  int _pushIntervalMs = 1500;
+
+  /// 上一次房主进度推送的时间戳（毫秒）。
+  int _lastHostPushAt = 0;
+
+  /// 推送间隔的自适应倍率：弱网时 >1（推得慢些），良好时 =1。
+  ///
+  /// 由 [_updatePushIntervalFactor] 根据「成员纠偏频率」估算：
+  /// 纠偏越频繁说明越不同步，可能是网络抖，也可能是推送太少 ——
+  /// 这里选择拉长间隔而不是缩短，因为弱网下高频推送只会把消息堆在
+  /// WebSocket 里，成员收到的还是过期的位置，反而更糟。
+  double _pushIntervalFactor = 1;
+
+  /// 根据最近的纠偏次数调整推送倍率（每 10 秒评估一次）。
+  void _updatePushIntervalFactor() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _pushFactorAt < 10000) return;
+    final corrections = _correctionsSinceFactor;
+    _pushFactorAt = now;
+    _correctionsSinceFactor = 0;
+    // 10 秒内纠偏 0~1 次：网络好，正常推送
+    // 2~4 次：轻微不同步，间隔拉到 1.6 倍
+    // ≥5 次：明显抖动，间隔拉到 2.5 倍（少推、让成员多外推）
+    if (corrections >= 5) {
+      _pushIntervalFactor = 2.5;
+    } else if (corrections >= 2) {
+      _pushIntervalFactor = 1.6;
+    } else {
+      _pushIntervalFactor = 1;
+    }
+  }
+
+  int _pushFactorAt = 0;
+  int _correctionsSinceFactor = 0;
   Timer? _enterTimer;
 
   @override
@@ -1379,7 +1420,11 @@ class _TogetherPageState extends State<TogetherPage>
     final state = _remote;
     // Buffering can stop value notifications entirely; the timer must keep
     // publishing the frozen host position instead of relying on that stream.
-    if (_isHost && _foreground) _watchHostBuffering();
+    if (_isHost && _foreground) {
+      _watchHostBuffering();
+      _updatePushIntervalFactor();
+      _pushHostProgressThrottled();
+    }
     // 后台不与服务器做 seek / 变速对齐：那时心跳和网络都可能被系统限流，
     // 强行追进度会造成声音断层；回前台拿到最新 room_state 再对齐。
     if (!_isHost &&
@@ -1473,10 +1518,13 @@ class _TogetherPageState extends State<TogetherPage>
       buffering: buffering,
     );
     if (decision.move == TogetherSyncMove.rate) {
+      _correctionsSinceFactor++;
       _setMicroRate(decision.rate, state);
       return;
     }
     if (decision.move == TogetherSyncMove.seek) {
+      // 硬 seek 是最重的纠偏，权重算 2 次，让它更快触发「拉长间隔」。
+      _correctionsSinceFactor += 2;
       _hardSeek(decision.target, state);
       return;
     }
@@ -1930,6 +1978,35 @@ class _TogetherPageState extends State<TogetherPage>
     }
     if (mark) _markRemote(state, safe, rate: rate);
     return safe;
+  }
+
+  /// 房主进度按 [_pushIntervalMs] 节流推送。
+  ///
+  /// 只在「真的在播、位置有推进」时推：暂停 / 缓冲由 _watchHostBuffering
+  /// 和播放事件负责，这里重复推反而会让成员端 seq 乱跳。
+  ///
+  /// 为什么需要它：9 秒心跳太慢。成员靠 `position + 本地时钟外推` 追进度，
+  /// 房主侧时钟和网络抖动累积到 9 秒会偏出几百毫秒，纠偏就得硬 seek，
+  /// 表现就是「卡一下」。1.5 秒推一次能把偏差压在几十毫秒内，基本不用 seek。
+  void _pushHostProgressThrottled() {
+    if (!_isHost || _isLive || !_online || !_foreground) return;
+    final controller = _controller;
+    if (controller == null) return;
+    final value = controller.value;
+    if (!value.isInitialized || !value.isPlaying || value.isBuffering) return;
+    if (_endedSent || _seeking) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // 自适应：连接质量差时拉长间隔，避免消息在弱网里排队（排队比不同步更糟）。
+    // 咕噜的 room_filter_public_speed_* 也是同一思路：按带宽决定推送频率。
+    final interval = _pushIntervalMs * _pushIntervalFactor;
+    if (now - _lastHostPushAt < interval) return;
+    _lastHostPushAt = now;
+    _reportHostState(
+      'play',
+      value.position.inMilliseconds / 1000.0,
+      rate: _hostRate,
+      mark: false,
+    );
   }
 
   /// 房主缓冲上报：缓冲开始 / 结束各立即报一次，缓冲期间每秒报一次
