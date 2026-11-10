@@ -7,7 +7,7 @@ NDK 26.1；而 media_kit_libs_android_video 1.3.8（libmpv 1.1.7 / 16KB
 页对齐）自身要求 AGP 8.13 + compileSdk 36。这里显式写死，避免模板漂移。
 
 - compileSdk 36 / targetSdk 36（Android 16）/ minSdk 23
-- AGP 8.13.0 / Gradle 8.13 / Kotlin 2.1.0
+- AGP 8.13.0 / Gradle 8.14 / Kotlin 2.1.0
 - ndkVersion 27.0.12077973（16KB 页对齐所需的新版 NDK）
 
 用法（仓库根目录）：python3 tools/patch_android_sdk.py
@@ -25,7 +25,7 @@ LEVELS = (
 )
 NDK_VERSION = '27.0.12077973'
 AGP_VERSION = '8.13.0'
-GRADLE_VERSION = '8.13'
+GRADLE_VERSION = '8.14'
 KOTLIN_VERSION = '2.1.0'
 
 APP_CANDIDATES = (
