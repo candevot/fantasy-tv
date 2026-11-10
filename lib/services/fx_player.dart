@@ -287,22 +287,31 @@ class FxPlayer implements Listenable {
     return 192 * 1024 * 1024;
   }
 
-  /// 稳态缓存上限：首帧后按实测吞吐在 32~96MB 之间自适应。
+  /// 稳态缓存上下限：首帧后按实测吞吐在 64~192MB 之间自适应。
   ///
-  /// 不要再往大调：mpv 的 cache-buffering-state 是「缓存填满多少」，
-  /// 上限设 192~256MB 时 4K 码率下要缓很久才填满，界面就长期停在
-  /// 「缓冲中 99%」。而且代理层已经把整集预热到本地，mpv 这层只需要
-  /// 一小段前向缓冲兜住解复用抖动即可，两层都做大是重复占用。
+  /// 为什么下限从 32MB 提到 64MB、上限从 96MB 提到 192MB：
+  /// 4K 分片 2.8~4.4MB/片、单片时长 16~22 秒，32MB 只够 8 片，
+  /// 网速抖动一下缓冲就见底。192MB 在 4K 下约 45 片、15 分钟余量。
+  ///
+  /// 上限不再往大调：mpv 的 cache-buffering-state 是「缓存填满多少」，
+  /// 设到 256MB+ 时 4K 码率要缓很久才填满，界面会长期停在
+  /// 「缓冲中 99%」。而且代理层已经把整集预热到本地，
+  /// mpv 这层只需要足够的前向缓冲兜住解复用抖动即可。
   static const int _minSteadyBufferBytes = 64 * 1024 * 1024;
   static const int _steadyBufferBytes = 64 * 1024 * 1024;
   static const int _maxSteadyBufferBytes = 192 * 1024 * 1024;
   static const int _backBufferBytes = 8 * 1024 * 1024;
 
-  /// 按实测吞吐挑稳态缓冲：取「约 30 秒的码率量」，夹在 32~96MB。
-  /// 网络一般（2MB/s）约 60MB，网络很好（8MB/s）到上限 96MB。
+  /// 按实测吞吐挑稳态缓冲：取「约 60 秒的码率量」，夹在 64~192MB。
+  ///
+  /// 为什么是 60 秒而不是 30 秒：4K 单分片就有 16~22 秒，30 秒只等于
+  /// 一两片，网速一抖就见底。60 秒约等于 3~4 片，能扛住一次瞬时卡顿。
+  ///
+  /// 网络一般（2MB/s）→ 120MB，很好（8MB/s）→ 到上限 192MB，
+  /// 很差（0.5MB/s）→ 取下限 64MB（先保证能播，别等太久才起画）。
   static int _steadyBufferFor(double? throughput) {
     if (throughput == null || throughput <= 0) return _steadyBufferBytes;
-    final target = (throughput * 30).round();
+    final target = (throughput * 60).round();
     return target.clamp(_minSteadyBufferBytes, _maxSteadyBufferBytes);
   }
 
