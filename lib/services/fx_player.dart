@@ -226,7 +226,17 @@ class FxPlayer implements Listenable {
         title: '幻想影视',
         // 字幕 / ASS 交给 libass，复杂样式不走 Flutter 层。
         libass: true,
-        // 起播只用 12MB 小缓冲，首帧出来后再动态升到 32MB。
+        // 起播缓冲：**不能写死小值**。
+        //
+        // media_kit 的 bufferSize 是 demuxer-max-bytes 的硬上限，
+        // 后面 _setCacheLimits 再怎么调都超不过它。
+        //
+        // 原来写 16MB：4K 分片 2.8~4.4MB/片，只装得下 4~5 片，
+        // 而 4K 第一片就有 21.68 秒 —— 缓冲一空就停在 19~21 秒，
+        // 这就是用户报的「4K 只播 19 秒」。
+        //
+        // 现在按设备内存给：低端 64MB，中端 128MB，高端 192MB。
+        // 4K 高码率下 128MB ≈ 30 片 ≈ 10 分钟前向缓冲，够播了。
         bufferSize: _startupBufferBytes,
         logLevel: MPVLogLevel.error,
       ),
@@ -257,9 +267,23 @@ class FxPlayer implements Listenable {
     );
   }
 
-  /// 起播前向缓存：16MB。代理层已在本地整集预热，mpv 不需要靠大缓冲
-  /// 去对抗网络抖动，起播要的是「尽快出画」。
-  static const int _startupBufferBytes = 16 * 1024 * 1024;
+  /// 起播前向缓存（字节）：按设备内存给，**不再写死 16MB**。
+  ///
+  /// 16MB 在 4K 下只能装 4~5 个分片（每片 2.8~4.4MB），而 4K 首片时长
+  /// 就有 21.68 秒 —— 缓冲一空播放器就停，表现为「4K 只播 19 秒」。
+  ///
+  /// 现在：≤3GB 内存给 64MB，≤6GB 给 128MB，再高给 192MB。
+  /// 128MB 在 4K 码率下约等于 30 个分片、10 分钟前向缓冲。
+  ///
+  /// 注意 media_kit 的 bufferSize 是 demuxer-max-bytes 的**硬上限**，
+  /// 后面 _setCacheLimits 调的值不能超过它，所以这个基数必须够大。
+  static int get _startupBufferBytes {
+    final mb = _deviceMemoryMb();
+    if (mb <= 0) return 128 * 1024 * 1024;
+    if (mb <= 3072) return 64 * 1024 * 1024;
+    if (mb <= 6144) return 128 * 1024 * 1024;
+    return 192 * 1024 * 1024;
+  }
 
   /// 稳态缓存上限：首帧后按实测吞吐在 32~96MB 之间自适应。
   ///
@@ -267,9 +291,9 @@ class FxPlayer implements Listenable {
   /// 上限设 192~256MB 时 4K 码率下要缓很久才填满，界面就长期停在
   /// 「缓冲中 99%」。而且代理层已经把整集预热到本地，mpv 这层只需要
   /// 一小段前向缓冲兜住解复用抖动即可，两层都做大是重复占用。
-  static const int _minSteadyBufferBytes = 32 * 1024 * 1024;
+  static const int _minSteadyBufferBytes = 64 * 1024 * 1024;
   static const int _steadyBufferBytes = 64 * 1024 * 1024;
-  static const int _maxSteadyBufferBytes = 96 * 1024 * 1024;
+  static const int _maxSteadyBufferBytes = 192 * 1024 * 1024;
   static const int _backBufferBytes = 8 * 1024 * 1024;
 
   /// 按实测吞吐挑稳态缓冲：取「约 30 秒的码率量」，夹在 32~96MB。
