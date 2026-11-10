@@ -1,7 +1,7 @@
 name: build-apk
 on:
   push:
-    branches: [ main ]
+    branches: [ main, flutter-upgrade ]
   workflow_dispatch:
 jobs:
   build:
