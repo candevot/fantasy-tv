@@ -2,8 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-// TickerModeData（TickerMode.getValuesNotifier 的返回类型）在 scheduler 里。
-import 'package:flutter/scheduler.dart';
 
 import '../api.dart';
 import '../models.dart';
