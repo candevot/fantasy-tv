@@ -216,7 +216,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   // 控件显隐 / 锁屏
   bool _controls = true;
-  Timer? _hideTimer;
+
+  /// betterplayer 控件可见性订阅（页面只跟随，不再自己计时）。
+  StreamSubscription<bool>? _controlsSub;
   Timer? _progressTimer;
 
   /// 是否已切到后台：切后台 / inactive / paused 一律不暂停，继续播放，
@@ -349,6 +351,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _loadedEp = c.value.isInitialized ? _ep : null;
     _loading = !c.value.isInitialized;
     _firstFrame = _hasFirstFrame(c);
+    _bindControlsVisibility(c);
     // 全屏复用的是竖屏已经打开的播放器：这里只监听错误流，不重新 open。
     // 播放层已换成 betterplayer，错误流由 FxPlayer 统一暴露。
     _platformErrorSub = c.errorStream.listen(_onPlatformError);
@@ -384,10 +387,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   @override
   void dispose() {
+    _controlsSub?.cancel();
     // 退出全屏也要复位长按倍速，不能让 3.0x 留在共享播放器上。
     _resetHold2x(notify: false);
     WidgetsBinding.instance.removeObserver(this);
-    _hideTimer?.cancel();
     _seekHintTimer?.cancel();
     _unlockTimer?.cancel();
     _uiHoldTimer?.cancel();
@@ -558,7 +561,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 换集 / 重试时手势可能还没收到 onLongPressEnd，先把长按倍速清掉。
     _resetHold2x();
     final token = ++_loadToken;
-    _hideTimer?.cancel();
     _cancelFirstFrameTimer();
     // 先抓最后一帧：同一个 player 实例换地址时纹理会被清空，用它垫住黑屏。
     if (_firstFrame && (_frozenFrame == null || !_freezeOpaque)) {
@@ -1285,22 +1287,26 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /* ---------------------------------------------------------------- 控件 */
 
-  void _startHideTimer() {
-    _hideTimer?.cancel();
-    _hideTimer = Timer(kPlayerControlsAutoHide, () {
+  /// 跟随 betterplayer 的控件显隐。
+  ///
+  /// 之前页面自己维护一套 5 秒定时器、播放器内部又有一套 3 秒定时器，
+  /// 两边节奏不同步：点屏幕后页面的返回键亮了、播放器的进度条还藏着，
+  /// 或者反过来。现在只认播放器的状态。
+  void _bindControlsVisibility(FxPlayer c) {
+    _controlsSub?.cancel();
+    _controlsSub = c.controlsVisibilityStream.listen((visible) {
       if (!mounted) return;
-      if (_locked ||
-          _panelOpen ||
-          _holding2x ||
-          _loading ||
-          _error) {
-        if (_holding2x) _startHideTimer();
-        return;
-      }
-      _controller?.player.toggleControlsVisibility(false);
-      setState(() => _controls = false);
+      if (_controls != visible) setState(() => _controls = visible);
     });
   }
+
+  /// 控件自动隐藏交给 betterplayer 自己（3 秒），页面不再另起定时器。
+  ///
+  /// 之前这里有个 5 秒定时器，和播放器内部的 3 秒定时器并存：点屏幕后
+  /// 页面的返回键还在、播放器的进度条已经藏了，或者反过来。现在页面的
+  /// _controls 完全跟随 controlsVisibilityStream，这里保留空实现只为
+  /// 不破坏调用点。
+  void _startHideTimer() {}
 
   void _wake() {
     if (!mounted || _locked) return;
@@ -1312,7 +1318,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   void _hideControls() {
-    _hideTimer?.cancel();
     if (!mounted) return;
     // 同步隐藏 betterplayer 自己的控件层：只改页面 _controls 不会影响它，
     // 用户看到的「控件一直显示隐藏不了」就是这个原因。
@@ -1430,7 +1435,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     _rateBeforeHold = _rate;
     unawaited(_applyRate(kPlayerHoldRate));
-    _hideTimer?.cancel();
     setState(() {
       _holding2x = true;
       // 参考：长按进入快进时收起控件，只在顶部留「3.0倍速快进中」胶囊。
@@ -1510,7 +1514,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 作废仍在进行的切集 / 重连请求，退出后不要再回写 UI。
     _loadToken++;
     _uiHoldTimer?.cancel();
-    _hideTimer?.cancel();
     final playing = _playing;
     final position = await _saveProgress();
     // 播放器交回竖屏继续使用：不 pause、不 dispose，保持进度与播放状态。

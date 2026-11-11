@@ -303,6 +303,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 否则会被误归到「高分好剧」，导致电影分区丢失。
   String _sectionLabel(String raw) {
     if (raw.contains('今日热播')) return '今日热播';
+    // 「最新」要排在分类词之后判：服务端可能返回「最新电视剧」，
+    // 先判「最新」会把它归到「最新更新」，剧集分区就少一块。
+    if (raw.contains('电视剧') || raw.contains('剧集') || raw.contains('连续剧')) {
+      // 「最新剧集」这类同时含两个词的，仍按剧集归类（内容以分类为主）。
+      if (!raw.contains('最新')) return '剧集';
+    }
     if (raw.contains('最新')) return '最新更新';
     // 电视剧 / 剧集 / 连续剧 都归到「剧集」。之前没有这条分支，
     // 服务端返回的「电视剧热播榜」会原样落到白名单外被丢弃 —— 首页空白。

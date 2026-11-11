@@ -105,6 +105,8 @@ class FxPlayback {
       StreamController<String>.broadcast();
   final StreamController<bool> _completedCtrl =
       StreamController<bool>.broadcast();
+  final StreamController<bool> _controlsCtrl =
+      StreamController<bool>.broadcast();
 
   Timer? _ticker;
   bool _disposed = false;
@@ -120,6 +122,12 @@ class FxPlayback {
   Stream<bool> get bufferingStream => _bufferingCtrl.stream;
   Stream<String> get errorStream => _errorCtrl.stream;
   Stream<bool> get completedStream => _completedCtrl.stream;
+
+  /// betterplayer 内置控件的显隐变化。
+  ///
+  /// 页面用它跟随播放器的控件状态：播放器 3 秒自动隐藏，页面不该再维护
+  /// 一套 5 秒定时器，否则两边会错拍。
+  Stream<bool> get controlsVisibilityStream => _controlsCtrl.stream;
 
   bool get isPlaying => _controller.videoPlayerValue?.isPlaying ?? false;
 
@@ -216,6 +224,12 @@ class FxPlayback {
           final msg = event.parameters?['error']?.toString() ?? '播放异常';
           _errorCtrl.add(msg);
           _setValue(_last.copyWith(hasError: true, errorText: msg));
+          break;
+        case PlayerEventType.controlsVisible:
+          if (!_controlsCtrl.isClosed) _controlsCtrl.add(true);
+          break;
+        case PlayerEventType.controlsHiddenEnd:
+          if (!_controlsCtrl.isClosed) _controlsCtrl.add(false);
           break;
         case PlayerEventType.finished:
           if (!_completedFired) {
@@ -352,6 +366,7 @@ class FxPlayback {
     await _bufferingCtrl.close();
     await _errorCtrl.close();
     await _completedCtrl.close();
+    await _controlsCtrl.close();
     value.dispose();
   }
 }

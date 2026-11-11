@@ -87,6 +87,9 @@ class FxPlayer implements Listenable {
   /// 播放中状态流。
   Stream<bool> get playingStream => _core.playingStream;
 
+  /// betterplayer 内置控件的显隐变化（页面用它跟随播放器节奏）。
+  Stream<bool> get controlsVisibilityStream => _core.controlsVisibilityStream;
+
   bool get isPlaying => _value.isPlaying;
 
   double get rate => _rate;

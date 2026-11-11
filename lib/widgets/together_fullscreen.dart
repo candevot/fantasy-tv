@@ -124,7 +124,6 @@ class TogetherFullscreenView extends StatefulWidget {
 
 class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   bool _controls = true;
-  Timer? _hideTimer;
 
   bool _locked = false;
   bool _unlockVisible = false;
@@ -145,12 +144,24 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   /// null 表示没拖过，跟随安全区与键盘自动摆放。
   Offset? _chatPos;
 
+  /// betterplayer 控件可见性订阅（页面 _controls 只跟随，不自己计时）。
+  StreamSubscription<bool>? _controlsSub;
+
   @override
   void initState() {
     super.initState();
     _syncChatState(reset: true);
     widget.chat.addListener(_onChatChanged);
-    _scheduleHide();
+    _bindControls(widget.player);
+  }
+
+  void _bindControls(FxPlayer? p) {
+    _controlsSub?.cancel();
+    if (p == null) return;
+    _controlsSub = p.controlsVisibilityStream.listen((visible) {
+      if (!mounted) return;
+      if (_controls != visible) setState(() => _controls = visible);
+    });
   }
 
   @override
@@ -161,13 +172,14 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       widget.chat.addListener(_onChatChanged);
       _syncChatState(reset: true);
     }
+    if (!identical(oldWidget.player, widget.player)) _bindControls(widget.player);
     if (oldWidget.loading && !widget.loading) _wake();
   }
 
   @override
   void dispose() {
+    _controlsSub?.cancel();
     widget.chat.removeListener(_onChatChanged);
-    _hideTimer?.cancel();
     _unlockTimer?.cancel();
     // 长按快进中直接退出全屏时，把倍速恢复成进入长按前的值。
     if (_holding) {
@@ -223,24 +235,24 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
   /* ------------------------------------------------------------ 控件显隐 */
 
-  void _scheduleHide() {
-    _hideTimer?.cancel();
-    _hideTimer = Timer(togetherFullscreenControlsAutoHide, () {
-      if (!mounted) return;
-      if (_locked || _chatOpen || _showSpeed || _showQuality) return;
-      if (_controls) setState(() => _controls = false);
-    });
-  }
+  /// 控件自动隐藏交给 betterplayer 自己，页面不再另起定时器。
+  ///
+  /// 这个页面用的是内置控件（showControls 默认 true），页面自己再来一套
+  /// 5 秒定时器会和播放器的 3 秒错拍：点屏幕后返回键亮了、进度条还藏着。
+  void _scheduleHide() {}
 
   void _wake() {
     if (_locked) return;
-    _hideTimer?.cancel();
+    if (player != null) {
+      player.toggleControlsVisibility(true);
+    }
     if (!_controls && mounted) setState(() => _controls = true);
-    _scheduleHide();
   }
 
   void _hideControls() {
-    _hideTimer?.cancel();
+    if (player != null) {
+      player.toggleControlsVisibility(false);
+    }
     if (mounted) {
       setState(() {
         _controls = false;
@@ -312,7 +324,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     if (player == null || !player.value.isInitialized) return;
     _rateBeforeHold = player.rate;
     unawaited(player.setRate(3.0));
-    _hideTimer?.cancel();
     setState(() {
       _holding = true;
       _controls = false;
@@ -340,7 +351,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
   void _openChat() {
     FocusScope.of(context).unfocus();
-    _hideTimer?.cancel();
     setState(() {
       _chatOpen = true;
       _controls = false;
