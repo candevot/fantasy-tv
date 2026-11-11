@@ -263,7 +263,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 切线路 / 重连期间锁住 UI 进度，防止播放器 open 归零时进度条跳回 0。
   Duration? _uiPosition;
-  Duration? _uiDuration;
   Timer? _uiHoldTimer;
 
   /// loading 浮层文案（重新连接时显示「正在重新连接」）。
@@ -318,7 +317,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (!mounted || _uiPosition == null) return;
       setState(() {
         _uiPosition = null;
-        _uiDuration = null;
       });
     });
   }
@@ -584,7 +582,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _sourceFailNotified = false;
       _qualityKey = null;
       _uiPosition = null;
-      _uiDuration = null;
       _loadingHint = null;
       _firstFrame = false;
       _nextPrewarmed = false;
@@ -1011,7 +1008,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _errorText = text;
       _controls = true;
       _uiPosition = null;
-      _uiDuration = null;
     });
     _wake();
   }
@@ -1072,7 +1068,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _firstFrame = false;
       _controls = true;
       _uiPosition = resume > Duration.zero ? resume : null;
-      _uiDuration = c.value.duration > Duration.zero ? c.value.duration : null;
     });
     final ok = await _openSource(
       url,
@@ -1123,7 +1118,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _uiHoldTimer?.cancel();
         setState(() {
           _uiPosition = null;
-          if (v.duration > Duration.zero) _uiDuration = null;
         });
       }
     }

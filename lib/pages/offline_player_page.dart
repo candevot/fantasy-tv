@@ -6,7 +6,6 @@ import 'package:flutter/services.dart';
 
 import '../services/app_settings.dart';
 import '../services/download_service.dart';
-import '../services/fx_display_settings.dart';
 import '../services/fx_player.dart';
 import '../services/screen_orientation.dart';
 import '../theme.dart';
@@ -105,7 +104,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     systemNavigationBarContrastEnforced: false,
   );
 
-  static const List<double> _rates = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 
   @override
   void initState() {
@@ -178,15 +176,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
         List<DownloadTask>.from(_service.tasksForSeries(_task.id))
           ..sort((a, b) => a.ep.compareTo(b.ep));
     _episodes = list;
-  }
-
-  /// 该剧总集数（选集面板要列出还没下载的集号）。
-  int get _totalEpisodes {
-    var total = _service.seriesTotalEpisodes(_task.id);
-    for (final t in _episodes) {
-      if (t.ep > total) total = t.ep;
-    }
-    return total < 1 ? 1 : total;
   }
 
   List<DownloadTask> get _downloaded =>
@@ -443,27 +432,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     _wake();
   }
 
-  Future<void> _setRate(double rate) async {
-    _rate = rate;
-    if (mounted) setState(() {});
-    try {
-      await _player?.setRate(rate);
-    } catch (_) {}
-    _refreshSheet();
-  }
-
-  /// 循环播放：单集循环交给 mpv（loop-file），关闭则按「自动下一集」连播。
-  Future<void> _setLoopMode(FxLoopMode mode) async {
-    if (_loopMode == mode) return;
-    _loopMode = mode;
-    // 关掉循环时清掉「本集已播完」标记，这一集结尾才会触发自动下一集。
-    if (mode == FxLoopMode.off) _endedHandled = false;
-    try {
-      await _player?.setLooping(mode == FxLoopMode.single);
-    } catch (_) {}
-    _refreshSheet();
-  }
-
   /* -------------------------------------------------------------- 控件显隐 */
 
   void _toggleControls() {
@@ -492,20 +460,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
   }
 
   /* ------------------------------------------------------------------ 锁屏 */
-
-  void _lock() {
-    _hideTimer?.cancel();
-    setState(() {
-      _locked = true;
-      _controlsVisible = false;
-      _unlockVisible = true;
-    });
-    _unlockTimer?.cancel();
-    _unlockTimer = Timer(const Duration(seconds: 3), () {
-      if (!mounted) return;
-      setState(() => _unlockVisible = false);
-    });
-  }
 
   void _unlock() {
     _unlockTimer?.cancel();
@@ -565,22 +519,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
 
   /* ------------------------------------------------------------ 定时关闭 */
 
-  Future<void> _applySleep(FxSleepMode mode, int minutes) async {
-    final settings = AppSettings.instance;
-    await settings.init();
-    _sleepTimer?.cancel();
-    _sleepTimer = null;
-    if (mode == FxSleepMode.minutes) {
-      final endsAt = DateTime.now().millisecondsSinceEpoch + minutes * 60000;
-      await settings.setSleepTimer(mode, minutes: minutes, endsAt: endsAt);
-      _armSleep(endsAt - DateTime.now().millisecondsSinceEpoch);
-    } else {
-      await settings.setSleepTimer(mode);
-    }
-    if (mounted) setState(() {});
-    _refreshSheet();
-  }
-
   void _armSleep(int millis) {
     _sleepTimer?.cancel();
     _sleepTimer = null;
@@ -620,219 +558,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
 
   /* ------------------------------------------------------------- 设置面板 */
 
-  String _rateLabel(double rate) =>
-      rate == rate.roundToDouble() ? '${rate.toInt()}x' : '${rate}x';
-
-  Widget _sheetSection({required String title, required Widget child}) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: Fx.ink,
-            ),
-          ),
-          const SizedBox(height: 8),
-          child,
-        ],
-      ),
-    );
-  }
-
-  Widget _optChip({
-    required String label,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        decoration: BoxDecoration(
-          color: selected
-              ? Fx.accent.withValues(alpha: .14)
-              : Colors.white,
-          borderRadius: BorderRadius.circular(11),
-          border: Border.all(
-            color: selected
-                ? Fx.accent
-                : const Color(0xFFE4EAF4),
-            width: selected ? 1.3 : 1,
-          ),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 11.5,
-            fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
-            color: selected ? Fx.accent : Fx.ink,
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _switchRow({
-    required String label,
-    required String hint,
-    required bool value,
-    required ValueChanged<bool> onChanged,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE4EAF4)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w700,
-                    color: Fx.ink,
-                  ),
-                ),
-                Text(
-                  hint,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 9, color: Fx.sub),
-                ),
-              ],
-            ),
-          ),
-          Switch(
-            value: value,
-            activeTrackColor: Fx.accent,
-            onChanged: onChanged,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _sheetButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFE4EAF4)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 15, color: Fx.accent),
-            const SizedBox(width: 5),
-            Text(
-              label,
-              style: const TextStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w700,
-                color: Fx.ink,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _episodeTile(int ep, int current) {
-    final task = _service.taskFor(_task.id, ep);
-    final status = task?.status;
-    final downloaded = status == DownloadStatus.completed;
-    final isCurrent = ep == current;
-    final color = downloaded
-        ? (isCurrent ? Fx.accent : const Color(0xFF2FA985))
-        : (status == null ? const Color(0xFF8D99AA) : Fx.sub);
-    final stateText = status == null
-        ? '未下载'
-        : switch (status) {
-            DownloadStatus.completed => isCurrent ? '播放中' : '已下载',
-            DownloadStatus.downloading => '下载中',
-            DownloadStatus.queued => '排队中',
-            DownloadStatus.paused => '已暂停',
-            DownloadStatus.failed => '下载失败',
-          };
-
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: downloaded
-          ? () {
-              final target = task;
-              if (target == null) return;
-              Navigator.of(context).maybePop();
-              unawaited(_switchTo(target));
-            }
-          : null,
-      child: Container(
-        alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(horizontal: 4),
-        decoration: BoxDecoration(
-          color: isCurrent
-              ? Fx.accent.withValues(alpha: .12)
-              : Colors.white.withValues(alpha: .85),
-          borderRadius: BorderRadius.circular(11),
-          border: Border.all(
-            color: isCurrent
-                ? Fx.accent
-                : downloaded
-                    ? const Color(0xFF2FA985).withValues(alpha: .45)
-                    : const Color(0xFFE4EAF4),
-            width: isCurrent ? 1.3 : 1,
-          ),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              '第 $ep 集',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: downloaded ? FontWeight.w700 : FontWeight.w500,
-                color: color,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              stateText,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 8,
-                height: 1.1,
-                color: color.withValues(alpha: .85),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 
   /* ------------------------------------------------------------------ UI */
 
