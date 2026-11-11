@@ -613,188 +613,49 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     );
   }
 
+  /// 一起看全屏的控件全部交给 betterplayer 内置。
+  ///
+  /// 原来这里是 FsTopBar + FsSideControls + FsQualityPanel + FsSpeedPanel
+  /// + FsBottomBar 一整套自绘控件，换成 betterplayer 后会和内置控件叠成
+  /// 上下两层（用户报的「新旧两个重叠」）。只保留左上角返回 + 房间信息。
   Widget _buildControls(FxPlayer? player, EdgeInsets pad) {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Positioned(
-          top: 0,
-          left: 0,
-          right: 0,
-          child: _buildTopBar(pad),
-        ),
-        Positioned.fill(
-          child: FsSideControls(
-            onLock: _lock,
-            onSeekBy: _seekBy,
-            showSeek: !widget.isLive,
-          ),
-        ),
-        Positioned(
-          left: 0,
-          right: 0,
-          bottom: 0,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+    return Positioned(
+      left: 0,
+      top: 0,
+      right: 0,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(6),
+          child: Row(
             children: [
-              if (_showQuality)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: FsQualityPanel(
-                      items: widget.qualities,
-                      currentKey: widget.qualityKey,
-                      showSource: !widget.isLive,
-                      onPick: _openQualityPanel,
-                    ),
+              IconButton(
+                icon: const Icon(Icons.arrow_back_rounded,
+                    color: Colors.white, size: 22),
+                tooltip: '返回',
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.black.withValues(alpha: .38),
+                ),
+                onPressed: widget.onExit,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-              if (_showSpeed && !widget.isLive)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: FsSpeedPanel(
-                      rate: widget.rate,
-                      onPick: _openSpeedPanel,
-                    ),
-                  ),
-                ),
-              _buildBottomBar(player, pad),
+              ),
             ],
           ),
         ),
-      ],
-    );
-  }
-
-  Widget _buildTopBar(EdgeInsets pad) {
-    return Container(
-      padding: EdgeInsets.fromLTRB(14, 8, 10, 18),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Colors.black.withValues(alpha: .52), Colors.black.withValues(alpha: 0)],
-        ),
-      ),
-      child: Row(
-        children: [
-          PGlassIcon(
-            icon: Icons.arrow_back_ios_new_rounded,
-            size: 34,
-            iconSize: 17,
-            tint: .16,
-            tooltip: '退出全屏',
-            onTap: widget.onExit,
-          ),
-          const SizedBox(width: 9),
-          Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.title.trim().isEmpty ? '一起看' : widget.title.trim(),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  _epLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 11,
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 7),
-          PGlassIcon(
-            icon: Icons.alt_route_rounded,
-            size: 32,
-            iconSize: 17,
-            tooltip: '换源',
-            onTap: widget.onSwitchLine,
-          ),
-          if (!widget.isLive) ...[
-            const SizedBox(width: 7),
-            PGlassIcon(
-              icon: Icons.movie_filter_rounded,
-              size: 32,
-              iconSize: 17,
-              tooltip: '换剧',
-              onTap: widget.onChangeDrama,
-            ),
-          ],
-          if (widget.isLive) ...[
-            const SizedBox(width: 8),
-            const _LivePill(),
-          ],
-          if (widget.qualityLabel.isNotEmpty) ...[
-            const SizedBox(width: 12),
-            FsQualityPill(label: widget.qualityLabel),
-          ],
-          const SizedBox(width: 8),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.onMembers,
-            child: PGlassPill(
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.people_alt_outlined,
-                    size: 13,
-                    color: Colors.white,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    '${widget.members.length}',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w700,
-                      shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 7),
-          PGlassIcon(
-            icon: Icons.person_add_alt_1_rounded,
-            size: 32,
-            iconSize: 17,
-            tooltip: '邀请好友',
-            onTap: widget.onInvite,
-          ),
-          const SizedBox(width: 7),
-          PGlassIcon(
-            icon: Icons.logout_rounded,
-            size: 32,
-            iconSize: 17,
-            tooltip: widget.isHost ? '解散房间' : '退出房间',
-            onTap: widget.onExitRoom,
-          ),
-        ],
       ),
     );
   }
-
   String get _epLabel {
     if (widget.isLive) return 'LIVE · 直播中';
     for (final episode in widget.episodes) {
@@ -803,46 +664,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       }
     }
     return fxEpisodeLabel(widget.ep);
-  }
-
-  Widget _buildBottomBar(FxPlayer? player, EdgeInsets pad) {
-    final compact = MediaQuery.sizeOf(context).width < 700;
-    return AnimatedBuilder(
-      animation: player ?? const AlwaysStoppedAnimation<double>(0),
-      builder: (context, _) {
-        final value = player?.value;
-        return ValueListenableBuilder<double>(
-          valueListenable: widget.position,
-          builder: (context, position, _) {
-            final shown = Duration(
-              milliseconds:
-                  (position.isFinite && position > 0 ? position * 1000 : 0)
-                      .round(),
-            );
-            return FsBottomBar(
-              position: shown,
-              duration: value?.duration ?? Duration.zero,
-              buffered: value?.buffered ?? Duration.zero,
-              playing: value?.isInitialized == true && value!.isPlaying,
-              rate: widget.rate,
-              live: widget.isLive,
-              qualityLabel: widget.canChangeQuality ? '清晰度' : '',
-              qualityActive:
-                  widget.canChangeQuality && widget.qualityKey != null,
-              compact: compact,
-              bottomInset: pad.bottom,
-              onSeek: (target) => _seekTo(target.inMilliseconds / 1000.0),
-              onTogglePlay: _togglePlay,
-              onNext: () => _runHost(widget.onNext),
-              onSpeed: _toggleSpeed,
-              onQuality: _toggleQuality,
-              onEpisodes: () => _runHost(widget.onEpisodes),
-              onExit: widget.onExit,
-            );
-          },
-        );
-      },
-    );
   }
 
   Widget _buildError() {

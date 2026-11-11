@@ -62,8 +62,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _liveLoaded = false;
 
   /// 直播首屏搜索：本地过滤全部频道，输入即出结果。
-  final TextEditingController _liveSearchCtrl = TextEditingController();
-  String _liveQuery = '';
 
   List<LiveSection> get _liveSections => buildLiveSections(_liveGroups);
 
@@ -76,6 +74,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _load();
+    // 首页末尾有「直播」分区，需要直播数据。
+    // 之前只在 _channel == 'live' 时才拉，而分类页签删掉后 _channel 恒为
+    // 'recommend'，_loadLive 永远不会被调用 → 直播区一直是空的。
+    unawaited(_loadLive());
   }
 
   @override
@@ -121,7 +123,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _timer?.cancel();
     _bannerCtrl.dispose();
     _bannerPage.dispose();
-    _liveSearchCtrl.dispose();
     super.dispose();
   }
 
@@ -230,7 +231,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() => _liveLoading = true);
     try {
       final groups = await Api.liveGroups();
-      if (!mounted || req != _req || _channel != 'live') return;
+      if (!mounted || req != _req) return;
       setState(() {
         _liveGroups = groups;
         _liveLoaded = true;
@@ -238,7 +239,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       });
     } catch (_) {
       // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它频道。
-      if (!mounted || req != _req || _channel != 'live') return;
+      if (!mounted || req != _req) return;
       setState(() {
         _liveGroups = const <LiveGroup>[];
         _liveLoaded = true;
@@ -382,7 +383,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       child: RefreshIndicator(
         color: Fx.accent,
         backgroundColor: Colors.white,
-        onRefresh: () => _channel == 'live' ? _loadLive() : _load(force: true),
+        onRefresh: () async {
+          // 分类页签已删，首页固定推荐频道；下拉同时刷新影视与直播。
+          await Future.wait(<Future<void>>[_load(force: true), _loadLive()]);
+        },
         child: CustomScrollView(
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           physics: const AlwaysScrollableScrollPhysics(
@@ -401,7 +405,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   List<Widget> _body(HomeData? data) {
-    if (_channel == 'live') return _liveBody();
     if (data == null) {
       if (_loading) {
         return const [SliverToBoxAdapter(child: _HomeSkeleton())];
@@ -479,191 +482,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
     ];
-  }
-
-  /// 直播首屏：搜索 + 固定顺序的分组卡；输入台名时直接出频道结果。
-  List<Widget> _liveBody() {
-    if (_liveLoading && !_liveLoaded) {
-      return const [SliverToBoxAdapter(child: _HomeSkeleton())];
-    }
-    final sections = _liveSections;
-    if (sections.isEmpty) {
-      return [
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: FxEmptyView(
-            icon: Icons.live_tv_rounded,
-            title: '暂无直播频道 · 敬请期待',
-            subtitle: '频道上线后会在这里出现',
-            actionText: '刷新试试',
-            onAction: _loadLive,
-          ),
-        ),
-      ];
-    }
-
-    final query = _liveQuery.trim();
-    final matches = query.isEmpty
-        ? const <LiveChannel>[]
-        : <LiveChannel>[
-            for (final channel in _liveAllChannels)
-              if (liveChannelMatches(channel, query)) channel,
-          ];
-    return [
-      SliverToBoxAdapter(child: _liveSearchBar()),
-      if (query.isEmpty) ...[
-        SliverToBoxAdapter(child: _liveSectionHeader(sections)),
-        _liveSectionGrid(sections),
-      ] else if (matches.isEmpty)
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: FxEmptyView(
-            icon: Icons.search_off_rounded,
-            title: '没找到「$query」',
-            subtitle: '换个台名试试，如 CCTV5、湖南',
-          ),
-        )
-      else ...[
-        SliverToBoxAdapter(child: _liveSearchHeader(matches.length)),
-        _liveChannelGrid(matches),
-      ],
-    ];
-  }
-
-  void _clearLiveSearch() {
-    if (_liveQuery.isEmpty) return;
-    _liveSearchCtrl.clear();
-    setState(() => _liveQuery = '');
-    FocusScope.of(context).unfocus();
-  }
-
-  Widget _liveSearchBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      child: Container(
-        height: 44,
-        padding: const EdgeInsets.only(left: 13, right: 6),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: .72),
-          borderRadius: BorderRadius.circular(22),
-          border: Border.all(color: Colors.white),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF50729F).withValues(alpha: .08),
-              blurRadius: 18,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.search_rounded, size: 19, color: Fx.sub),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextField(
-                controller: _liveSearchCtrl,
-                textInputAction: TextInputAction.search,
-                textAlignVertical: TextAlignVertical.center,
-                cursorColor: Fx.accent,
-                style: const TextStyle(fontSize: 13, color: Fx.ink),
-                decoration: const InputDecoration(
-                  isDense: true,
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.zero,
-                  hintText: '搜索台名，如 CCTV5 / 湖南',
-                  hintStyle: TextStyle(
-                    fontSize: 12.5,
-                    color: Color(0xFF9AA6B8),
-                  ),
-                ),
-                onChanged: (value) {
-                  final query = value.trim();
-                  if (query == _liveQuery) return;
-                  setState(() => _liveQuery = query);
-                },
-              ),
-            ),
-            if (_liveQuery.isNotEmpty)
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _clearLiveSearch,
-                child: const SizedBox(
-                  width: 32,
-                  height: 32,
-                  child: Icon(Icons.close_rounded, size: 17, color: Fx.sub),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _liveSectionHeader(List<LiveSection> sections) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          const Text(
-            '频道分组',
-            style: TextStyle(
-              fontSize: 16.5,
-              height: 1.2,
-              fontWeight: FontWeight.w800,
-              color: Fx.ink,
-            ),
-          ),
-          const SizedBox(width: 7),
-          Text(
-            '${sections.length} 组',
-            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-          ),
-          const Spacer(),
-          Text(
-            '${_liveAllChannels.length} 台',
-            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _liveSearchHeader(int count) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          const Text(
-            '搜索结果',
-            style: TextStyle(
-              fontSize: 16.5,
-              height: 1.2,
-              fontWeight: FontWeight.w800,
-              color: Fx.ink,
-            ),
-          ),
-          const SizedBox(width: 7),
-          Text(
-            '$count 台',
-            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-          ),
-          const Spacer(),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _clearLiveSearch,
-            child: const Padding(
-              padding: EdgeInsets.symmetric(vertical: 4, horizontal: 2),
-              child: Text(
-                '清空',
-                style: TextStyle(fontSize: 11.5, color: Fx.sub),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 
   Widget _liveSectionGrid(List<LiveSection> sections) {

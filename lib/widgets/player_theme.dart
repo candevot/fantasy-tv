@@ -174,10 +174,17 @@ class FxPlayerSurface extends StatefulWidget {
     super.key,
     required this.player,
     this.subtitleBottom = fxSubtitleMinBottom,
+    this.showControls = true,
   });
 
   final FxPlayer player;
   final double subtitleBottom;
+
+  /// 是否显示播放器内置控件。
+  ///
+  /// 全屏播放传 true（用内置控件：画质 / 音轨 / 字幕 / PiP）；
+  /// 竖屏嵌入播放传 false（页面自己画进度条，避免两套控件重叠）。
+  final bool showControls;
 
   @override
   State<FxPlayerSurface> createState() => _FxPlayerSurfaceState();
@@ -259,7 +266,10 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     //
     // 画面比例 / 镜像这些自定义档位改由 BetterPlayer 的 fit 参数承担：
     // fit 通过 FxPlayer.buildVideo(fit:) 传进去，比例由播放器自己算。
-    final video = widget.player.buildVideo(fit: fxAspectFit(aspect));
+    final video = widget.player.buildVideo(
+      fit: fxAspectFit(aspect),
+      showControls: widget.showControls,
+    );
 
     // 镜像：翻转整个画面层（含控件）。字幕在纹理里，会一起翻转 ——
     // 这是镜像模式的预期行为，和相机镜像一致。

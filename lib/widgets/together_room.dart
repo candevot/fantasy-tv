@@ -390,6 +390,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               RepaintBoundary(
                 key: widget.videoBoundaryKey,
                 child: FxPlayerSurface(
+                  showControls: false,
                   key: ValueKey<int>(widget.videoEpoch),
                   player: player,
                   subtitleBottom: 76,

@@ -1593,6 +1593,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             if (c != null && c.value.isInitialized && !_fullscreenActive)
               SizedBox.expand(
                 child: FxPlayerSurface(
+                  showControls: false,
                   key: ValueKey<int>(_videoEpoch),
                   player: c,
                   subtitleBottom: fxSubtitleMinBottom,

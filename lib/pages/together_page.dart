@@ -3031,7 +3031,7 @@ class _TogetherPageState extends State<TogetherPage>
         continue;
       }
       if (!mounted || seq != _videoSeq) return;
-      if (play.type.trim().toLowerCase() == 'parse') continue;
+      // 不跳过 parse 线路（4K / 爱奇艺 / 腾讯都是这个类型）。
       _playInfo = play;
 
       // 统一补成绝对地址：站内相对路径补全后 mpv 能直连，
@@ -3212,11 +3212,10 @@ class _TogetherPageState extends State<TogetherPage>
     if (!mounted || seq != _videoSeq) return null;
     try {
       final play = await Api.play(videoId, ep, line, fresh: true);
-      if (!mounted ||
-          seq != _videoSeq ||
-          play.type.trim().toLowerCase() == 'parse') {
+      if (!mounted || seq != _videoSeq) {
         return null;
       }
+      // 不跳过 parse 线路。
       if (qualityKey != null) {
         for (final quality in play.quality) {
           if (quality.key == qualityKey && quality.url.trim().isNotEmpty) {

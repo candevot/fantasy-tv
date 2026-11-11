@@ -184,7 +184,13 @@ class FxPlayback {
   /// [fit] 由 betterplayer 内部的 AspectRatio + FittedBox 处理（创建时
   /// 配置里已固定为 contain），这里不再额外包一层比例框 —— 外面再套会
   /// 二次约束把画面推出屏幕（用户报的「新播放器在屏幕外」）。
-  Widget buildVideo({BoxFit fit = BoxFit.contain}) {
+  /// [showControls] 是否显示 betterplayer 的内置控件。
+  ///
+  /// 竖屏嵌入播放（详情页 / 一起看房间）由页面自己画进度条，
+  /// 这时传 false，否则内置控件会和页面控件叠成两层。
+  /// 全屏播放传 true，直接用内置控件（画质 / 音轨 / 字幕 / PiP）。
+  Widget buildVideo({BoxFit fit = BoxFit.contain, bool showControls = true}) {
+    _controller.setControlsEnabled(showControls);
     return BetterPlayer(controller: _controller);
   }
 

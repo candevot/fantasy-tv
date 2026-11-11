@@ -1264,51 +1264,38 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     );
   }
 
-  /// 横屏控件层：完全复用在线全屏三件套 —— [FsTopBar] 返回·剧名·集数·⋯设置，
-  /// [FsSideControls] 左锁（左侧中部，不与返回重叠）·右 ±10 秒，
-  /// [FsBottomBar] 进度 · 播放暂停 · 下一集 · 选集 · ⋯设置 · 退出。
-  /// 投屏 / 清晰度·线路 / 下载这些在线入口一律不给。
+  /// 离线播放的控件全部交给 betterplayer 内置（进度 / 倍速 / 重试）。
+  ///
+  /// 这里原来画着 FsTopBar + FsSideControls + FsBottomBar 一整套自绘控件，
+  /// 换成 betterplayer 之后会与内置控件上下叠成两层，所以整段移除，
+  /// 只保留左上角返回键。
   Widget _controls() {
-    final compact = MediaQuery.sizeOf(context).width < 700;
-    return AnimatedOpacity(
-      opacity: _controlsVisible ? 1 : 0,
-      duration: const Duration(milliseconds: 180),
-      child: IgnorePointer(
-        ignoring: !_controlsVisible,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: _topBar(compact: compact),
+    return Positioned(
+      left: 0,
+      top: 0,
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(6),
+          child: IconButton(
+            icon: const Icon(Icons.arrow_back_rounded,
+                color: Colors.white, size: 22),
+            tooltip: '返回',
+            style: IconButton.styleFrom(
+              backgroundColor: Colors.black.withValues(alpha: .38),
             ),
-            Positioned.fill(
-              child: FsSideControls(
-                onLock: _lock,
-                onSeekBy: (seconds) => unawaited(_seekBy(seconds)),
-              ),
-            ),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: _bottomBar(compact: compact),
-            ),
-          ],
+            onPressed: () => unawaited(_exit()),
+          ),
         ),
       ),
     );
   }
-
   /// 顶栏：完全复用在线全屏的 [FsTopBar]（返回 · 剧名 · 集数 · ⋯设置）。
   ///
   /// 投屏只对在线播放有意义，而 [FsTopBar] 的投屏钮是必填项：这里传空实现，
   /// 再用与顶栏逐像素相同的渐变把投屏那一列盖住（离线页不给投屏入口，
   /// 顺带挡住那颗按钮的点击与长按提示）。遮罩按 FsTopBar 的排布定位：
   /// 右内边距 10 + ⋯钮 32·s + 间距 7·s + 投屏钮 32·s，上下拉满整条顶栏。
-  Widget _topBar({required bool compact}) {
+) {
     final s = compact ? .9 : 1.0;
     // FsTopBar 会按屏幕安全边距右移一列，遮罩跟着移才能继续盖住投屏钮。
     final safeRight = MediaQuery.viewPaddingOf(context).right;
@@ -1348,7 +1335,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     );
   }
 
-  Widget _bottomBar({required bool compact}) {
+) {
     return FsBottomBar(
       position: _position,
       duration: _duration,
