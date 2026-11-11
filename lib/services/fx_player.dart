@@ -94,11 +94,15 @@ class FxPlayer implements Listenable {
   double _rate = 1;
 
   /// 画面组件 —— 直接用 betterplayer 内置控件。
+  ///
+  /// [showControls] false 时关闭播放器自带控件（竖屏嵌入播放用，
+  /// 由页面自己画进度条，避免两套控件叠成两层）。
   Widget buildVideo({
     BoxFit fit = BoxFit.contain,
     Alignment alignment = Alignment.center,
+    bool showControls = true,
   }) {
-    return _core.buildVideo();
+    return _core.buildVideo(fit: fit, showControls: showControls);
   }
 
   /// [buildVideo] 的简写入口。

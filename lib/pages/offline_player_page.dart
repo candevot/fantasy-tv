@@ -19,7 +19,6 @@ import '../widgets/player_theme.dart'
         FxLoadingOverlay,
         FxPlayerSurface,
         fxLoadProgress,
-        fxPlayerQuality,
         fxResumeMinSeconds,
         fxSaveProgress,
         kPlayerControlsAutoHide;
@@ -60,12 +59,10 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
   bool _loading = true;
   String? _error;
   bool _controlsVisible = true;
-  bool _playing = false;
   bool _switching = false;
   bool _endedHandled = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
-  Duration _buffered = Duration.zero;
   double _rate = 1;
 
   /// 循环播放：单集循环交给 mpv（loop-file），关闭则按「自动下一集」连播。
@@ -233,8 +230,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
         _endedHandled = false;
         _duration = player.value.duration;
         _position = player.value.position;
-        _playing = player.value.isPlaying;
-        _buffered = player.value.buffered;
       });
       _armResume(saved);
       _wake();
@@ -316,8 +311,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     setState(() {
       _position = value.position;
       _duration = value.duration;
-      _buffered = value.buffered;
-      _playing = value.isPlaying;
       if (error != null) _error = error;
     });
     // 续播挂起点：时长一到、或位置已经开始推进（本地文件常常一次就绪，
@@ -412,8 +405,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
       _controlsVisible = true;
       _position = Duration.zero;
       _duration = Duration.zero;
-      _buffered = Duration.zero;
-      _playing = false;
     });
     if (reason != null) _toast('$reason · ${next.epLabel}');
     await _open();
@@ -629,185 +620,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
 
   /* ------------------------------------------------------------- 设置面板 */
 
-  Widget _settingsSheet() {
-    final display = FxDisplaySettings.instance;
-    final settings = AppSettings.instance;
-    final bottom = MediaQuery.paddingOf(context).bottom;
-    return Container(
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.sizeOf(context).height * .78,
-      ),
-      decoration: const BoxDecoration(
-        color: Color(0xFFF7FAFF),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
-      ),
-      child: SingleChildScrollView(
-        physics: const BouncingScrollPhysics(),
-        padding: EdgeInsets.fromLTRB(18, 10, 18, 14 + bottom),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 38,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFE3E9F3),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                const Icon(Icons.tune_rounded, size: 18, color: Fx.accent),
-                const SizedBox(width: 7),
-                const Text(
-                  '播放设置',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: Fx.ink,
-                  ),
-                ),
-                const Spacer(),
-                Flexible(
-                  child: Text(
-                    '${_task.title} · ${_task.epLabel}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            _sheetSection(
-              title: '画面比例',
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final mode in FxAspectMode.values)
-                    _optChip(
-                      label: mode.label,
-                      selected: display.aspect == mode,
-                      onTap: () {
-                        unawaited(display.setAspect(mode));
-                        _refreshSheet();
-                      },
-                    ),
-                ],
-              ),
-            ),
-            _sheetSection(
-              title: '镜像',
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final mode in FxMirrorMode.values)
-                    _optChip(
-                      label: mode.label,
-                      selected: display.mirror == mode,
-                      onTap: () {
-                        unawaited(display.setMirror(mode));
-                        _refreshSheet();
-                      },
-                    ),
-                ],
-              ),
-            ),
-            _sheetSection(
-              title: '倍速',
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final rate in _rates)
-                    _optChip(
-                      label: _rateLabel(rate),
-                      selected: (_rate - rate).abs() < .001,
-                      onTap: () => unawaited(_setRate(rate)),
-                    ),
-                ],
-              ),
-            ),
-            _sheetSection(
-              title: '定时关闭',
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _optChip(
-                    label: '不开启',
-                    selected: settings.sleepMode == FxSleepMode.off,
-                    onTap: () => unawaited(_applySleep(FxSleepMode.off, 0)),
-                  ),
-                  _optChip(
-                    label: '播完本集',
-                    selected: settings.sleepMode == FxSleepMode.episode,
-                    onTap: () =>
-                        unawaited(_applySleep(FxSleepMode.episode, 0)),
-                  ),
-                  for (final minutes in AppSettings.sleepTimerOptions)
-                    _optChip(
-                      label: '$minutes 分钟',
-                      selected: settings.sleepMode == FxSleepMode.minutes &&
-                          settings.sleepMinutes == minutes,
-                      onTap: () =>
-                          unawaited(_applySleep(FxSleepMode.minutes, minutes)),
-                    ),
-                ],
-              ),
-            ),
-            _sheetSection(
-              title: '循环播放',
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final mode in FxLoopMode.values)
-                    _optChip(
-                      label: mode.label,
-                      selected: _loopMode == mode,
-                      onTap: () => unawaited(_setLoopMode(mode)),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                Expanded(
-                  child: _switchRow(
-                    label: '播完自动下一集',
-                    hint: '仅在已下载的集之间连播',
-                    value: settings.autoNext,
-                    onChanged: (v) {
-                      unawaited(settings.setAutoNext(v));
-                      _refreshSheet();
-                    },
-                  ),
-                ),
-                const SizedBox(width: 10),
-                _sheetButton(
-                  icon: Icons.lock_outline_rounded,
-                  label: '锁定屏幕',
-                  onTap: () {
-                    Navigator.of(context).maybePop();
-                    _lock();
-                  },
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   String _rateLabel(double rate) =>
       rate == rate.roundToDouble() ? '${rate.toInt()}x' : '${rate}x';
 
@@ -942,89 +754,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  /// 选集：只列本地任务，已下载的可直接切，其余显示排队 / 未下载状态。
-  Widget _episodeSheet() {
-    final size = MediaQuery.sizeOf(context);
-    final bottom = MediaQuery.paddingOf(context).bottom;
-    final total = _totalEpisodes;
-    final current = _task.ep;
-    return Container(
-      // 横屏可用高度小，抽屉放高一点；竖屏维持原来的 58%。
-      height: size.height * (size.width > size.height ? .78 : .58),
-      decoration: const BoxDecoration(
-        color: Color(0xFFF7FAFF),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
-      ),
-      child: Column(
-        children: [
-          const SizedBox(height: 9),
-          Container(
-            width: 38,
-            height: 4,
-            decoration: BoxDecoration(
-              color: const Color(0xFFE3E9F3),
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 12, 10, 8),
-            child: Row(
-              children: [
-                const Icon(Icons.playlist_play_rounded,
-                    size: 19, color: Fx.accent),
-                const SizedBox(width: 7),
-                const Text(
-                  '选集',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: Fx.ink,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  '已下载 ${_downloaded.length}/$total 集',
-                  style: const TextStyle(fontSize: 11, color: Fx.sub),
-                ),
-                const Spacer(),
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => Navigator.of(context).maybePop(),
-                  child: Container(
-                    width: 30,
-                    height: 30,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: .85),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white),
-                    ),
-                    child: const Icon(Icons.close_rounded,
-                        size: 18, color: Fx.sub),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: GridView.builder(
-              padding: EdgeInsets.fromLTRB(16, 0, 16, 12 + bottom),
-              physics: const BouncingScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 4,
-                mainAxisSpacing: 8,
-                crossAxisSpacing: 8,
-                childAspectRatio: 1.9,
-              ),
-              itemCount: total,
-              itemBuilder: (ctx, i) => _episodeTile(i + 1, current),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1241,7 +970,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
             style: IconButton.styleFrom(
               backgroundColor: Colors.black.withValues(alpha: .38),
             ),
-            onPressed: () => unawaited(_exit()),
+            onPressed: () => unawaited(_leave()),
           ),
         ),
       ),

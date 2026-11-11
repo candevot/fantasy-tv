@@ -183,12 +183,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   PlayInfo? _info;
 
   /// 全屏内实际 open 成功的地址 / 请求头（重新 open 后投屏要跟着变）。
-  String? _activeCastUrl;
-  Map<String, String> _activeCastHeaders = const <String, String>{};
 
   late int _ep;
   late String _line;
-  late String _title;
   late List<Episode> _episodes;
 
   /// 详情线路表：加载文案只按当前 lineId 查线路名。
@@ -312,14 +309,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return null;
   }
 
-  /// loading / 切换期间显示用的进度，避免 open 重置成 0 导致进度条回弹。
-  Duration get _displayPosition =>
-      _uiPosition ?? (_controller?.value.position ?? Duration.zero);
 
-  Duration get _displayDuration =>
-      (_uiDuration != null && _uiDuration! > Duration.zero)
-          ? _uiDuration!
-          : (_controller?.value.duration ?? Duration.zero);
 
   /// 切换结束后最多再占位 2 秒；seek 异常时也不会把假进度永远挂在 UI 上。
   void _startUiHoldTimeout() {
@@ -333,7 +323,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     });
   }
 
-  String get _epLabel => _epLabelFor(_ep);
 
   /// 当前线路名：只按当前 lineId 从详情线路表查，不用上一次请求的 _info。
   String get _lineName => fxLineNameOf(_lines, _line);
@@ -350,7 +339,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     super.initState();
     _ep = widget.ep;
     _line = widget.line;
-    _title = widget.title.trim().isEmpty ? '正在播放' : widget.title.trim();
     _episodes = List<Episode>.from(widget.episodes);
     _lines = List<LineInfo>.from(widget.lines);
 
@@ -512,7 +500,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _episodes = detail.allEpisodes;
         _lines = detail.lines;
         if (widget.title.trim().isEmpty && detail.title.isNotEmpty) {
-          _title = detail.title;
         }
       });
     } catch (_) {
@@ -782,8 +769,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       // open 成功不代表首帧已出（红屏/黑屏常见于这里）：超时仍未出画面
       // 就进入错误页，而不是一直干等。
       if (!_firstFrame) _armFirstFrameTimer();
-      _activeCastUrl = url;
-      _activeCastHeaders = headers;
       return true;
     } catch (_) {
       return false;

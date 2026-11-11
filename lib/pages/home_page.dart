@@ -63,9 +63,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   List<LiveSection> get _liveSections => buildLiveSections(_liveGroups);
 
-  List<LiveChannel> get _liveAllChannels => <LiveChannel>[
-    for (final section in _liveSections) ...section.channels,
-  ];
 
   @override
   void initState() {

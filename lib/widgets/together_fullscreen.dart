@@ -860,34 +860,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
 /// 顶部 / 中央短提示胶囊（3.0x 快进中）。
 /// 全屏一起看顶栏的 LIVE 胶囊。
-class _LivePill extends StatelessWidget {
-  const _LivePill();
-
-  @override
-  Widget build(BuildContext context) {
-    return PGlassPill(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.circle, size: 6, color: Color(0xFFFF5A5A)),
-          SizedBox(width: 4),
-          Text(
-            'LIVE',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 10.5,
-              fontWeight: FontWeight.w800,
-              letterSpacing: .5,
-              shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _FsBadge extends StatelessWidget {
   const _FsBadge({required this.text});
 
