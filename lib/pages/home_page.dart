@@ -58,8 +58,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 直播频道单独维护：接口可能为空 / 404，失败也按空态处理，不弹错误。
   List<LiveGroup> _liveGroups = const <LiveGroup>[];
-  bool _liveLoading = false;
-  bool _liveLoaded = false;
 
   /// 直播首屏搜索：本地过滤全部频道，输入即出结果。
 
@@ -228,22 +226,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _loadLive() async {
     final req = ++_req;
-    setState(() => _liveLoading = true);
     try {
       final groups = await Api.liveGroups();
       if (!mounted || req != _req) return;
       setState(() {
         _liveGroups = groups;
-        _liveLoaded = true;
-        _liveLoading = false;
       });
     } catch (_) {
       // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它频道。
       if (!mounted || req != _req) return;
       setState(() {
         _liveGroups = const <LiveGroup>[];
-        _liveLoaded = true;
-        _liveLoading = false;
       });
     }
   }
@@ -482,61 +475,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
     ];
-  }
-
-  Widget _liveSectionGrid(List<LiveSection> sections) {
-    return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-      sliver: SliverLayoutBuilder(
-        builder: (context, constraints) {
-          final columns = constraints.crossAxisExtent >= 560 ? 3 : 2;
-          return SliverGrid(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: columns == 3 ? 1.45 : 1.25,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (context, i) => LiveGroupCard(
-                section: sections[i],
-                onTap: () => openLiveSection(context, sections[i]),
-              ),
-              childCount: sections.length,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _liveChannelGrid(List<LiveChannel> channels) {
-    return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-      sliver: SliverLayoutBuilder(
-        builder: (context, constraints) {
-          final columns = constraints.crossAxisExtent >= 700 ? 3 : 2;
-          final itemWidth =
-              (constraints.crossAxisExtent - 12 * (columns - 1)) / columns;
-          final extent = (itemWidth - 12) * 9 / 16 + 58;
-          return SliverGrid(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              mainAxisExtent: extent,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (context, i) => LiveChannelCard(
-                channel: channels[i],
-                onTap: () => openLiveChannel(context, channels[i]),
-              ),
-              childCount: channels.length,
-            ),
-          );
-        },
-      ),
-    );
   }
 
   Widget _header() {

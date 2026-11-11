@@ -11,9 +11,7 @@ import '../services/fx_player.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
-import '../widgets/cast_sheet.dart';
 import '../widgets/fs_controls.dart';
-import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
@@ -302,27 +300,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 顶栏画质胶囊文案：真实分辨率 `宽x高`（如 1920x1080），未就绪时为空。
   String get _qualityText => fxPlayerQuality(_controller);
-
-  /// 全屏顶栏「投屏」：复用竖屏解析好的当前清晰度 / 直播地址。
-  CastSource _buildCastSource() {
-    final info = _info;
-    if (info == null) throw const CastException('投屏地址还没准备好');
-    final active = _activeCastUrl?.trim() ?? '';
-    final url = active.isNotEmpty ? active : _watchdogUrl();
-    if (url == null) throw const CastException('当前没有可投屏的播放地址');
-    final headers =
-        active.isNotEmpty ? _activeCastHeaders : _watchdogHeaders(url);
-    return CastService.resolveSource(
-      url: url,
-      headers: headers,
-      title: _isLive ? _title : '$_title · $_epLabel',
-      isLive: _isLive,
-      direct: info.direct,
-      startAt:
-          _isLive ? Duration.zero : (_controller?.value.position ?? Duration.zero),
-      serverBase: Api.base,
-    );
-  }
 
   /// 主地址对应哪个码率：用于进入页面时正确高亮当前档。
   String? _qualityKeyFor(PlayInfo? info) {
@@ -1389,16 +1366,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _wake();
   }
 
-  /// 刚锁定时的唯一自动淡出计时器：3 秒后隐藏解锁钮。
-  /// 之后点屏幕是即时切换显隐，不再有「点一下亮 3 秒」。
-  void _startUnlockTimer() {
-    _unlockTimer?.cancel();
-    _unlockTimer = Timer(kPlayerUnlockAutoHide, () {
-      if (!mounted || !_locked) return;
-      setState(() => _unlockVisible = false);
-    });
-  }
-
   /// 锁定状态点屏幕 = 解锁钮显隐切换（toggle），隐藏 0 延迟立即执行；
   /// 可见时点一下马上消失，再点一下重新唤出，点锁钮本身则是解锁。
   ///
@@ -1501,74 +1468,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       setState(() {});
     }
     unawaited(_applyRate(_rateBeforeHold));
-  }
-
-  void _toggleSpeed() {
-    if (_isLive) {
-      return;
-    }
-    _hideTimer?.cancel();
-    setState(() {
-      _showSpeed = !_showSpeed;
-      _showSleep = false;
-      _showJump = false;
-      _controls = true;
-    });
-    if (!_showSpeed) _wake();
-  }
-
-  /// 播放设置里「跳过片头片尾」的状态文案：
-  /// 「片头 00:30 · 片尾 01:00」；两项都没设置显示「未设置」。
-  String get _markLabel {
-    if (_mark.isEmpty) return '未设置';
-    return '片头 ${fxTime(Duration(seconds: _mark.introSeconds))}'
-        ' · 片尾 ${fxTime(Duration(seconds: _mark.outroSeconds))}';
-  }
-
-  /// 打开片头 / 片尾标记面板（底部「片头/尾」按钮、播放设置行）。
-  void _openJumpPanel() {
-    if (_isLive) return;
-    _hideTimer?.cancel();
-    setState(() {
-      _showJump = true;
-      _showSpeed = false;
-      _showSleep = false;
-      _controls = true;
-    });
-  }
-
-  /// 应用输入的片头 / 片尾时长：按 videoId 落盘，本集立即按新值跳。
-  /// 清空本剧设置：清完任何位置都不再自动跳。
-  /// 打开定时关闭右侧面板（与速度 / 片头尾面板互斥）。
-  /// 直播同样可用：到点暂停对直播一样生效。
-  void _openSleepPanel() {
-    _hideTimer?.cancel();
-    setState(() {
-      _showSleep = true;
-      _showSpeed = false;
-      _showJump = false;
-      _controls = true;
-    });
-  }
-
-  /// 面板选中一项：不开启 / 看完当集 / 30·60·90 分钟。
-  /// 自定义分钟（1–1440）：弹输入框，确认后生效。
-  /// 落地定时关闭：分钟模式记截止时间戳（杀进程再进来能续上剩余时间）。
-  /// 到点只暂停播放并保留进度，不退出 App。
-  Future<void> _applySleep(FxSleepMode mode, int minutes) async {
-    final settings = AppSettings.instance;
-    await settings.init();
-    _sleepTimer?.cancel();
-    _sleepTimer = null;
-    if (mode == FxSleepMode.minutes) {
-      final endsAt = DateTime.now().millisecondsSinceEpoch + minutes * 60000;
-      await settings.setSleepTimer(mode, minutes: minutes, endsAt: endsAt);
-      _armSleep(endsAt - DateTime.now().millisecondsSinceEpoch);
-    } else {
-      await settings.setSleepTimer(mode);
-    }
-    if (!mounted) return;
-    setState(() {});
   }
 
   void _armSleep(int millis) {

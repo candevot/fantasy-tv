@@ -452,16 +452,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     _wake();
   }
 
-  Future<void> _seekBy(int seconds) async {
-    final target = _position + Duration(seconds: seconds);
-    final clamped = target < Duration.zero
-        ? Duration.zero
-        : (_duration > Duration.zero && target > _duration
-            ? _duration
-            : target);
-    await _seek(clamped);
-  }
-
   Future<void> _setRate(double rate) async {
     _rate = rate;
     if (mounted) setState(() {});
@@ -638,38 +628,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
   }
 
   /* ------------------------------------------------------------- 设置面板 */
-
-  Future<void> _openSettingsSheet() async {
-    _hideTimer?.cancel();
-    if (mounted) setState(() => _controlsVisible = true);
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      barrierColor: Colors.black.withValues(alpha: .34),
-      builder: (sheetCtx) => StatefulBuilder(
-        builder: (sheetCtx, setSheet) {
-          _setSheet = setSheet;
-          return _settingsSheet();
-        },
-      ),
-    );
-    _setSheet = null;
-    if (mounted) _wake();
-  }
-
-  Future<void> _openEpisodeSheet() async {
-    _hideTimer?.cancel();
-    if (mounted) setState(() => _controlsVisible = true);
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      barrierColor: Colors.black.withValues(alpha: .34),
-      builder: (sheetCtx) => _episodeSheet(),
-    );
-    if (mounted) _wake();
-  }
 
   Widget _settingsSheet() {
     final display = FxDisplaySettings.instance;
@@ -1289,15 +1247,6 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
       ),
     );
   }
-  void _playNextEpisode() {
-    final next = _nextEpisode();
-    if (next == null) {
-      _toast('已经是最后一集已下载的集');
-      return;
-    }
-    unawaited(_switchTo(next, reason: '下一集'));
-  }
-
   void _toast(String msg) {
     final messenger = ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;

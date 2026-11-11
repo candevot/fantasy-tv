@@ -9,7 +9,6 @@ import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
 import 'fs_controls.dart';
-import 'fs_panels.dart';
 import 'player_gestures.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
@@ -268,38 +267,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     _toggleControls();
   }
 
-  void _togglePlay() {
-    widget.onTogglePlay();
-    _wake();
-  }
-
   void _seekTo(double seconds) {
     widget.onSeek(seconds);
     _wake();
   }
 
-  void _seekBy(int seconds) {
-    widget.onSeekBy(seconds);
-    _wake();
-  }
-
   /* ------------------------------------------------------------ 锁屏 */
-
-  void _lock() {
-    FocusScope.of(context).unfocus();
-    _hideTimer?.cancel();
-    _unlockTimer?.cancel();
-    setState(() {
-      _locked = true;
-      _unlockVisible = true;
-      _controls = false;
-      _chatOpen = false;
-      _showSpeed = false;
-      _showQuality = false;
-    });
-    _endHold();
-    _startUnlockTimer();
-  }
 
   void _unlock() {
     _unlockTimer?.cancel();
@@ -364,58 +337,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   }
 
   /* ------------------------------------------------------------ 弹层 / 聊天 */
-
-  void _toggleSpeed() {
-    if (!widget.isHost) {
-      widget.onHostOnly();
-      return;
-    }
-    _hideTimer?.cancel();
-    setState(() {
-      _showSpeed = !_showSpeed;
-      _showQuality = false;
-      _controls = true;
-    });
-    if (!_showSpeed) _scheduleHide();
-  }
-
-  void _toggleQuality() {
-    if (!widget.isHost) {
-      widget.onHostOnly();
-      return;
-    }
-    if (!widget.canChangeQuality) {
-      return;
-    }
-    _hideTimer?.cancel();
-    setState(() {
-      _showQuality = !_showQuality;
-      _showSpeed = false;
-      _controls = true;
-    });
-    if (!_showQuality) _scheduleHide();
-  }
-
-  void _openSpeedPanel(double value) {
-    widget.onRate(value);
-    setState(() => _showSpeed = false);
-    _wake();
-  }
-
-  void _openQualityPanel(String? key) {
-    widget.onQuality(key);
-    setState(() => _showQuality = false);
-    _wake();
-  }
-
-  void _runHost(VoidCallback action) {
-    if (!widget.isHost) {
-      widget.onHostOnly();
-      return;
-    }
-    action();
-    _wake();
-  }
 
   void _openChat() {
     FocusScope.of(context).unfocus();
@@ -656,16 +577,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       ),
     );
   }
-  String get _epLabel {
-    if (widget.isLive) return 'LIVE · 直播中';
-    for (final episode in widget.episodes) {
-      if (episode.n == widget.ep) {
-        return fxEpisodeLabel(episode.n, episode.name);
-      }
-    }
-    return fxEpisodeLabel(widget.ep);
-  }
-
   Widget _buildError() {
     return Container(
       color: Colors.black.withValues(alpha: .46),

@@ -254,10 +254,6 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     final settings = FxDisplaySettings.instance;
     final aspect = settings.aspect;
     final mirror = settings.mirror;
-    final mirrored = mirror != FxMirrorMode.none;
-    final bottom = widget.subtitleBottom < fxSubtitleMinBottom
-        ? fxSubtitleMinBottom
-        : widget.subtitleBottom;
     // 画面直接用 betterplayer 的 BetterPlayer 控件。
     //
     // 注意：不要再套 fxAspectFrame —— betterplayer 内部已经有 AspectRatio
