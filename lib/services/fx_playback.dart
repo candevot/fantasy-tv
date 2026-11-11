@@ -158,9 +158,13 @@ class FxPlayback {
     _startTicker();
   }
 
-  Future<void> play() => _controller.play();
+  Future<void> play() async {
+    await _controller.play();
+  }
 
-  Future<void> pause() => _controller.pause();
+  Future<void> pause() async {
+    await _controller.pause();
+  }
 
   Future<void> stop() async {
     _stopTicker();
@@ -168,7 +172,9 @@ class FxPlayback {
     await _controller.seekTo(Duration.zero);
   }
 
-  Future<void> seek(Duration position) => _controller.seekTo(position);
+  Future<void> seek(Duration position) async {
+    await _controller.seekTo(position);
+  }
 
   Future<void> setRate(double rate) async {
     await _controller.setSpeed(rate);

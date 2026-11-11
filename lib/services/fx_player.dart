@@ -251,7 +251,7 @@ class FxPlayer implements Listenable {
 
   void _onCoreValue() {
     if (_disposed) return;
-    final c = _core.value;
+    final c = _core.value.value;
     _setValue(_value.copyWith(
       position: c.position,
       duration: c.duration,
