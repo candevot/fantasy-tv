@@ -28,7 +28,7 @@ dependencies:
   image: ^4.2.0
   path_provider: '>=2.1.4 <3.0.0'
   # 读取 Android 真实 versionName / versionCode（设置页、关于页、检查更新）。
-  package_info_plus: '>=8.3.1 <9.0.0'
+  package_info_plus: '>=10.1.0 <11.0.0'
   # 播放页上下滑手势：亮度 / 音量。两者都是 media_kit_video 的传递依赖，
   # 显式声明以便与 media_kit_video 锁在同一大版本，避免解析出不兼容的新版。
   screen_brightness_platform_interface: ^2.1.2
