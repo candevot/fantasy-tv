@@ -304,38 +304,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   String get _qualityText => fxPlayerQuality(_controller);
 
   /// 全屏顶栏「投屏」：复用竖屏解析好的当前清晰度 / 直播地址。
-  Future<void> _openCastSheet() async {
-    CastSource source;
-    final override = widget.castSource;
-    if (override != null) {
-      source = override;
-    } else {
-      try {
-        source = _buildCastSource();
-      } on CastException {
-        // 解析投屏地址失败：静默返回，不弹遮挡画面的提示。
-        return;
-      }
-    }
-    final wasPlaying = _controller?.value.isPlaying ?? false;
-    await showCastSheet(
-      context,
-      source: source,
-      owner: widget.castOwner ?? this,
-      onCastStarted: () async {
-        try {
-          await _controller?.pause();
-        } catch (_) {}
-      },
-      onCastStopped: () async {
-        if (!wasPlaying || !mounted) return;
-        try {
-          await _controller?.play();
-        } catch (_) {}
-      },
-    );
-  }
-
   CastSource _buildCastSource() {
     final info = _info;
     if (info == null) throw const CastException('投屏地址还没准备好');
@@ -1359,16 +1327,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _wake();
   }
 
-  Future<void> _next() async {
-    if (_isLive) return;
-    final next = _nextEpNumber();
-    if (next == null) {
-      _wake();
-      return;
-    }
-    await _switchEp(next);
-  }
-
   /* ---------------------------------------------------------------- 控件 */
 
   void _startHideTimer() {
@@ -1429,23 +1387,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showJump = false;
     });
     _wake();
-  }
-
-  void _lock() {
-    _unlockTimer?.cancel();
-    // 锁屏会直接移除手势层，长按 end 不会再回来，先复位倍速。
-    _resetHold2x();
-    setState(() {
-      _locked = true;
-      _controls = false;
-      _unlockVisible = true;
-      _showSpeed = false;
-      _showSleep = false;
-      _showJump = false;
-    });
-    _hideTimer?.cancel();
-    // 自动淡出只在刚锁定这一次：3 秒后锁按钮 opacity=0 且不再可点。
-    _startUnlockTimer();
   }
 
   /// 刚锁定时的唯一自动淡出计时器：3 秒后隐藏解锁钮。
@@ -1509,19 +1450,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _wake();
   }
 
-  void _seekBy(int seconds) {
-    if (_isLive) return;
-    final c = _controller;
-    if (c == null || _loading || !c.value.isInitialized) return;
-    final total = c.value.duration;
-    var target = c.value.position + Duration(seconds: seconds);
-    if (target < Duration.zero) target = Duration.zero;
-    if (target > total) target = total;
-    unawaited(c.seekTo(target));
-    _showSeekHint(seconds > 0 ? '快进 ${seconds}s' : '后退 ${-seconds}s');
-    _wake();
-  }
-
   void _showSeekHint(String text) {
     _seekHintTimer?.cancel();
     if (!mounted) return;
@@ -1538,13 +1466,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     try {
       await c.setRate(rate);
     } catch (_) {}
-  }
-
-  void _setRate(double rate) {
-    if (!mounted) return;
-    setState(() => _rate = rate);
-    unawaited(_applyRate(rate));
-    _showSeekHint('${fxRateLabel(rate)} 播放');
   }
 
   void _startHold2x() {
@@ -1596,57 +1517,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!_showSpeed) _wake();
   }
 
-  Future<void> _openEpisodeSheet() async {
-    if (_isLive) {
-      return;
-    }
-    if (_loading) return;
-    _hideTimer?.cancel();
-    if (_episodes.isEmpty) {
-      _wake();
-      return;
-    }
-    if (mounted) setState(() => _controls = true);
-    final picked = await showFsEpisodeSheet(
-      context,
-      episodes: _episodes,
-      current: _ep,
-    );
-    if (!mounted) return;
-    _wake();
-    if (picked != null) await _switchEp(picked);
-  }
-
-  Future<void> _openMorePanel() async {
-    _hideTimer?.cancel();
-    if (mounted) setState(() => _controls = true);
-    await showFxMorePanel(
-      context,
-      loopMode: _loopMode,
-      markLabel: _markLabel,
-      // 直播没有循环 / 片头尾 / 下载 / 倍速：传 null 让对应行不显示；
-      // 画面比例、镜像、定时关闭、后台播放、问题反馈照常可用且生效。
-      onLoopChanged: _isLive
-          ? null
-          : (mode) {
-              if (!mounted) return;
-              setState(() => _loopMode = mode);
-              unawaited(
-                _controller?.setLooping(mode == FxLoopMode.single) ??
-                    Future<void>.value(),
-              );
-            },
-      onJumpPanel: _isLive ? null : _openJumpPanel,
-      onSleepTimer: _openSleepPanel,
-      onDownload: _isLive ? null : () {},
-      onSpeed: _isLive ? null : _toggleSpeed,
-      onBackground: () {},
-      onFeedback: () {},
-    );
-    if (!mounted) return;
-    _wake();
-  }
-
   /// 播放设置里「跳过片头片尾」的状态文案：
   /// 「片头 00:30 · 片尾 01:00」；两项都没设置显示「未设置」。
   String get _markLabel {
@@ -1668,28 +1538,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   /// 应用输入的片头 / 片尾时长：按 videoId 落盘，本集立即按新值跳。
-  Future<void> _applyJump(int introSeconds, int outroSeconds) async {
-    final mark = VideoMark(
-      introSeconds: introSeconds,
-      outroSeconds: outroSeconds,
-    );
-    await VideoMarks.save(widget.videoId, mark);
-    if (!mounted) return;
-    setState(() => _mark = mark);
-    _showSeekHint(mark.isEmpty
-        ? '已清空跳过片头片尾'
-        : '已设置片头 ${fxTime(Duration(seconds: introSeconds))}'
-            ' · 片尾 ${fxTime(Duration(seconds: outroSeconds))}');
-  }
-
   /// 清空本剧设置：清完任何位置都不再自动跳。
-  Future<void> _clearMarks() async {
-    await VideoMarks.clear(widget.videoId);
-    if (!mounted) return;
-    setState(() => _mark = const VideoMark());
-    _showSeekHint('已清空本剧设置');
-  }
-
   /// 打开定时关闭右侧面板（与速度 / 片头尾面板互斥）。
   /// 直播同样可用：到点暂停对直播一样生效。
   void _openSleepPanel() {
@@ -1703,28 +1552,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   /// 面板选中一项：不开启 / 看完当集 / 30·60·90 分钟。
-  void _pickSleep(FxSleepMode mode, int minutes) {
-    if (mounted) setState(() => _showSleep = false);
-    unawaited(_applySleep(mode, minutes));
-    _wake();
-  }
-
   /// 自定义分钟（1–1440）：弹输入框，确认后生效。
-  Future<void> _openCustomSleep() async {
-    final settings = AppSettings.instance;
-    final picked = await showFxSleepCustomDialog(
-      context,
-      current: settings.sleepMode == FxSleepMode.minutes
-          ? settings.sleepMinutes
-          : 0,
-    );
-    if (!mounted || picked == null) return;
-    setState(() => _showSleep = false);
-    await _applySleep(FxSleepMode.minutes, picked);
-    if (!mounted) return;
-    _wake();
-  }
-
   /// 落地定时关闭：分钟模式记截止时间戳（杀进程再进来能续上剩余时间）。
   /// 到点只暂停播放并保留进度，不退出 App。
   Future<void> _applySleep(FxSleepMode mode, int minutes) async {
@@ -2124,10 +1952,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     double keyboard,
     EdgeInsets pad,
   ) {
-    final compact = MediaQuery.sizeOf(context).width < 700;
-    final bottomInset = keyboard > 0 ? 0.0 : pad.bottom;
-    // 刘海 / 圆角屏安全边距：设置面板跟着右移，不压进屏幕圆角。
-    final safe = MediaQuery.viewPaddingOf(context);
+    // 控件全交给 betterplayer 内置，这里不再需要算 compact / bottomInset。
     return Stack(
       fit: StackFit.expand,
       children: [
