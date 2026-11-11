@@ -3,7 +3,7 @@ description: 幻想影视 - 纯净追剧
 publish_to: 'none'
 version: 1.0.0+1
 environment:
-  sdk: '>=3.8.0 <4.0.0'
+  sdk: '>=3.13.0 <4.0.0'
 dependencies:
   flutter:
     sdk: flutter
@@ -20,19 +20,19 @@ dependencies:
   # 并且内置画质选择 / 音轨选择 / 字幕 / PiP / 投屏。
   # 1.36.0 要求 Flutter >=3.47.0（本项目 3.47.9）。
   better_player: ^1.36.0
-  web_socket_channel: '>=2.4.0 <3.0.0'
-  shared_preferences: '>=2.2.2 <3.0.0'
+  web_socket_channel: ^3.0.3
+  shared_preferences: ^2.5.6
   # 直播详情「分享」调系统分享面板；10.x 兼容 Flutter 3.32 / compileSdk 36。
-  share_plus: '>=10.1.4 <11.0.0'
-  image_picker: '>=1.1.2 <2.0.0'
+  share_plus: ^13.3.1
+  image_picker: ^1.2.4
   image: ^4.2.0
-  path_provider: '>=2.1.4 <3.0.0'
+  path_provider: ^2.1.5
   # 读取 Android 真实 versionName / versionCode（设置页、关于页、检查更新）。
   package_info_plus: '>=10.1.0 <11.0.0'
   # 播放页上下滑手势：亮度 / 音量。两者都是 media_kit_video 的传递依赖，
   # 显式声明以便与 media_kit_video 锁在同一大版本，避免解析出不兼容的新版。
   screen_brightness_platform_interface: ^2.1.2
-  volume_controller: '>=3.4.4 <4.0.0'
+  volume_controller: ^3.7.1
   # DLNA/UPnP 投屏：SSDP 发现 + AVTransport / RenderingControl SOAP。
   # 纯 Dart 实现，SDK >=3.8，与 Flutter 3.32.8 / Dart 3.8.1 匹配。
   dlna_dart: ^0.1.2
