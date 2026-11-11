@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:http/http.dart' as http;
+
 import 'package:better_player/better_player.dart' show BetterPlayerController;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -56,6 +58,12 @@ class FxPlayer implements Listenable {
 
   /// 底层 betterplayer 控制器（需要画质/音轨列表时直接用）。
   BetterPlayerController get player => _core.controller;
+
+  /// 画面层代际：每次真正换地址都 +1，页面用它做纹理重建的 key。
+  ///
+  /// ExoPlayer 不需要重建纹理（内嵌在 AndroidView 里），这里保留接口，
+  /// 值恒为 0，页面拿到相同 key 就不会白白重建。
+  int get renderEpoch => 0;
 
   /// 当前状态快照。
   FxPlayerValue get value => _value;
@@ -628,3 +636,212 @@ class _PlaybackSource {
 /// - 同一集并发请求走同一个 Future，不会重复打接口；
 /// - [prewarm] 会先清掉旧结果再请求，并把下一集的 m3u8 也预热好，
 ///   切集时 open 只差一个本地 playlist 往返。
+
+class _FxHlsWarmup {
+  static const Duration _budget = Duration(milliseconds: 1600);
+  static const Duration _ttl = Duration(minutes: 8);
+  /// 预热时真正预取的分片数。
+  ///
+  /// 直连模式下没有客户端代理的整集缓存，起播和 seek 都直接打 CDN。
+  /// 之前只暖首片 256KB，等于只做了 DNS/连接预热 —— 首帧仍要等第一个
+  /// 完整分片下完。这里改成预取前 3 片（4K 单片 10~40MB 时按字节上限
+  /// 截断），让 mpv 一起播就有货可解，起播不再空等。
+  static const int _segmentPrefetchCount = 3;
+
+  /// 预取总字节上限：4K 分片很大，不能无限预取。
+  static const int _prefetchBudgetBytes = 24 * 1024 * 1024;
+  static final Map<String, DateTime> _warmed = <String, DateTime>{};
+  static final Map<String, Future<void>> _inflight = <String, Future<void>>{};
+
+  static Future<void> prepare(String url, Map<String, String> headers) {
+    if (url.isEmpty || !_looksLikeHls(url)) return Future<void>.value();
+    // 离线缓存播的是本地 index.m3u8，不需要联网预热。
+    final scheme = Uri.tryParse(url)?.scheme ?? '';
+    if (scheme != 'http' && scheme != 'https') return Future<void>.value();
+    final now = DateTime.now();
+    final warmedAt = _warmed[url];
+    if (warmedAt != null && now.difference(warmedAt) < _ttl) {
+      return Future<void>.value();
+    }
+    final pending = _inflight[url];
+    if (pending != null) return pending;
+    final future = _warm(url, headers).timeout(_budget, onTimeout: () {});
+    _inflight[url] = future;
+    return future.whenComplete(() {
+      if (identical(_inflight[url], future)) _inflight.remove(url);
+      _warmed[url] = DateTime.now();
+      _trimWarmed();
+    });
+  }
+
+  /// 代理地址 / 带 query 的地址要解码后再判断，避免漏掉 .m3u8。
+  static bool _looksLikeHls(String url) {
+    final lower = Uri.decodeFull(url).toLowerCase();
+    return lower.contains('.m3u8');
+  }
+
+  static Future<void> _warm(String url, Map<String, String> headers) async {
+    final playlistUri = Uri.parse(url);
+    final client = http.Client();
+    try {
+      // 先做 DNS 预解析，再拿 playlist；HTTP 连接也会复用这次解析结果。
+      unawaited(_dnsPrefetch(playlistUri));
+      final response = await client
+          .get(playlistUri, headers: headers)
+          .timeout(const Duration(milliseconds: 1200));
+      if (response.statusCode < 200 || response.statusCode >= 400) return;
+      final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+      if (!body.contains('#EXTM3U')) return;
+      final variants = _variants(body, playlistUri);
+      if (variants.isEmpty) {
+        // 已经是媒体 playlist：直接取第一个分片的前 256KB 暖 CDN。
+        // 直连没有代理层的整集缓存，开头多备几片，起播/小 seek 不用等。
+        final leading = _leadingSegments(
+          body,
+          playlistUri,
+          _segmentPrefetchCount,
+        );
+        for (final seg in leading) {
+          unawaited(_prefetchFirstSegment(seg, headers));
+        }
+        return;
+      }
+      // master playlist：只等第一个子 playlist（拿到真实分片地址），
+      // 第二个子 playlist 后台暖连接，不占用起播预算。
+      final firstVariant = variants.first;
+      final firstBody = await _fetchPlaylistText(client, firstVariant, headers);
+      if (firstBody != null) {
+        final leading = _leadingSegments(
+          firstBody,
+          firstVariant,
+          _segmentPrefetchCount,
+        );
+        for (final seg in leading) {
+          unawaited(_prefetchFirstSegment(seg, headers));
+        }
+      }
+      if (variants.length > 1) {
+        unawaited(_warmVariant(variants[1], headers));
+      }
+    } catch (_) {
+      // 预热失败不影响正常 open。
+    } finally {
+      client.close();
+    }
+  }
+
+  static Future<String?> _fetchPlaylistText(
+    http.Client client,
+    Uri uri,
+    Map<String, String> headers,
+  ) async {
+    try {
+      unawaited(_dnsPrefetch(uri));
+      final response = await client
+          .get(uri, headers: headers)
+          .timeout(const Duration(milliseconds: 800));
+      if (response.statusCode < 200 || response.statusCode >= 400) return null;
+      return utf8.decode(response.bodyBytes, allowMalformed: true);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 第二个码率只在后台暖连接，不占用等待时间。
+  static Future<void> _warmVariant(Uri uri, Map<String, String> headers) async {
+    final client = http.Client();
+    try {
+      await _fetchPlaylistText(client, uri, headers);
+    } finally {
+      client.close();
+    }
+  }
+
+  /// 直连模式下的预热：把开头几个分片整片拉一遍。
+  ///
+  /// 不保留数据（mpv 自己会再拉一次并缓存），目的是：
+  ///   1. 暖 DNS / TCP / TLS，起播省掉握手；
+  ///   2. 让 CDN 边缘节点预热这几个对象，mpv 再拉时直接命中；
+  ///   3. 提前暴露「首片就 404/403」的坏线路，交给上层快速换线。
+  ///
+  /// 4K 单片 10~40MB，因此按 [_prefetchBudgetBytes] 截断，不会把带宽吃光。
+  static Future<void> _prefetchFirstSegment(
+    Uri uri,
+    Map<String, String> headers,
+  ) async {
+    unawaited(_dnsPrefetch(uri));
+    final client = http.Client();
+    var budget = _prefetchBudgetBytes;
+    try {
+      final request = http.Request('GET', uri)..headers.addAll(headers);
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 3));
+      if (response.statusCode >= 400) return;
+      await for (final chunk in response.stream.timeout(
+        const Duration(seconds: 3),
+      )) {
+        budget -= chunk.length;
+        if (budget <= 0) break;
+      }
+    } catch (_) {
+      // 预取失败不影响播放。
+    } finally {
+      client.close();
+    }
+  }
+
+  static Future<void> _dnsPrefetch(Uri uri) async {
+    final https = uri.isScheme('https');
+    if (uri.host.isEmpty || !(https || uri.isScheme('http'))) return;
+    try {
+      await InternetAddress.lookup(
+        uri.host,
+      ).timeout(const Duration(milliseconds: 800));
+    } catch (_) {
+      // DNS 失败交给真正请求时的系统解析。
+    }
+  }
+
+  /// 从媒体 playlist 里取第一个分片地址，相对路径按 playlist 地址解析。
+  /// 取 playlist 里前 [count] 个分片地址（用于直连预热）。
+  static List<Uri> _leadingSegments(String playlist, Uri base, int count) {
+    if (playlist.contains('#EXT-X-STREAM-INF')) return const <Uri>[];
+    final out = <Uri>[];
+    for (final raw in const LineSplitter().convert(playlist)) {
+      final line = raw.trim();
+      if (line.isEmpty || line.startsWith('#')) continue;
+      final uri = Uri.tryParse(base.resolve(line).toString());
+      if (uri == null) continue;
+      out.add(uri);
+      if (out.length >= count) break;
+    }
+    return out;
+  }
+
+  /// 从 master playlist 里取前两个变体地址（相对路径按 playlist 地址解析）。
+  static List<Uri> _variants(String playlist, Uri base) {
+    final lines = const LineSplitter().convert(playlist);
+    final variants = <Uri>[];
+    for (var i = 0; i < lines.length; i++) {
+      if (!lines[i].trimLeft().startsWith('#EXT-X-STREAM-INF')) continue;
+      for (var j = i + 1; j < lines.length; j++) {
+        final line = lines[j].trim();
+        if (line.isEmpty || line.startsWith('#')) continue;
+        final uri = Uri.tryParse(base.resolve(line).toString());
+        if (uri != null) variants.add(uri);
+        break;
+      }
+    }
+    return variants;
+  }
+
+  static void _trimWarmed() {
+    if (_warmed.length <= 24) return;
+    final now = DateTime.now();
+    _warmed.removeWhere((_, at) => now.difference(at) > _ttl);
+    while (_warmed.length > 24) {
+      _warmed.remove(_warmed.keys.first);
+    }
+  }
+}
