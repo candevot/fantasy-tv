@@ -638,7 +638,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       // 位置没被重置、也没冻结，但流可能已经断了（后台待久了连接被回收、
       // 平台签名过期）。这时不能什么都不做 —— 交给播放器自检，
       // 真的断了会自动重连并回到原位置，不用用户点重试。
-      unawaited(c.resumeSelfCheck());
+      await c.resumeSelfCheck();
       return;
     }
     // 自愈改过播放状态 / 位置：刷新一次进度条，避免停在旧值。

@@ -416,7 +416,7 @@ class _TogetherPageState extends State<TogetherPage>
         // 房主/房员都不用手动点重试。
         final c = _controller;
         if (c != null) {
-          unawaited(c.resumeSelfCheck());
+          await c.resumeSelfCheck();
         } else if (_stage == _TogetherStage.room && _videoId.isNotEmpty) {
           // 播放器已被释放（后台被系统回收）：按房间当前状态整段重建，
           // 位置由随后的 room_state 对齐。

@@ -155,7 +155,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     );
     if (!mounted) return;
     if (!healed) {
-      unawaited(player.resumeSelfCheck());
+      await player.resumeSelfCheck();
       return;
     }
     setState(() {});
