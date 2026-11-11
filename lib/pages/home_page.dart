@@ -8,7 +8,10 @@ import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
+import 'live_all_page.dart';
+import 'live_detail_page.dart';
 import 'live_groups_page.dart';
+import '../widgets/fx_live_section.dart';
 import 'search_page.dart';
 import 'together_page.dart';
 import '../utils/fx_route.dart';
@@ -40,7 +43,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final Map<String, HomeData> _cache = {};
 
   Timer? _timer;
-  String _channel = 'recommend';
+  String _channel = 'recommend';  // 分类入口已移除，只保留推荐频道
 
   /// banner 页码只驱动指示点，不再 setState 整页。
   final ValueNotifier<int> _bannerPage = ValueNotifier<int>(0);
@@ -348,13 +351,21 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 首页分区固定顺序：今日热播（腾讯榜命中）→ 最新更新 → 高分好剧 →
   /// 电影 → 综艺 → 动漫。推荐频道只保留这 6 个分区，每区最多 10 条。
+  /// 首页分区顺序：热门优先。
+  ///
+  /// 用户要求「去掉分类入口，各区域优先显示热门」，所以：
+  ///   · 今日热播 / 最新更新 放最前（更新最快、点击率最高）
+  ///   · 电影 / 剧集 / 综艺 / 动漫 按内容量排
+  ///   · 直播作为独立分区放在最后（它不用卡片网格，单独渲染）
   static const List<String> _sectionOrder = <String>[
     '今日热播',
     '最新更新',
-    '高分好剧',
     '电影',
+    '剧集',
     '综艺',
     '动漫',
+    '高分好剧',
+    '直播',
   ];
 
   int _sectionRank(String label) {
@@ -460,6 +471,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           childCount: sections.length,
         ),
       ),
+      // 直播作为首页的一个区（用户要求：去掉分类页签，直播进分区）。
+      // 数据来自 /api/live，与直播页共用同一份 _liveGroups。
+      if (_liveSections.isNotEmpty)
+        SliverToBoxAdapter(
+          child: FxLiveSectionRow(
+            sections: _liveSections,
+            onMore: _openLiveAll,
+            onTapChannel: _openLiveChannel,
+          ),
+        ),
       SliverToBoxAdapter(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(0, 24, 0, 0),
@@ -846,8 +867,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const SizedBox(height: 14),
           _searchBar(),
           const SizedBox(height: 12),
-          _channelTabs(),
-          const SizedBox(height: 12),
         ],
       ),
     );
@@ -890,58 +909,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _channelTabs() {
-    return Container(
-      height: 42,
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .58),
-        borderRadius: BorderRadius.circular(21),
-        border: Border.all(color: Colors.white.withValues(alpha: .92)),
-      ),
-      child: Row(
-        children: [
-          for (final c in _channels)
-            Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => _selectChannel(c.key),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 220),
-                  curve: Curves.easeOutCubic,
-                  decoration: BoxDecoration(
-                    gradient: c.key == _channel ? Fx.brand : null,
-                    borderRadius: BorderRadius.circular(17),
-                    boxShadow: c.key == _channel
-                        ? [
-                            BoxShadow(
-                              color: Fx.accent.withValues(alpha: .22),
-                              blurRadius: 10,
-                              offset: const Offset(0, 3),
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: Center(
-                    child: Text(
-                      c.label,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: c.key == _channel
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                        color: c.key == _channel ? Colors.white : Fx.sub,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
         ],
       ),
     );
@@ -1133,6 +1100,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ),
       ],
+    );
+  }
+
+  /// 「全部」：跳直播总览页。
+  void _openLiveAll() {
+    Navigator.of(context).push(
+      FxPageRoute(builder: (_) => const LiveAllPage()),
+    );
+  }
+
+  /// 点某个直播频道：进直播播放页。
+  void _openLiveChannel(LiveChannel channel) {
+    Navigator.of(context).push(
+      FxPageRoute(builder: (_) => LiveDetailPage(channel: channel)),
     );
   }
 
