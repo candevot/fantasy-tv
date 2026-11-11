@@ -79,7 +79,12 @@ jobs:
             echo 'dependency_overrides must be removed' >&2
             exit 1
           fi
-          grep -E 'media_kit(_video|_libs_video)?:' pubspec.yaml
+          # 播放内核已换成 betterplayer(ExoPlayer)，media_kit 应已彻底移除。
+          if grep -qE '^  media_kit(_video|_libs_video)?:' pubspec.yaml; then
+            echo 'media_kit 依赖应当已移除（播放层已换 betterplayer）' >&2
+            exit 1
+          fi
+          grep -E '^  better_player:' pubspec.yaml
       - run: flutter pub get
       - run: flutter analyze
       - name: Playback recovery regressions
