@@ -1263,8 +1263,15 @@ class _TogetherPageState extends State<TogetherPage>
     if (_videoId.isEmpty || _ep <= 0) return;
     // 0 秒不覆盖详情页原本的进度；有真实观看进度才回写。
     if (!position.isFinite || position <= .5) return;
+    // 片尾窗口内不写进度，直接清 0：房间散场时往往已经播到片尾，
+    // 若把「距结尾几十秒」存下来，下次单独打开这集会直接从片尾开始。
+    final totalSeconds =
+        controller != null && controller.value.isInitialized
+            ? controller.value.duration.inMilliseconds / 1000.0
+            : 0.0;
+    final save = fxIsFinishedPosition(position, totalSeconds) ? 0.0 : position;
     try {
-      await fxSaveProgress(_videoId, _ep, position);
+      await fxSaveProgress(_videoId, _ep, save);
     } catch (_) {}
   }
 
@@ -3073,7 +3080,12 @@ class _TogetherPageState extends State<TogetherPage>
           double target;
           bool shouldPlay;
           if (_isHost) {
-            final resume = localResumePos;
+            var resume = localResumePos;
+            // 片尾窗口内的进度不续播，从头开始。房间散场常常发生在
+            // 播到片尾时，这个进度会被带进下一次播放。
+            if (resume != null && fxIsFinishedPosition(resume, duration)) {
+              resume = 0;
+            }
             if (resume != null) {
               target = resume;
               shouldPlay = localResumePlaying;

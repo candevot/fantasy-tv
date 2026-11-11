@@ -748,7 +748,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             : (rawPosition > durationMs ? durationMs : rawPosition))
         : (rawPosition < 0 ? 0 : rawPosition);
     var seconds = ended ? 0.0 : positionMs / 1000.0;
-    if (!ended && durationMs > 0 && positionMs >= durationMs - 1500) {
+    // 片尾窗口内一律归零：用户在最后几十秒退出很常见（等片尾曲、
+    // 看预告），若照原样存下来，下次打开就从那里播 —— 表现就是
+    // 「一打开就是片尾、总共只有几十秒」。
+    if (!ended && fxIsFinishedPosition(positionMs / 1000.0, durationMs / 1000.0)) {
       seconds = 0;
     }
     await fxSaveProgress(widget.videoId, ep, seconds);
@@ -1093,7 +1096,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         } catch (_) {}
         final durationMs = controller.value.duration.inMilliseconds;
         var resume = saved;
-        if (durationMs > 0 && resume >= durationMs / 1000.0 - 2) {
+        // 旧版本存下的「距结尾几十秒」进度也要在这里兜住：
+        // 否则升级后第一次打开仍然会直接跳到片尾。
+        if (fxIsFinishedPosition(resume, durationMs / 1000.0)) {
           resume = 0;
         }
         if (resume > 0) {

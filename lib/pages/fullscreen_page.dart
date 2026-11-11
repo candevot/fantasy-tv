@@ -727,7 +727,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (!mounted || token != _loadToken) return;
         final durationMs = c.value.duration.inMilliseconds;
         var start = resume;
-        if (durationMs > 0 && start >= durationMs / 1000.0 - 2) start = 0;
+        // 片尾窗口内一律从头播：用户上次在最后几十秒退出很常见，
+        // 照原样续播就成了「一打开就是片尾曲、总共只剩几十秒」。
+        if (fxIsFinishedPosition(start, durationMs / 1000.0)) start = 0;
         if (start > 0) {
           // 静默续播：直接 seek 到上次位置，不弹任何提示。
           await c.seekTo(Duration(milliseconds: (start * 1000).round()));
@@ -857,7 +859,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             : (rawPosition > durationMs ? durationMs : rawPosition))
         : (rawPosition < 0 ? 0 : rawPosition);
     var seconds = ended ? 0.0 : positionMs / 1000.0;
-    if (!ended && durationMs > 0 && positionMs >= durationMs - 1500) {
+    // 片尾窗口内归零（见 fxIsFinishedPosition）：否则用户在最后几十秒
+    // 退出，下次打开会直接跳到片尾，看起来像「一打开就是片尾曲」。
+    if (!ended &&
+        fxIsFinishedPosition(positionMs / 1000.0, durationMs / 1000.0)) {
       seconds = 0;
     }
     await fxSaveProgress(widget.videoId, ep, seconds);

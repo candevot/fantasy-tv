@@ -20,6 +20,22 @@ String fxPad2(int n) => n.toString().padLeft(2, '0');
 /// 续播门槛：上次进度不足 60 秒时从头播，避免把「片头 20 秒」误当成续播。
 const double fxResumeMinSeconds = 60;
 
+/// 片尾判定窗口：距结尾不足这么多秒，就认为「这集已经看完了」，进度归零。
+///
+/// 原来是写死的 1.5 秒，太小了 —— 用户在最后几十秒退出（看片尾曲、
+/// 等字幕、手动退出），进度会被存成「距结尾 43 秒」，下次打开直接从
+/// 那里开始播，用户看到的就是「一打开就是片尾曲、总共只有 43 秒」。
+///
+/// 现在按「距结尾 90 秒以内算看完」处理。一集 40 分钟以上的剧，
+/// 最后 90 秒基本就是片尾曲 / 下集预告，重看这一段没有意义。
+const double fxEndingWindowSeconds = 90;
+
+/// 判断某个播放位置是否已经算「看完」（应当把进度归零）。
+bool fxIsFinishedPosition(double positionSeconds, double durationSeconds) {
+  if (durationSeconds <= 0) return false;
+  return positionSeconds >= durationSeconds - fxEndingWindowSeconds;
+}
+
 /// 控件无操作后自动隐藏：参考实现 5000ms（PlayerControllerImpl）。
 const Duration kPlayerControlsAutoHide = Duration(seconds: 5);
 
