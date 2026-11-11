@@ -372,19 +372,29 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         fit: StackFit.expand,
         children: [
           _buildVideo(player, pad, ready),
+          // 手势层只占画面中段：铺满会把 betterplayer 的进度条和按钮盖住，
+          // 用户点进度条跳不动、点设置没反应（和在线全屏同一个问题）。
           if (!_locked && player != null)
             Positioned.fill(
-              child: FxPlayerGestures(
-                player: player,
-                enabled: widget.errorText.isEmpty,
-                enableSeek: !widget.isLive,
-                onTap: _onSurfaceTap,
-                onDoubleTap: _wake,
-                onSeek: (value) => _seekTo(value.inMilliseconds / 1000.0),
-                onLongPressStart: _startHold,
-                onLongPressEnd: _endHold,
-                onGestureStart: _hideControls,
-                resetBrightnessOnDispose: true,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 96,
+                  right: 96,
+                  top: pad.top + 72,
+                  bottom: pad.bottom + 88,
+                ),
+                child: FxPlayerGestures(
+                  player: player,
+                  enabled: widget.errorText.isEmpty,
+                  enableSeek: !widget.isLive,
+                  onTap: _onSurfaceTap,
+                  onDoubleTap: _wake,
+                  onSeek: (value) => _seekTo(value.inMilliseconds / 1000.0),
+                  onLongPressStart: _startHold,
+                  onLongPressEnd: _endHold,
+                  onGestureStart: _hideControls,
+                  resetBrightnessOnDispose: true,
+                ),
               ),
             ),
           if (!widget.loading && widget.errorText.isEmpty && ready)

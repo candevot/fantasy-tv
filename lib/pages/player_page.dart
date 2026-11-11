@@ -1613,16 +1613,28 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               ),
             // 手势层：单击显隐控件 / 双击暂停 / 左右滑调进度。
             // 亮度音量上下滑与长按倍速只在全屏提供。
+            //
+            // 不能铺满：页面底部自己画的进度条 + 顶栏按钮都在这一层下面，
+            // Positioned.fill 会把它们全部盖住 —— 用户点进度条跳不动、
+            // 点设置没反应。这里上下各让出控制区高度。
             if (c != null)
               Positioned.fill(
-                child: FxPlayerGestures(
-                  player: c,
-                  enabled: !_error,
-                  enableVertical: false,
-                  onTap: _onSurfaceTap,
-                  onDoubleTap: _togglePlay,
-                  onSeek: _seek,
-                  onGestureStart: _hideControls,
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    left: 24,
+                    right: 24,
+                    top: 64,
+                    bottom: 72,
+                  ),
+                  child: FxPlayerGestures(
+                    player: c,
+                    enabled: !_error,
+                    enableVertical: false,
+                    onTap: _onSurfaceTap,
+                    onDoubleTap: _togglePlay,
+                    onSeek: _seek,
+                    onGestureStart: _hideControls,
+                  ),
                 ),
               ),
             // 播放中的缓冲：玻璃圆环 + 真实缓存百分比。

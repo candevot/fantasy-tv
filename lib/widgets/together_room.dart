@@ -445,12 +445,23 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   },
                 ),
               ),
+            // 点击显隐手势：只占中间区域。
+            //
+            // 之前是 Positioned.fill + HitTestBehavior.opaque 铺满整个小窗，
+            // 把播放器自带的进度条和按钮全盖住 —— 用户点进度条跳不动、
+            // 点设置没反应。小窗本身不大，上下各让 44dp 就够了。
             if (ready)
               Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: _onSurfaceTap,
-                  child: const SizedBox.expand(),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 44,
+                  ),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onTap: _onSurfaceTap,
+                    child: const SizedBox.expand(),
+                  ),
                 ),
               ),
             if (ready)
