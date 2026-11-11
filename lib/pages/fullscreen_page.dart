@@ -2002,6 +2002,39 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     );
   }
 
+  /// 分辨率 / 网速胶囊：只在拿到数据后显示，拿不到就不占位。
+  Widget _statChip(FxPlayer? c) {
+    if (c == null) return const SizedBox.shrink();
+    return AnimatedBuilder(
+      animation: c,
+      builder: (context, _) {
+        final v = c.value;
+        final res = v.resolutionText;
+        final speed = v.speedText;
+        if (res.isEmpty && speed.isEmpty) return const SizedBox.shrink();
+        final parts = <String>[
+          if (res.isNotEmpty) res,
+          if (speed.isNotEmpty) speed,
+        ];
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: .38),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Text(
+            parts.join(' · '),
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildError() {
     return Positioned.fill(
       child: Center(
@@ -2098,116 +2131,36 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return Stack(
       fit: StackFit.expand,
       children: [
+        // 控件全部交给 betterplayer 内置（进度条 / 倍速 / 画质 / 音轨 /
+        // 字幕 / PiP / 重试），位置就是它自己算的安全区。
+        //
+        // 之前这里还画着自绘的 FsTopBar + FsSideControls + FsBottomBar，
+        // 结果是「上下两套控件同时出现」—— 用户报的原话。
+        // 现在只留左上角一个返回键（betterplayer 的控件里没有退出全屏按钮）。
         Positioned(
+          left: 0,
           top: 0,
-          left: 0,
-          right: 0,
-          child: AnimatedBuilder(
-            // 网速每 2 秒刷新一次（FxPlayer 看门狗同步），
-            // 只重建顶栏这一小块，不影响画面层。
-            animation: _controller ?? const AlwaysStoppedAnimation<double>(0),
-            builder: (context, _) => FsTopBar(
-              title: _title,
-              epLabel: _isLive ? 'LIVE · 直播中' : _epLabel,
-              compact: compact,
-              qualityLabel: _qualityText,
-              speedText: _isLive
-                  ? ''
-                  : (_controller?.value.speedText ?? ''),
-              onBack: () => unawaited(_exit()),
-              onCast: () => unawaited(_openCastSheet()),
-              onMore: () => unawaited(_openMorePanel()),
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_rounded,
+                        color: Colors.white, size: 22),
+                    tooltip: '返回',
+                    style: IconButton.styleFrom(
+                      backgroundColor: Colors.black.withValues(alpha: .38),
+                    ),
+                    onPressed: () => unawaited(_exit()),
+                  ),
+                  const SizedBox(width: 6),
+                  // 分辨率 + 实时网速（betterplayer 不显示这些）
+                  _statChip(c),
+                ],
+              ),
             ),
-          ),
-        ),
-        Positioned.fill(
-          child: FsSideControls(
-            onLock: _lock,
-            onSeekBy: _seekBy,
-            showSeek: !_isLive,
-          ),
-        ),
-        Positioned(
-          left: 0,
-          right: 0,
-          bottom: keyboard,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (!_isLive && _showSpeed)
-                Padding(
-                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: FsSpeedPanel(
-                      rate: _rate,
-                      onPick: (v) {
-                        _setRate(v);
-                        setState(() => _showSpeed = false);
-                        _wake();
-                      },
-                    ),
-                  ),
-                ),
-              if (_showSleep)
-                Padding(
-                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: FsSleepPanel(
-                      mode: AppSettings.instance.sleepMode,
-                      minutes: AppSettings.instance.sleepMinutes,
-                      onPick: _pickSleep,
-                      onCustom: () => unawaited(_openCustomSleep()),
-                    ),
-                  ),
-                ),
-              if (!_isLive && _showJump)
-                Padding(
-                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: FsJumpPanel(
-                      mark: _mark,
-                      onApply: (intro, outro) =>
-                          unawaited(_applyJump(intro, outro)),
-                      onClear: () => unawaited(_clearMarks()),
-                    ),
-                  ),
-                ),
-              if (c == null)
-                SizedBox(height: 68 + bottomInset)
-              else if (keyboard > 0)
-                // 分秒输入时键盘弹出：底栏先让位，面板贴着键盘顶即可，
-                // 否则横屏可用高度不够，面板会被顶出屏幕。
-                const SizedBox(height: 0)
-              else
-                AnimatedBuilder(
-                  animation: c,
-                  builder: (context, _) {
-                    final v = c.value;
-                    return FsBottomBar(
-                      position: _displayPosition,
-                      duration: _displayDuration,
-                      buffered: v.buffered,
-                      playing: v.isInitialized && v.isPlaying,
-                      rate: _rate,
-                      // 倍速 / 定时 / 片头尾等全部收进 ⋯ 播放设置。
-                      qualityLabel: '',
-                      compact: compact,
-                      bottomInset: bottomInset,
-                      live: _isLive,
-                      onSeek: _isLive ? null : _seekTo,
-                      onTogglePlay: _togglePlay,
-                      onNext: _isLive ? null : () => unawaited(_next()),
-                      onEpisodes:
-                          _isLive ? null : () => unawaited(_openEpisodeSheet()),
-                      onMore: () => unawaited(_openMorePanel()),
-                      onExit: () => unawaited(_exit()),
-                    );
-                  },
-                ),
-            ],
           ),
         ),
       ],

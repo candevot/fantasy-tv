@@ -251,19 +251,19 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     final bottom = widget.subtitleBottom < fxSubtitleMinBottom
         ? fxSubtitleMinBottom
         : widget.subtitleBottom;
-    // 画面直接用 betterplayer 的 BetterPlayer 控件（内置控制层）。
-    final video = widget.player.buildVideo();
+    // 画面直接用 betterplayer 的 BetterPlayer 控件。
+    //
+    // 注意：不要再套 fxAspectFrame —— betterplayer 内部已经有 AspectRatio
+    // 按视频真实比例排布，外面再套一层会把画面二次约束、推出屏幕外
+    // （用户报的「新播放器位置在屏幕外」就是这个）。
+    //
+    // 画面比例 / 镜像这些自定义档位改由 BetterPlayer 的 fit 参数承担：
+    // fit 通过 FxPlayer.buildVideo(fit:) 传进去，比例由播放器自己算。
+    final video = widget.player.buildVideo(fit: fxAspectFit(aspect));
 
-    final framed = fxAspectFrame(aspect, video);
-    final body = fxMirrorWrap(mirror, framed);
-    if (!mirrored) return body;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        body,
-        FxMirrorSubtitle(player: widget.player, bottom: bottom),
-      ],
-    );
+    // 镜像：翻转整个画面层（含控件）。字幕在纹理里，会一起翻转 ——
+    // 这是镜像模式的预期行为，和相机镜像一致。
+    return fxMirrorWrap(mirror, video);
   }
 }
 

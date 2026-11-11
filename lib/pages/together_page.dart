@@ -2228,7 +2228,10 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     final qualities = _playInfo?.quality ?? const <QualityItem>[];
-    final playableLines = _lines.where((line) => !line.needsParse).toList();
+    // 不再过滤 needsParse —— 幻想4K / 爱奇艺 / 腾讯这些「需要解析」的线路
+    // 同样能播（解析由服务端 /api/play 完成），过滤掉会让一起看里看不到
+    // 4K，用户以为「只能用红牛量子」。
+    final playableLines = _lines.toList();
     final action = await showTogetherRoomMenu(
       context,
       epLabel: _epLabel,
@@ -2527,7 +2530,8 @@ class _TogetherPageState extends State<TogetherPage>
       await _ensureDetail(_videoId);
       if (!mounted) return;
     }
-    final playable = _lines.where((line) => !line.needsParse).toList();
+    // 同上：全部线路都参与换源。
+    final playable = _lines.toList();
     if (playable.length < 2) {
       return;
     }
@@ -3000,7 +3004,8 @@ class _TogetherPageState extends State<TogetherPage>
     await _ensureDetail(videoId);
     if (!mounted || seq != _videoSeq) return;
 
-    var playable = _lines.where((item) => !item.needsParse).toList();
+    // 同上：全部线路都参与换源。
+    var playable = _lines.toList();
     if (playable.isEmpty) {
       // 详情拿不到时仍尝试一次默认线路，避免房间完全不可看。
       // 详情拿不到时仍尝试一次当前线路，避免房间完全不可看。
@@ -3250,7 +3255,9 @@ class _TogetherPageState extends State<TogetherPage>
       try {
         final play = await Api.play(videoId, ep, next.id);
         if (!mounted || seq != _videoSeq) return null;
-        if (play.type.trim().toLowerCase() == 'parse') continue;
+        // 不要跳过 type=='parse' 的线路：幻想4K / 爱奇艺 / 腾讯都是这个
+        // 类型，跳过它们就等于换源永远只在红牛/量子之间打转。
+        // 能不能播只看「有没有拿到地址」，不看类型标签。
         final url = fxAbsolutePlayUrl(_qualityUrlFor(play, qualityKey));
         if (url.isEmpty) continue;
         return FxLineSource(

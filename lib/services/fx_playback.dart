@@ -180,7 +180,11 @@ class FxPlayback {
   }
 
   /// 画面 Widget —— 直接用 betterplayer 的成熟控件。
-  Widget buildVideo() {
+  ///
+  /// [fit] 由 betterplayer 内部的 AspectRatio + FittedBox 处理（创建时
+  /// 配置里已固定为 contain），这里不再额外包一层比例框 —— 外面再套会
+  /// 二次约束把画面推出屏幕（用户报的「新播放器在屏幕外」）。
+  Widget buildVideo({BoxFit fit = BoxFit.contain}) {
     return BetterPlayer(controller: _controller);
   }
 
@@ -220,6 +224,57 @@ class FxPlayback {
     });
   }
 
+  // 网速估算：betterplayer/ExoPlayer 不暴露实时带宽，这里用「已缓冲时长
+  // 的增量」反推。单位换算：增量秒数 × 码率 ≈ 下载字节，但码率未知，
+  // 所以直接用「每秒缓冲了多少秒」当作 1x 播放速度的倍数，再乘一个
+  // 估计码率给出近似网速。只用于界面显示，不参与任何播放决策。
+  DateTime? _speedAt;
+  Duration _speedBuffered = Duration.zero;
+  double _speedBps = 0;
+  int? _lastVideoBytes;
+
+  /// 近似网速（字节/秒）；0 表示还没测到。
+  double get measuredBytesPerSecond => _speedBps;
+
+  void _updateSpeed(Duration buffered, Duration duration, int? videoBytes) {
+    final now = DateTime.now();
+    // 画面分辨率变化时重新起算（切清晰度会让码率跳变）。
+    if (videoBytes != _lastVideoBytes) {
+      _lastVideoBytes = videoBytes;
+      _speedAt = now;
+      _speedBuffered = buffered;
+      return;
+    }
+    final last = _speedAt;
+    if (last == null) {
+      _speedAt = now;
+      _speedBuffered = buffered;
+      return;
+    }
+    final dtMs = now.difference(last).inMilliseconds;
+    if (dtMs < 900) return;
+    final gainedSec =
+        (buffered.inMilliseconds - _speedBuffered.inMilliseconds) / 1000.0;
+    _speedAt = now;
+    _speedBuffered = buffered;
+    if (gainedSec <= 0) {
+      // 缓冲没长（可能已缓冲到片尾）：逐步衰减到 0，不显示假速度。
+      _speedBps = _speedBps * 0.6;
+      return;
+    }
+    // 用分辨率估码率：1080p≈2.5Mbps，720p≈1.2Mbps，4K≈15Mbps。
+    final h = videoBytes ?? 0;
+    final mbps = h >= 1800
+        ? 15.0
+        : h >= 1000
+            ? 2.5
+            : h >= 700
+                ? 1.2
+                : 0.8;
+    final bytes = gainedSec * mbps * 1024 * 1024 / 8;
+    _speedBps = bytes / (dtMs / 1000.0);
+  }
+
   void _sync() {
     final vp = _controller.videoPlayerValue;
     if (vp == null) return;
@@ -236,10 +291,13 @@ class FxPlayback {
     final bufferedEnd =
         vp.buffered.isEmpty ? Duration.zero : vp.buffered.last.end;
 
+    _updateSpeed(bufferedEnd, dur, h > 0 ? h.round() : null);
+
     final next = FxPlaybackValue(
       position: vp.position,
       duration: dur,
       buffered: bufferedEnd,
+      bytesPerSecond: _speedBps,
       isPlaying: vp.isPlaying,
       isBuffering: vp.isBuffering,
       isInitialized: vp.initialized,
@@ -308,6 +366,7 @@ class FxPlaybackValue {
     this.videoWidth,
     this.videoHeight,
     this.aspectRatio = 16 / 9,
+    this.bytesPerSecond = 0,
   });
 
   final Duration position;
@@ -322,6 +381,9 @@ class FxPlaybackValue {
   final int? videoWidth;
   final int? videoHeight;
   final double aspectRatio;
+
+  /// 近似网速（字节/秒）；0 表示还没测到。
+  final double bytesPerSecond;
 
   /// 进度（0-1）。
   double get progress {
@@ -350,6 +412,7 @@ class FxPlaybackValue {
     int? videoWidth,
     int? videoHeight,
     double? aspectRatio,
+    double? bytesPerSecond,
   }) {
     return FxPlaybackValue(
       position: position ?? this.position,
@@ -364,6 +427,7 @@ class FxPlaybackValue {
       videoWidth: videoWidth ?? this.videoWidth,
       videoHeight: videoHeight ?? this.videoHeight,
       aspectRatio: aspectRatio ?? this.aspectRatio,
+      bytesPerSecond: bytesPerSecond ?? this.bytesPerSecond,
     );
   }
 }

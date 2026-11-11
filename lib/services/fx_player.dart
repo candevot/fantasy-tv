@@ -282,6 +282,7 @@ class FxPlayer implements Listenable {
       videoWidth: c.videoWidth,
       videoHeight: c.videoHeight,
       aspectRatio: c.aspectRatio,
+      bytesPerSecond: c.bytesPerSecond,
     ));
   }
 

@@ -15,7 +15,7 @@ import 'services/download_service.dart';
 import 'theme.dart';
 import 'widgets/update_dialog.dart';
 import 'pages/home_page.dart';
-import 'pages/category_page.dart';
+import 'pages/live_all_page.dart';
 import 'pages/rank_page.dart';
 import 'pages/mine_page.dart';
 import 'pages/detail_page.dart';
@@ -426,7 +426,7 @@ class _RootShellState extends State<RootShell> {
 
   static const _tabs = [
     (icon: Icons.home_rounded, label: '首页'),
-    (icon: Icons.grid_view_rounded, label: '分类'),
+    (icon: Icons.live_tv_rounded, label: '直播'),
     (icon: Icons.local_fire_department_rounded, label: '排行榜'),
     (icon: Icons.person_rounded, label: '我的'),
   ];
@@ -460,7 +460,7 @@ class _RootShellState extends State<RootShell> {
   Widget build(BuildContext context) {
     final pages = [
       const HomePage(),
-      const CategoryPage(),
+      const LiveAllPage(),
       const RankPage(),
       const MinePage(),
     ];
