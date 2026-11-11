@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:better_player/better_player.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 /// 播放层 —— betterplayer(ExoPlayer/Media3) 的薄封装。

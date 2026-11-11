@@ -5,7 +5,6 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import 'package:better_player/better_player.dart' show BetterPlayerController;
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../api.dart';
