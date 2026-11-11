@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -623,20 +622,8 @@ class _CachedPlayInfo {
   final DateTime at;
 }
 
-class _OpenRequest {
-  const _OpenRequest(this.key, this.future);
-
-  final String key;
-  final Future<void> future;
-}
 
 /// 解析完成后真正交给 mpv 的地址（可能已被本地 HLS 代理改写）。
-class _PlaybackSource {
-  const _PlaybackSource(this.url, this.headers);
-
-  final String url;
-  final Map<String, String> headers;
-}
 
 /// /api/play 结果缓存 + 下一集预解析（只请求，不创建播放器）。
 ///

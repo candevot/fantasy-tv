@@ -186,8 +186,6 @@ class FxPlayerSurface extends StatefulWidget {
 class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   /// 已经同步到 mpv 的字幕可见性与对应播放器，避免改画面比例这类无关档位时
   /// 重复写属性，同时保证换播放器实例（切线路 / 换集）后重新写一次。
-  bool? _subtitleVisible;
-  Object? _subtitlePlayer;
   int _renderEpoch = 0;
 
   // 放在共享画面层处理，普通播放、直播、离线和一起看都不会漏接。
@@ -215,8 +213,6 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     oldWidget.player.removeListener(_onPlayerChanged);
     widget.player.addListener(_onPlayerChanged);
     _renderEpoch = widget.player.renderEpoch;
-    // 换了播放器实例：新 mpv 的 sub-visibility 是默认值，需要按当前镜像档位重写。
-    _subtitlePlayer = null;
     _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
   }
 
@@ -235,9 +231,8 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   /// 镜像模式下画面翻转时，内嵌字幕会跟着翻转 —— 这里只记录状态，
   /// 真正的字幕层由 betterplayer 的 subtitlesConfiguration 处理。
   Future<void> _syncMirrorSubtitle(FxMirrorMode mode) async {
-    final visible = mode == FxMirrorMode.none;
-    _subtitleVisible = visible;
-    _subtitlePlayer = widget.player;
+    // 字幕显隐由 betterplayer 的控件负责，这里无需额外动作。
+    // 保留这个方法是为了后续若要按镜像档位关闭内嵌字幕时有落点。
   }
 
   @override

@@ -500,12 +500,14 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     final body = text.toString().trim();
     try {
       final box = context.findRenderObject();
-      await Share.share(
-        body,
-        subject: name,
-        sharePositionOrigin: box is RenderBox
-            ? box.localToGlobal(Offset.zero) & box.size
-            : null,
+      await SharePlus.instance.share(
+        ShareParams(
+          text: body,
+          subject: name,
+          sharePositionOrigin: box is RenderBox
+              ? box.localToGlobal(Offset.zero) & box.size
+              : null,
+        ),
       );
     } catch (_) {
       // 系统分享不可用时退回复制，保证地址能发出去。

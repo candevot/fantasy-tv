@@ -5,7 +5,6 @@ import '../models.dart';
 import '../services/app_settings.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
-import 'fs_controls.dart';
 import 'player_theme.dart';
 
 /* ========================================================================== */
