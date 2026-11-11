@@ -8,7 +8,6 @@ import '../services/app_settings.dart';
 import '../services/download_service.dart';
 import '../services/fx_player.dart';
 import '../services/screen_orientation.dart';
-import '../theme.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
