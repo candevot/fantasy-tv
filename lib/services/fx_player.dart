@@ -5,6 +5,8 @@ import 'package:better_player/better_player.dart' show BetterPlayerController;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import '../api.dart';
+import '../models.dart';
 import 'fx_playback.dart';
 
 /// 播放器对外门面 —— 全项目唯一的播放入口。
@@ -430,3 +432,199 @@ class FxPlayerValue {
     );
   }
 }
+
+/// 无感救援链第③步：返回下一条线路的播放源；没有下一条或取不到地址时返回 null。
+typedef FxLineRescue = Future<FxLineSource?> Function();
+
+/// 换线路用的播放源，字段语义与 `FxPlayer.open` 的参数一致。
+class FxLineSource {
+  const FxLineSource({
+    required this.url,
+    this.headers = const <String, String>{},
+    this.direct = false,
+  });
+
+  /// 新线路的 m3u8 / 播放地址。
+  final String url;
+
+  /// 新线路需要透传给播放器的请求头。
+  final Map<String, String> headers;
+
+  /// 是否为 HLS 直链（走本地分片代理）。
+  final bool direct;
+}
+
+/// 播放地址缓存 + 预热：减少「点播放要等一下」的感知延迟。
+class FxPlayCache {
+  static const Duration _ttl = Duration(minutes: 10);
+  static const int _maxEntries = 8;
+
+  static final Map<String, _CachedPlayInfo> _cache =
+      <String, _CachedPlayInfo>{};
+  static final Map<String, Future<PlayInfo>> _inflight =
+      <String, Future<PlayInfo>>{};
+
+  static String _key(String id, int ep, String line) => '$id|$ep|$line';
+
+  static PlayInfo? _fresh(String key) {
+    final cached = _cache[key];
+    if (cached == null) return null;
+    if (DateTime.now().difference(cached.at) > _ttl) {
+      _cache.remove(key);
+      return null;
+    }
+    return cached.info;
+  }
+
+  /// 只看缓存不请求；UI 可用于判断是否可秒开。
+  static PlayInfo? peek(String id, int ep, String line) =>
+      _fresh(_key(id, ep, line));
+
+  /// 取播放地址：优先缓存 / 正在请求的结果，[force] 时强制重新请求。
+  static Future<PlayInfo> resolve(
+    String id,
+    int ep,
+    String line, {
+    bool force = false,
+  }) {
+    final key = _key(id, ep, line);
+    if (force) {
+      _cache.remove(key);
+    } else {
+      final cached = _fresh(key);
+      if (cached != null) return Future<PlayInfo>.value(cached);
+    }
+    final pending = _inflight[key];
+    if (pending != null) return pending;
+    final future = Api.play(id, ep, line).then((info) {
+      _cache[key] = _CachedPlayInfo(info, DateTime.now());
+      _trim();
+      return info;
+    });
+    _inflight[key] = future;
+    return future.whenComplete(() {
+      if (identical(_inflight[key], future)) _inflight.remove(key);
+    });
+  }
+
+  /// 页面进入 / 下一集预热：已有缓存直接复用，不重复请求接口。
+  /// 只发请求并预热 m3u8，不创建播放器。
+  static void warm(String id, int ep, String line) {
+    final key = _key(id, ep, line);
+    if (_fresh(key) != null) return;
+    _resolveAndWarm(id, ep, line);
+  }
+
+  /// 播放 30 秒后调用：后台清空并刷新下一集 /api/play 结果与 m3u8。
+  /// 只发请求，不 open；失败静默，不影响当前播放。
+  static void prewarm(String id, int ep, String line) {
+    _cache.remove(_key(id, ep, line));
+    _resolveAndWarm(id, ep, line);
+  }
+
+  static void _resolveAndWarm(String id, int ep, String line) {
+    final key = _key(id, ep, line);
+    if (_inflight.containsKey(key)) return;
+    unawaited(
+      resolve(id, ep, line).then<void>(
+        (info) async {
+          final url = info.url.trim();
+          if (url.isEmpty) return;
+          await _FxHlsWarmup.prepare(url, info.headers);
+        },
+        onError: (Object error, StackTrace stack) {
+          // 预解析失败无需打扰用户，切集时还会正常重试。
+        },
+      ),
+    );
+  }
+
+  /// 播放地址失效 / 手动刷新时清掉对应缓存。
+  static void invalidate(String id, int ep, String line) {
+    _cache.remove(_key(id, ep, line));
+  }
+
+  static void _trim() {
+    final now = DateTime.now();
+    _cache.removeWhere((_, cached) => now.difference(cached.at) > _ttl);
+    while (_cache.length > _maxEntries) {
+      String? oldestKey;
+      DateTime? oldest;
+      for (final entry in _cache.entries) {
+        if (oldest == null || entry.value.at.isBefore(oldest)) {
+          oldest = entry.value.at;
+          oldestKey = entry.key;
+        }
+      }
+      if (oldestKey == null) return;
+      _cache.remove(oldestKey);
+    }
+  }
+}
+
+class FxSnapshotLayer extends StatelessWidget {
+  const FxSnapshotLayer({
+    super.key,
+    required this.bytes,
+    required this.opaque,
+    this.fit = BoxFit.contain,
+  });
+
+  /// media_kit `Player.screenshot()` 返回的图片字节。
+  final Uint8List? bytes;
+
+  /// 是否完全盖住画面；false 时淡出。
+  final bool opaque;
+
+  /// 与当前播放模式一致：竖屏 contain，全屏撑满时 cover。
+  final BoxFit fit;
+
+  @override
+  Widget build(BuildContext context) {
+    final data = bytes;
+    if (data == null) return const SizedBox.shrink();
+    return IgnorePointer(
+      child: AnimatedOpacity(
+        opacity: opaque ? 1 : 0,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        child: Image.memory(
+          data,
+          fit: fit,
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.low,
+        ),
+      ),
+    );
+  }
+}
+
+/// 正在执行的一次 open，用于忽略同一地址的重复打开请求。
+class _CachedPlayInfo {
+  const _CachedPlayInfo(this.info, this.at);
+
+  final PlayInfo info;
+  final DateTime at;
+}
+
+class _OpenRequest {
+  const _OpenRequest(this.key, this.future);
+
+  final String key;
+  final Future<void> future;
+}
+
+/// 解析完成后真正交给 mpv 的地址（可能已被本地 HLS 代理改写）。
+class _PlaybackSource {
+  const _PlaybackSource(this.url, this.headers);
+
+  final String url;
+  final Map<String, String> headers;
+}
+
+/// /api/play 结果缓存 + 下一集预解析（只请求，不创建播放器）。
+///
+/// - 缓存 10 分钟内有效，最多 8 条，避免 URL 长期失效与内存膨胀；
+/// - 同一集并发请求走同一个 Future，不会重复打接口；
+/// - [prewarm] 会先清掉旧结果再请求，并把下一集的 m3u8 也预热好，
+///   切集时 open 只差一个本地 playlist 往返。
