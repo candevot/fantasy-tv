@@ -7,7 +7,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  cupertino_icons: ^1.0.6
+  cupertino_icons: ^2.0.0
   http: ^1.2.0
   # media_kit（libmpv）播放内核；libs_video 1.0.7 起自带 16KB 对齐的
   # libmpv 1.1.7，配合 compileSdk 36 / AGP 8.13 满足 Android 15+ 16KB 页要求。
