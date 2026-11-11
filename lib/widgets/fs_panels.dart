@@ -160,92 +160,107 @@ class FsBottomBar extends StatelessWidget {
           if (!live) const SizedBox(height: 4),
           Row(
             children: [
+              // ── 左组：播放 / 下一集 ──
               PGlassIcon(
                 icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                size: 34 * s,
-                iconSize: 19 * s,
-                tint: .16,
+                size: 40 * s,
+                iconSize: 22 * s,
+                tint: .18,
                 tooltip: playing ? '暂停' : '播放',
                 onTap: onTogglePlay,
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 10),
               if (live) ...[
                 const _FsLiveBadge(),
                 const Spacer(),
               ] else ...[
                 PGlassIcon(
                   icon: Icons.skip_next_rounded,
-                  size: 34 * s,
-                  iconSize: 19 * s,
-                  tint: .16,
+                  size: 40 * s,
+                  iconSize: 22 * s,
+                  tint: .18,
                   tooltip: '下一集',
                   onTap: onNext,
                 ),
                 const Spacer(),
               ],
-              // 中段文字按钮：窄屏 / 刘海屏放不下时整体缩小，绝不挤出屏幕。
-              Flexible(
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (!live) const SizedBox(width: 10),
-                        if (!live && onJump != null) ...[
-                          FsTextAction(
-                            text: '片头/尾',
-                            size: s,
-                            active: jumpActive,
-                            onTap: onJump,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        if (!live && onSpeed != null) ...[
-                          FsTextAction(
-                            text: '倍速',
-                            size: s,
-                            active: (rate - 1).abs() > .001,
-                            onTap: onSpeed,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        if (qualityLabel.isNotEmpty) ...[
-                          FsTextAction(
-                            text: qualityLabel,
-                            size: s,
-                            active: qualityActive,
-                            onTap: onQuality,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        if (!live && onEpisodes != null) ...[
-                          FsTextAction(text: '选集', size: s, onTap: onEpisodes),
-                          const SizedBox(width: 8),
-                        ],
-                      ],
-                    ),
-                  ),
+              // ── 右组：功能入口 ──
+              //
+              // 之前这里混着「文字按钮 + 图标按钮」两种风格，而且倍速/清晰度
+              // 在底栏和 ⋯ 面板里**重复出现**，视觉上又挤又乱。
+              //
+              // 现在统一为图标，且每个功能只有一个入口：
+              //   倍速 → speed 图标（active 时高亮，不再显示「1.5x」文字）
+              //   清晰度 → hd 图标（有画质信息才显示）
+              //   选集 → 列表图标
+              //   片头尾 → bookmark 图标
+              //   播放设置 → ⋯
+              // 文字全部收进 tooltip，底栏在窄屏也不会挤成一团。
+              if (!live && onSpeed != null) ...[
+                PGlassIcon(
+                  icon: Icons.speed_rounded,
+                  size: 36 * s,
+                  iconSize: 20 * s,
+                  tint: .14,
+                  active: (rate - 1).abs() > .001,
+                  tooltip: (rate - 1).abs() > .001
+                      ? '倍速 ${rate.toStringAsFixed(rate == rate.roundToDouble() ? 1 : 2)}x'
+                      : '倍速',
+                  onTap: onSpeed,
                 ),
-              ),
-              // 底栏只留 ⋯ 播放设置：倍速 / 清晰度 / 线路全部收进面板。
+                const SizedBox(width: 6),
+              ],
+              if (qualityLabel.isNotEmpty && onQuality != null) ...[
+                PGlassIcon(
+                  icon: Icons.high_quality_rounded,
+                  size: 36 * s,
+                  iconSize: 20 * s,
+                  tint: .14,
+                  active: qualityActive,
+                  tooltip: '清晰度 $qualityLabel',
+                  onTap: onQuality,
+                ),
+                const SizedBox(width: 6),
+              ],
+              if (!live && onJump != null) ...[
+                PGlassIcon(
+                  icon: Icons.bookmark_border_rounded,
+                  size: 36 * s,
+                  iconSize: 19 * s,
+                  tint: .14,
+                  active: jumpActive,
+                  tooltip: '片头 / 片尾',
+                  onTap: onJump,
+                ),
+                const SizedBox(width: 6),
+              ],
+              if (!live && onEpisodes != null) ...[
+                PGlassIcon(
+                  icon: Icons.video_library_rounded,
+                  size: 36 * s,
+                  iconSize: 19 * s,
+                  tint: .14,
+                  tooltip: '选集',
+                  onTap: onEpisodes,
+                ),
+                const SizedBox(width: 6),
+              ],
               if (onMore != null) ...[
                 PGlassIcon(
                   icon: Icons.more_horiz_rounded,
-                  size: 34 * s,
-                  iconSize: 21 * s,
-                  tint: .16,
+                  size: 36 * s,
+                  iconSize: 22 * s,
+                  tint: .14,
                   tooltip: '播放设置',
                   onTap: onMore,
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
               ],
               PGlassIcon(
                 icon: Icons.fullscreen_exit_rounded,
-                size: 34 * s,
-                iconSize: 20 * s,
-                tint: .16,
+                size: 36 * s,
+                iconSize: 21 * s,
+                tint: .14,
                 tooltip: '退出全屏',
                 onTap: onExit,
               ),

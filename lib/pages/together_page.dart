@@ -3303,7 +3303,7 @@ class _TogetherPageState extends State<TogetherPage>
       await controller.pause();
     } catch (_) {}
     try {
-      await controller.player.stop();
+      await controller.stop();
     } catch (_) {}
     try {
       await controller.dispose();

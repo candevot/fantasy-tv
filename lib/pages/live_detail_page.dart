@@ -178,7 +178,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       await player.pause();
     } catch (_) {}
     try {
-      await player.player.stop();
+      await player.stop();
     } catch (_) {}
     try {
       await player.dispose();

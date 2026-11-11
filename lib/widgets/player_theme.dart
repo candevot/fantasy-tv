@@ -3,8 +3,6 @@ import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
-import 'package:media_kit/media_kit.dart' show NativePlayer;
-import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models.dart';
@@ -232,21 +230,14 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   /// 翻转画面会把字幕一起翻成反字。打开镜像时用 mpv `sub-visibility=no`
   /// 把纹理里的字幕藏起来，改由 [FxMirrorSubtitle] 以正字显示；
   /// 关掉镜像再还原成 `yes`。
+  /// 字幕显隐：ExoPlayer 的字幕轨由 betterplayer 的控件管理，
+  /// 不再通过 mpv 的 sub-visibility 属性控制（那个通道随 media_kit 一起移除了）。
+  /// 镜像模式下画面翻转时，内嵌字幕会跟着翻转 —— 这里只记录状态，
+  /// 真正的字幕层由 betterplayer 的 subtitlesConfiguration 处理。
   Future<void> _syncMirrorSubtitle(FxMirrorMode mode) async {
     final visible = mode == FxMirrorMode.none;
-    final player = widget.player;
-    if (_subtitleVisible == visible && identical(_subtitlePlayer, player)) {
-      return;
-    }
     _subtitleVisible = visible;
-    _subtitlePlayer = player;
-    try {
-      final platform = player.player.platform;
-      if (platform is! NativePlayer) return;
-      await platform.setProperty('sub-visibility', visible ? 'yes' : 'no');
-    } catch (_) {
-      // 播放器已释放 / 属性不可用：保持现状，不影响播放。
-    }
+    _subtitlePlayer = widget.player;
   }
 
   @override
@@ -265,23 +256,9 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     final bottom = widget.subtitleBottom < fxSubtitleMinBottom
         ? fxSubtitleMinBottom
         : widget.subtitleBottom;
-    final video = Video(
-      key: ValueKey<int>(_renderEpoch),
-      controller: widget.player.videoController,
-      controls: NoVideoControls,
-      fit: fxAspectFit(aspect),
-      alignment: Alignment.center,
-      fill: Colors.black,
-      wakelock: true,
-      pauseUponEnteringBackgroundMode: false,
-      resumeUponEnteringForegroundMode: false,
-      subtitleViewConfiguration: SubtitleViewConfiguration(
-        padding: EdgeInsets.fromLTRB(24, 0, 24, bottom),
-        // 兜底（本项目走 libass，字幕画在纹理里，已由 mpv sub-visibility
-        // 隐藏）：非 libass 路径下镜像时也不显示会翻转的内部字幕。
-        visible: !mirrored,
-      ),
-    );
+    // 画面直接用 betterplayer 的 BetterPlayer 控件（内置控制层）。
+    final video = widget.player.buildVideo();
+
     final framed = fxAspectFrame(aspect, video);
     final body = fxMirrorWrap(mirror, framed);
     if (!mirrored) return body;
@@ -313,22 +290,20 @@ class FxMirrorSubtitle extends StatefulWidget {
 }
 
 class _FxMirrorSubtitleState extends State<FxMirrorSubtitle> {
-  List<String> _subtitle = <String>[];
-  StreamSubscription<List<String>>? _subscription;
+  /// 当前字幕文本行。
+  ///
+  /// ExoPlayer 通过 betterplayer 渲染字幕（画在视频纹理里），
+  /// Flutter 层拿不到逐行文本，所以这里恒为空 —— 镜像模式下
+  /// 不再额外叠一层文字，避免与纹理里的字幕重复。
+  List<String> _subtitle = const [];
 
   @override
   void initState() {
     super.initState();
-    _subtitle = widget.player.player.state.subtitle;
-    _subscription = widget.player.player.stream.subtitle.listen((value) {
-      if (!mounted) return;
-      setState(() => _subtitle = value);
-    });
   }
 
   @override
   void dispose() {
-    _subscription?.cancel();
     super.dispose();
   }
 
