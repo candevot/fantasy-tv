@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -187,11 +189,15 @@ class FxPlayer implements Listenable {
 
   Future<void> playOrPause() => _value.isPlaying ? pause() : play();
 
-  Future<void> stop() => _core.stop();
+  Future<void> stop() async {
+    await _core.stop();
+  }
 
   Future<void> seek(Duration position) => _core.seek(position);
 
-  Future<void> seekTo(Duration position) => seek(position);
+  Future<void> seekTo(Duration position) async {
+    await seek(position);
+  }
 
   Future<void> setRate(double rate) async {
     _rate = rate;
