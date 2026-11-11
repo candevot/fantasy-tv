@@ -304,6 +304,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _sectionLabel(String raw) {
     if (raw.contains('今日热播')) return '今日热播';
     if (raw.contains('最新')) return '最新更新';
+    // 电视剧 / 剧集 / 连续剧 都归到「剧集」。之前没有这条分支，
+    // 服务端返回的「电视剧热播榜」会原样落到白名单外被丢弃 —— 首页空白。
+    if (raw.contains('电视剧') || raw.contains('剧集') || raw.contains('连续剧')) {
+      return '剧集';
+    }
     if (raw.contains('电影')) return '电影';
     if (raw.contains('综艺')) return '综艺';
     if (raw.contains('动漫')) return '动漫';
@@ -341,14 +346,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (s.items.isNotEmpty && !s.title.contains('短剧'))
           HomeSection(_sectionLabel(s.title), s.items.take(10).toList()),
     ];
-    if (_channel == 'recommend') {
-      // 推荐频道严格按 6 个分区输出，服务端的其它分区不占用首页首屏。
-      return <HomeSection>[
-        for (final label in _sectionOrder)
-          ...list.where((s) => s.title == label),
-      ];
-    }
-    // 分类频道保留服务端分区，但同样按统一顺序排列。
+    // 排序：已知分区按 _sectionOrder 排前面，未知分区按原顺序跟后面。
+    //
+    // 之前这里是「严格白名单」：只输出 _sectionOrder 里列出的标签，
+    // 服务端一旦改分区名（电视剧热播榜 / 电影精选 / 综艺现场 / 动漫番剧），
+    // 全部匹配不上 → sections 变空 → 首页只剩 banner，看起来就是白屏。
+    // 现在改成「已知的排前面、未知的也保留」，服务端加分区不会再丢内容。
     list.sort((a, b) => _sectionRank(a.title).compareTo(_sectionRank(b.title)));
     return list;
   }

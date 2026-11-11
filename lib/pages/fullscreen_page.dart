@@ -1297,12 +1297,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (_holding2x) _startHideTimer();
         return;
       }
+      _controller?.player.toggleControlsVisibility(false);
       setState(() => _controls = false);
     });
   }
 
   void _wake() {
     if (!mounted || _locked) return;
+    _controller?.player.toggleControlsVisibility(true);
     if (!_controls) {
       setState(() => _controls = true);
     }
@@ -1312,6 +1314,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void _hideControls() {
     _hideTimer?.cancel();
     if (!mounted) return;
+    // 同步隐藏 betterplayer 自己的控件层：只改页面 _controls 不会影响它，
+    // 用户看到的「控件一直显示隐藏不了」就是这个原因。
+    _controller?.player.toggleControlsVisibility(false);
     setState(() {
       _controls = false;
       _showSpeed = false;
@@ -1551,21 +1556,36 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             fit: StackFit.expand,
             children: [
               Positioned.fill(child: _buildVideoSurface(c)),
-              // 手势层：单击显隐控件 / 双击暂停 / 横扫调进度 / 竖扫亮度音量 /
-              // 长按 3.0x。加载与切换时仍保留手势（按钮的 no-op 由页面自己判）。
+              // 手势层：只占中间一条竖带，左右各让出 96dp。
+              //
+              // 之前这里铺满全屏（Positioned.fill），把 betterplayer 自带的
+              // 控件整个盖住 —— 用户点任何按钮都没反应、控件也永远不隐藏，
+              // 因为点击先被手势层吃掉。现在手势层只覆盖画面中段，
+              // 上下控制区留给播放器自己处理。
               if (!_locked && c != null)
                 Positioned.fill(
-                  child: FxPlayerGestures(
-                    player: c,
-                    enabled: !_error,
-                    onTap: _onSurfaceTap,
-                    onDoubleTap: _togglePlay,
-                    onSeek: _seekTo,
-                    enableSeek: !_isLive,
-                    onLongPressStart: _isLive ? null : _startHold2x,
-                    onLongPressEnd: _isLive ? null : _endHold2x,
-                    onGestureStart: _hideControls,
-                    resetBrightnessOnDispose: true,
+                  child: IgnorePointer(
+                    ignoring: !_error ? false : true,
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        left: 96,
+                        right: 96,
+                        top: pad.top + 72,
+                        bottom: pad.bottom + 88,
+                      ),
+                      child: FxPlayerGestures(
+                        player: c,
+                        enabled: !_error,
+                        onTap: _onSurfaceTap,
+                        onDoubleTap: _togglePlay,
+                        onSeek: _seekTo,
+                        enableSeek: !_isLive,
+                        onLongPressStart: _isLive ? null : _startHold2x,
+                        onLongPressEnd: _isLive ? null : _endHold2x,
+                        onGestureStart: _hideControls,
+                        resetBrightnessOnDispose: true,
+                      ),
+                    ),
                   ),
                 ),
               if (_panelOpen)
