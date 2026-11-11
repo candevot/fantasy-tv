@@ -209,20 +209,22 @@ class FxPlayer implements Listenable {
   }
 
   /// 回前台自愈：ExoPlayer 自己会恢复，这里只把播放态补回来。
-  Future<void> recoverAfterBackground(
+  /// 回前台自愈：把进度拉回切后台时的位置并恢复播放态。
+  ///
+  /// 返回「是否已完成自愈」：位置确实被拉回、且播放态符合预期时为 true。
+  /// 页面用这个值决定要不要再调 [resumeSelfCheck] 做一次断流重连。
+  Future<bool> recoverAfterBackground(
     Duration expected, {
     required bool wasPlaying,
   }) async {
-    if (_disposed) return;
-    if (expected > Duration.zero) {
-      try {
-        await seek(expected);
-      } catch (_) {}
-    }
-    if (wasPlaying && _playIntent) {
-      try {
-        await play();
-      } catch (_) {}
+    if (_disposed) return false;
+    if (expected <= Duration.zero) return false;
+    try {
+      await seek(expected);
+      if (wasPlaying && _playIntent) await play();
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
