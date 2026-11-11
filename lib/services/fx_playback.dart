@@ -218,12 +218,17 @@ class FxPlayback {
     final vp = _controller.videoPlayerValue;
     if (vp == null) return;
 
-    // 画面尺寸：ExoPlayer 通过 videoPlayerController.value.size 给。
+    // 画面尺寸：ExoPlayer 通过 VideoPlayerValue.size 给。
     final size = vp.size;
+    // buffered 在 video_player 里是 List<DurationRange>，取最后一段的末尾作为
+    // 「已缓冲到哪」——和旧实现里 mpv 的 demuxer-cache-time 语义一致。
+    final bufferedEnd = vp.buffered.isEmpty
+        ? Duration.zero
+        : vp.buffered.last.end;
     final next = FxPlaybackValue(
       position: vp.position,
       duration: vp.duration,
-      buffered: vp.buffered,
+      buffered: bufferedEnd,
       isPlaying: vp.isPlaying,
       isBuffering: vp.isBuffering,
       isInitialized: vp.isInitialized,
@@ -266,7 +271,8 @@ class FxPlayback {
     if (_disposed) return;
     _disposed = true;
     _stopTicker();
-    await _controller.dispose(forceDispose: true);
+    // dispose 在 1.36 是同步 void，不是 Future。
+    _controller.dispose(forceDispose: true);
     await _positionCtrl.close();
     await _durationCtrl.close();
     await _playingCtrl.close();

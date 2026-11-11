@@ -418,8 +418,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _loadedEp = c.value.isInitialized ? _ep : null;
     _loading = !c.value.isInitialized;
     _firstFrame = _hasFirstFrame(c);
-    // 全屏复用的是竖屏已经打开的播放器：这里只监听平台错误，不重新 open。
-    _platformErrorSub = c.player.stream.error.listen(_onPlatformError);
+    // 全屏复用的是竖屏已经打开的播放器：这里只监听错误流，不重新 open。
+    // 播放层已换成 betterplayer，错误流由 FxPlayer 统一暴露。
+    _platformErrorSub = c.errorStream.listen(_onPlatformError);
     c.addListener(_onVideoValue);
     if (!_firstFrame) _armFirstFrameTimer();
     if (c.value.hasError) {
