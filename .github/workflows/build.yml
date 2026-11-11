@@ -73,11 +73,20 @@ jobs:
       - name: Check Android 8+ / 16KB compatibility
         run: |
           python3 tools/check_android_compat.py
-      - name: Verify dependency overrides removed
+      - name: Verify dependency overrides are intentional
         run: |
+          # 唯一允许的 override：xml。
+          #   better_player 1.36 要 xml ^7.0.1
+          #   dlna_dart 0.1.2 要 xml ^6.5.0
+          # 两者直接冲突；xml 7 对 6 的 API 向后兼容（parse/节点/属性都保留），
+          # 放宽到 7 后 dlna_dart 仍能正常解析 DIDL-Lite 与设备描述。
           if grep -q '^dependency_overrides:' pubspec.yaml; then
-            echo 'dependency_overrides must be removed' >&2
-            exit 1
+            bad=$(awk '/^dependency_overrides:/{f=1;next} f&&/^  [a-z_]+:/{print $1}' pubspec.yaml | grep -v '^xml:$' || true)
+            if [ -n "$bad" ]; then
+              echo "只允许 override xml，发现: $bad" >&2
+              exit 1
+            fi
+            grep -A2 '^dependency_overrides:' pubspec.yaml
           fi
           # 播放内核已换成 betterplayer(ExoPlayer)，media_kit 应已彻底移除。
           if grep -qE '^  media_kit(_video|_libs_video)?:' pubspec.yaml; then

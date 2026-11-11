@@ -46,3 +46,9 @@ flutter:
   assets:
     - assets/logo.png
     - assets/splash_logo.png
+
+# dlna_dart 0.1.2 依赖 xml ^6.5.0，better_player 1.36 依赖 xml ^7.0.1。
+# xml 7 的 API 对 6 是向后兼容的（parse/节点遍历/属性访问都保留），
+# 这里把 dlna_dart 的 xml 约束放宽到 7，避免版本求解失败。
+dependency_overrides:
+  xml: ^7.0.1
