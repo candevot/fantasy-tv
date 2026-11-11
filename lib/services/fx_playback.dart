@@ -24,7 +24,7 @@ import 'package:flutter/material.dart';
 class FxPlayback {
   FxPlayback() {
     _controller = BetterPlayerController(
-      BetterPlayerConfiguration(
+      PlayerConfiguration(
         autoPlay: true,
         looping: false,
         fit: BoxFit.contain,
@@ -122,14 +122,13 @@ class FxPlayback {
   Stream<String> get errorStream => _errorCtrl.stream;
   Stream<bool> get completedStream => _completedCtrl.stream;
 
-  bool get isPlaying =>
-      _controller.videoPlayerController?.value.isPlaying ?? false;
+  bool get isPlaying => _controller.videoPlayerValue?.isPlaying ?? false;
 
   Duration get position =>
-      _controller.videoPlayerController?.value.position ?? Duration.zero;
+      _controller.videoPlayerValue?.position ?? Duration.zero;
 
   Duration get duration =>
-      _controller.videoPlayerController?.value.duration ?? Duration.zero;
+      _controller.videoPlayerValue?.duration ?? Duration.zero;
 
   /// 打开地址。[headers] 原样带给 ExoPlayer 的 HttpDataSource。
   ///
@@ -197,12 +196,12 @@ class FxPlayback {
     _controller.addEventsListener((event) {
       if (_disposed) return;
       switch (event.betterPlayerEventType) {
-        case BetterPlayerEventType.exception:
+        case PlayerEventType.exception:
           final msg = event.parameters?['error']?.toString() ?? '播放异常';
           _errorCtrl.add(msg);
           _setValue(_last.copyWith(hasError: true, errorText: msg));
           break;
-        case BetterPlayerEventType.finished:
+        case PlayerEventType.finished:
           if (!_completedFired) {
             _completedFired = true;
             _completedCtrl.add(true);
@@ -216,7 +215,7 @@ class FxPlayback {
   }
 
   void _sync() {
-    final vp = _controller.videoPlayerController?.value;
+    final vp = _controller.videoPlayerValue;
     if (vp == null) return;
 
     // 画面尺寸：ExoPlayer 通过 videoPlayerController.value.size 给。
