@@ -158,8 +158,9 @@ class FxPlayback {
     _startTicker();
   }
 
-  Future<void> play() async => _controller.play();
-  Future<void> pause() async => _controller.pause();
+  Future<void> play() => _controller.play();
+
+  Future<void> pause() => _controller.pause();
 
   Future<void> stop() async {
     _stopTicker();
@@ -218,25 +219,28 @@ class FxPlayback {
     final vp = _controller.videoPlayerValue;
     if (vp == null) return;
 
-    // 画面尺寸：ExoPlayer 通过 VideoPlayerValue.size 给。
+    // better_player 1.36 的 VideoPlayerValue：
+    //   duration  Duration?（未就绪为 null）
+    //   size      Size?（未就绪为 null）
+    //   buffered  List<DurationRange>
+    //   initialized 就是「已就绪」，没有 isInitialized 这个字段。
+    final dur = vp.duration ?? Duration.zero;
     final size = vp.size;
-    // buffered 在 video_player 里是 List<DurationRange>，取最后一段的末尾作为
-    // 「已缓冲到哪」——和旧实现里 mpv 的 demuxer-cache-time 语义一致。
-    final bufferedEnd = vp.buffered.isEmpty
-        ? Duration.zero
-        : vp.buffered.last.end;
+    final w = size?.width ?? 0;
+    final h = size?.height ?? 0;
+    final bufferedEnd =
+        vp.buffered.isEmpty ? Duration.zero : vp.buffered.last.end;
+
     final next = FxPlaybackValue(
       position: vp.position,
-      duration: vp.duration,
+      duration: dur,
       buffered: bufferedEnd,
       isPlaying: vp.isPlaying,
       isBuffering: vp.isBuffering,
-      isInitialized: vp.isInitialized,
-      videoWidth: size.width > 0 ? size.width.round() : null,
-      videoHeight: size.height > 0 ? size.height.round() : null,
-      aspectRatio: size.width > 0 && size.height > 0
-          ? size.width / size.height
-          : 16 / 9,
+      isInitialized: vp.initialized,
+      videoWidth: w > 0 ? w.round() : null,
+      videoHeight: h > 0 ? h.round() : null,
+      aspectRatio: w > 0 && h > 0 ? w / h : 16 / 9,
       hasError: _last.hasError,
       errorText: _last.errorText,
       isCompleted: _last.isCompleted,

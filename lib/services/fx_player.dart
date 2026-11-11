@@ -99,7 +99,7 @@ class FxPlayer implements Listenable {
   ///
   /// ExoPlayer 不提供截帧 API，统一返回 null —— 页面拿到 null 会退回纯黑，
   /// 这是预期行为（切线路时的那层快照垫底可以不要）。
-  Future<Uint8List?> captureFrame() async => null;
+  Future<Uint8List?> captureFrame() => Future<Uint8List?>.value(null);
 
   /// 打开一个网络地址并等待其就绪。
   ///
