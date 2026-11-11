@@ -264,35 +264,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  void _selectChannel(String key) {
-    if (_channel == key) return;
-    if (key == 'live' && _liveQuery.isNotEmpty) {
-      _liveSearchCtrl.clear();
-      _liveQuery = '';
-    }
-    setState(() {
-      _channel = key;
-      _bannerPage.value = 0;
-      _error = null;
-      _loading = key != 'live' && !_cache.containsKey(key);
-    });
-    _timer?.cancel();
-    if (key == 'live') {
-      _loadLive();
-      return;
-    }
-    if (_cache.containsKey(key)) {
-      _restartAuto();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _bannerCtrl.hasClients) {
-          _bannerCtrl.jumpToPage(0);
-        }
-      });
-    } else {
-      _load();
-    }
-  }
-
   void _openSearch({bool ai = false}) {
     Navigator.of(
       context,
