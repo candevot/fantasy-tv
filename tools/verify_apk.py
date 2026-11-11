@@ -7,9 +7,8 @@
 - assets/flutter_assets/fonts/MaterialIcons-Regular.otf（图标字体）
   + FontManifest.json 里注册了 MaterialIcons
 - assets/flutter_assets/assets/logo.png（且是合法 PNG）
-- lib/arm64-v8a/libapp.so、libflutter.so、libmpv.so 存在
-- libmpv.so 恰好 4 段 LOAD 且 ALIGN=0x4000；其余 arm64 .so 的 LOAD 也须
-  16KB 对齐
+- lib/arm64-v8a/libapp.so、libflutter.so 存在
+- 所有 arm64 .so 的 LOAD 段须 16KB 对齐
 - META-INF 签名文件存在；apksigner verify 通过（没有 apksigner 则跳过并说明）
 - zipalign 16KB 对齐（有 zipalign 时）；APK 体积、sha256
 
@@ -35,7 +34,6 @@ REQUIRED_ENTRIES = (
     'assets/flutter_assets/assets/logo.png',
     'lib/arm64-v8a/libapp.so',
     'lib/arm64-v8a/libflutter.so',
-    'lib/arm64-v8a/libmpv.so',
 )
 SIGNATURE_RE = re.compile(r'^META-INF/[^/]+\.(?:SF|RSA|DSA|EC)$', re.I)
 
@@ -268,21 +266,16 @@ def verify_elf(gate, zf, names):
             if not aligns:
                 gate.fail('%s LOAD segments' % short)
                 continue
-            if short == 'libmpv.so':
-                gate.require('%s has exactly 4 LOAD segments' % short,
-                             len(aligns) == 4, 'got %d' % len(aligns))
-                gate.require('%s all LOAD ALIGN=0x4000' % short,
-                             all(a == '0x4000' for a in aligns),
-                             ', '.join(aligns))
-            else:
-                def aligned(value):
-                    try:
-                        return int(value, 16) % 0x4000 == 0
-                    except ValueError:
-                        return False
-                gate.require('%s LOAD ALIGN 16KB' % short,
-                             all(aligned(a) for a in aligns),
-                             ', '.join(aligns))
+            # 播放内核已换成 betterplayer(ExoPlayer)，不再有 libmpv.so。
+            # 其余 arm64 原生库统一按 16KB 页要求校验 LOAD 对齐。
+            def aligned(value):
+                try:
+                    return int(value, 16) % 0x4000 == 0
+                except ValueError:
+                    return False
+            gate.require('%s LOAD ALIGN 16KB' % short,
+                         all(aligned(a) for a in aligns),
+                         ', '.join(aligns))
 
 
 def verify_zip_alignment(gate, apk, zf):
