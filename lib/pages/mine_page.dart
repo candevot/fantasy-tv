@@ -267,23 +267,23 @@ class _MinePageState extends State<MinePage> {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            _profile(),
-            const SizedBox(height: 20),
-            _sectionHeader('观看统计', trailing: '仅统计本机'),
-            const SizedBox(height: 10),
-            _stats(),
+            const SizedBox(height: 14),
+            // MINE_V2（2026-11-12）：按腾讯/爱奇艺的排法重排。
+            //
+            // 顶部大头图（头像 + 昵称 + 统计）→ 最近观看横滑 →
+            // 功能宫格。原来「观看统计」单独占一块，把首屏切得很碎。
+            _hero(),
             // 最近观看：带封面横滑，点卡片直接续播
             if (_recent.isNotEmpty) ...[
-              const SizedBox(height: 22),
+              const SizedBox(height: 24),
               FxRecentRow(
                 items: _recent,
                 onTapItem: _openRecent,
                 onMore: () => _open(const HistoryPage()),
               ),
             ],
-            const SizedBox(height: 20),
-            _sectionHeader('我的功能'),
+            const SizedBox(height: 24),
+            _sectionHeader('我的'),
             const SizedBox(height: 10),
             _entryGrid(),
             const SizedBox(height: 28),
@@ -327,29 +327,7 @@ class _MinePageState extends State<MinePage> {
     final user = Auth.instance.user;
     final logged = user != null;
     final account = user?.account.trim() ?? '';
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            Colors.white.withValues(alpha: .82),
-            Fx.accent.withValues(alpha: .10),
-            Fx.accent2.withValues(alpha: .07),
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: Colors.white.withValues(alpha: .95)),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF50729F).withValues(alpha: .10),
-            blurRadius: 30,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Row(
+    return Row(
         children: [
           _avatar(user),
           const SizedBox(width: 14),
@@ -452,7 +430,6 @@ class _MinePageState extends State<MinePage> {
           else
             GradButton(text: '登录', height: 32, onTap: _openLogin),
         ],
-      ),
     );
   }
 
@@ -565,52 +542,87 @@ class _MinePageState extends State<MinePage> {
     );
   }
 
-  Widget _stats() {
-    return GlassCard(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      radius: 20,
-      child: Row(
-        children: [
-          _stat(_statsReady ? '$_history' : '—', '观看记录'),
-          _divider(),
-          _stat(_statsReady ? '$_favorite' : '—', '我的收藏'),
-          _divider(),
-          _stat(_statsReady ? '$_download' : '—', '离线缓存'),
-        ],
-      ),
-    );
-  }
-
-  Widget _stat(String value, String label) {
-    return Expanded(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ShaderMask(
-            shaderCallback: (r) => Fx.brand.createShader(r),
-            child: Text(
-              value,
-              style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
-                  height: 1.15),
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(label,
-              style: const TextStyle(
-                  fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub)),
-        ],
-      ),
-    );
-  }
-
   Widget _divider() {
     return Container(
       width: 1,
       height: 28,
       color: Fx.ink.withValues(alpha: .06),
+    );
+  }
+
+  /// 顶部大头图：头像 + 昵称 + 三格统计，一块玻璃卡包住。
+  ///
+  /// 腾讯/爱奇艺的「我的」页都是这种结构：上面一块整的，
+  /// 统计数字压在头像下面，不再单独开一个「观看统计」分区。
+  Widget _hero() {
+    return GlassCard(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+      radius: 22,
+      opacity: .72,
+      child: Column(
+        children: [
+          _profile(),
+          const SizedBox(height: 14),
+          Container(
+            height: 1,
+            color: Colors.white.withValues(alpha: .72),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              _heroStat(_statsReady ? '$_history' : '—', '观看'),
+              _heroDivider(),
+              _heroStat(_statsReady ? '$_favorite' : '—', '收藏'),
+              _heroDivider(),
+              _heroStat(_statsReady ? '$_download' : '—', '缓存'),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _heroStat(String value, String label) {
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          if (label == '观看') {
+            _open(const HistoryPage());
+          } else if (label == '收藏') {
+            _open(const FavoritePage());
+          } else {
+            _open(const DownloadsPage());
+          }
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 19,
+                height: 1.1,
+                fontWeight: FontWeight.w700,
+                color: Fx.ink,
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _heroDivider() {
+    return Container(
+      width: 1,
+      height: 26,
+      color: Colors.white.withValues(alpha: .78),
     );
   }
 
