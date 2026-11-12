@@ -1,0 +1,94 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../services/danmu_service.dart';
+import 'danmu_overlay.dart';
+
+/// 弹幕接入层 —— 播放页只放这一个 widget，内部负责：
+///   1. 按「剧名 + 集号」拉弹幕
+///   2. 跟随播放器位置渲染
+///   3. 开关 / 透明度 / 字号从全局设置读
+///
+/// 四个播放场景（全屏 / 竖屏 / 一起看全屏 / 一起看小窗）共用同一份实现。
+class DanmuLayer extends StatefulWidget {
+  const DanmuLayer({
+    super.key,
+    required this.title,
+    required this.ep,
+    required this.epName,
+    required this.position,
+    required this.playing,
+    this.enabled = true,
+    this.opacity = 1,
+    this.fontSize = 15,
+    this.areaRatio = 0.7,
+  });
+
+  final String title;
+  final int ep;
+  final String epName;
+
+  /// 播放器当前位置。
+  final Duration position;
+
+  /// 是否在播放。
+  final bool playing;
+
+  final bool enabled;
+  final double opacity;
+  final double fontSize;
+  final double areaRatio;
+
+  @override
+  State<DanmuLayer> createState() => _DanmuLayerState();
+}
+
+class _DanmuLayerState extends State<DanmuLayer> {
+  List<DanmuItem> _items = const [];
+  bool _loading = false;
+  String _loadedKey = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant DanmuLayer old) {
+    super.didUpdateWidget(old);
+    if (old.title != widget.title || old.ep != widget.ep) _load();
+  }
+
+  Future<void> _load() async {
+    final key = '${widget.title}|${widget.ep}';
+    if (key == _loadedKey || _loading) return;
+    _loadedKey = key;
+    _loading = true;
+    final list = await DanmuService.instance.load(
+      title: widget.title,
+      ep: widget.ep,
+      epName: widget.epName,
+    );
+    if (!mounted || _loadedKey != key) return;
+    setState(() {
+      _items = list ?? const [];
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.enabled || _items.isEmpty) return const SizedBox.shrink();
+    return DanmuOverlay(
+      items: _items,
+      position: widget.position,
+      playing: widget.playing,
+      enabled: widget.enabled,
+      opacity: widget.opacity,
+      fontSize: widget.fontSize,
+      areaRatio: widget.areaRatio,
+    );
+  }
+}

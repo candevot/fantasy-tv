@@ -14,6 +14,7 @@ import '../widgets/cast_sheet.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_more_panel.dart';
+import '../widgets/danmu_layer.dart';
 import '../widgets/player_theme.dart';
 import 'fullscreen_page.dart';
 import 'history_page.dart' show FxStore;
@@ -1590,6 +1591,24 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         child: Stack(
           fit: StackFit.expand,
           children: [
+            // 弹幕层：画面之上、控件之下
+            if (c != null && c.value.isInitialized && !_fullscreenActive)
+              Positioned.fill(
+                child: AnimatedBuilder(
+                  animation: c,
+                  builder: (context, _) => DanmuLayer(
+                    title: widget.videoId.isEmpty ? '' : (_detail?.title ?? ''),
+                    ep: _ep,
+                    epName: '',
+                    position: c.value.position,
+                    playing: c.value.isPlaying,
+                    enabled: AppSettings.instance.danmuEnabled,
+                    opacity: AppSettings.instance.danmuOpacity,
+                    fontSize: AppSettings.instance.danmuFontSize,
+                    areaRatio: 0.6,
+                  ),
+                ),
+              ),
             if (c != null && c.value.isInitialized && !_fullscreenActive)
               SizedBox.expand(
                 child: FxPlayerSurface(

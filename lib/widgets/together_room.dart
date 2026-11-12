@@ -8,6 +8,8 @@ import 'package:flutter/material.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
+import '../services/app_settings.dart';
+import 'danmu_layer.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
 import 'together_floating_chat.dart';
@@ -383,6 +385,30 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                     title: _title,
                     radius: 0,
                     showTitle: false,
+                  ),
+                ),
+              ),
+            // 弹幕层：小窗也支持（用户要求一起看、播放详情、全屏都有弹幕）
+            if (ready && player != null && !widget.isLive)
+              Positioned.fill(
+                child: AnimatedBuilder(
+                  animation: player,
+                  builder: (context, _) => ValueListenableBuilder<double>(
+                    valueListenable: widget.position,
+                    builder: (context, pos, _) => DanmuLayer(
+                      title: widget.videoTitle,
+                      ep: widget.ep,
+                      epName: '',
+                      position: Duration(
+                        milliseconds:
+                            (pos.isFinite && pos > 0 ? pos * 1000 : 0).round(),
+                      ),
+                      playing: player.value.isPlaying,
+                      enabled: AppSettings.instance.danmuEnabled,
+                      opacity: AppSettings.instance.danmuOpacity,
+                      fontSize: AppSettings.instance.danmuFontSize,
+                      areaRatio: 0.55,
+                    ),
                   ),
                 ),
               ),

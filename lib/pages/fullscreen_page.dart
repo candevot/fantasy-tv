@@ -16,6 +16,7 @@ import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_more_panel.dart';
+import '../widgets/danmu_layer.dart';
 import '../widgets/player_theme.dart';
 import 'history_page.dart' show FxStore;
 
@@ -1844,6 +1845,23 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             fit: StackFit.expand,
             children: [
               Positioned.fill(child: _buildVideoSurface(c)),
+              // 弹幕层：画面之上、手势层之下（不挡点击）。
+              if (!_isLive && c != null)
+                Positioned.fill(
+                  child: AnimatedBuilder(
+                    animation: c,
+                    builder: (context, _) => DanmuLayer(
+                      title: _title,
+                      ep: _ep,
+                      epName: _epLabelFor(_ep),
+                      position: c.value.position,
+                      playing: c.value.isPlaying,
+                      enabled: AppSettings.instance.danmuEnabled,
+                      opacity: AppSettings.instance.danmuOpacity,
+                      fontSize: AppSettings.instance.danmuFontSize,
+                    ),
+                  ),
+                ),
               // 手势层：单击显隐控件 / 双击暂停 / 横扫调进度 / 竖扫亮度音量 /
               // 长按 3.0x。加载与切换时仍保留手势（按钮的 no-op 由页面自己判）。
               if (!_locked && c != null)

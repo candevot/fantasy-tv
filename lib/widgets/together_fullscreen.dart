@@ -11,6 +11,8 @@ import '../theme.dart';
 import 'fs_controls.dart';
 import 'fs_panels.dart';
 import 'player_gestures.dart';
+import '../services/app_settings.dart';
+import 'danmu_layer.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
 import 'together_ui.dart';
@@ -451,6 +453,29 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         fit: StackFit.expand,
         children: [
           _buildVideo(player, pad, ready),
+          // 弹幕层：画面之上、手势层之下
+          if (ready && player != null && !widget.isLive)
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: player,
+                builder: (context, _) => ValueListenableBuilder<double>(
+                  valueListenable: widget.position,
+                  builder: (context, pos, _) => DanmuLayer(
+                    title: widget.title,
+                    ep: widget.ep,
+                    epName: '',
+                    position: Duration(
+                      milliseconds:
+                          (pos.isFinite && pos > 0 ? pos * 1000 : 0).round(),
+                    ),
+                    playing: player.value.isPlaying,
+                    enabled: AppSettings.instance.danmuEnabled,
+                    opacity: AppSettings.instance.danmuOpacity,
+                    fontSize: AppSettings.instance.danmuFontSize,
+                  ),
+                ),
+              ),
+            ),
           if (!_locked && player != null)
             Positioned.fill(
               child: FxPlayerGestures(
