@@ -103,12 +103,19 @@ jobs:
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"
           # SPEED（2026-11-12）：只出 arm64。
-          # 手机是 arm64-v8a，v7a / x86_64 编出来没人用，白花 5 分钟。
-          flutter build apk --release --target-platform=android-arm64 \
+          #
+          # 必须同时用 --split-per-abi 和 --target-platform：
+          #   · 只写 --target-platform=android-arm64 → 生成 fat APK，
+          #     media_kit 会把 4 个架构的 libmpv 全塞进去（25MB → 62MB）
+          #   · 只写 --split-per-abi → 出 3 个包（arm64/v7a/x86_64）
+          #   · 两个一起用 → 只出 arm64 一个包，且只含 arm64 的 .so
+          flutter build apk --release \
+            --target-platform=android-arm64 \
+            --split-per-abi \
             --build-number=${{ github.run_number }} \
             --build-name=1.0.${{ github.run_number }}
           # APK 改名成「幻想影视-v<版本>.apk」，装到手机上一眼能看出是哪个版本
-          mv build/app/outputs/flutter-apk/app-release.apk \
+          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
              "build/app/outputs/flutter-apk/幻想影视-v1.0.${{ github.run_number }}.apk"
           ls -lh build/app/outputs/flutter-apk/
       - name: Verify release APK (comprehensive gate)
@@ -134,8 +141,12 @@ jobs:
         run: |
           APK=$(ls build/app/outputs/flutter-apk/幻想影视-v*.apk | head -1)
           test -f "$APK" || { echo 'no apk'; exit 1; }
-          NAME=$(basename "$APK")
+          # gh release 的 "file#name" 语法里 #name 不能带中文/特殊字符，
+          # 否则会被截成「-v1.0.226.apk」。这里统一用英文 asset 名，
+          # 中文名只保留在 Release 标题里。
+          NAME="FantasyTV-v1.0.${{ github.run_number }}-arm64.apk"
+          cp "$APK" "/tmp/$NAME"
           TAG="v1.0.${{ github.run_number }}"
-          gh release create "$TAG" "$APK#$NAME" \
+          gh release create "$TAG" "/tmp/$NAME" \
             --title "幻想影视 $TAG" \
             --notes "构建 #${{ github.run_number }} · $(date '+%Y-%m-%d %H:%M')" || true
