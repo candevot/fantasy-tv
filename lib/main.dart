@@ -16,7 +16,6 @@ import 'services/download_service.dart';
 import 'theme.dart';
 import 'widgets/update_dialog.dart';
 import 'pages/home_page.dart';
-import 'pages/category_page.dart';
 import 'pages/live_all_page.dart';
 import 'pages/rank_page.dart';
 import 'pages/mine_page.dart';
