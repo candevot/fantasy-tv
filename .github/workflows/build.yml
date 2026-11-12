@@ -17,6 +17,16 @@ jobs:
           # better_player_android 的 classes.jar 是 Java 21 编译的
           # （class file version 65.0），JDK 17 读不了。
           java-version: '21'
+      # 缓存 Gradle 依赖与构建产物：命中后省 8-10 分钟。
+      - uses: actions/cache@v4
+        with:
+          # 只缓存 Gradle 依赖（约 500MB），不缓存 build/ ——
+          # 增量产物跨 commit 复用容易出脏包。
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/pubspec.lock') }}
+          restore-keys: gradle-${{ runner.os }}-
       - uses: subosito/flutter-action@v2
         with:
           # Flutter 3.47.9 = Dart 3.13.7（2026-10-29 stable）。
@@ -92,7 +102,9 @@ jobs:
       - name: Build release APKs (split per ABI)
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"
-          flutter build apk --release --split-per-abi \
+          # SPEED（2026-11-12）：只出 arm64。
+          # 手机是 arm64-v8a，v7a / x86_64 编出来没人用，白花 5 分钟。
+          flutter build apk --release --target-platform=android-arm64 \
             --build-number=${{ github.run_number }} \
             --build-name=1.0.${{ github.run_number }}
           ls -lh build/app/outputs/flutter-apk/
@@ -101,7 +113,7 @@ jobs:
           # 权限 / 明文流量 / label / icon / MaterialIcons 字体 / logo.png /
           # libapp + libflutter + libmpv / libmpv 4 段 LOAD 0x4000 /
           # META-INF + apksigner / zipalign / 体积 / sha256，任一不过即失败。
-          APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          APK=build/app/outputs/flutter-apk/app-release.apk
           test -f "$APK"
           python3 tools/verify_apk.py "$APK"
       # artifact 配额满了会失败（Failed to CreateArtifact: quota hit），
@@ -110,14 +122,14 @@ jobs:
         continue-on-error: true
         with:
           name: fantasy-tv-apk
-          path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
       # Release 通道：不占 artifact 配额，直接挂到 tag 上，可长期下载。
       - name: Publish APK to Release
         if: success() || failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          APK=build/app/outputs/flutter-apk/app-release.apk
           test -f "$APK" || { echo 'no apk'; exit 1; }
           TAG="build-$(date +%Y%m%d-%H%M%S)"
           gh release create "$TAG" "$APK#fantasy-tv-arm64.apk" \
