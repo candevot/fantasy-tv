@@ -408,165 +408,181 @@ class _HistoryPageState extends State<HistoryPage> {
           ),
         ),
         Expanded(
-          child: ListView.builder(
+          // HISTORY_GRID（2026-11-12）：列表改成网格卡片。
+          //
+          // 用户要求「历史观看要和腾讯爱奇艺对齐，现在太丑」。
+          // 列表一列 60x90 小封面信息密度太低；改成 3 列海报网格，
+          // 每张卡带封面、进度条、集数角标，和首页片卡同一套视觉。
+          child: CustomScrollView(
             physics: const BouncingScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(18, 0, 18, 30),
-            itemCount: _items.length,
-            itemBuilder: (ctx, i) {
-              final r = _items[i];
-              final showHeader = i == 0 ||
-                  _dayLabel(r.updatedAt) != _dayLabel(_items[i - 1].updatedAt);
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (showHeader)
-                    Padding(
-                      padding: EdgeInsets.fromLTRB(2, i == 0 ? 4 : 16, 2, 8),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 5,
-                            height: 5,
-                            decoration: const BoxDecoration(
-                              color: Fx.accent,
-                              shape: BoxShape.circle,
-                            ),
+            slivers: [
+              for (final group in _grouped())
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                  sliver: SliverToBoxAdapter(
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 3,
+                          height: 13,
+                          decoration: BoxDecoration(
+                            color: Fx.accent,
+                            borderRadius: BorderRadius.circular(2),
                           ),
-                          const SizedBox(width: 6),
-                          Text(_dayLabel(r.updatedAt),
-                              style: const TextStyle(
-                                  fontSize: 11.5,
-                                  fontWeight: FontWeight.w600,
-                                  color: Fx.sub)),
-                        ],
-                      ),
+                        ),
+                        const SizedBox(width: 7),
+                        Text(
+                          group.$1,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: Fx.ink,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          '${group.$2.length}',
+                          style: const TextStyle(fontSize: 11, color: Fx.sub),
+                        ),
+                      ],
                     ),
-                  _card(r),
-                ],
-              );
-            },
+                  ),
+                ),
+              for (final group in _grouped())
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                  sliver: SliverGrid(
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 12,
+                      childAspectRatio: 0.52,
+                    ),
+                    delegate: SliverChildBuilderDelegate(
+                      (ctx, i) => _gridCard(group.$2[i]),
+                      childCount: group.$2.length,
+                    ),
+                  ),
+                ),
+              const SliverToBoxAdapter(child: SizedBox(height: 28)),
+            ],
           ),
         ),
       ],
     );
   }
 
-  Widget _card(WatchRecord r) {
-    final epLabel = r.epName.isNotEmpty ? r.epName : '第 ${r.ep} 集';
-    final epAndLine = r.lineName.isEmpty ? epLabel : '$epLabel · ${r.lineName}';
-    final progressText = r.duration > 0 && r.position > 0
-        ? '看到 ${fxDurationText(r.position)} / ${fxDurationText(r.duration)}'
-        : '上次观看 ${fxTimeAgo(r.updatedAt)}';
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: GlassCard(
-        padding: const EdgeInsets.all(10),
-        radius: 18,
-        opacity: .64,
-        onTap: () => _continue(r),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 60,
-              height: 90,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    FxCover(url: r.cover, title: r.title, radius: 10),
-                    Center(
-                      child: Container(
-                        width: 25,
-                        height: 25,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: .84),
-                          shape: BoxShape.circle,
+  /// 按天分组：今天 / 昨天 / 具体日期。
+  List<(String, List<WatchRecord>)> _grouped() {
+    final out = <(String, List<WatchRecord>)>[];
+    String? last;
+    for (final r in _items) {
+      final label = _dayLabel(r.updatedAt);
+      if (label != last) {
+        out.add((label, <WatchRecord>[]));
+        last = label;
+      }
+      out.last.$2.add(r);
+    }
+    return out;
+  }
+
+  /// 网格卡片：封面 + 进度条 + 集数角标 + 标题。
+  Widget _gridCard(WatchRecord r) {
+    final epLabel = r.epName.isNotEmpty ? r.epName : '第${r.ep}集';
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _continue(r),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  FxCover(url: r.cover, title: r.title, radius: 10),
+                  // 播放按钮：一眼看出可点
+                  Center(
+                    child: Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: .45),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.play_arrow_rounded,
+                          size: 20, color: Colors.white),
+                    ),
+                  ),
+                  // 集数角标
+                  Positioned(
+                    right: 5,
+                    top: 5,
+                    child: Container(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: .55),
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: Text(
+                        epLabel,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w600,
+                          height: 1.2,
                         ),
-                        child: const Icon(Icons.play_arrow_rounded,
-                            size: 17, color: Fx.accent),
                       ),
                     ),
-                    if (r.progress > 0)
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: LinearProgressIndicator(
-                          value: r.progress,
-                          minHeight: 3,
-                          backgroundColor: Colors.white.withValues(alpha: .4),
-                          valueColor:
-                              const AlwaysStoppedAnimation<Color>(Fx.accent),
+                  ),
+                  // 进度条
+                  if (r.progress > 0)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        height: 3,
+                        color: Colors.black.withValues(alpha: .38),
+                        child: FractionallySizedBox(
+                          alignment: Alignment.centerLeft,
+                          widthFactor: r.progress,
+                          child: Container(color: Fx.accent),
                         ),
                       ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 11),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    r.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                        color: Fx.ink),
-                  ),
-                  const SizedBox(height: 5),
-                  Text(epAndLine,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: Fx.accent)),
-                  const SizedBox(height: 5),
-                  Text(progressText,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 10.5, color: Fx.sub)),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      const Icon(Icons.play_circle_fill_rounded,
-                          size: 13, color: Fx.accent),
-                      const SizedBox(width: 3),
-                      const Text('继续观看',
-                          style: TextStyle(
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w600,
-                              color: Fx.accent)),
-                      const SizedBox(width: 6),
-                      Text('· ${fxTimeAgo(r.updatedAt)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 9.5, color: Color(0xFFA6B1C2))),
-                    ],
-                  ),
+                    ),
                 ],
               ),
             ),
-            const SizedBox(width: 4),
-            GestureDetector(
-              onTap: () => _delete(r),
-              child: Container(
-                width: 28,
-                height: 28,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: .6),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.close_rounded, size: 15, color: Fx.sub),
-              ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            r.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Fx.ink,
+              height: 1.25,
             ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            r.progress > 0
+                ? '已看 ${(r.progress * 100).round()}%'
+                : fxTimeAgo(r.updatedAt),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 10, color: Fx.sub),
+          ),
+        ],
       ),
     );
   }
+
 }
