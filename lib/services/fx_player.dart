@@ -329,7 +329,12 @@ class FxPlayer implements Listenable {
   static const Duration _openHardCap = Duration(minutes: 2);
 
   /// 看门狗采样间隔。
-  static const Duration _watchdogTick = Duration(seconds: 2);
+  ///
+  /// PERF（2026-11-13）：2 秒 → 4 秒。
+  /// 每次 tick 都要跨平台读一次 mpv 的 cache-speed（最多等 1 秒），
+  /// 4K 大分片时这个读取本身就会阻塞主线程，导致弹幕和进度条掉帧。
+  /// 看门狗只用来判「彻底不动了」，4 秒足够。
+  static const Duration _watchdogTick = Duration(seconds: 4);
 
   /// 停摆判定门槛：连续 [stall] 完全没有字节流动才算失败候选
   /// （原 12 秒太激进，4K 高码率 seek / 起播都可能超过 12 秒）。
@@ -495,6 +500,16 @@ class FxPlayer implements Listenable {
 
   /// 直链 HLS 的本地分片代理；只在 direct 模式下懒创建。
   LocalHlsProxy? _hlsProxy;
+
+  /// 高频播放位置通道（每 50~200ms 更新一次）。
+  ///
+  /// 进度条、弹幕这类需要「每帧跟手」的组件订阅它，
+  /// 不再跟着 FxPlayerValue 的整对象通知一起重建。
+  final ValueNotifier<Duration> _positionNotifier =
+      ValueNotifier<Duration>(Duration.zero);
+
+  /// 高频位置（供进度条 / 弹幕订阅）。
+  ValueListenable<Duration> get positionListenable => _positionNotifier;
 
   /// 是否启用本地 HLS 代理。
   ///
@@ -1029,6 +1044,7 @@ class FxPlayer implements Listenable {
     // 救援链 / 看门狗在释放后一律停手。
     _rescueGen++;
     _rescueBusy = false;
+    _positionNotifier.dispose();
     _watchdogTimer?.cancel();
     _watchdogTimer = null;
     _cacheGuardTimer?.cancel();
@@ -1075,6 +1091,14 @@ class FxPlayer implements Listenable {
 
   void _bindStreams() {
     _subscriptions.add(
+      // PERF（2026-11-13）：position 流是高频的（每 50~200ms 一条），
+      // 原来每条都 _setValue → 通知全部监听者，导致顶栏、底栏、
+      // 弹幕层一起重建 —— 这是播放界面掉帧的主因之一。
+      //
+      // 现在把 position 单独拆到 _positionNotifier：
+      //   · 进度条 / 弹幕只订阅它，粒度细、重建范围小
+      //   · _setValue 里的 position 只在整秒变化时才更新，
+      //     避免每秒几十次的整对象通知
       _player.stream.position.listen((position) {
         // 救援重开期间新流的 position 会先归零：保留原进度显示，
         // 避免 UI 进度条 / 观看进度回写读到 0。
@@ -1084,8 +1108,14 @@ class FxPlayer implements Listenable {
           previous: _value.position,
           incoming: position,
         );
+        // 高频通道：只给进度条 / 弹幕用
+        _positionNotifier.value = shown;
+        // 低频通道：整秒才写进 FxPlayerValue，减少整体重建
         final initialized = _value.isInitialized || position > Duration.zero;
-        _setValue(_value.copyWith(isInitialized: initialized, position: shown));
+        final changedSecond = shown.inSeconds != _value.position.inSeconds;
+        if (!initialized || changedSecond) {
+          _setValue(_value.copyWith(isInitialized: initialized, position: shown));
+        }
       }),
     );
     _subscriptions.add(
@@ -1252,10 +1282,17 @@ class FxPlayer implements Listenable {
   double _cachedMpvSpeed = 0;
 
   /// 从 mpv 读实时下载速度（cache-speed，字节/秒）。直连线路用它显示网速。
+  /// 上次读取 mpv 速度的时间（节流用）。
+  DateTime _lastSpeedRead = DateTime.fromMillisecondsSinceEpoch(0);
+
   Future<void> _readMpvSpeed() async {
     final platform = _player.platform;
     if (platform is! NativePlayer) return;
     if (_disposed || _rescueBusy) return;
+    // 8 秒内读过就不再读：界面上显示的速度本来也不需要更高频率。
+    final now = DateTime.now();
+    if (now.difference(_lastSpeedRead) < const Duration(seconds: 8)) return;
+    _lastSpeedRead = now;
     try {
       final raw = await platform
           .getProperty('cache-speed', waitForInitialization: false)

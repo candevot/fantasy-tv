@@ -1937,27 +1937,29 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               // 弹幕层：画面之上、手势层之下（不挡点击）。
               if (!_isLive && c != null)
                 Positioned.fill(
-                  child: AnimatedBuilder(
-                    animation: c,
-                    builder: (context, _) => DanmuLayer(
-                      title: _title,
-                      ep: _ep,
-                      epName: _epLabelFor(_ep),
-                      position: c.value.position,
-                      playing: c.value.isPlaying,
-                      enabled: AppSettings.instance.danmuEnabled,
-                      opacity: AppSettings.instance.danmuOpacity,
-                      fontSize: AppSettings.instance.danmuFontSize,
-                      speed: AppSettings.instance.danmuSpeed,
-                      areaRatio: AppSettings.instance.danmuArea,
-                      reloadKey: _danmuReload,
-                      videoId: widget.videoId,
-                      onCount: (n) {
-                        if (mounted && n != _danmuCount) {
-                          setState(() => _danmuCount = n);
-                        }
-                      },
-                    ),
+                  // 不再包 AnimatedBuilder(animation: c)：
+                  // 弹幕层自己用 positionListenable 逐帧推进，
+                  // 外面再套一层会让整棵弹幕树随播放器每次通知重建，
+                  // CustomPaint 的优化就白做了（实测帧率差一倍）。
+                  child: DanmuLayer(
+                    title: _title,
+                    ep: _ep,
+                    epName: _epLabelFor(_ep),
+                    position: c.value.position,
+                    positionListenable: c.positionListenable,
+                    playing: c.value.isPlaying,
+                    enabled: AppSettings.instance.danmuEnabled,
+                    opacity: AppSettings.instance.danmuOpacity,
+                    fontSize: AppSettings.instance.danmuFontSize,
+                    speed: AppSettings.instance.danmuSpeed,
+                    areaRatio: AppSettings.instance.danmuArea,
+                    reloadKey: _danmuReload,
+                    videoId: widget.videoId,
+                    onCount: (n) {
+                      if (mounted && n != _danmuCount) {
+                        setState(() => _danmuCount = n);
+                      }
+                    },
                   ),
                 ),
               // 手势层：单击显隐控件 / 双击暂停 / 横扫调进度 / 竖扫亮度音量 /

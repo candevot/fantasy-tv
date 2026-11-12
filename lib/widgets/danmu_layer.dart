@@ -18,6 +18,7 @@ class DanmuLayer extends StatefulWidget {
     required this.ep,
     required this.epName,
     required this.position,
+    this.positionListenable,
     required this.playing,
     this.enabled = true,
     this.opacity = 1,
@@ -35,6 +36,9 @@ class DanmuLayer extends StatefulWidget {
 
   /// 播放器当前位置。
   final Duration position;
+
+  /// 高频位置通道（有就用，弹幕能跟得更紧）。
+  final ValueListenable<Duration>? positionListenable;
 
   /// 是否在播放。
   final bool playing;
@@ -112,6 +116,7 @@ class _DanmuLayerState extends State<DanmuLayer> {
     return DanmuOverlay(
       items: _items,
       position: widget.position,
+      positionListenable: widget.positionListenable,
       playing: widget.playing,
       enabled: widget.enabled,
       opacity: widget.opacity,

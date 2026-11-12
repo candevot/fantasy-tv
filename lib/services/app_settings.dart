@@ -65,7 +65,7 @@ class AppSettings extends ChangeNotifier {
     SharedPreferences.getInstance().then(write).catchError((_) {});
   }
 
-  bool _danmuEnabled = true;
+  bool _danmuEnabled = false;
   double _danmuOpacity = 0.92;
   double _danmuFontSize = 15;
   double _danmuSpeed = 1.0;
@@ -180,7 +180,7 @@ class AppSettings extends ChangeNotifier {
       final sp = await SharedPreferences.getInstance();
       _defaultQuality = _validQuality(sp.getString(_kDefaultQuality));
       _autoNext = sp.getBool(_kAutoNext) ?? defaultAutoNext;
-      _danmuEnabled = sp.getBool(_kDanmuEnabled) ?? true;
+      _danmuEnabled = sp.getBool(_kDanmuEnabled) ?? false;
       _danmuOpacity = (sp.getDouble(_kDanmuOpacity) ?? 0.92).clamp(0.2, 1.0);
       _danmuFontSize = (sp.getDouble(_kDanmuFontSize) ?? 15).clamp(11.0, 24.0);
       _danmuSpeed = (sp.getDouble(_kDanmuSpeed) ?? 1.0).clamp(0.5, 2.0);

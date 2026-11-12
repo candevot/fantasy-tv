@@ -19,6 +19,7 @@ class DanmuOverlay extends StatefulWidget {
     super.key,
     required this.items,
     required this.position,
+    this.positionListenable,
     required this.playing,
     this.enabled = true,
     this.opacity = 1,
@@ -32,6 +33,13 @@ class DanmuOverlay extends StatefulWidget {
 
   /// 当前播放位置。
   final Duration position;
+
+  /// 高频位置通道（可选）。
+  ///
+  /// 传了就用它：每帧直接从 ValueListenable 读最新值，
+  /// 不再等父组件 setState 传新的 position 进来。
+  /// 这样即使外层整棵树不重建，弹幕也能跟着播放器流畅滚动。
+  final ValueListenable<Duration>? positionListenable;
 
   /// 是否在播放（暂停时弹幕也停）。
   final bool playing;
@@ -142,8 +150,9 @@ class _DanmuOverlayState extends State<DanmuOverlay>
       _lastPos = widget.position;
       return;
     }
-    // 用播放器位置推进，不用 ticker 的 elapsed —— 倍速、缓冲都能跟上
-    final pos = widget.position;
+    // 用播放器位置推进，不用 ticker 的 elapsed —— 倍速、缓冲都能跟上。
+    // 有高频通道就优先读它：父组件不重建也能拿到最新位置。
+    final pos = widget.positionListenable?.value ?? widget.position;
     var dt = pos - _lastPos;
     _lastPos = pos;
     if (dt.isNegative || dt > const Duration(seconds: 2)) {
