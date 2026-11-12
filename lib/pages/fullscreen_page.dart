@@ -1064,15 +1064,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _failWith('加载失败，重试');
   }
 
-  /// 连续失败达到 2 次且还有其它线路时，退出全屏交给竖屏自动换线路。
+  /// 失败计数。**不再自动换线**。
+  ///
+  /// NO_AUTO_SWITCH（2026-11-12）：参考 FongMi/TV —— 它的重试全在播放器
+  /// 的 LoadErrorHandlingPolicy 里，重试同一个源，绝不自己跳到别的线路。
+  ///
+  /// 我们之前在「连续失败 2 次」时自动退出全屏换线，用户看到的就是
+  /// 「看着看着突然跳到另一条线路」，而且新线路又要重新 open、重新缓冲，
+  /// 体感就是掉线。
+  ///
+  /// 现在失败就停在可重试的错误页，由用户决定重试还是自己换线。
   bool _registerFailure() {
     _failStreak++;
-    if (_failStreak >= 2 && widget.canChangeLine && !_exiting) {
-      // sourceFailed：竖屏按「先原线重试一次（带缓冲），仍失败再换线」处理，
-      // 与竖屏自身的失败路径完全一致。
-      unawaited(_exit(requestLineChange: true, sourceFailed: true));
-      return true;
-    }
     return false;
   }
 

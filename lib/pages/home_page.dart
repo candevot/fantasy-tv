@@ -11,7 +11,6 @@ import 'detail_page.dart';
 import 'live_all_page.dart';
 import 'live_detail_page.dart';
 import 'live_groups_page.dart';
-import '../widgets/fx_live_section.dart';
 import 'search_page.dart';
 import 'together_page.dart';
 import '../utils/fx_route.dart';
@@ -84,10 +83,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _load();
-    // 首页末尾有「直播」分区，需要直播数据。
-    // 原来只在切到 live 频道时才拉，而分类页签删掉后 _channel 恒为
-    // recommend，_loadLive 永远不执行 → 直播区一直空着。
-    unawaited(_loadLive());
+    // 直播是独立 Tab（LiveAllPage），首页不再展示直播分区。
+    // 之前 initState 顺手拉一次直播数据，现在没必要 —— 白占一次请求和内存。
   }
 
   @override
@@ -483,15 +480,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           childCount: sections.length,
         ),
       ),
-      // 直播作为首页的一个区（用户要求：去掉分类页签，直播进分区）。
-      if (_liveSections.isNotEmpty)
-        SliverToBoxAdapter(
-          child: FxLiveSectionRow(
-            sections: _liveSections,
-            onMore: _openLiveAll,
-            onTapChannel: _openLiveChannel,
-          ),
-        ),
       SliverToBoxAdapter(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(0, 24, 0, 0),

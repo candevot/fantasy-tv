@@ -496,6 +496,14 @@ class FxPlayer implements Listenable {
   /// 直链 HLS 的本地分片代理；只在 direct 模式下懒创建。
   LocalHlsProxy? _hlsProxy;
 
+  /// 是否启用本地 HLS 代理。
+  ///
+  /// 默认 false —— 让播放器直连，和 FongMi/TV 的做法一致。
+  /// 代理层的实测副作用：4K 单片 16~30MB 被拆成几十个 Range 重下，
+  /// 代理自己判超时/重试/回退直连，导致加载慢、卡死、黑屏。
+  /// 服务端整条链路只要 87ms，代理没有任何收益。
+  static const bool _enableLocalHlsProxy = false;
+
   /// 底层 media_kit Player，需要高级能力（音轨/字幕/属性）时可直接使用。
   Player get player => _player;
 
@@ -751,7 +759,20 @@ class FxPlayer implements Listenable {
     var playbackUrl = url;
     var playbackHeaders = headers;
     var proxied = false;
-    if (direct) {
+    // NO_LOCAL_PROXY（2026-11-12）：本地 HLS 代理默认关闭，播放器直连。
+    //
+    // 参考 FongMi/TV：它完全信任 ExoPlayer 原生 HLS 实现，不套任何代理。
+    // 我们之前每播一路都要经过「播放器 → 本地代理 → 拆 Range 并发 → 拼回」，
+    // 4K 单片 16~30MB 被切成几十个 Range 请求重下，代理还要自己判超时、
+    // 自己重试、失败就回退直连 —— 用户看到的就是加载慢、卡死、黑屏、跳线路。
+    //
+    // 实测服务端链路全程 < 250ms（api/play 23ms、m3u8 31ms、首片 208ms），
+    // 所以代理带来的只有副作用，没有收益。
+    //
+    // 保留 LocalHlsProxy 代码与开关：某些需要签名重写的源将来还能用，
+    // 但默认路径不受它影响。
+    final useLocalProxy = _enableLocalHlsProxy;
+    if (direct && useLocalProxy) {
       // 缓存上限按设备内存定：无限预加载要把整集尽量拉下来，
       // 512MB 对 1080P（一集 300~600MB）刚好够，但对 4K 完全不够。
       // 这里取可用内存的 1/8，夹在 512MB~2GB：

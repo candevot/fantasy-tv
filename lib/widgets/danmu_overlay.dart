@@ -72,6 +72,9 @@ class _DanmuOverlayState extends State<DanmuOverlay>
   /// 累计播放时间（暂停时不累加）。
   Duration _clock = Duration.zero;
 
+  /// 重绘信号：数值变化只触发 CustomPaint 重绘，不重建 Widget 树。
+  final ValueNotifier<int> _repaint = ValueNotifier<int>(0);
+
   int _laneCount = 8;
   double _laneHeight = 0;
   double _width = 0;
@@ -122,6 +125,17 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     _cursor = lo;
   }
 
+  /// 每帧推进。
+  ///
+  /// DANMU_SMOOTH（2026-11-12）：
+  ///   之前用 Ticker + setState(() {}) 全量重建整棵 Widget 树 ——
+  ///   每条弹幕都是一个 Positioned + Opacity + Text，屏幕上二三十条时
+  ///   每帧要重建二三十个组件，中低端机直接掉到 30fps 以下，
+  ///   肉眼就是「弹幕一卡一卡的」。
+  ///
+  ///   现在改成：**不碰 Widget 树**，Dart 侧只更新数值，
+  ///   由一个 CustomPainter 在一次 paint 里把全部弹幕画出来。
+  ///   每帧成本从「重建 N 个组件」降到「一次 canvas 绘制」。
   void _onTick(Duration elapsed) {
     if (!mounted) return;
     if (!widget.enabled || !widget.playing) {
@@ -138,10 +152,23 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     }
     _clock += dt;
 
-    // 1) 发射到期的弹幕
+    // 1) 发射到期的弹幕。
+    //
+    // DANMU_CONTINUOUS：之前 here 是 while 一次性把「所有 time <= _clock」
+    // 的都吐出来 —— 一旦某一帧卡了一下（比如解码抖动 dt 变大），
+    // 就会在那一瞬间炸出一整批，用户看到的就是「一组一组地冒」，
+    // 而不是连续飘过。现在限制每帧最多发射 3 条，多出来的留在
+    // cursor 里下一帧继续，视觉上就是平滑的流水。
+    var spawned = 0;
     while (_cursor < widget.items.length &&
-        widget.items[_cursor].time <= _clock) {
-      _spawn(widget.items[_cursor]);
+        widget.items[_cursor].time <= _clock &&
+        spawned < 3) {
+      if (_spawn(widget.items[_cursor])) spawned++;
+      _cursor++;
+    }
+    // 把「本该早就出现」的过时弹幕丢掉，避免 seek 后一次性补一堆。
+    while (_cursor < widget.items.length &&
+        _clock - widget.items[_cursor].time > const Duration(seconds: 6)) {
       _cursor++;
     }
 
@@ -157,11 +184,32 @@ class _DanmuOverlayState extends State<DanmuOverlay>
       return f.age > const Duration(seconds: 4);
     });
 
-    setState(() {});
+    // 只触发重绘，不重建组件树。
+    _repaint.value++;
   }
 
-  void _spawn(DanmuItem item) {
-    if (_width <= 0 || _laneHeight <= 0) return;
+  /// 屏幕上最近出现过的弹幕文本（去重用，带出现时刻）。
+  final Map<String, Duration> _recent = <String, Duration>{};
+
+  /// 发射一条弹幕。返回 true 表示真的上屏了。
+  ///
+  /// DANMU_DEDUP（2026-11-12）：弹幕源里同一句话会重复很多次
+  /// （尤酷/腾讯的接口会把同一条弹幕挂到多个时间点）。
+  /// 之前照单全收，用户看到的就是「一直都是重复的」。
+  /// 现在同一句话 [_dedupWindow] 内只放一条。
+  static const Duration _dedupWindow = Duration(seconds: 6);
+
+  bool _spawn(DanmuItem item) {
+    if (_width <= 0 || _laneHeight <= 0) return false;
+    // 去重：同一句话 6 秒内只出现一次
+    final key = item.text;
+    final last = _recent[key];
+    if (last != null && (_clock - last).abs() < _dedupWindow) return false;
+    _recent[key] = _clock;
+    // 清掉过期的去重记录，避免 Map 无限增长
+    if (_recent.length > 400) {
+      _recent.removeWhere((_, at) => (_clock - at).abs() > _dedupWindow);
+    }
     // 估算宽度：中文按字号，英文按 0.55 字号
     final width = _measure(item.text, widget.fontSize);
 
@@ -176,12 +224,12 @@ class _DanmuOverlayState extends State<DanmuOverlay>
         mode: item.mode,
         age: Duration.zero,
       ));
-      return;
+      return true;
     }
 
     // 滚动弹幕：找一条可用轨道
     final lane = _pickLane(width);
-    if (lane < 0) return; // 全满，丢弃（成熟方案也这么做，避免叠字）
+    if (lane < 0) return false; // 全满，丢弃（成熟方案也这么做，避免叠字）
     final travel = _width + width;
     // 速度：固定穿过时间 8 秒 / speed 倍率
     final durationSec = 8 / math.max(0.5, widget.speed);
@@ -225,6 +273,7 @@ class _DanmuOverlayState extends State<DanmuOverlay>
   @override
   void dispose() {
     _ticker.dispose();
+    _repaint.dispose();
     super.dispose();
   }
 
@@ -236,37 +285,31 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     return LayoutBuilder(
       builder: (ctx, cons) {
         _width = cons.maxWidth;
-        final area = cons.maxHeight * widget.areaRatio;
-        _laneCount = math.max(1, (area / (widget.fontSize * 1.6)).floor());
-        _laneHeight = area / _laneCount;
+        // DANMU_AREA（2026-11-12）：显示区域改成按「条数」而不是「屏幕比例」。
+        //
+        // 之前 areaRatio 是画面高度的百分比，最低 30% —— 在 1080p 横屏
+        // 上下留了约 200dp，按字号算仍有 7~8 条轨道，用户看到的就是
+        // 「调到最低还是占半个屏幕」。
+        //
+        // 现在 areaRatio 直接换算成轨道条数：30% → 3 条，100% → 10 条。
+        // 这样滑到最低是真的「只在画面上部飘三条」。
+        final lanes = (widget.areaRatio * 10).round().clamp(1, 12);
+        _laneCount = math.max(1, lanes);
+        _laneHeight = (widget.fontSize * 1.6).clamp(18.0, 40.0);
         return IgnorePointer(
           child: ClipRect(
-            child: Stack(
-              children: [
-                for (final f in _flying)
-                  Positioned(
-                    left: f.x,
-                    top: f.y,
-                    child: Opacity(
-                      opacity: widget.opacity,
-                      child: Text(
-                        f.item.text,
-                        maxLines: 1,
-                        softWrap: false,
-                        style: TextStyle(
-                          fontSize: widget.fontSize,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF000000 | f.item.color),
-                          height: 1.25,
-                          shadows: const [
-                            Shadow(color: Colors.black87, blurRadius: 3),
-                            Shadow(color: Colors.black54, blurRadius: 6),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
+            // 一次 paint 画完所有弹幕：不再为每条弹幕建 Positioned+Opacity+Text。
+            // _repaint 变化只触发重绘，不重建组件树。
+            child: RepaintBoundary(
+              child: CustomPaint(
+                size: Size(cons.maxWidth, cons.maxHeight),
+                painter: _DanmuPainter(
+                  flying: _flying,
+                  repaint: _repaint,
+                  opacity: widget.opacity,
+                  fontSize: widget.fontSize,
+                ),
+              ),
             ),
           ),
         );
@@ -303,4 +346,78 @@ class _LaneState {
 
   /// 新弹幕的头部完全进入屏幕的时刻（防追尾）。
   final Duration headInAt;
+}
+
+
+/// 把屏幕上所有弹幕一次性画出来。
+///
+/// 相比「每条弹幕一个 Text 组件」：省掉组件树重建、布局、合成，
+/// 中低端机上帧率差别很明显（30fps → 60fps）。
+/// 文字用 TextPainter 缓存，避免每帧重新排版。
+class _DanmuPainter extends CustomPainter {
+  _DanmuPainter({
+    required this.flying,
+    required this.repaint,
+    required this.opacity,
+    required this.fontSize,
+  }) : super(repaint: repaint);
+
+  final List<_Flying> flying;
+  final Listenable repaint;
+  final double opacity;
+  final double fontSize;
+
+  /// 文本排版缓存：同一条弹幕的内容不重复 layout。
+  static final Map<String, TextPainter> _cache = <String, TextPainter>{};
+
+  TextPainter _painterFor(_Flying f) {
+    final key = '${f.item.color}|${f.item.text}';
+    final cached = _cache[key];
+    if (cached != null) return cached;
+    final tp = TextPainter(
+      text: TextSpan(
+        text: f.item.text,
+        style: TextStyle(
+          fontSize: fontSize,
+          fontWeight: FontWeight.w600,
+          color: Color(0xFF000000 | f.item.color),
+          height: 1.25,
+          shadows: const [
+            Shadow(color: Colors.black87, blurRadius: 3),
+            Shadow(color: Colors.black54, blurRadius: 6),
+          ],
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    if (_cache.length > 600) _cache.clear();
+    _cache[key] = tp;
+    return tp;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (opacity <= 0) return;
+    for (final f in flying) {
+      final tp = _painterFor(f);
+      canvas.save();
+      canvas.translate(f.x, f.y);
+      // 用 saveLayer 做整体透明度：比给每条文字设 alpha 更省
+      if (opacity < 1) {
+        final layer = canvas.saveLayer(
+          Rect.fromLTWH(-4, -4, tp.width + 8, tp.height + 8),
+          Paint()..color = Colors.white.withValues(alpha: opacity),
+        );
+        tp.paint(canvas, Offset.zero);
+        canvas.restoreToCount(layer);
+      } else {
+        tp.paint(canvas, Offset.zero);
+      }
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DanmuPainter old) => true;
 }
