@@ -242,34 +242,35 @@ class FsBottomBar extends StatelessWidget {
                     onTap: onDanmuSettings,
                   ),
                 ],
-                if (onDanmuSend != null) ...[
-                  const SizedBox(width: 8),
-                  PGlassIcon(
-                    icon: Icons.chat_bubble_outline_rounded,
-                    size: 34 * s,
-                    iconSize: 18 * s,
-                    tint: .16,
-                    tooltip: '发弹幕',
-                    onTap: onDanmuSend,
-                  ),
-                ],
               ],
-              // ── 中间：弹幕输入气泡（占了就不用 Spacer）──
-              if (danmuInput != null && !live) ...[
-                const SizedBox(width: 10),
-                Expanded(child: _FsDanmuInput(
-                  controller: danmuInput!,
-                  onSubmit: onDanmuSubmit,
-                  size: s,
-                )),
-                const SizedBox(width: 10),
-              ] else
-                const Spacer(),
-              // ── 右组：文字按钮 + 齿轮 + 退出（超宽时整体缩小）──
-              Flexible(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerRight,
+              // ── 中间：弹幕输入气泡，固定宽度居中 ──
+              //
+              // 两侧各一个 Spacer 把气泡夹在屏幕正中间，
+              // 右组则被顶到最右边，不再和气泡挤在一起。
+              // ── 中间：气泡在剩余空间里居中 ──
+              Expanded(
+                child: danmuInput != null && !live
+                    ? Center(
+                        child: SizedBox(
+                          width: 260 * s,
+                          child: _FsDanmuInput(
+                            controller: danmuInput!,
+                            onSubmit: onDanmuSubmit,
+                            size: s,
+                          ),
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
+              // ── 右组：文字按钮 + 齿轮 + 退出 ──
+              //
+              // 不能包 Flexible：Flexible 的 flex 会和 Expanded/Spacer 一起
+              // 平分剩余空间，右组只拿到三分之一宽度，按钮就被拉回屏幕中间，
+              // 右边空出一大片。这里让它按内容自然宽度靠右，
+              // 外层 Container 的 24 + safe.right 内边距负责避开弧形屏幕圆角。
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerRight,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -325,7 +326,6 @@ class FsBottomBar extends StatelessWidget {
                       ),
                     ],
                   ),
-                ),
               ),
             ],
           ),
