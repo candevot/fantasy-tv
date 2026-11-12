@@ -11,7 +11,9 @@ import '../services/fx_player.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
+import '../widgets/cast_sheet.dart';
 import '../widgets/fs_controls.dart';
+import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
@@ -183,9 +185,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   PlayInfo? _info;
 
   /// 全屏内实际 open 成功的地址 / 请求头（重新 open 后投屏要跟着变）。
+  String? _activeCastUrl;
+  Map<String, String> _activeCastHeaders = const <String, String>{};
 
   late int _ep;
   late String _line;
+  late String _title;
   late List<Episode> _episodes;
 
   /// 详情线路表：加载文案只按当前 lineId 查线路名。
@@ -216,9 +221,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   // 控件显隐 / 锁屏
   bool _controls = true;
-
-  /// betterplayer 控件可见性订阅（页面只跟随，不再自己计时）。
-  StreamSubscription<bool>? _controlsSub;
+  Timer? _hideTimer;
   Timer? _progressTimer;
 
   /// 是否已切到后台：切后台 / inactive / paused 一律不暂停，继续播放，
@@ -265,6 +268,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 切线路 / 重连期间锁住 UI 进度，防止播放器 open 归零时进度条跳回 0。
   Duration? _uiPosition;
+  Duration? _uiDuration;
   Timer? _uiHoldTimer;
 
   /// loading 浮层文案（重新连接时显示「正在重新连接」）。
@@ -299,6 +303,59 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 顶栏画质胶囊文案：真实分辨率 `宽x高`（如 1920x1080），未就绪时为空。
   String get _qualityText => fxPlayerQuality(_controller);
 
+  /// 全屏顶栏「投屏」：复用竖屏解析好的当前清晰度 / 直播地址。
+  Future<void> _openCastSheet() async {
+    CastSource source;
+    final override = widget.castSource;
+    if (override != null) {
+      source = override;
+    } else {
+      try {
+        source = _buildCastSource();
+      } on CastException {
+        // 解析投屏地址失败：静默返回，不弹遮挡画面的提示。
+        return;
+      }
+    }
+    final wasPlaying = _controller?.value.isPlaying ?? false;
+    await showCastSheet(
+      context,
+      source: source,
+      owner: widget.castOwner ?? this,
+      onCastStarted: () async {
+        try {
+          await _controller?.pause();
+        } catch (_) {}
+      },
+      onCastStopped: () async {
+        if (!wasPlaying || !mounted) return;
+        try {
+          await _controller?.play();
+        } catch (_) {}
+      },
+    );
+  }
+
+  CastSource _buildCastSource() {
+    final info = _info;
+    if (info == null) throw const CastException('投屏地址还没准备好');
+    final active = _activeCastUrl?.trim() ?? '';
+    final url = active.isNotEmpty ? active : _watchdogUrl();
+    if (url == null) throw const CastException('当前没有可投屏的播放地址');
+    final headers =
+        active.isNotEmpty ? _activeCastHeaders : _watchdogHeaders(url);
+    return CastService.resolveSource(
+      url: url,
+      headers: headers,
+      title: _isLive ? _title : '$_title · $_epLabel',
+      isLive: _isLive,
+      direct: info.direct,
+      startAt:
+          _isLive ? Duration.zero : (_controller?.value.position ?? Duration.zero),
+      serverBase: Api.base,
+    );
+  }
+
   /// 主地址对应哪个码率：用于进入页面时正确高亮当前档。
   String? _qualityKeyFor(PlayInfo? info) {
     if (info == null) return null;
@@ -310,7 +367,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return null;
   }
 
+  /// loading / 切换期间显示用的进度，避免 open 重置成 0 导致进度条回弹。
+  Duration get _displayPosition =>
+      _uiPosition ?? (_controller?.value.position ?? Duration.zero);
 
+  Duration get _displayDuration =>
+      (_uiDuration != null && _uiDuration! > Duration.zero)
+          ? _uiDuration!
+          : (_controller?.value.duration ?? Duration.zero);
 
   /// 切换结束后最多再占位 2 秒；seek 异常时也不会把假进度永远挂在 UI 上。
   void _startUiHoldTimeout() {
@@ -319,10 +383,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (!mounted || _uiPosition == null) return;
       setState(() {
         _uiPosition = null;
+        _uiDuration = null;
       });
     });
   }
 
+  String get _epLabel => _epLabelFor(_ep);
 
   /// 当前线路名：只按当前 lineId 从详情线路表查，不用上一次请求的 _info。
   String get _lineName => fxLineNameOf(_lines, _line);
@@ -339,6 +405,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     super.initState();
     _ep = widget.ep;
     _line = widget.line;
+    _title = widget.title.trim().isEmpty ? '正在播放' : widget.title.trim();
     _episodes = List<Episode>.from(widget.episodes);
     _lines = List<LineInfo>.from(widget.lines);
 
@@ -351,10 +418,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _loadedEp = c.value.isInitialized ? _ep : null;
     _loading = !c.value.isInitialized;
     _firstFrame = _hasFirstFrame(c);
-    _bindControlsVisibility(c);
-    // 全屏复用的是竖屏已经打开的播放器：这里只监听错误流，不重新 open。
-    // 播放层已换成 betterplayer，错误流由 FxPlayer 统一暴露。
-    _platformErrorSub = c.errorStream.listen(_onPlatformError);
+    // 全屏复用的是竖屏已经打开的播放器：这里只监听平台错误，不重新 open。
+    _platformErrorSub = c.player.stream.error.listen(_onPlatformError);
     c.addListener(_onVideoValue);
     if (!_firstFrame) _armFirstFrameTimer();
     if (c.value.hasError) {
@@ -387,10 +452,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   @override
   void dispose() {
-    _controlsSub?.cancel();
     // 退出全屏也要复位长按倍速，不能让 3.0x 留在共享播放器上。
     _resetHold2x(notify: false);
     WidgetsBinding.instance.removeObserver(this);
+    _hideTimer?.cancel();
     _seekHintTimer?.cancel();
     _unlockTimer?.cancel();
     _uiHoldTimer?.cancel();
@@ -463,7 +528,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!mounted) return;
     if (!healed) {
       // 同上：位置没异常也可能已经断流，交给播放器自检（断了自动重连）。
-      await c.resumeSelfCheck();
+      unawaited(c.resumeSelfCheck());
       return;
     }
     setState(() {});
@@ -501,6 +566,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _episodes = detail.allEpisodes;
         _lines = detail.lines;
         if (widget.title.trim().isEmpty && detail.title.isNotEmpty) {
+          _title = detail.title;
         }
       });
     } catch (_) {
@@ -561,6 +627,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 换集 / 重试时手势可能还没收到 onLongPressEnd，先把长按倍速清掉。
     _resetHold2x();
     final token = ++_loadToken;
+    _hideTimer?.cancel();
     _cancelFirstFrameTimer();
     // 先抓最后一帧：同一个 player 实例换地址时纹理会被清空，用它垫住黑屏。
     if (_firstFrame && (_frozenFrame == null || !_freezeOpaque)) {
@@ -584,6 +651,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _sourceFailNotified = false;
       _qualityKey = null;
       _uiPosition = null;
+      _uiDuration = null;
       _loadingHint = null;
       _firstFrame = false;
       _nextPrewarmed = false;
@@ -768,6 +836,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       // open 成功不代表首帧已出（红屏/黑屏常见于这里）：超时仍未出画面
       // 就进入错误页，而不是一直干等。
       if (!_firstFrame) _armFirstFrameTimer();
+      _activeCastUrl = url;
+      _activeCastHeaders = headers;
       return true;
     } catch (_) {
       return false;
@@ -891,19 +961,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _hasFirstFrame(FxPlayer? player) {
     final v = player?.value;
     if (v == null || !v.isInitialized) return false;
-    // FIRSTFRAME_FIX（2026-11-12）：不再强依赖宽高。
-    //
-    // ExoPlayer 在真正渲染出首帧前 VideoPlayerValue.size 是 null，
-    // 于是「宽高 > 0」永远不成立 → _firstFrame 一直 false →
-    // _buildStatusOverlay 永远返回全屏 loading 浮层 → 把 betterplayer
-    // 的控件整个盖死，用户看到「播放器完全不可控」。
-    // 现在：初始化完成、且已经开始播放（或位置在推进）就算出画。
     var w = v.videoWidth ?? 0;
     var h = v.videoHeight ?? 0;
     if (w <= 0) w = v.width ?? 0;
     if (h <= 0) h = v.height ?? 0;
-    if (w > 0 && h > 0) return true;
-    return v.isPlaying || v.position > Duration.zero;
+    return w > 0 && h > 0;
   }
 
   void _armFirstFrameTimer() {
@@ -1018,6 +1080,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _errorText = text;
       _controls = true;
       _uiPosition = null;
+      _uiDuration = null;
     });
     _wake();
   }
@@ -1078,6 +1141,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _firstFrame = false;
       _controls = true;
       _uiPosition = resume > Duration.zero ? resume : null;
+      _uiDuration = c.value.duration > Duration.zero ? c.value.duration : null;
     });
     final ok = await _openSource(
       url,
@@ -1128,6 +1192,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _uiHoldTimer?.cancel();
         setState(() {
           _uiPosition = null;
+          if (v.duration > Duration.zero) _uiDuration = null;
         });
       }
     }
@@ -1293,32 +1358,36 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _wake();
   }
 
+  Future<void> _next() async {
+    if (_isLive) return;
+    final next = _nextEpNumber();
+    if (next == null) {
+      _wake();
+      return;
+    }
+    await _switchEp(next);
+  }
+
   /* ---------------------------------------------------------------- 控件 */
 
-  /// 跟随 betterplayer 的控件显隐。
-  ///
-  /// 之前页面自己维护一套 5 秒定时器、播放器内部又有一套 3 秒定时器，
-  /// 两边节奏不同步：点屏幕后页面的返回键亮了、播放器的进度条还藏着，
-  /// 或者反过来。现在只认播放器的状态。
-  void _bindControlsVisibility(FxPlayer c) {
-    _controlsSub?.cancel();
-    _controlsSub = c.controlsVisibilityStream.listen((visible) {
+  void _startHideTimer() {
+    _hideTimer?.cancel();
+    _hideTimer = Timer(kPlayerControlsAutoHide, () {
       if (!mounted) return;
-      if (_controls != visible) setState(() => _controls = visible);
+      if (_locked ||
+          _panelOpen ||
+          _holding2x ||
+          _loading ||
+          _error) {
+        if (_holding2x) _startHideTimer();
+        return;
+      }
+      setState(() => _controls = false);
     });
   }
 
-  /// 控件自动隐藏交给 betterplayer 自己（3 秒），页面不再另起定时器。
-  ///
-  /// 之前这里有个 5 秒定时器，和播放器内部的 3 秒定时器并存：点屏幕后
-  /// 页面的返回键还在、播放器的进度条已经藏了，或者反过来。现在页面的
-  /// _controls 完全跟随 controlsVisibilityStream，这里保留空实现只为
-  /// 不破坏调用点。
-  void _startHideTimer() {}
-
   void _wake() {
     if (!mounted || _locked) return;
-    _controller?.setControlsVisible(true);
     if (!_controls) {
       setState(() => _controls = true);
     }
@@ -1326,10 +1395,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   }
 
   void _hideControls() {
+    _hideTimer?.cancel();
     if (!mounted) return;
-    // 同步隐藏 betterplayer 自己的控件层：只改页面 _controls 不会影响它，
-    // 用户看到的「控件一直显示隐藏不了」就是这个原因。
-    _controller?.setControlsVisible(false);
     setState(() {
       _controls = false;
       _showSpeed = false;
@@ -1361,6 +1428,33 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _showJump = false;
     });
     _wake();
+  }
+
+  void _lock() {
+    _unlockTimer?.cancel();
+    // 锁屏会直接移除手势层，长按 end 不会再回来，先复位倍速。
+    _resetHold2x();
+    setState(() {
+      _locked = true;
+      _controls = false;
+      _unlockVisible = true;
+      _showSpeed = false;
+      _showSleep = false;
+      _showJump = false;
+    });
+    _hideTimer?.cancel();
+    // 自动淡出只在刚锁定这一次：3 秒后锁按钮 opacity=0 且不再可点。
+    _startUnlockTimer();
+  }
+
+  /// 刚锁定时的唯一自动淡出计时器：3 秒后隐藏解锁钮。
+  /// 之后点屏幕是即时切换显隐，不再有「点一下亮 3 秒」。
+  void _startUnlockTimer() {
+    _unlockTimer?.cancel();
+    _unlockTimer = Timer(kPlayerUnlockAutoHide, () {
+      if (!mounted || !_locked) return;
+      setState(() => _unlockVisible = false);
+    });
   }
 
   /// 锁定状态点屏幕 = 解锁钮显隐切换（toggle），隐藏 0 延迟立即执行；
@@ -1414,6 +1508,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _wake();
   }
 
+  void _seekBy(int seconds) {
+    if (_isLive) return;
+    final c = _controller;
+    if (c == null || _loading || !c.value.isInitialized) return;
+    final total = c.value.duration;
+    var target = c.value.position + Duration(seconds: seconds);
+    if (target < Duration.zero) target = Duration.zero;
+    if (target > total) target = total;
+    unawaited(c.seekTo(target));
+    _showSeekHint(seconds > 0 ? '快进 ${seconds}s' : '后退 ${-seconds}s');
+    _wake();
+  }
+
   void _showSeekHint(String text) {
     _seekHintTimer?.cancel();
     if (!mounted) return;
@@ -1432,6 +1539,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     } catch (_) {}
   }
 
+  void _setRate(double rate) {
+    if (!mounted) return;
+    setState(() => _rate = rate);
+    unawaited(_applyRate(rate));
+    _showSeekHint('${fxRateLabel(rate)} 播放');
+  }
+
   void _startHold2x() {
     if (_isLive || _holding2x) return;
     final c = _controller;
@@ -1443,6 +1557,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     _rateBeforeHold = _rate;
     unawaited(_applyRate(kPlayerHoldRate));
+    _hideTimer?.cancel();
     setState(() {
       _holding2x = true;
       // 参考：长按进入快进时收起控件，只在顶部留「3.0倍速快进中」胶囊。
@@ -1464,6 +1579,167 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       setState(() {});
     }
     unawaited(_applyRate(_rateBeforeHold));
+  }
+
+  void _toggleSpeed() {
+    if (_isLive) {
+      return;
+    }
+    _hideTimer?.cancel();
+    setState(() {
+      _showSpeed = !_showSpeed;
+      _showSleep = false;
+      _showJump = false;
+      _controls = true;
+    });
+    if (!_showSpeed) _wake();
+  }
+
+  Future<void> _openEpisodeSheet() async {
+    if (_isLive) {
+      return;
+    }
+    if (_loading) return;
+    _hideTimer?.cancel();
+    if (_episodes.isEmpty) {
+      _wake();
+      return;
+    }
+    if (mounted) setState(() => _controls = true);
+    final picked = await showFsEpisodeSheet(
+      context,
+      episodes: _episodes,
+      current: _ep,
+    );
+    if (!mounted) return;
+    _wake();
+    if (picked != null) await _switchEp(picked);
+  }
+
+  Future<void> _openMorePanel() async {
+    _hideTimer?.cancel();
+    if (mounted) setState(() => _controls = true);
+    await showFxMorePanel(
+      context,
+      loopMode: _loopMode,
+      markLabel: _markLabel,
+      // 直播没有循环 / 片头尾 / 下载 / 倍速：传 null 让对应行不显示；
+      // 画面比例、镜像、定时关闭、后台播放、问题反馈照常可用且生效。
+      onLoopChanged: _isLive
+          ? null
+          : (mode) {
+              if (!mounted) return;
+              setState(() => _loopMode = mode);
+              unawaited(
+                _controller?.setLooping(mode == FxLoopMode.single) ??
+                    Future<void>.value(),
+              );
+            },
+      onJumpPanel: _isLive ? null : _openJumpPanel,
+      onSleepTimer: _openSleepPanel,
+      onDownload: _isLive ? null : () {},
+      onSpeed: _isLive ? null : _toggleSpeed,
+      onBackground: () {},
+      onFeedback: () {},
+    );
+    if (!mounted) return;
+    _wake();
+  }
+
+  /// 播放设置里「跳过片头片尾」的状态文案：
+  /// 「片头 00:30 · 片尾 01:00」；两项都没设置显示「未设置」。
+  String get _markLabel {
+    if (_mark.isEmpty) return '未设置';
+    return '片头 ${fxTime(Duration(seconds: _mark.introSeconds))}'
+        ' · 片尾 ${fxTime(Duration(seconds: _mark.outroSeconds))}';
+  }
+
+  /// 打开片头 / 片尾标记面板（底部「片头/尾」按钮、播放设置行）。
+  void _openJumpPanel() {
+    if (_isLive) return;
+    _hideTimer?.cancel();
+    setState(() {
+      _showJump = true;
+      _showSpeed = false;
+      _showSleep = false;
+      _controls = true;
+    });
+  }
+
+  /// 应用输入的片头 / 片尾时长：按 videoId 落盘，本集立即按新值跳。
+  Future<void> _applyJump(int introSeconds, int outroSeconds) async {
+    final mark = VideoMark(
+      introSeconds: introSeconds,
+      outroSeconds: outroSeconds,
+    );
+    await VideoMarks.save(widget.videoId, mark);
+    if (!mounted) return;
+    setState(() => _mark = mark);
+    _showSeekHint(mark.isEmpty
+        ? '已清空跳过片头片尾'
+        : '已设置片头 ${fxTime(Duration(seconds: introSeconds))}'
+            ' · 片尾 ${fxTime(Duration(seconds: outroSeconds))}');
+  }
+
+  /// 清空本剧设置：清完任何位置都不再自动跳。
+  Future<void> _clearMarks() async {
+    await VideoMarks.clear(widget.videoId);
+    if (!mounted) return;
+    setState(() => _mark = const VideoMark());
+    _showSeekHint('已清空本剧设置');
+  }
+
+  /// 打开定时关闭右侧面板（与速度 / 片头尾面板互斥）。
+  /// 直播同样可用：到点暂停对直播一样生效。
+  void _openSleepPanel() {
+    _hideTimer?.cancel();
+    setState(() {
+      _showSleep = true;
+      _showSpeed = false;
+      _showJump = false;
+      _controls = true;
+    });
+  }
+
+  /// 面板选中一项：不开启 / 看完当集 / 30·60·90 分钟。
+  void _pickSleep(FxSleepMode mode, int minutes) {
+    if (mounted) setState(() => _showSleep = false);
+    unawaited(_applySleep(mode, minutes));
+    _wake();
+  }
+
+  /// 自定义分钟（1–1440）：弹输入框，确认后生效。
+  Future<void> _openCustomSleep() async {
+    final settings = AppSettings.instance;
+    final picked = await showFxSleepCustomDialog(
+      context,
+      current: settings.sleepMode == FxSleepMode.minutes
+          ? settings.sleepMinutes
+          : 0,
+    );
+    if (!mounted || picked == null) return;
+    setState(() => _showSleep = false);
+    await _applySleep(FxSleepMode.minutes, picked);
+    if (!mounted) return;
+    _wake();
+  }
+
+  /// 落地定时关闭：分钟模式记截止时间戳（杀进程再进来能续上剩余时间）。
+  /// 到点只暂停播放并保留进度，不退出 App。
+  Future<void> _applySleep(FxSleepMode mode, int minutes) async {
+    final settings = AppSettings.instance;
+    await settings.init();
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (mode == FxSleepMode.minutes) {
+      final endsAt = DateTime.now().millisecondsSinceEpoch + minutes * 60000;
+      await settings.setSleepTimer(mode, minutes: minutes, endsAt: endsAt);
+      _armSleep(endsAt - DateTime.now().millisecondsSinceEpoch);
+    } else {
+      await settings.setSleepTimer(mode);
+    }
+    if (!mounted) return;
+    setState(() {});
   }
 
   void _armSleep(int millis) {
@@ -1522,6 +1798,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 作废仍在进行的切集 / 重连请求，退出后不要再回写 UI。
     _loadToken++;
     _uiHoldTimer?.cancel();
+    _hideTimer?.cancel();
     final playing = _playing;
     final position = await _saveProgress();
     // 播放器交回竖屏继续使用：不 pause、不 dispose，保持进度与播放状态。
@@ -1567,36 +1844,21 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             fit: StackFit.expand,
             children: [
               Positioned.fill(child: _buildVideoSurface(c)),
-              // 手势层：只占中间一条竖带，左右各让出 96dp。
-              //
-              // 之前这里铺满全屏（Positioned.fill），把 betterplayer 自带的
-              // 控件整个盖住 —— 用户点任何按钮都没反应、控件也永远不隐藏，
-              // 因为点击先被手势层吃掉。现在手势层只覆盖画面中段，
-              // 上下控制区留给播放器自己处理。
+              // 手势层：单击显隐控件 / 双击暂停 / 横扫调进度 / 竖扫亮度音量 /
+              // 长按 3.0x。加载与切换时仍保留手势（按钮的 no-op 由页面自己判）。
               if (!_locked && c != null)
                 Positioned.fill(
-                  child: IgnorePointer(
-                    ignoring: !_error ? false : true,
-                    child: Padding(
-                      padding: EdgeInsets.only(
-                        left: 96,
-                        right: 96,
-                        top: pad.top + 72,
-                        bottom: pad.bottom + 88,
-                      ),
-                      child: FxPlayerGestures(
-                        player: c,
-                        enabled: !_error,
-                        onTap: _onSurfaceTap,
-                        onDoubleTap: _togglePlay,
-                        onSeek: _seekTo,
-                        enableSeek: !_isLive,
-                        onLongPressStart: _isLive ? null : _startHold2x,
-                        onLongPressEnd: _isLive ? null : _endHold2x,
-                        onGestureStart: _hideControls,
-                        resetBrightnessOnDispose: true,
-                      ),
-                    ),
+                  child: FxPlayerGestures(
+                    player: c,
+                    enabled: !_error,
+                    onTap: _onSurfaceTap,
+                    onDoubleTap: _togglePlay,
+                    onSeek: _seekTo,
+                    enableSeek: !_isLive,
+                    onLongPressStart: _isLive ? null : _startHold2x,
+                    onLongPressEnd: _isLive ? null : _endHold2x,
+                    onGestureStart: _hideControls,
+                    resetBrightnessOnDispose: true,
                   ),
                 ),
               if (_panelOpen)
@@ -1678,14 +1940,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         26.0 + 40.0 + 4.0 + 34.0 + 6.0 + MediaQuery.paddingOf(context).bottom;
     // 首帧未出 / 出错时不要挂 Video 纹理：部分设备会显示红屏或透明残帧。
     // 始终先铺纯黑底色，再把 Video 放上去，缓冲时不会出现纯黑无内容的画面。
-    // VIDEO_SHOW_FIX（2026-11-12）：只要播放器初始化完成就挂画面。
-    //
-    // 原来还要求 _firstFrame（videoWidth/videoHeight > 0）。ExoPlayer 在
-    // 真正开始渲染前 VideoPlayerValue.size 可能是 null，于是 _firstFrame
-    // 永远 false → 画面层不挂 → betterplayer 的控件也跟着不出现，
-    // 用户看到的就是「播放器完全不可控」。
-    // betterplayer 自己会在拿到首帧前显示 loading，不需要我们再挡一层。
-    final showVideo = c != null && c.value.isInitialized && !_error;
+    final showVideo =
+        c != null && c.value.isInitialized && _firstFrame && !_error;
     return ClipRect(
       child: Stack(
         fit: StackFit.expand,
@@ -1726,63 +1982,22 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 不再叠一行旧线路名小字。
     final loading = _loadingHint ?? fxLoadingLineText(_ep, _lineName);
     // 真实缓存进度：起播 / 切集阶段有 buffer 就显示，不拿假进度凑数。
-    // OVERLAY_PASS_THROUGH（2026-11-12）：浮层只做视觉提示，不吃点击。
-    //
-    // 之前是全屏 FxLoadingOverlay 直接铺在 betterplayer 之上，
-    // 缓冲期间用户点进度条 / 设置全被它挡掉。
     if (!_firstFrame || _loading) {
-      return IgnorePointer(
-        child: FxLoadingOverlay(
-          title: loading,
-          percent: v.bufferingPercent,
-          speedText: v.speedText,
-          dim: _frozenFrame == null,
-        ),
+      return FxLoadingOverlay(
+        title: loading,
+        percent: v.bufferingPercent,
+        speedText: v.speedText,
+        dim: _frozenFrame == null,
       );
     }
     if (!v.isBuffering) return const SizedBox.shrink();
     final percent = v.bufferingPercent;
-    return IgnorePointer(
-      child: FxLoadingOverlay(
-        title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
-        percent: percent,
-        speedText: v.speedText,
-        dim: false,
-        compact: true,
-      ),
-    );
-  }
-
-  /// 分辨率 / 网速胶囊：只在拿到数据后显示，拿不到就不占位。
-  Widget _statChip(FxPlayer? c) {
-    if (c == null) return const SizedBox.shrink();
-    return AnimatedBuilder(
-      animation: c,
-      builder: (context, _) {
-        final v = c.value;
-        final res = v.resolutionText;
-        final speed = v.speedText;
-        if (res.isEmpty && speed.isEmpty) return const SizedBox.shrink();
-        final parts = <String>[
-          if (res.isNotEmpty) res,
-          if (speed.isNotEmpty) speed,
-        ];
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: .38),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Text(
-            parts.join(' · '),
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        );
-      },
+    return FxLoadingOverlay(
+      title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
+      percent: percent,
+      speedText: v.speedText,
+      dim: false,
+      compact: true,
     );
   }
 
@@ -1875,40 +2090,123 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     double keyboard,
     EdgeInsets pad,
   ) {
-    // 控件全交给 betterplayer 内置，这里不再需要算 compact / bottomInset。
+    final compact = MediaQuery.sizeOf(context).width < 700;
+    final bottomInset = keyboard > 0 ? 0.0 : pad.bottom;
+    // 刘海 / 圆角屏安全边距：设置面板跟着右移，不压进屏幕圆角。
+    final safe = MediaQuery.viewPaddingOf(context);
     return Stack(
       fit: StackFit.expand,
       children: [
-        // 控件全部交给 betterplayer 内置（进度条 / 倍速 / 画质 / 音轨 /
-        // 字幕 / PiP / 重试），位置就是它自己算的安全区。
-        //
-        // 之前这里还画着自绘的 FsTopBar + FsSideControls + FsBottomBar，
-        // 结果是「上下两套控件同时出现」—— 用户报的原话。
-        // 现在只留左上角一个返回键（betterplayer 的控件里没有退出全屏按钮）。
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: AnimatedBuilder(
+            // 网速每 2 秒刷新一次（FxPlayer 看门狗同步），
+            // 只重建顶栏这一小块，不影响画面层。
+            animation: _controller ?? const AlwaysStoppedAnimation<double>(0),
+            builder: (context, _) => FsTopBar(
+              title: _title,
+              epLabel: _isLive ? 'LIVE · 直播中' : _epLabel,
+              compact: compact,
+              qualityLabel: _qualityText,
+              speedText: _isLive
+                  ? ''
+                  : (_controller?.value.speedText ?? ''),
+              onBack: () => unawaited(_exit()),
+              onCast: () => unawaited(_openCastSheet()),
+              onMore: () => unawaited(_openMorePanel()),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: FsSideControls(
+            onLock: _lock,
+            onSeekBy: _seekBy,
+            showSeek: !_isLive,
+          ),
+        ),
         Positioned(
           left: 0,
-          top: 0,
-          child: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(6),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back_rounded,
-                        color: Colors.white, size: 22),
-                    tooltip: '返回',
-                    style: IconButton.styleFrom(
-                      backgroundColor: Colors.black.withValues(alpha: .38),
+          right: 0,
+          bottom: keyboard,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!_isLive && _showSpeed)
+                Padding(
+                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: FsSpeedPanel(
+                      rate: _rate,
+                      onPick: (v) {
+                        _setRate(v);
+                        setState(() => _showSpeed = false);
+                        _wake();
+                      },
                     ),
-                    onPressed: () => unawaited(_exit()),
                   ),
-                  const SizedBox(width: 6),
-                  // 分辨率 + 实时网速（betterplayer 不显示这些）
-                  _statChip(c),
-                ],
-              ),
-            ),
+                ),
+              if (_showSleep)
+                Padding(
+                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: FsSleepPanel(
+                      mode: AppSettings.instance.sleepMode,
+                      minutes: AppSettings.instance.sleepMinutes,
+                      onPick: _pickSleep,
+                      onCustom: () => unawaited(_openCustomSleep()),
+                    ),
+                  ),
+                ),
+              if (!_isLive && _showJump)
+                Padding(
+                  padding: EdgeInsets.fromLTRB(16 + safe.left, 0, 16 + safe.right, 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: FsJumpPanel(
+                      mark: _mark,
+                      onApply: (intro, outro) =>
+                          unawaited(_applyJump(intro, outro)),
+                      onClear: () => unawaited(_clearMarks()),
+                    ),
+                  ),
+                ),
+              if (c == null)
+                SizedBox(height: 68 + bottomInset)
+              else if (keyboard > 0)
+                // 分秒输入时键盘弹出：底栏先让位，面板贴着键盘顶即可，
+                // 否则横屏可用高度不够，面板会被顶出屏幕。
+                const SizedBox(height: 0)
+              else
+                AnimatedBuilder(
+                  animation: c,
+                  builder: (context, _) {
+                    final v = c.value;
+                    return FsBottomBar(
+                      position: _displayPosition,
+                      duration: _displayDuration,
+                      buffered: v.buffered,
+                      playing: v.isInitialized && v.isPlaying,
+                      rate: _rate,
+                      // 倍速 / 定时 / 片头尾等全部收进 ⋯ 播放设置。
+                      qualityLabel: '',
+                      compact: compact,
+                      bottomInset: bottomInset,
+                      live: _isLive,
+                      onSeek: _isLive ? null : _seekTo,
+                      onTogglePlay: _togglePlay,
+                      onNext: _isLive ? null : () => unawaited(_next()),
+                      onEpisodes:
+                          _isLive ? null : () => unawaited(_openEpisodeSheet()),
+                      onMore: () => unawaited(_openMorePanel()),
+                      onExit: () => unawaited(_exit()),
+                    );
+                  },
+                ),
+            ],
           ),
         ),
       ],

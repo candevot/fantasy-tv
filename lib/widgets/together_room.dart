@@ -390,7 +390,6 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               RepaintBoundary(
                 key: widget.videoBoundaryKey,
                 child: FxPlayerSurface(
-                  showControls: false,
                   key: ValueKey<int>(widget.videoEpoch),
                   player: player,
                   subtitleBottom: 76,
@@ -417,13 +416,10 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               ),
             if (widget.loading)
               Positioned.fill(
-                // 加载浮层只做提示，不吃点击。
-                child: IgnorePointer(
-                  child: FxLoadingOverlay(
-                    title: widget.isLive ? '正在加载直播…' : '正在加载视频…',
-                    dim: false,
-                    compact: true,
-                  ),
+                child: FxLoadingOverlay(
+                  title: widget.isLive ? '正在加载直播…' : '正在加载视频…',
+                  dim: false,
+                  compact: true,
                 ),
               )
             else if (ready)
@@ -438,36 +434,22 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                     // 只认 libmpv cache-buffering-state 的真实填充进度；
                     // 拿不到就不显示数字，只给「缓冲中…」+ 不确定转圈。
                     final percent = value.bufferingPercent;
-                    return IgnorePointer(
-                      child: FxLoadingOverlay(
-                        title: percent == null
-                            ? '缓冲中…'
-                            : '缓冲中 ${percent.round()}%',
-                        percent: percent,
-                        dim: false,
-                        compact: true,
-                      ),
+                    return FxLoadingOverlay(
+                      title:
+                          percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
+                      percent: percent,
+                      dim: false,
+                      compact: true,
                     );
                   },
                 ),
               ),
-            // 点击显隐手势：只占中间区域。
-            //
-            // 之前是 Positioned.fill + HitTestBehavior.opaque 铺满整个小窗，
-            // 把播放器自带的进度条和按钮全盖住 —— 用户点进度条跳不动、
-            // 点设置没反应。小窗本身不大，上下各让 44dp 就够了。
             if (ready)
               Positioned.fill(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 44,
-                  ),
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onTap: _onSurfaceTap,
-                    child: const SizedBox.expand(),
-                  ),
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _onSurfaceTap,
+                  child: const SizedBox.expand(),
                 ),
               ),
             if (ready)

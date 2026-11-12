@@ -9,6 +9,7 @@ import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
 import 'fs_controls.dart';
+import 'fs_panels.dart';
 import 'player_gestures.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
@@ -124,11 +125,14 @@ class TogetherFullscreenView extends StatefulWidget {
 
 class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   bool _controls = true;
+  Timer? _hideTimer;
 
   bool _locked = false;
   bool _unlockVisible = false;
   Timer? _unlockTimer;
 
+  bool _showSpeed = false;
+  bool _showQuality = false;
 
   bool _holding = false;
   double? _rateBeforeHold;
@@ -142,24 +146,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   /// null 表示没拖过，跟随安全区与键盘自动摆放。
   Offset? _chatPos;
 
-  /// betterplayer 控件可见性订阅（页面 _controls 只跟随，不自己计时）。
-  StreamSubscription<bool>? _controlsSub;
-
   @override
   void initState() {
     super.initState();
     _syncChatState(reset: true);
     widget.chat.addListener(_onChatChanged);
-    _bindControls(widget.player);
-  }
-
-  void _bindControls(FxPlayer? p) {
-    _controlsSub?.cancel();
-    if (p == null) return;
-    _controlsSub = p.controlsVisibilityStream.listen((visible) {
-      if (!mounted) return;
-      if (_controls != visible) setState(() => _controls = visible);
-    });
+    _scheduleHide();
   }
 
   @override
@@ -170,14 +162,13 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       widget.chat.addListener(_onChatChanged);
       _syncChatState(reset: true);
     }
-    if (!identical(oldWidget.player, widget.player)) _bindControls(widget.player);
     if (oldWidget.loading && !widget.loading) _wake();
   }
 
   @override
   void dispose() {
-    _controlsSub?.cancel();
     widget.chat.removeListener(_onChatChanged);
+    _hideTimer?.cancel();
     _unlockTimer?.cancel();
     // 长按快进中直接退出全屏时，把倍速恢复成进入长按前的值。
     if (_holding) {
@@ -233,21 +224,29 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
   /* ------------------------------------------------------------ 控件显隐 */
 
-  /// 控件自动隐藏交给 betterplayer 自己，页面不再另起定时器。
-  ///
-  /// 这个页面用的是内置控件（showControls 默认 true），页面自己再来一套
-  /// 5 秒定时器会和播放器的 3 秒错拍：点屏幕后返回键亮了、进度条还藏着。
+  void _scheduleHide() {
+    _hideTimer?.cancel();
+    _hideTimer = Timer(togetherFullscreenControlsAutoHide, () {
+      if (!mounted) return;
+      if (_locked || _chatOpen || _showSpeed || _showQuality) return;
+      if (_controls) setState(() => _controls = false);
+    });
+  }
+
   void _wake() {
     if (_locked) return;
-    widget.player?.setControlsVisible(true);
+    _hideTimer?.cancel();
     if (!_controls && mounted) setState(() => _controls = true);
+    _scheduleHide();
   }
 
   void _hideControls() {
-    widget.player?.setControlsVisible(false);
+    _hideTimer?.cancel();
     if (mounted) {
       setState(() {
         _controls = false;
+        _showSpeed = false;
+        _showQuality = false;
       });
     }
   }
@@ -269,12 +268,38 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     _toggleControls();
   }
 
+  void _togglePlay() {
+    widget.onTogglePlay();
+    _wake();
+  }
+
   void _seekTo(double seconds) {
     widget.onSeek(seconds);
     _wake();
   }
 
+  void _seekBy(int seconds) {
+    widget.onSeekBy(seconds);
+    _wake();
+  }
+
   /* ------------------------------------------------------------ 锁屏 */
+
+  void _lock() {
+    FocusScope.of(context).unfocus();
+    _hideTimer?.cancel();
+    _unlockTimer?.cancel();
+    setState(() {
+      _locked = true;
+      _unlockVisible = true;
+      _controls = false;
+      _chatOpen = false;
+      _showSpeed = false;
+      _showQuality = false;
+    });
+    _endHold();
+    _startUnlockTimer();
+  }
 
   void _unlock() {
     _unlockTimer?.cancel();
@@ -314,9 +339,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     if (player == null || !player.value.isInitialized) return;
     _rateBeforeHold = player.rate;
     unawaited(player.setRate(3.0));
+    _hideTimer?.cancel();
     setState(() {
       _holding = true;
       _controls = false;
+      _showSpeed = false;
+      _showQuality = false;
     });
   }
 
@@ -337,11 +365,66 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
   /* ------------------------------------------------------------ 弹层 / 聊天 */
 
+  void _toggleSpeed() {
+    if (!widget.isHost) {
+      widget.onHostOnly();
+      return;
+    }
+    _hideTimer?.cancel();
+    setState(() {
+      _showSpeed = !_showSpeed;
+      _showQuality = false;
+      _controls = true;
+    });
+    if (!_showSpeed) _scheduleHide();
+  }
+
+  void _toggleQuality() {
+    if (!widget.isHost) {
+      widget.onHostOnly();
+      return;
+    }
+    if (!widget.canChangeQuality) {
+      return;
+    }
+    _hideTimer?.cancel();
+    setState(() {
+      _showQuality = !_showQuality;
+      _showSpeed = false;
+      _controls = true;
+    });
+    if (!_showQuality) _scheduleHide();
+  }
+
+  void _openSpeedPanel(double value) {
+    widget.onRate(value);
+    setState(() => _showSpeed = false);
+    _wake();
+  }
+
+  void _openQualityPanel(String? key) {
+    widget.onQuality(key);
+    setState(() => _showQuality = false);
+    _wake();
+  }
+
+  void _runHost(VoidCallback action) {
+    if (!widget.isHost) {
+      widget.onHostOnly();
+      return;
+    }
+    action();
+    _wake();
+  }
+
   void _openChat() {
     FocusScope.of(context).unfocus();
+    _hideTimer?.cancel();
     setState(() {
       _chatOpen = true;
       _controls = false;
+      _showSpeed = false;
+      _showQuality = false;
       _unread = 0;
     });
   }
@@ -368,29 +451,19 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         fit: StackFit.expand,
         children: [
           _buildVideo(player, pad, ready),
-          // 手势层只占画面中段：铺满会把 betterplayer 的进度条和按钮盖住，
-          // 用户点进度条跳不动、点设置没反应（和在线全屏同一个问题）。
           if (!_locked && player != null)
             Positioned.fill(
-              child: Padding(
-                padding: EdgeInsets.only(
-                  left: 96,
-                  right: 96,
-                  top: pad.top + 72,
-                  bottom: pad.bottom + 88,
-                ),
-                child: FxPlayerGestures(
-                  player: player,
-                  enabled: widget.errorText.isEmpty,
-                  enableSeek: !widget.isLive,
-                  onTap: _onSurfaceTap,
-                  onDoubleTap: _wake,
-                  onSeek: (value) => _seekTo(value.inMilliseconds / 1000.0),
-                  onLongPressStart: _startHold,
-                  onLongPressEnd: _endHold,
-                  onGestureStart: _hideControls,
-                  resetBrightnessOnDispose: true,
-                ),
+              child: FxPlayerGestures(
+                player: player,
+                enabled: widget.errorText.isEmpty,
+                enableSeek: !widget.isLive,
+                onTap: _onSurfaceTap,
+                onDoubleTap: _wake,
+                onSeek: (value) => _seekTo(value.inMilliseconds / 1000.0),
+                onLongPressStart: _startHold,
+                onLongPressEnd: _endHold,
+                onGestureStart: _hideControls,
+                resetBrightnessOnDispose: true,
               ),
             ),
           if (!widget.loading && widget.errorText.isEmpty && ready)
@@ -405,25 +478,19 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                   // 只认 libmpv cache-buffering-state 的真实填充进度；
                   // 拿不到就不显示数字，只给「缓冲中…」+ 不确定转圈。
                   final percent = value.bufferingPercent;
-                  // 缓冲浮层只做提示，不吃点击。
-                  return IgnorePointer(
-                    child: FxLoadingOverlay(
-                      title: percent == null
-                          ? '缓冲中…'
-                          : '缓冲中 ${percent.round()}%',
-                      percent: percent,
-                      speedText: value.speedText,
-                      dim: false,
-                      compact: true,
-                    ),
+                  return FxLoadingOverlay(
+                    title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
+                    percent: percent,
+                    speedText: value.speedText,
+                    dim: false,
+                    compact: true,
                   );
                 },
               ),
             ),
           if (widget.loading)
             Positioned.fill(
-              child: IgnorePointer(
-                child: widget.player == null
+              child: widget.player == null
                   ? FxLoadingOverlay(
                       title: fxLoadingEpisodeText(widget.ep),
                       dim: widget.frozenFrame == null,
@@ -434,11 +501,10 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                         title: fxLoadingEpisodeText(widget.ep),
                         percent: widget.player!.value.bufferingPercent,
                         speedText: widget.player!.value.speedText,
-                          // 有最后一帧时不再压暗，让切换过程继续看得到画面。
-                          dim: widget.frozenFrame == null,
-                        ),
+                        // 有最后一帧时不再压暗，让切换过程继续看得到画面。
+                        dim: widget.frozenFrame == null,
                       ),
-              ),
+                    ),
             ),
           if (!_locked)
             Positioned.fill(
@@ -547,49 +613,238 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     );
   }
 
-  /// 一起看全屏的控件全部交给 betterplayer 内置。
-  ///
-  /// 原来这里是 FsTopBar + FsSideControls + FsQualityPanel + FsSpeedPanel
-  /// + FsBottomBar 一整套自绘控件，换成 betterplayer 后会和内置控件叠成
-  /// 上下两层（用户报的「新旧两个重叠」）。只保留左上角返回 + 房间信息。
   Widget _buildControls(FxPlayer? player, EdgeInsets pad) {
-    return Positioned(
-      left: 0,
-      top: 0,
-      right: 0,
-      child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(6),
-          child: Row(
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: _buildTopBar(pad),
+        ),
+        Positioned.fill(
+          child: FsSideControls(
+            onLock: _lock,
+            onSeekBy: _seekBy,
+            showSeek: !widget.isLive,
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back_rounded,
-                    color: Colors.white, size: 22),
-                tooltip: '返回',
-                style: IconButton.styleFrom(
-                  backgroundColor: Colors.black.withValues(alpha: .38),
+              if (_showQuality)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: FsQualityPanel(
+                      items: widget.qualities,
+                      currentKey: widget.qualityKey,
+                      showSource: !widget.isLive,
+                      onPick: _openQualityPanel,
+                    ),
+                  ),
                 ),
-                onPressed: widget.onExit,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  widget.title,
+              if (_showSpeed && !widget.isLive)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: FsSpeedPanel(
+                      rate: widget.rate,
+                      onPick: _openSpeedPanel,
+                    ),
+                  ),
+                ),
+              _buildBottomBar(player, pad),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTopBar(EdgeInsets pad) {
+    return Container(
+      padding: EdgeInsets.fromLTRB(14, 8, 10, 18),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.black.withValues(alpha: .52), Colors.black.withValues(alpha: 0)],
+        ),
+      ),
+      child: Row(
+        children: [
+          PGlassIcon(
+            icon: Icons.arrow_back_ios_new_rounded,
+            size: 34,
+            iconSize: 17,
+            tint: .16,
+            tooltip: '退出全屏',
+            onTap: widget.onExit,
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.title.trim().isEmpty ? '一起看' : widget.title.trim(),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
                   ),
                 ),
-              ),
-            ],
+                const SizedBox(height: 2),
+                Text(
+                  _epLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                    shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
+          const SizedBox(width: 7),
+          PGlassIcon(
+            icon: Icons.alt_route_rounded,
+            size: 32,
+            iconSize: 17,
+            tooltip: '换源',
+            onTap: widget.onSwitchLine,
+          ),
+          if (!widget.isLive) ...[
+            const SizedBox(width: 7),
+            PGlassIcon(
+              icon: Icons.movie_filter_rounded,
+              size: 32,
+              iconSize: 17,
+              tooltip: '换剧',
+              onTap: widget.onChangeDrama,
+            ),
+          ],
+          if (widget.isLive) ...[
+            const SizedBox(width: 8),
+            const _LivePill(),
+          ],
+          if (widget.qualityLabel.isNotEmpty) ...[
+            const SizedBox(width: 12),
+            FsQualityPill(label: widget.qualityLabel),
+          ],
+          const SizedBox(width: 8),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onMembers,
+            child: PGlassPill(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.people_alt_outlined,
+                    size: 13,
+                    color: Colors.white,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${widget.members.length}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 7),
+          PGlassIcon(
+            icon: Icons.person_add_alt_1_rounded,
+            size: 32,
+            iconSize: 17,
+            tooltip: '邀请好友',
+            onTap: widget.onInvite,
+          ),
+          const SizedBox(width: 7),
+          PGlassIcon(
+            icon: Icons.logout_rounded,
+            size: 32,
+            iconSize: 17,
+            tooltip: widget.isHost ? '解散房间' : '退出房间',
+            onTap: widget.onExitRoom,
+          ),
+        ],
       ),
     );
   }
+
+  String get _epLabel {
+    if (widget.isLive) return 'LIVE · 直播中';
+    for (final episode in widget.episodes) {
+      if (episode.n == widget.ep) {
+        return fxEpisodeLabel(episode.n, episode.name);
+      }
+    }
+    return fxEpisodeLabel(widget.ep);
+  }
+
+  Widget _buildBottomBar(FxPlayer? player, EdgeInsets pad) {
+    final compact = MediaQuery.sizeOf(context).width < 700;
+    return AnimatedBuilder(
+      animation: player ?? const AlwaysStoppedAnimation<double>(0),
+      builder: (context, _) {
+        final value = player?.value;
+        return ValueListenableBuilder<double>(
+          valueListenable: widget.position,
+          builder: (context, position, _) {
+            final shown = Duration(
+              milliseconds:
+                  (position.isFinite && position > 0 ? position * 1000 : 0)
+                      .round(),
+            );
+            return FsBottomBar(
+              position: shown,
+              duration: value?.duration ?? Duration.zero,
+              buffered: value?.buffered ?? Duration.zero,
+              playing: value?.isInitialized == true && value!.isPlaying,
+              rate: widget.rate,
+              live: widget.isLive,
+              qualityLabel: widget.canChangeQuality ? '清晰度' : '',
+              qualityActive:
+                  widget.canChangeQuality && widget.qualityKey != null,
+              compact: compact,
+              bottomInset: pad.bottom,
+              onSeek: (target) => _seekTo(target.inMilliseconds / 1000.0),
+              onTogglePlay: _togglePlay,
+              onNext: () => _runHost(widget.onNext),
+              onSpeed: _toggleSpeed,
+              onQuality: _toggleQuality,
+              onEpisodes: () => _runHost(widget.onEpisodes),
+              onExit: widget.onExit,
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildError() {
     return Container(
       color: Colors.black.withValues(alpha: .46),
@@ -873,6 +1128,34 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
 /// 顶部 / 中央短提示胶囊（3.0x 快进中）。
 /// 全屏一起看顶栏的 LIVE 胶囊。
+class _LivePill extends StatelessWidget {
+  const _LivePill();
+
+  @override
+  Widget build(BuildContext context) {
+    return PGlassPill(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.circle, size: 6, color: Color(0xFFFF5A5A)),
+          SizedBox(width: 4),
+          Text(
+            'LIVE',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: .5,
+              shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _FsBadge extends StatelessWidget {
   const _FsBadge({required this.text});
 

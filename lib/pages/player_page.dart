@@ -638,7 +638,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       // 位置没被重置、也没冻结，但流可能已经断了（后台待久了连接被回收、
       // 平台签名过期）。这时不能什么都不做 —— 交给播放器自检，
       // 真的断了会自动重连并回到原位置，不用用户点重试。
-      await c.resumeSelfCheck();
+      unawaited(c.resumeSelfCheck());
       return;
     }
     // 自愈改过播放状态 / 位置：刷新一次进度条，避免停在旧值。
@@ -1593,7 +1593,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             if (c != null && c.value.isInitialized && !_fullscreenActive)
               SizedBox.expand(
                 child: FxPlayerSurface(
-                  showControls: false,
                   key: ValueKey<int>(_videoEpoch),
                   player: c,
                   subtitleBottom: fxSubtitleMinBottom,
@@ -1613,28 +1612,16 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               ),
             // 手势层：单击显隐控件 / 双击暂停 / 左右滑调进度。
             // 亮度音量上下滑与长按倍速只在全屏提供。
-            //
-            // 不能铺满：页面底部自己画的进度条 + 顶栏按钮都在这一层下面，
-            // Positioned.fill 会把它们全部盖住 —— 用户点进度条跳不动、
-            // 点设置没反应。这里上下各让出控制区高度。
             if (c != null)
               Positioned.fill(
-                child: Padding(
-                  padding: EdgeInsets.only(
-                    left: 24,
-                    right: 24,
-                    top: 64,
-                    bottom: 72,
-                  ),
-                  child: FxPlayerGestures(
-                    player: c,
-                    enabled: !_error,
-                    enableVertical: false,
-                    onTap: _onSurfaceTap,
-                    onDoubleTap: _togglePlay,
-                    onSeek: _seek,
-                    onGestureStart: _hideControls,
-                  ),
+                child: FxPlayerGestures(
+                  player: c,
+                  enabled: !_error,
+                  enableVertical: false,
+                  onTap: _onSurfaceTap,
+                  onDoubleTap: _togglePlay,
+                  onSeek: _seek,
+                  onGestureStart: _hideControls,
                 ),
               ),
             // 播放中的缓冲：玻璃圆环 + 真实缓存百分比。
@@ -1649,17 +1636,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                       return const SizedBox.shrink();
                     }
                     final percent = v.bufferingPercent;
-                    // 缓冲浮层只做提示，不吃点击（否则进度条/设置点不动）。
-                    return IgnorePointer(
-                      child: FxLoadingOverlay(
-                        title: percent == null
-                            ? '缓冲中…'
-                            : '缓冲中 ${percent.round()}%',
-                        percent: percent,
-                        speedText: v.speedText,
-                        dim: false,
-                        compact: true,
-                      ),
+                    return FxLoadingOverlay(
+                      title:
+                          percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
+                      percent: percent,
+                      speedText: v.speedText,
+                      dim: false,
+                      compact: true,
                     );
                   },
                 ),

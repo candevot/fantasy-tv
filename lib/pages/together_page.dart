@@ -416,8 +416,7 @@ class _TogetherPageState extends State<TogetherPage>
         // 房主/房员都不用手动点重试。
         final c = _controller;
         if (c != null) {
-          // 生命周期回调是同步 void，这里显式忽略返回值。
-          unawaited(Future<void>.sync(() => c.resumeSelfCheck()));
+          unawaited(c.resumeSelfCheck());
         } else if (_stage == _TogetherStage.room && _videoId.isNotEmpty) {
           // 播放器已被释放（后台被系统回收）：按房间当前状态整段重建，
           // 位置由随后的 room_state 对齐。
@@ -2228,10 +2227,7 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     final qualities = _playInfo?.quality ?? const <QualityItem>[];
-    // 不再过滤 needsParse —— 幻想4K / 爱奇艺 / 腾讯这些「需要解析」的线路
-    // 同样能播（解析由服务端 /api/play 完成），过滤掉会让一起看里看不到
-    // 4K，用户以为「只能用红牛量子」。
-    final playableLines = _lines.toList();
+    final playableLines = _lines.where((line) => !line.needsParse).toList();
     final action = await showTogetherRoomMenu(
       context,
       epLabel: _epLabel,
@@ -2530,8 +2526,7 @@ class _TogetherPageState extends State<TogetherPage>
       await _ensureDetail(_videoId);
       if (!mounted) return;
     }
-    // 同上：全部线路都参与换源。
-    final playable = _lines.toList();
+    final playable = _lines.where((line) => !line.needsParse).toList();
     if (playable.length < 2) {
       return;
     }
@@ -3004,8 +2999,7 @@ class _TogetherPageState extends State<TogetherPage>
     await _ensureDetail(videoId);
     if (!mounted || seq != _videoSeq) return;
 
-    // 同上：全部线路都参与换源。
-    var playable = _lines.toList();
+    var playable = _lines.where((item) => !item.needsParse).toList();
     if (playable.isEmpty) {
       // 详情拿不到时仍尝试一次默认线路，避免房间完全不可看。
       // 详情拿不到时仍尝试一次当前线路，避免房间完全不可看。
@@ -3031,7 +3025,7 @@ class _TogetherPageState extends State<TogetherPage>
         continue;
       }
       if (!mounted || seq != _videoSeq) return;
-      // 不跳过 parse 线路（4K / 爱奇艺 / 腾讯都是这个类型）。
+      if (play.type.trim().toLowerCase() == 'parse') continue;
       _playInfo = play;
 
       // 统一补成绝对地址：站内相对路径补全后 mpv 能直连，
@@ -3212,10 +3206,11 @@ class _TogetherPageState extends State<TogetherPage>
     if (!mounted || seq != _videoSeq) return null;
     try {
       final play = await Api.play(videoId, ep, line, fresh: true);
-      if (!mounted || seq != _videoSeq) {
+      if (!mounted ||
+          seq != _videoSeq ||
+          play.type.trim().toLowerCase() == 'parse') {
         return null;
       }
-      // 不跳过 parse 线路。
       if (qualityKey != null) {
         for (final quality in play.quality) {
           if (quality.key == qualityKey && quality.url.trim().isNotEmpty) {
@@ -3254,9 +3249,7 @@ class _TogetherPageState extends State<TogetherPage>
       try {
         final play = await Api.play(videoId, ep, next.id);
         if (!mounted || seq != _videoSeq) return null;
-        // 不要跳过 type=='parse' 的线路：幻想4K / 爱奇艺 / 腾讯都是这个
-        // 类型，跳过它们就等于换源永远只在红牛/量子之间打转。
-        // 能不能播只看「有没有拿到地址」，不看类型标签。
+        if (play.type.trim().toLowerCase() == 'parse') continue;
         final url = fxAbsolutePlayUrl(_qualityUrlFor(play, qualityKey));
         if (url.isEmpty) continue;
         return FxLineSource(
@@ -3310,7 +3303,7 @@ class _TogetherPageState extends State<TogetherPage>
       await controller.pause();
     } catch (_) {}
     try {
-      await controller.stop();
+      await controller.player.stop();
     } catch (_) {}
     try {
       await controller.dispose();

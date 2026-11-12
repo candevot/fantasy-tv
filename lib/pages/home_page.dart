@@ -43,7 +43,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final Map<String, HomeData> _cache = {};
 
   Timer? _timer;
-  String _channel = 'recommend';  // 分类入口已移除，只保留推荐频道
+  String _channel = 'recommend';
 
   /// banner 页码只驱动指示点，不再 setState 整页。
   final ValueNotifier<int> _bannerPage = ValueNotifier<int>(0);
@@ -58,11 +58,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   /// 直播频道单独维护：接口可能为空 / 404，失败也按空态处理，不弹错误。
   List<LiveGroup> _liveGroups = const <LiveGroup>[];
+  bool _liveLoading = false;
+  bool _liveLoaded = false;
 
   /// 直播首屏搜索：本地过滤全部频道，输入即出结果。
+  final TextEditingController _liveSearchCtrl = TextEditingController();
+  String _liveQuery = '';
 
   List<LiveSection> get _liveSections => buildLiveSections(_liveGroups);
 
+  List<LiveChannel> get _liveAllChannels => <LiveChannel>[
+    for (final section in _liveSections) ...section.channels,
+  ];
 
   @override
   void initState() {
@@ -70,8 +77,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _load();
     // 首页末尾有「直播」分区，需要直播数据。
-    // 之前只在 _channel == 'live' 时才拉，而分类页签删掉后 _channel 恒为
-    // 'recommend'，_loadLive 永远不会被调用 → 直播区一直是空的。
+    // 原来只在切到 live 频道时才拉，而分类页签删掉后 _channel 恒为
+    // recommend，_loadLive 永远不执行 → 直播区一直空着。
     unawaited(_loadLive());
   }
 
@@ -118,6 +125,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _timer?.cancel();
     _bannerCtrl.dispose();
     _bannerPage.dispose();
+    _liveSearchCtrl.dispose();
     super.dispose();
   }
 
@@ -223,17 +231,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _loadLive() async {
     final req = ++_req;
+    setState(() => _liveLoading = true);
     try {
       final groups = await Api.liveGroups();
-      if (!mounted || req != _req) return;
+      if (!mounted || req != _req || _channel != 'live') return;
       setState(() {
         _liveGroups = groups;
+        _liveLoaded = true;
+        _liveLoading = false;
       });
     } catch (_) {
       // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它频道。
-      if (!mounted || req != _req) return;
+      if (!mounted || req != _req || _channel != 'live') return;
       setState(() {
         _liveGroups = const <LiveGroup>[];
+        _liveLoaded = true;
+        _liveLoading = false;
       });
     }
   }
@@ -253,6 +266,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         curve: Curves.easeOutCubic,
       );
     });
+  }
+
+  void _selectChannel(String key) {
+    if (_channel == key) return;
+    if (key == 'live' && _liveQuery.isNotEmpty) {
+      _liveSearchCtrl.clear();
+      _liveQuery = '';
+    }
+    setState(() {
+      _channel = key;
+      _bannerPage.value = 0;
+      _error = null;
+      _loading = key != 'live' && !_cache.containsKey(key);
+    });
+    _timer?.cancel();
+    if (key == 'live') {
+      _loadLive();
+      return;
+    }
+    if (_cache.containsKey(key)) {
+      _restartAuto();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _bannerCtrl.hasClients) {
+          _bannerCtrl.jumpToPage(0);
+        }
+      });
+    } else {
+      _load();
+    }
   }
 
   void _openSearch({bool ai = false}) {
@@ -303,15 +345,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 否则会被误归到「高分好剧」，导致电影分区丢失。
   String _sectionLabel(String raw) {
     if (raw.contains('今日热播')) return '今日热播';
-    // 「最新」要排在分类词之后判：服务端可能返回「最新电视剧」，
-    // 先判「最新」会把它归到「最新更新」，剧集分区就少一块。
-    if (raw.contains('电视剧') || raw.contains('剧集') || raw.contains('连续剧')) {
-      // 「最新剧集」这类同时含两个词的，仍按剧集归类（内容以分类为主）。
-      if (!raw.contains('最新')) return '剧集';
-    }
     if (raw.contains('最新')) return '最新更新';
-    // 电视剧 / 剧集 / 连续剧 都归到「剧集」。之前没有这条分支，
-    // 服务端返回的「电视剧热播榜」会原样落到白名单外被丢弃 —— 首页空白。
+    // 电视剧 / 剧集 / 连续剧 都归到「剧集」。没有这条分支时，
+    // 服务端的「电视剧热播榜」会原样落到白名单外被丢弃。
     if (raw.contains('电视剧') || raw.contains('剧集') || raw.contains('连续剧')) {
       return '剧集';
     }
@@ -327,9 +363,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 首页分区顺序：热门优先。
   ///
   /// 用户要求「去掉分类入口，各区域优先显示热门」，所以：
-  ///   · 今日热播 / 最新更新 放最前（更新最快、点击率最高）
-  ///   · 电影 / 剧集 / 综艺 / 动漫 按内容量排
-  ///   · 直播作为独立分区放在最后（它不用卡片网格，单独渲染）
+  /// 今日热播 / 最新更新放最前，然后电影 / 剧集 / 综艺 / 动漫。
   static const List<String> _sectionOrder = <String>[
     '今日热播',
     '最新更新',
@@ -354,10 +388,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ];
     // 排序：已知分区按 _sectionOrder 排前面，未知分区按原顺序跟后面。
     //
-    // 之前这里是「严格白名单」：只输出 _sectionOrder 里列出的标签，
-    // 服务端一旦改分区名（电视剧热播榜 / 电影精选 / 综艺现场 / 动漫番剧），
-    // 全部匹配不上 → sections 变空 → 首页只剩 banner，看起来就是白屏。
-    // 现在改成「已知的排前面、未知的也保留」，服务端加分区不会再丢内容。
+    // 原来这里是严格白名单（只输出 _sectionOrder 里的标签），服务端返回的
+    // 「电视剧热播榜 / 电影精选 / 综艺现场 / 动漫番剧」一个都匹配不上，
+    // sections 变空 → 首页只剩 banner，看起来就是白屏。
     list.sort((a, b) => _sectionRank(a.title).compareTo(_sectionRank(b.title)));
     return list;
   }
@@ -371,18 +404,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // HOME_NO_SWITCHER（2026-11-12）：去掉 AnimatedSwitcher。
     //
     // 它把整个页面（SafeArea + CustomScrollView）包在 KeyedSubtree 里，
-    // 而 layoutBuilder 只返回 currentChild —— 首帧 currentChild 为 null，
-    // 整页被吞成 SizedBox.shrink()，用户看到的就是「首页加载不出来」。
-    // 切频道本来也只有「推荐」一个，淡入动画没有存在意义。
+    // layoutBuilder 只返回 currentChild —— 首帧 currentChild 为 null，
+    // 整页被吞成 SizedBox.shrink()，用户看到的就是「首页白屏」。
+    // 现在只剩「推荐」一个频道，淡入动画没有存在意义。
     return SafeArea(
       bottom: false,
       child: RefreshIndicator(
         color: Fx.accent,
         backgroundColor: Colors.white,
-        onRefresh: () async {
-          // 分类页签已删，首页固定推荐频道；下拉同时刷新影视与直播。
-          await Future.wait(<Future<void>>[_load(force: true), _loadLive()]);
-        },
+        onRefresh: () => _channel == 'live' ? _loadLive() : _load(force: true),
         child: CustomScrollView(
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           physics: const AlwaysScrollableScrollPhysics(
@@ -399,6 +429,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   List<Widget> _body(HomeData? data) {
+    if (_channel == 'live') return _liveBody();
     if (data == null) {
       if (_loading) {
         return const [SliverToBoxAdapter(child: _HomeSkeleton())];
@@ -440,7 +471,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
       // 直播作为首页的一个区（用户要求：去掉分类页签，直播进分区）。
-      // 数据来自 /api/live，与直播页共用同一份 _liveGroups。
       if (_liveSections.isNotEmpty)
         SliverToBoxAdapter(
           child: FxLiveSectionRow(
@@ -476,6 +506,246 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
     ];
+  }
+
+  /// 直播首屏：搜索 + 固定顺序的分组卡；输入台名时直接出频道结果。
+  List<Widget> _liveBody() {
+    if (_liveLoading && !_liveLoaded) {
+      return const [SliverToBoxAdapter(child: _HomeSkeleton())];
+    }
+    final sections = _liveSections;
+    if (sections.isEmpty) {
+      return [
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: FxEmptyView(
+            icon: Icons.live_tv_rounded,
+            title: '暂无直播频道 · 敬请期待',
+            subtitle: '频道上线后会在这里出现',
+            actionText: '刷新试试',
+            onAction: _loadLive,
+          ),
+        ),
+      ];
+    }
+
+    final query = _liveQuery.trim();
+    final matches = query.isEmpty
+        ? const <LiveChannel>[]
+        : <LiveChannel>[
+            for (final channel in _liveAllChannels)
+              if (liveChannelMatches(channel, query)) channel,
+          ];
+    return [
+      SliverToBoxAdapter(child: _liveSearchBar()),
+      if (query.isEmpty) ...[
+        SliverToBoxAdapter(child: _liveSectionHeader(sections)),
+        _liveSectionGrid(sections),
+      ] else if (matches.isEmpty)
+        SliverFillRemaining(
+          hasScrollBody: false,
+          child: FxEmptyView(
+            icon: Icons.search_off_rounded,
+            title: '没找到「$query」',
+            subtitle: '换个台名试试，如 CCTV5、湖南',
+          ),
+        )
+      else ...[
+        SliverToBoxAdapter(child: _liveSearchHeader(matches.length)),
+        _liveChannelGrid(matches),
+      ],
+    ];
+  }
+
+  void _clearLiveSearch() {
+    if (_liveQuery.isEmpty) return;
+    _liveSearchCtrl.clear();
+    setState(() => _liveQuery = '');
+    FocusScope.of(context).unfocus();
+  }
+
+  Widget _liveSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Container(
+        height: 44,
+        padding: const EdgeInsets.only(left: 13, right: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: .72),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: Colors.white),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF50729F).withValues(alpha: .08),
+              blurRadius: 18,
+              offset: const Offset(0, 6),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.search_rounded, size: 19, color: Fx.sub),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _liveSearchCtrl,
+                textInputAction: TextInputAction.search,
+                textAlignVertical: TextAlignVertical.center,
+                cursorColor: Fx.accent,
+                style: const TextStyle(fontSize: 13, color: Fx.ink),
+                decoration: const InputDecoration(
+                  isDense: true,
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.zero,
+                  hintText: '搜索台名，如 CCTV5 / 湖南',
+                  hintStyle: TextStyle(
+                    fontSize: 12.5,
+                    color: Color(0xFF9AA6B8),
+                  ),
+                ),
+                onChanged: (value) {
+                  final query = value.trim();
+                  if (query == _liveQuery) return;
+                  setState(() => _liveQuery = query);
+                },
+              ),
+            ),
+            if (_liveQuery.isNotEmpty)
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _clearLiveSearch,
+                child: const SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: Icon(Icons.close_rounded, size: 17, color: Fx.sub),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _liveSectionHeader(List<LiveSection> sections) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          const Text(
+            '频道分组',
+            style: TextStyle(
+              fontSize: 16.5,
+              height: 1.2,
+              fontWeight: FontWeight.w800,
+              color: Fx.ink,
+            ),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            '${sections.length} 组',
+            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+          ),
+          const Spacer(),
+          Text(
+            '${_liveAllChannels.length} 台',
+            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _liveSearchHeader(int count) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          const Text(
+            '搜索结果',
+            style: TextStyle(
+              fontSize: 16.5,
+              height: 1.2,
+              fontWeight: FontWeight.w800,
+              color: Fx.ink,
+            ),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            '$count 台',
+            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+          ),
+          const Spacer(),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _clearLiveSearch,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+              child: Text(
+                '清空',
+                style: TextStyle(fontSize: 11.5, color: Fx.sub),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _liveSectionGrid(List<LiveSection> sections) {
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+      sliver: SliverLayoutBuilder(
+        builder: (context, constraints) {
+          final columns = constraints.crossAxisExtent >= 560 ? 3 : 2;
+          return SliverGrid(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              childAspectRatio: columns == 3 ? 1.45 : 1.25,
+            ),
+            delegate: SliverChildBuilderDelegate(
+              (context, i) => LiveGroupCard(
+                section: sections[i],
+                onTap: () => openLiveSection(context, sections[i]),
+              ),
+              childCount: sections.length,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _liveChannelGrid(List<LiveChannel> channels) {
+    return SliverPadding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+      sliver: SliverLayoutBuilder(
+        builder: (context, constraints) {
+          final columns = constraints.crossAxisExtent >= 700 ? 3 : 2;
+          final itemWidth =
+              (constraints.crossAxisExtent - 12 * (columns - 1)) / columns;
+          final extent = (itemWidth - 12) * 9 / 16 + 58;
+          return SliverGrid(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              mainAxisExtent: extent,
+            ),
+            delegate: SliverChildBuilderDelegate(
+              (context, i) => LiveChannelCard(
+                channel: channels[i],
+                onTap: () => openLiveChannel(context, channels[i]),
+              ),
+              childCount: channels.length,
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Widget _header() {
@@ -595,6 +865,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const SizedBox(height: 14),
           _searchBar(),
           const SizedBox(height: 12),
+          _channelTabs(),
+          const SizedBox(height: 12),
         ],
       ),
     );
@@ -637,6 +909,58 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _channelTabs() {
+    return Container(
+      height: 42,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .58),
+        borderRadius: BorderRadius.circular(21),
+        border: Border.all(color: Colors.white.withValues(alpha: .92)),
+      ),
+      child: Row(
+        children: [
+          for (final c in _channels)
+            Expanded(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _selectChannel(c.key),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  decoration: BoxDecoration(
+                    gradient: c.key == _channel ? Fx.brand : null,
+                    borderRadius: BorderRadius.circular(17),
+                    boxShadow: c.key == _channel
+                        ? [
+                            BoxShadow(
+                              color: Fx.accent.withValues(alpha: .22),
+                              blurRadius: 10,
+                              offset: const Offset(0, 3),
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Center(
+                    child: Text(
+                      c.label,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: c.key == _channel
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                        color: c.key == _channel ? Colors.white : Fx.sub,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
