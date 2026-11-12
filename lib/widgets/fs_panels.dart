@@ -197,6 +197,44 @@ class FsBottomBar extends StatelessWidget {
                   tooltip: '下一集',
                   onTap: onNext,
                 ),
+                // 弹幕三件套紧跟「下一集」右边：
+                // 开关 → 设置 → 发送（用户指定顺序）
+                if (danmuOn != null) ...[
+                  const SizedBox(width: 8),
+                  PGlassIcon(
+                    icon: danmuOn!
+                        ? Icons.subtitles_rounded
+                        : Icons.subtitles_off_rounded,
+                    size: 34 * s,
+                    iconSize: 20 * s,
+                    tint: danmuOn! ? .22 : .10,
+                    active: danmuOn!,
+                    tooltip: danmuOn! ? '关闭弹幕' : '开启弹幕',
+                    onTap: onDanmu,
+                  ),
+                ],
+                if (onDanmuSettings != null) ...[
+                  const SizedBox(width: 8),
+                  PGlassIcon(
+                    icon: Icons.tune_rounded,
+                    size: 34 * s,
+                    iconSize: 19 * s,
+                    tint: .16,
+                    tooltip: '弹幕设置',
+                    onTap: onDanmuSettings,
+                  ),
+                ],
+                if (onDanmuSend != null) ...[
+                  const SizedBox(width: 8),
+                  PGlassIcon(
+                    icon: Icons.chat_bubble_outline_rounded,
+                    size: 34 * s,
+                    iconSize: 18 * s,
+                    tint: .16,
+                    tooltip: '发弹幕',
+                    onTap: onDanmuSend,
+                  ),
+                ],
                 const Spacer(),
               ],
               // 中段文字按钮：窄屏 / 刘海屏放不下时整体缩小，绝不挤出屏幕。
@@ -245,45 +283,6 @@ class FsBottomBar extends StatelessWidget {
                   ),
                 ),
               ),
-              // 弹幕开关（紧跟「下一集」右侧）
-              if (danmuOn != null) ...[
-                PGlassIcon(
-                  icon: danmuOn!
-                      ? Icons.subtitles_rounded
-                      : Icons.subtitles_off_rounded,
-                  size: 34 * s,
-                  iconSize: 20 * s,
-                  tint: danmuOn! ? .22 : .10,
-                  active: danmuOn!,
-                  tooltip: danmuOn! ? '关闭弹幕' : '开启弹幕',
-                  onTap: onDanmu,
-                ),
-                const SizedBox(width: 8),
-              ],
-              // 弹幕设置
-              if (onDanmuSettings != null) ...[
-                PGlassIcon(
-                  icon: Icons.tune_rounded,
-                  size: 34 * s,
-                  iconSize: 19 * s,
-                  tint: .16,
-                  tooltip: '弹幕设置',
-                  onTap: onDanmuSettings,
-                ),
-                const SizedBox(width: 8),
-              ],
-              // 发送弹幕
-              if (onDanmuSend != null) ...[
-                PGlassIcon(
-                  icon: Icons.chat_bubble_outline_rounded,
-                  size: 34 * s,
-                  iconSize: 18 * s,
-                  tint: .16,
-                  tooltip: '发弹幕',
-                  onTap: onDanmuSend,
-                ),
-                const SizedBox(width: 8),
-              ],
               // 底栏只留 ⋯ 播放设置：倍速 / 清晰度 / 线路全部收进面板。
               if (onMore != null) ...[
                 PGlassIcon(
