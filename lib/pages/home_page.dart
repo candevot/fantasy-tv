@@ -231,18 +231,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _loadLive() async {
     final req = ++_req;
-    setState(() => _liveLoading = true);
+    if (mounted) setState(() => _liveLoading = true);
     try {
       final groups = await Api.liveGroups();
-      if (!mounted || req != _req || _channel != 'live') return;
+      // LIVE_LOAD_GUARD（2026-11-12）：不能再判 _channel != 'live'。
+      //
+      // 分类页签删掉后 _channel 恒为 recommend，而 initState 里就会调
+      // _loadLive() 给首页末尾的直播区取数据 —— 数据拉回来了却被这个
+      // 守卫丢掉，直播区永远是空的。现在只判「请求是否过期」。
+      if (!mounted || req != _req) return;
       setState(() {
         _liveGroups = groups;
         _liveLoaded = true;
         _liveLoading = false;
       });
     } catch (_) {
-      // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它频道。
-      if (!mounted || req != _req || _channel != 'live') return;
+      // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它分区。
+      if (!mounted || req != _req) return;
       setState(() {
         _liveGroups = const <LiveGroup>[];
         _liveLoaded = true;
