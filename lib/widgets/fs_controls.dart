@@ -298,6 +298,9 @@ class FsTopBar extends StatelessWidget {
               // 电量：和手机状态栏同款语义，充电时变绿
               _BatteryChip(size: s),
               const SizedBox(width: 6),
+              // 当前时间：全屏时看不到系统状态栏，这里补一个
+              _ClockChip(size: s),
+              const SizedBox(width: 6),
               PGlassIcon(
                 icon: Icons.cast_rounded,
                 size: 32 * s,
@@ -530,5 +533,51 @@ class _BatteryChip extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+/// 顶栏时间胶囊：HH:mm，每分钟自动刷新。
+///
+/// 全屏播放会把系统状态栏藏起来，用户看不到时间。这里补一个，
+/// 和电量并排，位置与 B站/腾讯的全屏顶栏一致。
+class _ClockChip extends StatefulWidget {
+  const _ClockChip({this.size = 1});
+
+  final double size;
+
+  @override
+  State<_ClockChip> createState() => _ClockChipState();
+}
+
+class _ClockChipState extends State<_ClockChip> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    // 对齐到下一分钟整点再开始 1 分钟周期，避免显示错一分钟。
+    final now = DateTime.now();
+    final msToNextMinute = 60000 - (now.second * 1000 + now.millisecond);
+    Timer(Duration(milliseconds: msToNextMinute), () {
+      if (!mounted) return;
+      setState(() {});
+      _timer = Timer.periodic(const Duration(minutes: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final text =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    return _TopChip(text: text, size: widget.size);
   }
 }
