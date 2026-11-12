@@ -30,6 +30,20 @@ void main() {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
     _installErrorHandlers();
+    // IMAGE_CACHE（2026-11-12）：调大图片缓存。
+    //
+    // Flutter 默认 1000 张 / 100MB。首页一轮就要 66 张不同地址的海报，
+    // 加上每个卡片按显示宽度做 ResizeImage，同一张图会以不同 cacheWidth
+    // 各存一份 —— 100MB 很容易撑爆。
+    //
+    // 一旦超标，ImageCache 按 LRU 淘汰，正在显示的图被淘汰后
+    // 回来时重新解码；表现就是「部分封面空白，滑动一下才出来」。
+    //
+    // 这里放宽到 2000 张 / 512MB：常规浏览量完全装得下，
+    // 系统内存紧张时 Flutter 仍会自行回收。
+    PaintingBinding.instance.imageCache
+      ..maximumSize = 2000
+      ..maximumSizeBytes = 512 * 1024 * 1024;
     // 首帧只负责出界面：配置 / 登录态 / 内核初始化全部挪到首帧之后，
     // 启动阶段任何网络或磁盘等待都不再挡住首屏。
     runApp(const FantasyApp());

@@ -68,10 +68,29 @@ ImageProvider<Object>? fxImageProvider(
   final src = Api.imgProxy(url);
   if (src.isEmpty) return null;
   return ResizeImage.resizeIfNeeded(
-    cacheWidth,
+    _quantizeCacheWidth(cacheWidth),
     cacheHeight,
     NetworkImage(src),
   );
+}
+
+/// 把解码宽度量化到 8 档，避免「同一张图按不同宽度各解一份」。
+///
+/// 问题：首页横滑卡片（4 列）、详情页推荐、搜索结果、历史网格的宽度
+/// 各不相同，每处都按自己的实际宽度调 ResizeImage —— 同一张海报会被
+/// 解码成好几个不同尺寸，各占一份 ImageCache。
+/// 66 张首页封面 × 多尺寸，很容易把默认 100MB 撑爆；一旦淘汰，
+/// 正在显示的图就空掉，表现是「部分封面加载不出来」。
+///
+/// 量化后同一张图在全站最多 8 个尺寸，跨页面直接命中同一份缓存。
+int? _quantizeCacheWidth(int? width) {
+  if (width == null || width <= 0) return null;
+  // 档位：120 / 180 / 240 / 320 / 420 / 560 / 720 / 960
+  const stops = <int>[120, 180, 240, 320, 420, 560, 720, 960];
+  for (final s in stops) {
+    if (width <= s) return s;
+  }
+  return stops.last;
 }
 
 /// 灰底 + 渐变微光的加载占位，1.2s 循环。
