@@ -417,10 +417,13 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               ),
             if (widget.loading)
               Positioned.fill(
-                child: FxLoadingOverlay(
-                  title: widget.isLive ? '正在加载直播…' : '正在加载视频…',
-                  dim: false,
-                  compact: true,
+                // 加载浮层只做提示，不吃点击。
+                child: IgnorePointer(
+                  child: FxLoadingOverlay(
+                    title: widget.isLive ? '正在加载直播…' : '正在加载视频…',
+                    dim: false,
+                    compact: true,
+                  ),
                 ),
               )
             else if (ready)
@@ -435,12 +438,15 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                     // 只认 libmpv cache-buffering-state 的真实填充进度；
                     // 拿不到就不显示数字，只给「缓冲中…」+ 不确定转圈。
                     final percent = value.bufferingPercent;
-                    return FxLoadingOverlay(
-                      title:
-                          percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
-                      percent: percent,
-                      dim: false,
-                      compact: true,
+                    return IgnorePointer(
+                      child: FxLoadingOverlay(
+                        title: percent == null
+                            ? '缓冲中…'
+                            : '缓冲中 ${percent.round()}%',
+                        percent: percent,
+                        dim: false,
+                        compact: true,
+                      ),
                     );
                   },
                 ),

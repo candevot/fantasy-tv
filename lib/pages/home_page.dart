@@ -368,16 +368,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 频道切换时给内容一层淡入：之前是 setState 直接换列表，内容硬切，
     // 观感像「闪一下」。这里用 key 绑定频道，切换时旧内容淡出、新内容淡入，
     // 时长 180ms —— 够遮住跳变，又不会拖慢操作手感。
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 180),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      // 默认的 FadeTransition 会让两层同时占位导致高度跳动，
-      // 用 layoutBuilder 固定为「只显示新层」，避免滚动位置被顶歪。
-      layoutBuilder: (currentChild, previousChildren) => currentChild ?? const SizedBox.shrink(),
-      child: KeyedSubtree(
-        key: ValueKey<String>(_channel),
-        child: SafeArea(
+    // HOME_NO_SWITCHER（2026-11-12）：去掉 AnimatedSwitcher。
+    //
+    // 它把整个页面（SafeArea + CustomScrollView）包在 KeyedSubtree 里，
+    // 而 layoutBuilder 只返回 currentChild —— 首帧 currentChild 为 null，
+    // 整页被吞成 SizedBox.shrink()，用户看到的就是「首页加载不出来」。
+    // 切频道本来也只有「推荐」一个，淡入动画没有存在意义。
+    return SafeArea(
       bottom: false,
       child: RefreshIndicator(
         color: Fx.accent,
@@ -396,8 +393,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ..._body(data),
             const SliverToBoxAdapter(child: SizedBox(height: 104)),
           ],
-        ),
-      ),
         ),
       ),
     );

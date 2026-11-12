@@ -405,19 +405,25 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                   // 只认 libmpv cache-buffering-state 的真实填充进度；
                   // 拿不到就不显示数字，只给「缓冲中…」+ 不确定转圈。
                   final percent = value.bufferingPercent;
-                  return FxLoadingOverlay(
-                    title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
-                    percent: percent,
-                    speedText: value.speedText,
-                    dim: false,
-                    compact: true,
+                  // 缓冲浮层只做提示，不吃点击。
+                  return IgnorePointer(
+                    child: FxLoadingOverlay(
+                      title: percent == null
+                          ? '缓冲中…'
+                          : '缓冲中 ${percent.round()}%',
+                      percent: percent,
+                      speedText: value.speedText,
+                      dim: false,
+                      compact: true,
+                    ),
                   );
                 },
               ),
             ),
           if (widget.loading)
             Positioned.fill(
-              child: widget.player == null
+              child: IgnorePointer(
+                child: widget.player == null
                   ? FxLoadingOverlay(
                       title: fxLoadingEpisodeText(widget.ep),
                       dim: widget.frozenFrame == null,
@@ -428,10 +434,11 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                         title: fxLoadingEpisodeText(widget.ep),
                         percent: widget.player!.value.bufferingPercent,
                         speedText: widget.player!.value.speedText,
-                        // 有最后一帧时不再压暗，让切换过程继续看得到画面。
-                        dim: widget.frozenFrame == null,
+                          // 有最后一帧时不再压暗，让切换过程继续看得到画面。
+                          dim: widget.frozenFrame == null,
+                        ),
                       ),
-                    ),
+              ),
             ),
           if (!_locked)
             Positioned.fill(

@@ -1649,13 +1649,17 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                       return const SizedBox.shrink();
                     }
                     final percent = v.bufferingPercent;
-                    return FxLoadingOverlay(
-                      title:
-                          percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
-                      percent: percent,
-                      speedText: v.speedText,
-                      dim: false,
-                      compact: true,
+                    // 缓冲浮层只做提示，不吃点击（否则进度条/设置点不动）。
+                    return IgnorePointer(
+                      child: FxLoadingOverlay(
+                        title: percent == null
+                            ? '缓冲中…'
+                            : '缓冲中 ${percent.round()}%',
+                        percent: percent,
+                        speedText: v.speedText,
+                        dim: false,
+                        compact: true,
+                      ),
                     );
                   },
                 ),

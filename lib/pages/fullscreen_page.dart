@@ -891,11 +891,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _hasFirstFrame(FxPlayer? player) {
     final v = player?.value;
     if (v == null || !v.isInitialized) return false;
+    // FIRSTFRAME_FIX（2026-11-12）：不再强依赖宽高。
+    //
+    // ExoPlayer 在真正渲染出首帧前 VideoPlayerValue.size 是 null，
+    // 于是「宽高 > 0」永远不成立 → _firstFrame 一直 false →
+    // _buildStatusOverlay 永远返回全屏 loading 浮层 → 把 betterplayer
+    // 的控件整个盖死，用户看到「播放器完全不可控」。
+    // 现在：初始化完成、且已经开始播放（或位置在推进）就算出画。
     var w = v.videoWidth ?? 0;
     var h = v.videoHeight ?? 0;
     if (w <= 0) w = v.width ?? 0;
     if (h <= 0) h = v.height ?? 0;
-    return w > 0 && h > 0;
+    if (w > 0 && h > 0) return true;
+    return v.isPlaying || v.position > Duration.zero;
   }
 
   void _armFirstFrameTimer() {
@@ -1670,8 +1678,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         26.0 + 40.0 + 4.0 + 34.0 + 6.0 + MediaQuery.paddingOf(context).bottom;
     // 首帧未出 / 出错时不要挂 Video 纹理：部分设备会显示红屏或透明残帧。
     // 始终先铺纯黑底色，再把 Video 放上去，缓冲时不会出现纯黑无内容的画面。
-    final showVideo =
-        c != null && c.value.isInitialized && _firstFrame && !_error;
+    // VIDEO_SHOW_FIX（2026-11-12）：只要播放器初始化完成就挂画面。
+    //
+    // 原来还要求 _firstFrame（videoWidth/videoHeight > 0）。ExoPlayer 在
+    // 真正开始渲染前 VideoPlayerValue.size 可能是 null，于是 _firstFrame
+    // 永远 false → 画面层不挂 → betterplayer 的控件也跟着不出现，
+    // 用户看到的就是「播放器完全不可控」。
+    // betterplayer 自己会在拿到首帧前显示 loading，不需要我们再挡一层。
+    final showVideo = c != null && c.value.isInitialized && !_error;
     return ClipRect(
       child: Stack(
         fit: StackFit.expand,
@@ -1712,22 +1726,30 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 不再叠一行旧线路名小字。
     final loading = _loadingHint ?? fxLoadingLineText(_ep, _lineName);
     // 真实缓存进度：起播 / 切集阶段有 buffer 就显示，不拿假进度凑数。
+    // OVERLAY_PASS_THROUGH（2026-11-12）：浮层只做视觉提示，不吃点击。
+    //
+    // 之前是全屏 FxLoadingOverlay 直接铺在 betterplayer 之上，
+    // 缓冲期间用户点进度条 / 设置全被它挡掉。
     if (!_firstFrame || _loading) {
-      return FxLoadingOverlay(
-        title: loading,
-        percent: v.bufferingPercent,
-        speedText: v.speedText,
-        dim: _frozenFrame == null,
+      return IgnorePointer(
+        child: FxLoadingOverlay(
+          title: loading,
+          percent: v.bufferingPercent,
+          speedText: v.speedText,
+          dim: _frozenFrame == null,
+        ),
       );
     }
     if (!v.isBuffering) return const SizedBox.shrink();
     final percent = v.bufferingPercent;
-    return FxLoadingOverlay(
-      title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
-      percent: percent,
-      speedText: v.speedText,
-      dim: false,
-      compact: true,
+    return IgnorePointer(
+      child: FxLoadingOverlay(
+        title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
+        percent: percent,
+        speedText: v.speedText,
+        dim: false,
+        compact: true,
+      ),
     );
   }
 
