@@ -2146,6 +2146,10 @@ class LocalHlsProxy {
   /// 拉到本地，之后任意拖进度都是读本地。播放请求永远优先 ——
   /// `_yieldPrefetchToPlayback` 会在 seek 时把预取全部让位。
   int get _effectivePrefetchConcurrency {
+    // 首帧之前只给 1 路（甚至 0 路，由 _pumpPrefetch 提前 return）。
+    // 4K 分片 2.8~8.5MB，6 路预取会把上行带宽吃满，
+    // 起播要的首片排在后面 —— 用户看到的就是「加载十几秒」。
+    if (!_firstFrameReady) return 1;
     final speed = recentThroughput;
     final cap = infinitePreload ? 6 : prefetchConcurrency;
     if (speed == null) return math.min(cap, 2);

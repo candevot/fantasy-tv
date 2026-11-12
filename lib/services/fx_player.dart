@@ -780,9 +780,15 @@ class FxPlayer implements Listenable {
                       if (expired != null) expired();
                     },
             )
-            // 8 秒拿不到本地列表就回退直连：代理的意义是「更快更稳」，
-            // 一旦它比直连还慢，就不该让用户继续等。代理实例保留不销毁。
-            .timeout(const Duration(seconds: 8));
+            // 超时从 8 秒放宽到 15 秒。
+            //
+            // 4K 线路（幻想4K）播放列表 127KB，含 540 个分片，
+            // 代理要拉正文 + 逐行改写 + 建立别名表。实测服务端这段 87ms，
+            // 但客户端还要过一次 HTTP + 解析，冷启动偏慢。
+            // 8 秒一旦不够就回退直连 → mpv 自己再拉一遍同一个 m3u8，
+            // 两个请求串起来就是用户看到的「加载 20 秒」。
+            // 现在给足 15 秒，宁可多等一点也不要重复拉流。
+            .timeout(const Duration(seconds: 15));
         if (_disposed || token != _openToken) return null;
         if (localUrl.isNotEmpty) {
           playbackUrl = localUrl;

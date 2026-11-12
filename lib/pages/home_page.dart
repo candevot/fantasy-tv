@@ -48,6 +48,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// banner 页码只驱动指示点，不再 setState 整页。
   final ValueNotifier<int> _bannerPage = ValueNotifier<int>(0);
   int _req = 0;
+
+  /// 直播请求独立的序号。
+  ///
+  /// 原来 _load 和 _loadLive 共用 _req：initState 里先 _load()（req=1），
+  /// 紧接着 _loadLive()（req=2），等 _load 的响应回来时 req(1) != _req(2)，
+  /// 首页数据被当成「过期请求」丢掉 —— 表现就是进入 App 首页空白，
+  /// 必须下拉刷新才出来。
+  int _liveReq = 0;
   bool _loading = true;
   bool _dragging = false;
   bool _tabVisible = true;
@@ -230,7 +238,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _loadLive() async {
-    final req = ++_req;
+    final req = ++_liveReq;
     if (mounted) setState(() => _liveLoading = true);
     try {
       final groups = await Api.liveGroups();
@@ -239,7 +247,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       // 分类页签删掉后 _channel 恒为 recommend，而 initState 里就会调
       // _loadLive() 给首页末尾的直播区取数据 —— 数据拉回来了却被这个
       // 守卫丢掉，直播区永远是空的。现在只判「请求是否过期」。
-      if (!mounted || req != _req) return;
+      if (!mounted || req != _liveReq) return;
       setState(() {
         _liveGroups = groups;
         _liveLoaded = true;
@@ -247,7 +255,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       });
     } catch (_) {
       // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它分区。
-      if (!mounted || req != _req) return;
+      if (!mounted || req != _liveReq) return;
       setState(() {
         _liveGroups = const <LiveGroup>[];
         _liveLoaded = true;
