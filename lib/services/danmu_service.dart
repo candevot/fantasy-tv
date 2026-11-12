@@ -14,8 +14,11 @@ class DanmuService {
   DanmuService._();
   static final DanmuService instance = DanmuService._();
 
-  /// danmu_api 服务地址（和服务端同机，走 9321 端口）。
-  static String host = 'http://47.96.0.112:9321';
+  /// 弹幕服务地址：走主服务的 /api/danmu/ 反代。
+  ///
+  /// 直连 9321 走不通 —— 阿里云安全组只开了 8787。
+  /// 服务端把 /api/danmu/* 转到本机 danmu_api（见 index.js 前置拦截）。
+  static String host = 'http://47.96.0.112:8787/api/danmu';
 
   /// 服务端配置的访问 token（danmu_api 的 TOKEN 环境变量）。
   static const String token = '87654321';
@@ -59,7 +62,7 @@ class DanmuService {
         _searchCache.containsKey(title)) {
       return _searchCache[title];
     }
-    final uri = Uri.parse('$host/api/v2/search/episodes')
+    final uri = Uri.parse('$host/v2/search/episodes')
         .replace(queryParameters: {'anime': title, 'token': token});
     final res = await http.get(uri).timeout(const Duration(seconds: 12));
     if (res.statusCode != 200) return null;
@@ -96,7 +99,7 @@ class DanmuService {
         _commentCache.containsKey(episodeId)) {
       return _commentCache[episodeId]!;
     }
-    final uri = Uri.parse('$host/api/v2/comment/$episodeId')
+    final uri = Uri.parse('$host/v2/comment/$episodeId')
         .replace(queryParameters: {'withRelated': 'true', 'format': 'json'});
     final res = await http.get(uri).timeout(const Duration(seconds: 15));
     if (res.statusCode != 200) return const <DanmuItem>[];

@@ -80,6 +80,8 @@ class FsBottomBar extends StatelessWidget {
     this.onDanmu,
     this.onDanmuSettings,
     this.onDanmuSend,
+    this.danmuInput,
+    this.onDanmuSubmit,
     required this.onExit,
     this.onJump,
     this.jumpActive = false,
@@ -118,8 +120,15 @@ class FsBottomBar extends StatelessWidget {
   /// 点弹幕设置：打开弹幕设置面板。
   final VoidCallback? onDanmuSettings;
 
-  /// 点气泡：打开发送弹幕输入。
+  /// 点气泡：打开发送弹幕输入（旧式弹层，保留兼容）。
   final VoidCallback? onDanmuSend;
+
+  /// 内嵌输入框控制器：非 null 时底栏中间显示「发弹幕聊聊呗~」气泡。
+  /// 这是 B站/腾讯的做法 —— 输入框直接长在控制条上，不弹窗。
+  final TextEditingController? danmuInput;
+
+  /// 内嵌输入框提交回调。
+  final ValueChanged<String>? onDanmuSubmit;
   final VoidCallback onExit;
 
   /// 底部「片头/尾」按钮：打开本剧片头 / 片尾标记面板；null 时不显示。
@@ -174,8 +183,19 @@ class FsBottomBar extends StatelessWidget {
               timeFontWeight: FontWeight.w600,
             ),
           if (!live) const SizedBox(height: 4),
+          // BOTTOMBAR_3GROUP（2026-11-12）：底栏拆成「左固定 / 中弹性 / 右固定」三组。
+          //
+          // 之前只有一个 Row + 一个 Flexible：Flexible 里的文字按钮（片头尾/
+          // 倍速/选集）会先抢宽度，左边「暂停 / 下一集 / 弹幕三件套」被挤到
+          // 屏幕外，右边又空出一大块 —— 就是用户看到的「左边溢出、右边空」。
+          //
+          // 现在：
+          //   左组（暂停/下一集/弹幕三件套）不参与压缩，固定宽度；
+          //   中间 Spacer 吃掉所有剩余空间，把右组顶到最右；
+          //   右组（文字按钮 + 齿轮 + 退出）用 FittedBox 保底，超宽时整体缩小。
           Row(
             children: [
+              // ── 左组：播放 / 下一集 / 弹幕三件套（不压缩）──
               PGlassIcon(
                 icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
                 size: 34 * s,
@@ -187,7 +207,6 @@ class FsBottomBar extends StatelessWidget {
               const SizedBox(width: 8),
               if (live) ...[
                 const _FsLiveBadge(),
-                const Spacer(),
               ] else ...[
                 PGlassIcon(
                   icon: Icons.skip_next_rounded,
@@ -197,8 +216,7 @@ class FsBottomBar extends StatelessWidget {
                   tooltip: '下一集',
                   onTap: onNext,
                 ),
-                // 弹幕三件套紧跟「下一集」右边：
-                // 开关 → 设置 → 发送（用户指定顺序）
+                // 弹幕三件套紧跟「下一集」右边：开关 → 设置 → 发送
                 if (danmuOn != null) ...[
                   const SizedBox(width: 8),
                   PGlassIcon(
@@ -235,74 +253,79 @@ class FsBottomBar extends StatelessWidget {
                     onTap: onDanmuSend,
                   ),
                 ],
-                const Spacer(),
               ],
-              // 中段文字按钮：窄屏 / 刘海屏放不下时整体缩小，绝不挤出屏幕。
+              // ── 中间：弹幕输入气泡（占了就不用 Spacer）──
+              if (danmuInput != null && !live) ...[
+                const SizedBox(width: 10),
+                Expanded(child: _FsDanmuInput(
+                  controller: danmuInput!,
+                  onSubmit: onDanmuSubmit,
+                  size: s,
+                )),
+                const SizedBox(width: 10),
+              ] else
+                const Spacer(),
+              // ── 右组：文字按钮 + 齿轮 + 退出（超宽时整体缩小）──
               Flexible(
-                child: Align(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
                   alignment: Alignment.centerRight,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (!live) const SizedBox(width: 10),
-                        if (!live && onJump != null) ...[
-                          FsTextAction(
-                            text: '片头/尾',
-                            size: s,
-                            active: jumpActive,
-                            onTap: onJump,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        if (!live && onSpeed != null) ...[
-                          FsTextAction(
-                            text: '倍速',
-                            size: s,
-                            active: (rate - 1).abs() > .001,
-                            onTap: onSpeed,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        if (qualityLabel.isNotEmpty) ...[
-                          FsTextAction(
-                            text: qualityLabel,
-                            size: s,
-                            active: qualityActive,
-                            onTap: onQuality,
-                          ),
-                          const SizedBox(width: 8),
-                        ],
-                        if (!live && onEpisodes != null) ...[
-                          FsTextAction(text: '选集', size: s, onTap: onEpisodes),
-                          const SizedBox(width: 8),
-                        ],
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!live && onJump != null) ...[
+                        FsTextAction(
+                          text: '片头/尾',
+                          size: s,
+                          active: jumpActive,
+                          onTap: onJump,
+                        ),
+                        const SizedBox(width: 10),
                       ],
-                    ),
+                      if (!live && onSpeed != null) ...[
+                        FsTextAction(
+                          text: '倍速',
+                          size: s,
+                          active: (rate - 1).abs() > .001,
+                          onTap: onSpeed,
+                        ),
+                        const SizedBox(width: 10),
+                      ],
+                      if (qualityLabel.isNotEmpty) ...[
+                        FsTextAction(
+                          text: qualityLabel,
+                          size: s,
+                          active: qualityActive,
+                          onTap: onQuality,
+                        ),
+                        const SizedBox(width: 10),
+                      ],
+                      if (!live && onEpisodes != null) ...[
+                        FsTextAction(text: '选集', size: s, onTap: onEpisodes),
+                        const SizedBox(width: 10),
+                      ],
+                      if (onMore != null) ...[
+                        PGlassIcon(
+                          icon: Icons.settings_rounded,
+                          size: 34 * s,
+                          iconSize: 19 * s,
+                          tint: .16,
+                          tooltip: '播放设置',
+                          onTap: onMore,
+                        ),
+                        const SizedBox(width: 8),
+                      ],
+                      PGlassIcon(
+                        icon: Icons.fullscreen_exit_rounded,
+                        size: 34 * s,
+                        iconSize: 20 * s,
+                        tint: .16,
+                        tooltip: '退出全屏',
+                        onTap: onExit,
+                      ),
+                    ],
                   ),
                 ),
-              ),
-              // 播放设置（齿轮）：倍速 / 清晰度 / 线路全部收进面板。
-              if (onMore != null) ...[
-                PGlassIcon(
-                  // 播放设置用齿轮，不是三个点（三个点是「更多」语义）
-                  icon: Icons.settings_rounded,
-                  size: 34 * s,
-                  iconSize: 19 * s,
-                  tint: .16,
-                  tooltip: '播放设置',
-                  onTap: onMore,
-                ),
-                const SizedBox(width: 8),
-              ],
-              PGlassIcon(
-                icon: Icons.fullscreen_exit_rounded,
-                size: 34 * s,
-                iconSize: 20 * s,
-                tint: .16,
-                tooltip: '退出全屏',
-                onTap: onExit,
               ),
             ],
           ),
@@ -1554,4 +1577,135 @@ Future<void> showFsDanmuPanel(
       );
     },
   );
+}
+
+
+/// 底栏内嵌弹幕输入气泡（对齐 B站/腾讯：输入框直接长在控制条上）。
+///
+/// 未聚焦时显示浅色提示文字「发弹幕聊聊呗~」，
+/// 聚焦后弹出键盘、按回车或右侧「发送」提交。
+/// 不跳弹窗，不打断播放。
+class _FsDanmuInput extends StatefulWidget {
+  const _FsDanmuInput({
+    required this.controller,
+    required this.onSubmit,
+    required this.size,
+  });
+
+  final TextEditingController controller;
+  final ValueChanged<String>? onSubmit;
+  final double size;
+
+  @override
+  State<_FsDanmuInput> createState() => _FsDanmuInputState();
+}
+
+class _FsDanmuInputState extends State<_FsDanmuInput> {
+  final FocusNode _focus = FocusNode();
+  static const int _maxLen = 50;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onChanged);
+    _focus.addListener(_onFocus);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onChanged);
+    _focus.removeListener(_onFocus);
+    _focus.dispose();
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onFocus() {
+    if (mounted) setState(() {});
+  }
+
+  void _submit() {
+    final t = widget.controller.text.trim();
+    if (t.isEmpty) return;
+    widget.onSubmit?.call(t);
+    widget.controller.clear();
+    _focus.unfocus();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasText = widget.controller.text.trim().isNotEmpty;
+    return Container(
+      height: 32 * widget.size,
+      padding: EdgeInsets.only(left: 11 * widget.size, right: 3),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: _focus.hasFocus ? .52 : .34),
+        borderRadius: BorderRadius.circular(16 * widget.size),
+        border: Border.all(
+          color: _focus.hasFocus
+              ? Colors.white.withValues(alpha: .42)
+              : Colors.white.withValues(alpha: .16),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: widget.controller,
+              focusNode: _focus,
+              maxLength: _maxLen,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _submit(),
+              style: TextStyle(
+                fontSize: 12 * widget.size,
+                color: Colors.white,
+                height: 1.2,
+              ),
+              cursorColor: Colors.white,
+              cursorHeight: 13 * widget.size,
+              decoration: InputDecoration(
+                isDense: true,
+                counterText: '',
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.zero,
+                hintText: '发弹幕聊聊呗~',
+                hintStyle: TextStyle(
+                  fontSize: 12 * widget.size,
+                  color: Colors.white.withValues(alpha: .56),
+                  height: 1.2,
+                ),
+              ),
+            ),
+          ),
+          if (hasText)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _submit,
+              child: Container(
+                margin: const EdgeInsets.only(left: 4),
+                padding: EdgeInsets.symmetric(horizontal: 10 * widget.size),
+                height: 26 * widget.size,
+                decoration: BoxDecoration(
+                  color: Fx.accent,
+                  borderRadius: BorderRadius.circular(13 * widget.size),
+                ),
+                child: Center(
+                  child: Text(
+                    '发送',
+                    style: TextStyle(
+                      fontSize: 11 * widget.size,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }

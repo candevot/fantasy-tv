@@ -231,6 +231,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /// 自增触发弹幕层重新拉取（发完自己的弹幕后用）。
   int _danmuReload = 0;
+
+  /// 底栏内嵌弹幕输入框（对齐 B站/腾讯，不弹窗）。
+  final TextEditingController _danmuCtrl = TextEditingController();
   Timer? _hideTimer;
   Timer? _progressTimer;
 
@@ -468,6 +471,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _resetHold2x(notify: false);
     WidgetsBinding.instance.removeObserver(this);
     DeviceStatus.instance.detach();
+    _danmuCtrl.dispose();
     _hideTimer?.cancel();
     _seekHintTimer?.cancel();
     _unlockTimer?.cancel();
@@ -1444,7 +1448,22 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     );
   }
 
-  /// 打开发送弹幕输入条。
+  /// 底栏气泡里发弹幕：存本地 + 立刻上屏。
+  Future<void> _submitDanmu(String text) async {
+    final t = text.trim();
+    if (t.isEmpty) return;
+    await DanmuLocal.instance.send(
+      videoId: widget.videoId,
+      ep: _ep,
+      at: widget.player.value.position,
+      text: t,
+    );
+    if (!mounted) return;
+    setState(() => _danmuReload++);
+    _wake();
+  }
+
+  /// 打开发送弹幕输入条（旧式弹层，保留给竖屏页用）。
   Future<void> _openDanmuSend() async {
     _hideTimer?.cancel();
     final at = widget.player.value.position;
@@ -2304,6 +2323,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       onDanmu: _isLive ? null : _toggleDanmu,
                       onDanmuSettings: _isLive ? null : _openDanmuPanel,
                       onDanmuSend: _isLive ? null : _openDanmuSend,
+                      danmuInput: _isLive ? null : _danmuCtrl,
+                      onDanmuSubmit: _isLive ? null : _submitDanmu,
                       onExit: () => unawaited(_exit()),
                     );
                   },
