@@ -12,8 +12,10 @@ import 'downloads_page.dart';
 import 'favorite_page.dart';
 import 'history_page.dart';
 import 'login_page.dart';
+import 'player_page.dart';
 import 'settings_page.dart';
 import '../utils/fx_route.dart';
+import '../widgets/fx_recent_row.dart';
 
 class _Entry {
   const _Entry(this.icon, this.label, this.subtitle, this.color, this.builder);
@@ -35,6 +37,9 @@ class _MinePageState extends State<MinePage> {
   int _history = 0;
   int _favorite = 0;
   int _download = 0;
+
+  /// 最近观看（带封面），按 updatedAt 倒序。
+  List<Map<String, dynamic>> _recent = const [];
   bool _avatarBusy = false;
   bool _statsReady = false;
 
@@ -61,13 +66,35 @@ class _MinePageState extends State<MinePage> {
       FxStore.count(FxStore.favoriteKey),
       FxStore.count(FxStore.downloadKey),
     ]);
+    final hist = await FxStore.read(FxStore.historyKey);
+    hist.sort((a, b) =>
+        fxInt(b['updatedAt']).compareTo(fxInt(a['updatedAt'])));
     if (!mounted) return;
     setState(() {
       _history = res[0];
       _favorite = res[1];
       _download = res[2];
+      _recent = hist;
       _statsReady = true;
     });
+  }
+
+  /// 点最近观看：直接进播放页续播（带集数和线路）。
+  Future<void> _openRecent(Map<String, dynamic> item) async {
+    final id = fxStr(item['id']);
+    if (id.isEmpty) return;
+    await Navigator.of(context).push(
+      FxPageRoute(
+        builder: (_) => PlayerPage(
+          videoId: id,
+          ep: fxInt(item['ep'], 1),
+          line: fxStr(item['lineId']).isEmpty
+              ? fxStr(item['line'])
+              : fxStr(item['lineId']),
+        ),
+      ),
+    );
+    if (mounted) _load();
   }
 
   Future<void> _open(Widget page) async {
@@ -246,6 +273,15 @@ class _MinePageState extends State<MinePage> {
             _sectionHeader('观看统计', trailing: '仅统计本机'),
             const SizedBox(height: 10),
             _stats(),
+            // 最近观看：带封面横滑，点卡片直接续播
+            if (_recent.isNotEmpty) ...[
+              const SizedBox(height: 22),
+              FxRecentRow(
+                items: _recent,
+                onTapItem: _openRecent,
+                onMore: () => _open(const HistoryPage()),
+              ),
+            ],
             const SizedBox(height: 20),
             _sectionHeader('我的功能'),
             const SizedBox(height: 10),
