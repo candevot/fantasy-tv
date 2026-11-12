@@ -89,6 +89,46 @@ def pin_settings(path: str) -> None:
     print('patched %s' % path)
 
 
+def ensure_repositories(settings_path: str) -> None:
+    """给 pluginManagement / dependencyResolutionManagement 补仓库。
+
+    REPO_FIX（2026-11-12）：构建时报
+      Could not find org.jetbrains.kotlin:kotlin-stdlib:2.0.21
+      Searched in: https://plugins.gradle.org/m2/...
+    plugins.gradle.org 对 kotlin-stdlib 只回 303 重定向，Gradle 在
+    pluginManagement 的仓库链里跟不到，于是判定「找不到」。补上
+    mavenCentral + Google + 阿里云镜像即可（镜像对国内构建也更快）。
+    """
+    s = io.open(settings_path, encoding='utf-8').read()
+    if 'mavenCentral()' in s and 'aliyun' in s:
+        print('repositories already configured')
+        return
+
+    repos = '''            maven { url = uri("https://maven.aliyun.com/repository/public") }
+            maven { url = uri("https://maven.aliyun.com/repository/google") }
+            maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+            google()
+            mavenCentral()
+            gradlePluginPortal()
+'''
+
+    # pluginManagement { repositories { ... } }
+    if 'pluginManagement' in s and 'repositories' in s:
+        s = re.sub(
+            r'(pluginManagement\s*\{[\s\S]*?repositories\s*\{)',
+            lambda m: m.group(1) + '\n' + repos,
+            s, count=1)
+    # dependencyResolutionManagement { repositories { ... } }
+    if 'dependencyResolutionManagement' in s:
+        s = re.sub(
+            r'(dependencyResolutionManagement\s*\{[\s\S]*?repositories\s*\{)',
+            lambda m: m.group(1) + '\n' + repos,
+            s, count=1)
+
+    io.open(settings_path, 'w', encoding='utf-8').write(s)
+    print('injected repositories into %s' % settings_path)
+
+
 def pin_gradle() -> None:
     path = 'android/gradle/wrapper/gradle-wrapper.properties'
     s = io.open(path, encoding='utf-8').read()
@@ -121,6 +161,7 @@ def main() -> int:
     print('patched %s' % app)
 
     pin_settings(settings)
+    ensure_repositories(settings)
     pin_gradle()
     return 0
 
