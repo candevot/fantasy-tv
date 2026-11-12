@@ -8,8 +8,6 @@ import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
-import 'live_all_page.dart';
-import 'live_detail_page.dart';
 import 'live_groups_page.dart';
 import 'search_page.dart';
 import 'together_page.dart';
@@ -1153,20 +1151,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
         ),
       ],
-    );
-  }
-
-  /// 「全部」：跳直播总览页。
-  void _openLiveAll() {
-    Navigator.of(context).push(
-      FxPageRoute(builder: (_) => const LiveAllPage()),
-    );
-  }
-
-  /// 点某个直播频道：进直播播放页。
-  void _openLiveChannel(LiveChannel channel) {
-    Navigator.of(context).push(
-      FxPageRoute(builder: (_) => LiveDetailPage(channel: channel)),
     );
   }
 

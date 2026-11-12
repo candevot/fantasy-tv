@@ -247,6 +247,7 @@ class _DanmuOverlayState extends State<DanmuOverlay>
       mode: 1,
       age: Duration.zero,
     ));
+    return true;
   }
 
   /// 选轨道：从上一条用过的下一条开始轮转，跳过还没腾出来的。
@@ -403,14 +404,16 @@ class _DanmuPainter extends CustomPainter {
       final tp = _painterFor(f);
       canvas.save();
       canvas.translate(f.x, f.y);
-      // 用 saveLayer 做整体透明度：比给每条文字设 alpha 更省
+      // 整体透明度：saveLayer 做一次离屏合成。
+      // 注意 Canvas.saveLayer 返回 void（不是 layer id），
+      // 只能用 save / restore 配对。
       if (opacity < 1) {
-        final layer = canvas.saveLayer(
+        canvas.saveLayer(
           Rect.fromLTWH(-4, -4, tp.width + 8, tp.height + 8),
           Paint()..color = Colors.white.withValues(alpha: opacity),
         );
         tp.paint(canvas, Offset.zero);
-        canvas.restoreToCount(layer);
+        canvas.restore();
       } else {
         tp.paint(canvas, Offset.zero);
       }

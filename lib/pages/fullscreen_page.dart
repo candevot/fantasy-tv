@@ -151,7 +151,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   static const Duration _firstFrameTimeout = Duration(seconds: 10);
 
   /// 连续播放失败次数；首帧真正出现后清零。
-  int _failStreak = 0;
 
   /// 首帧超时看门狗。
   Timer? _firstFrameTimer;
@@ -992,8 +991,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (!mounted || _error || _exiting) return;
       if (!_firstFrame && _hasFirstFrame(_controller)) {
         _firstFrame = true;
-        _failStreak = 0;
-        setState(() {});
+            setState(() {});
         return;
       }
       if (_firstFrame) return;
@@ -1075,7 +1073,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   ///
   /// 现在失败就停在可重试的错误页，由用户决定重试还是自己换线。
   bool _registerFailure() {
-    _failStreak++;
     return false;
   }
 
@@ -1194,7 +1191,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 首帧检测：open 成功不等于画面已经出来，参数真正到达后才算。
     if (!_firstFrame && _hasFirstFrame(c)) {
       _firstFrame = true;
-      _failStreak = 0;
       _cancelFirstFrameTimer();
       _fadeOutFrozenFrame();
       setState(() {});
