@@ -8,6 +8,7 @@ import '../api.dart';
 import '../auth.dart';
 import '../models.dart';
 import '../theme.dart';
+import 'category_page.dart' show fxInt, fxStr;
 import 'downloads_page.dart';
 import 'favorite_page.dart';
 import 'history_page.dart';
@@ -539,14 +540,6 @@ class _MinePageState extends State<MinePage> {
         style: const TextStyle(
             fontSize: 27, fontWeight: FontWeight.w800, color: Colors.white),
       ),
-    );
-  }
-
-  Widget _divider() {
-    return Container(
-      width: 1,
-      height: 28,
-      color: Fx.ink.withValues(alpha: .06),
     );
   }
 

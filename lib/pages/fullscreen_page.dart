@@ -8,6 +8,7 @@ import '../models.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/danmu_local.dart';
+import '../services/device_status.dart';
 import '../services/fx_player.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
@@ -442,6 +443,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
 
     WidgetsBinding.instance.addObserver(this);
+    // 顶栏电量：进全屏就开始订阅，退出时释放
+    unawaited(DeviceStatus.instance.attach());
     unawaited(_enterImmersive());
     if (!_isLive) {
       _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -464,6 +467,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 退出全屏也要复位长按倍速，不能让 3.0x 留在共享播放器上。
     _resetHold2x(notify: false);
     WidgetsBinding.instance.removeObserver(this);
+    DeviceStatus.instance.detach();
     _hideTimer?.cancel();
     _seekHintTimer?.cancel();
     _unlockTimer?.cancel();
@@ -1443,8 +1447,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 打开发送弹幕输入条。
   Future<void> _openDanmuSend() async {
     _hideTimer?.cancel();
-    final player = _player;
-    final at = player?.value.position ?? Duration.zero;
+    final at = widget.player.value.position;
     await showDanmuSendSheet(
       context,
       onSend: (text) async {
@@ -1457,7 +1460,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         if (!mounted) return;
         _wake();
         // 重新拉一次，让刚发的弹幕立刻出现
-        setState(() => _danmuReload = _danmuReload + 1);
+        setState(() => _danmuReload++);
       },
     );
     if (mounted) _wake();

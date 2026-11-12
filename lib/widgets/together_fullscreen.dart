@@ -454,7 +454,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         children: [
           _buildVideo(player, pad, ready),
           // 弹幕层：画面之上、手势层之下
-          if (ready && player != null && !widget.isLive)
+          if (ready && !widget.isLive)
             Positioned.fill(
               child: AnimatedBuilder(
                 animation: player,

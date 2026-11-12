@@ -299,12 +299,6 @@ class _HistoryPageState extends State<HistoryPage> {
         FxStore.historyKey, _items.map((e) => e.toMap()).toList());
   }
 
-  Future<void> _delete(WatchRecord r) async {
-    setState(() => _items.removeWhere((e) => e.id == r.id));
-    await _persist();
-    _toast('已删除这条记录');
-  }
-
   Future<void> _confirmClear() async {
     final ok = await showDialog<bool>(
       context: context,

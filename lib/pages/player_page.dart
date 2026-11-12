@@ -1597,7 +1597,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 child: AnimatedBuilder(
                   animation: c,
                   builder: (context, _) => DanmuLayer(
-                    title: widget.videoId.isEmpty ? '' : (_detail?.title ?? ''),
+                    title: widget.videoId.isEmpty ? '' : (widget.detail?.title ?? ''),
                     ep: _ep,
                     epName: '',
                     position: c.value.position,
@@ -2053,7 +2053,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 ),
                 const SizedBox(width: 6),
                 PGlassIcon(
-                  icon: Icons.more_horiz_rounded,
+                  icon: Icons.settings_rounded,
                   size: 31,
                   iconSize: 18,
                   tooltip: '播放设置',

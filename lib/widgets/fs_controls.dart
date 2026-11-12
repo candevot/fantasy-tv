@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../services/device_status.dart';
 import '../theme.dart';
 import 'player_theme.dart';
 
@@ -277,41 +278,36 @@ class FsTopBar extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(width: 8),
-          // 实时网速：放在分辨率胶囊左边。用户要的是「能看出在动」，
-          // 光有进度环不够 —— 网络卡住时网速会掉到 0，一眼就知道。
-          if (speedText.isNotEmpty) ...[
-            Text(
-              speedText,
-              style: TextStyle(
-                color: Colors.white.withValues(alpha: .85),
-                fontSize: 10.5 * s,
-                fontWeight: FontWeight.w600,
-                shadows: const [
-                  Shadow(color: Colors.black54, blurRadius: 4),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-          ],
-          // 分辨率胶囊固定 88dp 槽位（未就绪只占位不画），保证右侧按钮不随
-          // 分辨率出现 / 消失而左右跳。
+          // TOPBAR_RIGHT_GROUP（2026-11-12）：右侧一组全部集中贴右。
           //
-          // 注意：这三个必须是「非 flex」子项。之前用 Flexible 包了一层，
-          // 它会和标题的 Expanded 各分走一半宽度，而 FittedBox 只取内容自然
-          // 宽度，右端就空出一截 —— 表现就是「投屏 / 三点太靠中间」。
-          // 现在交给 Expanded 吃掉所有剩余空间，这组自然贴到屏幕右边。
-          FsQualityPill(label: qualityLabel, size: s),
-          const SizedBox(width: 8),
-          PGlassIcon(
-            icon: Icons.tv_rounded,
-            size: 32 * s,
-            iconSize: 17 * s,
-            tooltip: '投屏',
-            onTap: onCast,
+          // 之前网速是 Row 的直接子项、夹在 Expanded 和胶囊之间，
+          // 窄屏时会被标题挤到屏幕中间偏左，看起来「散在左边」。
+          // 现在把 网速 / 分辨率 / 电量 / 投屏 收进一个 Row，
+          // 由 Spacer 推到最右，视觉上是一整组。
+          const Spacer(),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 实时网速：能看出在动。网络卡住时掉到 0，一眼就知道。
+              if (speedText.isNotEmpty) ...[
+                _TopChip(text: speedText, size: s),
+                const SizedBox(width: 6),
+              ],
+              FsQualityPill(label: qualityLabel, size: s),
+              const SizedBox(width: 6),
+              // 电量：和手机状态栏同款语义，充电时变绿
+              _BatteryChip(size: s),
+              const SizedBox(width: 6),
+              PGlassIcon(
+                icon: Icons.cast_rounded,
+                size: 32 * s,
+                iconSize: 17 * s,
+                tint: .18,
+                tooltip: '投屏',
+                onTap: onCast,
+              ),
+            ],
           ),
-          // 顶栏不再放「更多」：底栏右下角的「播放设置」是唯一入口，
-          // 两个 ⋯ 并存在竖屏 / 横屏里都会被误认为重复功能。
         ],
       ),
     );
@@ -442,6 +438,97 @@ class FsUnlockButton extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 顶栏小胶囊：网速 / 时间这类纯文字信息。
+///
+/// 统一圆角 + 半透明黑底，和 FsQualityPill 同一套视觉，
+/// 避免文字直接飘在画面上看不清。
+class _TopChip extends StatelessWidget {
+  const _TopChip({required this.text, this.size = 1});
+
+  final String text;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 7 * size, vertical: 3 * size),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: .34),
+        borderRadius: BorderRadius.circular(7 * size),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: Colors.white.withValues(alpha: .92),
+          fontSize: 10 * size,
+          fontWeight: FontWeight.w600,
+          height: 1.2,
+        ),
+      ),
+    );
+  }
+}
+
+/// 顶栏电量胶囊：图标 + 百分比，充电时图标变绿。
+class _BatteryChip extends StatelessWidget {
+  const _BatteryChip({this.size = 1});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: DeviceStatus.instance,
+      builder: (context, _) {
+        final st = DeviceStatus.instance;
+        final lv = st.level;
+        if (lv < 0) return const SizedBox.shrink();
+        final charging = st.charging;
+        // 低电量（≤15% 且没充电）用红色提醒
+        final low = lv <= 15 && !charging;
+        final color = charging
+            ? const Color(0xFF4CC38A)
+            : (low ? const Color(0xFFFF6B6B) : Colors.white);
+        final icon = charging
+            ? Icons.battery_charging_full_rounded
+            : (lv >= 95
+                ? Icons.battery_full_rounded
+                : (lv >= 70
+                    ? Icons.battery_5_bar_rounded
+                    : (lv >= 45
+                        ? Icons.battery_4_bar_rounded
+                        : (lv >= 20
+                            ? Icons.battery_3_bar_rounded
+                            : Icons.battery_1_bar_rounded))));
+        return Container(
+          padding:
+              EdgeInsets.symmetric(horizontal: 7 * size, vertical: 3 * size),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: .34),
+            borderRadius: BorderRadius.circular(7 * size),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13 * size, color: color),
+              SizedBox(width: 3 * size),
+              Text(
+                '$lv%',
+                style: TextStyle(
+                  color: color,
+                  fontSize: 10 * size,
+                  fontWeight: FontWeight.w700,
+                  height: 1.2,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

@@ -283,12 +283,13 @@ class FsBottomBar extends StatelessWidget {
                   ),
                 ),
               ),
-              // 底栏只留 ⋯ 播放设置：倍速 / 清晰度 / 线路全部收进面板。
+              // 播放设置（齿轮）：倍速 / 清晰度 / 线路全部收进面板。
               if (onMore != null) ...[
                 PGlassIcon(
-                  icon: Icons.more_horiz_rounded,
+                  // 播放设置用齿轮，不是三个点（三个点是「更多」语义）
+                  icon: Icons.settings_rounded,
                   size: 34 * s,
-                  iconSize: 21 * s,
+                  iconSize: 19 * s,
                   tint: .16,
                   tooltip: '播放设置',
                   onTap: onMore,

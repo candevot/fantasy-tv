@@ -389,7 +389,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 ),
               ),
             // 弹幕层：小窗也支持（用户要求一起看、播放详情、全屏都有弹幕）
-            if (ready && player != null && !widget.isLive)
+            if (ready && !widget.isLive)
               Positioned.fill(
                 child: AnimatedBuilder(
                   animation: player,
