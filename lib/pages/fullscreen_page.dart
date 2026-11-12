@@ -1310,7 +1310,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _wake() {
     if (!mounted || _locked) return;
-    _controller?.player.toggleControlsVisibility(true);
+    _controller?.setControlsVisible(true);
     if (!_controls) {
       setState(() => _controls = true);
     }
@@ -1321,7 +1321,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!mounted) return;
     // 同步隐藏 betterplayer 自己的控件层：只改页面 _controls 不会影响它，
     // 用户看到的「控件一直显示隐藏不了」就是这个原因。
-    _controller?.player.toggleControlsVisibility(false);
+    _controller?.setControlsVisible(false);
     setState(() {
       _controls = false;
       _showSpeed = false;

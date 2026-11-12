@@ -197,6 +197,11 @@ class FxPlayback {
   /// 竖屏嵌入播放（详情页 / 一起看房间）由页面自己画进度条，
   /// 这时传 false，否则内置控件会和页面控件叠成两层。
   /// 全屏播放传 true，直接用内置控件（画质 / 音轨 / 字幕 / PiP）。
+  /// 设置内置控件的显隐。
+  void setControlsVisible(bool visible) {
+    _controller.toggleControlsVisibility(visible);
+  }
+
   Widget buildVideo({BoxFit fit = BoxFit.contain, bool showControls = true}) {
     _controller.setControlsEnabled(showControls);
     return BetterPlayer(controller: _controller);

@@ -129,8 +129,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   bool _unlockVisible = false;
   Timer? _unlockTimer;
 
-  bool _showSpeed = false;
-  bool _showQuality = false;
 
   bool _holding = false;
   double? _rateBeforeHold;
@@ -239,25 +237,17 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   ///
   /// 这个页面用的是内置控件（showControls 默认 true），页面自己再来一套
   /// 5 秒定时器会和播放器的 3 秒错拍：点屏幕后返回键亮了、进度条还藏着。
-  void _scheduleHide() {}
-
   void _wake() {
     if (_locked) return;
-    if (player != null) {
-      player.toggleControlsVisibility(true);
-    }
+    widget.player?.setControlsVisible(true);
     if (!_controls && mounted) setState(() => _controls = true);
   }
 
   void _hideControls() {
-    if (player != null) {
-      player.toggleControlsVisibility(false);
-    }
+    widget.player?.setControlsVisible(false);
     if (mounted) {
       setState(() {
         _controls = false;
-        _showSpeed = false;
-        _showQuality = false;
       });
     }
   }
@@ -327,8 +317,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     setState(() {
       _holding = true;
       _controls = false;
-      _showSpeed = false;
-      _showQuality = false;
     });
   }
 
@@ -354,8 +342,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     setState(() {
       _chatOpen = true;
       _controls = false;
-      _showSpeed = false;
-      _showQuality = false;
       _unread = 0;
     });
   }

@@ -5,7 +5,7 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
-import 'package:better_player/better_player.dart' show BetterPlayerController;
+import 'package:better_player/better_player.dart';
 import 'package:flutter/material.dart';
 
 import '../api.dart';
@@ -89,6 +89,12 @@ class FxPlayer implements Listenable {
 
   /// betterplayer 内置控件的显隐变化（页面用它跟随播放器节奏）。
   Stream<bool> get controlsVisibilityStream => _core.controlsVisibilityStream;
+
+  /// 设置播放器内置控件的显隐。
+  ///
+  /// 页面统一走这里，不直接调 controller —— BetterPlayerController 的
+  /// 显隐方法是 extension（part of），只 import 类名拿不到。
+  void setControlsVisible(bool visible) => _core.setControlsVisible(visible);
 
   bool get isPlaying => _value.isPlaying;
 
