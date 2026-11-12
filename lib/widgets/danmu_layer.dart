@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../services/danmu_local.dart';
 import '../services/danmu_service.dart';
 import 'danmu_overlay.dart';
 
@@ -22,7 +23,11 @@ class DanmuLayer extends StatefulWidget {
     this.enabled = true,
     this.opacity = 1,
     this.fontSize = 15,
+    this.speed = 1,
     this.areaRatio = 0.7,
+    this.reloadKey = 0,
+    this.videoId = '',
+    this.onCount,
   });
 
   final String title;
@@ -38,7 +43,20 @@ class DanmuLayer extends StatefulWidget {
   final bool enabled;
   final double opacity;
   final double fontSize;
+
+  /// 滚动速度倍率。
+  final double speed;
+
   final double areaRatio;
+
+  /// 自增时重新拉取（发完自己的弹幕用）。
+  final int reloadKey;
+
+  /// 用于读本地弹幕。
+  final String videoId;
+
+  /// 拉到弹幕后回调条数（给设置面板显示）。
+  final ValueChanged<int>? onCount;
 
   @override
   State<DanmuLayer> createState() => _DanmuLayerState();
@@ -58,24 +76,35 @@ class _DanmuLayerState extends State<DanmuLayer> {
   @override
   void didUpdateWidget(covariant DanmuLayer old) {
     super.didUpdateWidget(old);
-    if (old.title != widget.title || old.ep != widget.ep) _load();
+    if (old.title != widget.title ||
+        old.ep != widget.ep ||
+        old.reloadKey != widget.reloadKey) {
+      _load();
+    }
   }
 
   Future<void> _load() async {
-    final key = '${widget.title}|${widget.ep}';
+    final key = '${widget.title}|${widget.ep}|${widget.reloadKey}';
     if (key == _loadedKey || _loading) return;
     _loadedKey = key;
     _loading = true;
-    final list = await DanmuService.instance.load(
+    final remote = await DanmuService.instance.load(
       title: widget.title,
       ep: widget.ep,
       epName: widget.epName,
     );
+    // 自己发的弹幕：和远程的合并后一起渲染
+    final local = widget.videoId.isEmpty
+        ? const <DanmuItem>[]
+        : await DanmuLocal.instance.read(widget.videoId, widget.ep);
     if (!mounted || _loadedKey != key) return;
+    final merged = <DanmuItem>[...(remote ?? const <DanmuItem>[]), ...local]
+      ..sort((a, b) => a.time.compareTo(b.time));
     setState(() {
-      _items = list ?? const [];
+      _items = merged;
       _loading = false;
     });
+    widget.onCount?.call(merged.length);
   }
 
   @override
@@ -88,6 +117,7 @@ class _DanmuLayerState extends State<DanmuLayer> {
       enabled: widget.enabled,
       opacity: widget.opacity,
       fontSize: widget.fontSize,
+      speed: widget.speed,
       areaRatio: widget.areaRatio,
     );
   }

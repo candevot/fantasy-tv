@@ -52,6 +52,8 @@ class AppSettings extends ChangeNotifier {
   static const String _kDanmuEnabled = 'fx_settings_danmu_enabled';
   static const String _kDanmuOpacity = 'fx_settings_danmu_opacity';
   static const String _kDanmuFontSize = 'fx_settings_danmu_font_size';
+  static const String _kDanmuSpeed = 'fx_settings_danmu_speed';
+  static const String _kDanmuArea = 'fx_settings_danmu_area';
 
   static const String defaultQualityKey = 'auto';
 
@@ -66,6 +68,8 @@ class AppSettings extends ChangeNotifier {
   bool _danmuEnabled = true;
   double _danmuOpacity = 0.92;
   double _danmuFontSize = 15;
+  double _danmuSpeed = 1.0;
+  double _danmuArea = 0.7;
 
   /// 弹幕开关。
   bool get danmuEnabled => _danmuEnabled;
@@ -93,6 +97,26 @@ class AppSettings extends ChangeNotifier {
     if ((_danmuFontSize - n).abs() < 0.001) return;
     _danmuFontSize = n;
     _persist((sp) => sp.setDouble(_kDanmuFontSize, n));
+    notifyListeners();
+  }
+
+  /// 弹幕滚动速度倍率（0.5 - 2.0）。
+  double get danmuSpeed => _danmuSpeed;
+  set danmuSpeed(double v) {
+    final n = v.clamp(0.5, 2.0);
+    if ((_danmuSpeed - n).abs() < 0.001) return;
+    _danmuSpeed = n;
+    _persist((sp) => sp.setDouble(_kDanmuSpeed, n));
+    notifyListeners();
+  }
+
+  /// 弹幕显示区域占画面高度的比例（0.3 - 1.0）。
+  double get danmuArea => _danmuArea;
+  set danmuArea(double v) {
+    final n = v.clamp(0.3, 1.0);
+    if ((_danmuArea - n).abs() < 0.001) return;
+    _danmuArea = n;
+    _persist((sp) => sp.setDouble(_kDanmuArea, n));
     notifyListeners();
   }
   static const bool defaultAutoNext = true;
@@ -159,6 +183,8 @@ class AppSettings extends ChangeNotifier {
       _danmuEnabled = sp.getBool(_kDanmuEnabled) ?? true;
       _danmuOpacity = (sp.getDouble(_kDanmuOpacity) ?? 0.92).clamp(0.2, 1.0);
       _danmuFontSize = (sp.getDouble(_kDanmuFontSize) ?? 15).clamp(11.0, 24.0);
+      _danmuSpeed = (sp.getDouble(_kDanmuSpeed) ?? 1.0).clamp(0.5, 2.0);
+      _danmuArea = (sp.getDouble(_kDanmuArea) ?? 0.7).clamp(0.3, 1.0);
       _sleepMode = FxSleepMode.parse(sp.getString(_kSleepMode));
       _sleepMinutes = _validSleepMinutes(sp.getInt(_kSleepMinutes));
       _sleepEndsAt = sp.getInt(_kSleepEndsAt) ?? 0;

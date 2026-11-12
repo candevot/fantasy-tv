@@ -7,6 +7,7 @@ import '../api.dart';
 import '../models.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
+import '../services/danmu_local.dart';
 import '../services/fx_player.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
@@ -17,6 +18,7 @@ import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_more_panel.dart';
 import '../widgets/danmu_layer.dart';
+import '../widgets/danmu_send.dart';
 import '../widgets/player_theme.dart';
 import 'history_page.dart' show FxStore;
 
@@ -222,6 +224,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   // 控件显隐 / 锁屏
   bool _controls = true;
+
+  /// 当前这集的弹幕条数（给弹幕设置面板显示）。
+  int _danmuCount = 0;
+
+  /// 自增触发弹幕层重新拉取（发完自己的弹幕后用）。
+  int _danmuReload = 0;
   Timer? _hideTimer;
   Timer? _progressTimer;
 
@@ -1395,6 +1403,66 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _startHideTimer();
   }
 
+  /// 底栏弹幕按钮：直接切开关。
+  void _toggleDanmu() {
+    final s = AppSettings.instance;
+    s.danmuEnabled = !s.danmuEnabled;
+    setState(() {});
+    _wake();
+  }
+
+  /// 打开弹幕设置面板。
+  Future<void> _openDanmuPanel() async {
+    _hideTimer?.cancel();
+    await showFsDanmuPanel(
+      context,
+      count: _danmuCount,
+      onToggle: (v) {
+        AppSettings.instance.danmuEnabled = v;
+        if (mounted) setState(() {});
+      },
+      onOpacity: (v) {
+        AppSettings.instance.danmuOpacity = v;
+        if (mounted) setState(() {});
+      },
+      onFontSize: (v) {
+        AppSettings.instance.danmuFontSize = v;
+        if (mounted) setState(() {});
+      },
+      onSpeed: (v) {
+        AppSettings.instance.danmuSpeed = v;
+        if (mounted) setState(() {});
+      },
+      onArea: (v) {
+        AppSettings.instance.danmuArea = v;
+        if (mounted) setState(() {});
+      },
+    );
+  }
+
+  /// 打开发送弹幕输入条。
+  Future<void> _openDanmuSend() async {
+    _hideTimer?.cancel();
+    final player = _player;
+    final at = player?.value.position ?? Duration.zero;
+    await showDanmuSendSheet(
+      context,
+      onSend: (text) async {
+        await DanmuLocal.instance.send(
+          videoId: widget.videoId,
+          ep: _ep,
+          at: at,
+          text: text,
+        );
+        if (!mounted) return;
+        _wake();
+        // 重新拉一次，让刚发的弹幕立刻出现
+        setState(() => _danmuReload = _danmuReload + 1);
+      },
+    );
+    if (mounted) _wake();
+  }
+
   void _hideControls() {
     _hideTimer?.cancel();
     if (!mounted) return;
@@ -1859,6 +1927,15 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       enabled: AppSettings.instance.danmuEnabled,
                       opacity: AppSettings.instance.danmuOpacity,
                       fontSize: AppSettings.instance.danmuFontSize,
+                      speed: AppSettings.instance.danmuSpeed,
+                      areaRatio: AppSettings.instance.danmuArea,
+                      reloadKey: _danmuReload,
+                      videoId: widget.videoId,
+                      onCount: (n) {
+                        if (mounted && n != _danmuCount) {
+                          setState(() => _danmuCount = n);
+                        }
+                      },
                     ),
                   ),
                 ),
@@ -2220,6 +2297,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       onEpisodes:
                           _isLive ? null : () => unawaited(_openEpisodeSheet()),
                       onMore: () => unawaited(_openMorePanel()),
+                      danmuOn: _isLive ? null : AppSettings.instance.danmuEnabled,
+                      onDanmu: _isLive ? null : _toggleDanmu,
+                      onDanmuSettings: _isLive ? null : _openDanmuPanel,
+                      onDanmuSend: _isLive ? null : _openDanmuSend,
                       onExit: () => unawaited(_exit()),
                     );
                   },

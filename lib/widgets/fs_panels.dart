@@ -76,6 +76,10 @@ class FsBottomBar extends StatelessWidget {
     this.onQuality,
     this.onEpisodes,
     this.onMore,
+    this.danmuOn,
+    this.onDanmu,
+    this.onDanmuSettings,
+    this.onDanmuSend,
     required this.onExit,
     this.onJump,
     this.jumpActive = false,
@@ -104,6 +108,18 @@ class FsBottomBar extends StatelessWidget {
 
   /// ⋯「播放设置」入口：打开播放设置面板；null 时不显示（如直播）。
   final VoidCallback? onMore;
+
+  /// 弹幕当前开关状态；null 时不显示弹幕按钮（如直播）。
+  final bool? danmuOn;
+
+  /// 点弹幕按钮：切换开关。
+  final VoidCallback? onDanmu;
+
+  /// 点弹幕设置：打开弹幕设置面板。
+  final VoidCallback? onDanmuSettings;
+
+  /// 点气泡：打开发送弹幕输入。
+  final VoidCallback? onDanmuSend;
   final VoidCallback onExit;
 
   /// 底部「片头/尾」按钮：打开本剧片头 / 片尾标记面板；null 时不显示。
@@ -229,6 +245,45 @@ class FsBottomBar extends StatelessWidget {
                   ),
                 ),
               ),
+              // 弹幕开关（紧跟「下一集」右侧）
+              if (danmuOn != null) ...[
+                PGlassIcon(
+                  icon: danmuOn!
+                      ? Icons.subtitles_rounded
+                      : Icons.subtitles_off_rounded,
+                  size: 34 * s,
+                  iconSize: 20 * s,
+                  tint: danmuOn! ? .22 : .10,
+                  active: danmuOn!,
+                  tooltip: danmuOn! ? '关闭弹幕' : '开启弹幕',
+                  onTap: onDanmu,
+                ),
+                const SizedBox(width: 8),
+              ],
+              // 弹幕设置
+              if (onDanmuSettings != null) ...[
+                PGlassIcon(
+                  icon: Icons.tune_rounded,
+                  size: 34 * s,
+                  iconSize: 19 * s,
+                  tint: .16,
+                  tooltip: '弹幕设置',
+                  onTap: onDanmuSettings,
+                ),
+                const SizedBox(width: 8),
+              ],
+              // 发送弹幕
+              if (onDanmuSend != null) ...[
+                PGlassIcon(
+                  icon: Icons.chat_bubble_outline_rounded,
+                  size: 34 * s,
+                  iconSize: 18 * s,
+                  tint: .16,
+                  tooltip: '发弹幕',
+                  onTap: onDanmuSend,
+                ),
+                const SizedBox(width: 8),
+              ],
               // 底栏只留 ⋯ 播放设置：倍速 / 清晰度 / 线路全部收进面板。
               if (onMore != null) ...[
                 PGlassIcon(
@@ -1041,7 +1096,14 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
-    final height = (size.height * .8).clamp(260.0, 560.0).toDouble();
+    final pad = MediaQuery.paddingOf(context);
+    // EPISODE_SHEET_FIT（2026-11-12）：按「实际可用高度」算，不是按屏幕高度。
+    // 全屏播放是横屏，size.height 拿到的是竖屏高度，减掉安全区后
+    // 弹窗会超出可见区域 → 底部集数被裁掉。这里改用 constraints 的实际高度。
+    final avail = (size.height - pad.top - pad.bottom - 24)
+        .clamp(220.0, 560.0)
+        .toDouble();
+    final height = avail;
     final width = size.width;
     final columns = (width / 86).floor().clamp(4, 9);
     final current = widget.current;
@@ -1049,9 +1111,10 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
     final count = fxMainEpisodeCount(widget.episodes);
     return Container(
       height: height,
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      decoration: BoxDecoration(
+        // 全屏播放里弹窗用深色，白底在暗画面里太刺眼。
+        color: const Color(0xFF16181D),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1076,7 +1139,7 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w800,
-                    color: Fx.ink,
+                    color: Colors.white,
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -1085,7 +1148,8 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                     '${_labelFor(current)} · 共 $count 集',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11.5, color: Fx.sub),
+                    style: const TextStyle(
+                        fontSize: 11.5, color: Color(0xFF9AA3B2)),
                   ),
                 ),
                 GestureDetector(
@@ -1093,19 +1157,20 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                   onTap: () => Navigator.of(context).pop(),
                   child: const Padding(
                     padding: EdgeInsets.all(6),
-                    child: Icon(Icons.close_rounded, size: 20, color: Fx.sub),
+                    child: Icon(Icons.close_rounded,
+                        size: 20, color: Color(0xFF9AA3B2)),
                   ),
                 ),
               ],
             ),
           ),
-          const Divider(height: 1, color: Color(0xFFEDF1F8)),
+          const Divider(height: 1, color: Color(0xFF2A2E36)),
           Expanded(
             child: total == 0
                 ? const Center(
                     child: Text(
                       '暂无剧集信息',
-                      style: TextStyle(fontSize: 12, color: Fx.sub),
+                      style: TextStyle(fontSize: 12, color: Color(0xFF9AA3B2)),
                     ),
                   )
                 : GridView.builder(
@@ -1121,7 +1186,8 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                     itemBuilder: (context, i) {
                       final e = widget.episodes[i];
                       final active = e.n == current;
-                      final label = fxEpisodeLabel(e.n, e.name);
+                      // 只显示两位数字（01 02 … 99），不显示「第N集」。
+                      final label = e.n.toString().padLeft(2, '0');
                       return GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: () => Navigator.of(context).pop(e.n),
@@ -1131,12 +1197,12 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                           padding: const EdgeInsets.symmetric(horizontal: 6),
                           decoration: BoxDecoration(
                             gradient: active ? Fx.brand : null,
-                            color: active ? null : const Color(0xFFF6F8FC),
+                            color: active ? null : const Color(0xFF23262E),
                             borderRadius: BorderRadius.circular(11),
                             border: Border.all(
                               color: active
                                   ? Colors.transparent
-                                  : const Color(0xFFE3E9F3),
+                                  : const Color(0xFF31353F),
                             ),
                             boxShadow: [
                               BoxShadow(
@@ -1147,28 +1213,29 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
                               ),
                             ],
                           ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
+                          // 纯两位数：不用 Flexible/ellipsis，
+                          // 之前「第N集」占位太长被截成「第…」。
+                          child: Stack(
+                            alignment: Alignment.center,
                             children: [
-                              if (active) ...[
-                                const Icon(Icons.play_arrow_rounded,
-                                    size: 14, color: Colors.white),
-                                const SizedBox(width: 2),
-                              ],
-                              Flexible(
-                                child: Text(
-                                  label,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontSize: 11.5,
-                                    fontWeight: active
-                                        ? FontWeight.w700
-                                        : FontWeight.w500,
-                                    color: active ? Colors.white : Fx.sub,
-                                  ),
+                              Text(
+                                label,
+                                maxLines: 1,
+                                style: TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: active
+                                      ? FontWeight.w700
+                                      : FontWeight.w500,
+                                  color: Colors.white,
+                                  letterSpacing: .4,
                                 ),
                               ),
+                              if (active)
+                                const Positioned(
+                                  left: 4,
+                                  child: Icon(Icons.play_arrow_rounded,
+                                      size: 12, color: Colors.white),
+                                ),
                             ],
                           ),
                         ),
@@ -1213,4 +1280,278 @@ class _FsLiveBadge extends StatelessWidget {
       ),
     );
   }
+}
+
+/* ========================================================================== */
+/*  弹幕设置面板                                                               */
+/* ========================================================================== */
+
+/// 弹幕设置 · 右侧面板。
+///
+/// 用户要求（2026-11-12）：弹幕开关和设置在播放界面，不要藏到设置页。
+///
+/// 内容：
+///   · 总开关（关掉后整层弹幕不渲染）
+///   · 透明度 20%–100%（滑杆，实时生效）
+///   · 字号 11–24（滑杆，实时生效）
+///   · 弹幕量提示（当前这集有多少条）
+class FsDanmuPanel extends StatelessWidget {
+  const FsDanmuPanel({
+    super.key,
+    required this.enabled,
+    required this.opacity,
+    required this.fontSize,
+    required this.speed,
+    required this.area,
+    required this.count,
+    required this.onToggle,
+    required this.onOpacity,
+    required this.onFontSize,
+    required this.onSpeed,
+    required this.onArea,
+    required this.onClose,
+  });
+
+  final bool enabled;
+  final double opacity;
+  final double fontSize;
+
+  /// 滚动速度倍率（0.5 - 2.0）。
+  final double speed;
+
+  /// 弹幕占画面高度比例（0.3 - 1.0）。
+  final double area;
+
+  /// 当前集弹幕条数（0 表示这个平台没有弹幕库）。
+  final int count;
+
+  final ValueChanged<bool> onToggle;
+  final ValueChanged<double> onOpacity;
+  final ValueChanged<double> onFontSize;
+  final ValueChanged<double> onSpeed;
+  final ValueChanged<double> onArea;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return FsGlassCard(
+      width: 306,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.subtitles_rounded, size: 17, color: Fx.accent),
+              const SizedBox(width: 6),
+              const Text(
+                '弹幕设置',
+                style: TextStyle(
+                    fontSize: 13.5, fontWeight: FontWeight.w800, color: Fx.ink),
+              ),
+              const Spacer(),
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: onClose,
+                child: const Icon(Icons.close_rounded,
+                    size: 17, color: Fx.sub),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          // 总开关
+          Row(
+            children: [
+              const Text(
+                '显示弹幕',
+                style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: Fx.ink),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                count > 0 ? '$count 条' : '暂无弹幕',
+                style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+              ),
+              const Spacer(),
+              Switch(
+                value: enabled,
+                onChanged: onToggle,
+                activeThumbColor: Fx.accent,
+              ),
+            ],
+          ),
+          if (enabled) ...[
+            const SizedBox(height: 6),
+            _sliderRow(
+              icon: Icons.opacity_rounded,
+              label: '不透明度',
+              valueText: '${(opacity * 100).round()}%',
+              value: opacity,
+              min: 0.2,
+              max: 1.0,
+              onChanged: onOpacity,
+            ),
+            const SizedBox(height: 8),
+            _sliderRow(
+              icon: Icons.format_size_rounded,
+              label: '字号',
+              valueText: fontSize.round().toString(),
+              value: fontSize,
+              min: 11,
+              max: 24,
+              onChanged: onFontSize,
+            ),
+            const SizedBox(height: 8),
+            _sliderRow(
+              icon: Icons.speed_rounded,
+              label: '滚动速度',
+              valueText: '${speed.toStringAsFixed(1)}x',
+              value: speed,
+              min: 0.5,
+              max: 2.0,
+              onChanged: onSpeed,
+            ),
+            const SizedBox(height: 8),
+            _sliderRow(
+              icon: Icons.crop_free_rounded,
+              label: '显示区域',
+              valueText: '${(area * 100).round()}%',
+              value: area,
+              min: 0.3,
+              max: 1.0,
+              onChanged: onArea,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _sliderRow({
+    required IconData icon,
+    required String label,
+    required String valueText,
+    required double value,
+    required double min,
+    required double max,
+    required ValueChanged<double> onChanged,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 14, color: Fx.sub),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 11.5, color: Fx.sub),
+            ),
+            const Spacer(),
+            Text(
+              valueText,
+              style: const TextStyle(
+                  fontSize: 11.5, fontWeight: FontWeight.w700, color: Fx.accent),
+            ),
+          ],
+        ),
+        SizedBox(
+          height: 28,
+          child: SliderTheme(
+            data: SliderThemeData(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+              activeTrackColor: Fx.accent,
+              inactiveTrackColor: const Color(0xFFE3E9F2),
+              thumbColor: Colors.white,
+            ),
+            child: Slider(
+              value: value.clamp(min, max),
+              min: min,
+              max: max,
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 弹出弹幕设置面板（全屏播放右侧浮层）。
+Future<void> showFsDanmuPanel(
+  BuildContext context, {
+  required int count,
+  required ValueChanged<bool> onToggle,
+  required ValueChanged<double> onOpacity,
+  required ValueChanged<double> onFontSize,
+  required ValueChanged<double> onSpeed,
+  required ValueChanged<double> onArea,
+}) {
+  return showGeneralDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: '弹幕设置',
+    barrierColor: Colors.black.withValues(alpha: .28),
+    transitionDuration: const Duration(milliseconds: 180),
+    pageBuilder: (ctx, _, __) => const SizedBox.shrink(),
+    transitionBuilder: (ctx, anim, _, __) {
+      final a = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
+      return FadeTransition(
+        opacity: a,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: .96, end: 1).animate(a),
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: EdgeInsets.only(
+                right: 16,
+                top: MediaQuery.paddingOf(ctx).top + 60,
+                bottom: MediaQuery.paddingOf(ctx).bottom + 60,
+              ),
+              child: SingleChildScrollView(
+                child: StatefulBuilder(
+                  builder: (ctx2, setSt) {
+                    final s = AppSettings.instance;
+                    return FsDanmuPanel(
+                      enabled: s.danmuEnabled,
+                      opacity: s.danmuOpacity,
+                      fontSize: s.danmuFontSize,
+                      speed: s.danmuSpeed,
+                      area: s.danmuArea,
+                      count: count,
+                      onToggle: (v) {
+                        onToggle(v);
+                        setSt(() {});
+                      },
+                      onOpacity: (v) {
+                        onOpacity(v);
+                        setSt(() {});
+                      },
+                      onFontSize: (v) {
+                        onFontSize(v);
+                        setSt(() {});
+                      },
+                      onSpeed: (v) {
+                        onSpeed(v);
+                        setSt(() {});
+                      },
+                      onArea: (v) {
+                        onArea(v);
+                        setSt(() {});
+                      },
+                      onClose: () => Navigator.of(ctx2).pop(),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+  );
 }
