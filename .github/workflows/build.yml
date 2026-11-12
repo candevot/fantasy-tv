@@ -107,30 +107,35 @@ jobs:
           flutter build apk --release --target-platform=android-arm64 \
             --build-number=${{ github.run_number }} \
             --build-name=1.0.${{ github.run_number }}
+          # APK 改名成「幻想影视-v<版本>.apk」，装到手机上一眼能看出是哪个版本
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             "build/app/outputs/flutter-apk/幻想影视-v1.0.${{ github.run_number }}.apk"
           ls -lh build/app/outputs/flutter-apk/
       - name: Verify release APK (comprehensive gate)
         run: |
           # 权限 / 明文流量 / label / icon / MaterialIcons 字体 / logo.png /
           # libapp + libflutter + libmpv / libmpv 4 段 LOAD 0x4000 /
           # META-INF + apksigner / zipalign / 体积 / sha256，任一不过即失败。
-          APK=build/app/outputs/flutter-apk/app-release.apk
-          test -f "$APK"
+          APK=$(ls build/app/outputs/flutter-apk/幻想影视-v*.apk | head -1)
+          echo "verify: $APK"
           python3 tools/verify_apk.py "$APK"
       # artifact 配额满了会失败（Failed to CreateArtifact: quota hit），
       # 所以上传改成「允许失败」，后面再用 Release 兜底。
       - uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: fantasy-tv-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: 幻想影视-v1.0.${{ github.run_number }}
+          path: build/app/outputs/flutter-apk/幻想影视-v*.apk
       # Release 通道：不占 artifact 配额，直接挂到 tag 上，可长期下载。
       - name: Publish APK to Release
         if: success() || failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          APK=build/app/outputs/flutter-apk/app-release.apk
+          APK=$(ls build/app/outputs/flutter-apk/幻想影视-v*.apk | head -1)
           test -f "$APK" || { echo 'no apk'; exit 1; }
-          TAG="build-$(date +%Y%m%d-%H%M%S)"
-          gh release create "$TAG" "$APK#fantasy-tv-arm64.apk" \
-            --title "构建 $TAG" --notes "自动构建产物" || true
+          NAME=$(basename "$APK")
+          TAG="v1.0.${{ github.run_number }}"
+          gh release create "$TAG" "$APK#$NAME" \
+            --title "幻想影视 $TAG" \
+            --notes "构建 #${{ github.run_number }} · $(date '+%Y-%m-%d %H:%M')" || true
