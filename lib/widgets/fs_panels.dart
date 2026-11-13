@@ -249,7 +249,9 @@ class FsBottomBar extends StatelessWidget {
               // 右组则被顶到最右边，不再和气泡挤在一起。
               // ── 中间：气泡在剩余空间里居中 ──
               Expanded(
-                child: danmuInput != null && !live
+                // 弹幕关着就不显示气泡：没开弹幕还留着输入框，
+                // 用户以为能发，点了也没东西可看。
+                child: danmuInput != null && !live && (danmuOn ?? false)
                     ? Center(
                         child: SizedBox(
                           width: 260 * s,
