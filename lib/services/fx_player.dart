@@ -148,18 +148,31 @@ class FxPlayerValue {
   /// 「已缓存时长 ÷ 总时长」只是全片下载比例——停在百分之十几、缓存够了
   /// 又瞬间跳满，看起来像假进度，不再拿来显示数字。
   double? get bufferingPercent {
-    // 优先用代理层按真实字节算的起播进度：它涨到 100 会结束，
-    // 不会像 mpv 的 cache-buffering-state 那样长期停在 99 假装还在缓。
     if (measuredBufferPercent > 0) {
       return measuredBufferPercent.clamp(0.0, 100.0);
     }
-    // 没有代理进度（直连 / 非 HLS）时退回 mpv 的百分比。
-    if (bufferingPercentage > 0) return bufferingPercentage.clamp(0.0, 99.0);
-    return null;
+    // BUFFER_PCT_FIX（2026-11-13）：不再用 mpv 的 cache-buffering-state。
+    //
+    // 那个值的分母是 demuxer-max-bytes（我们设 192MB），
+    // 4K 要真的下满 192MB 才会到 100 —— 永远到不了，界面就长期
+    // 停在「缓冲 99%」。用户报障原话就是「缓冲卡 99」。
+    //
+    // 改成按「已缓冲时长 ÷ 起播需要的最小缓冲」算，涨到 100 就是能播了：
+    //   · 起播 / 卡顿恢复都按 2 秒算（cache-pause-wait 已改成 0.5 秒）
+    const needSec = 2.0;
+    final haveSec = buffered.inMilliseconds / 1000.0;
+    if (haveSec <= 0) return null;
+    return (haveSec / needSec * 100).clamp(0.0, 100.0);
   }
 
   /// 起播进度是否已经到顶（可以隐藏进度环）。
-  bool get bufferingSettled => measuredBufferPercent >= 100;
+  ///
+  /// 原来只看 measuredBufferPercent（代理层按字节算的），
+  /// 直连模式下它恒为 0 → 永远判成未就绪。现在按已缓冲时长兜底。
+  bool get bufferingSettled {
+    if (measuredBufferPercent >= 100) return true;
+    return buffered.inMilliseconds >= 2000;
+  }
 
   /// 把字节/秒格式化成「3.2 MB/s」这类文案；0 返回空串。
   String get speedText {
@@ -326,7 +339,11 @@ class FxPlayer implements Listenable {
   /// mpv 起播时会把 demuxer-readahead-secs 填满才开始播放。
   /// 福盈 4K 一片 6 秒 / 5.5MB，原来要 120 秒 → 缓冲 20 片 ≈ 110MB 才出画。
   /// 现在起播只要 6 秒（1 片），首帧后立刻恢复到 120 秒。
-  static const String _startupReadaheadSeconds = '6';
+  /// 起播预读：2 秒。
+  ///
+  /// 4K 一片 6 秒 / 5.5MB，2 秒只要「首片的前三分之一」就能开始解码。
+  /// TS 是流式的，mpv 拿到关键帧就能出画，不需要等下完整片。
+  static const String _startupReadaheadSeconds = '2';
 
   /// 起播「还在进展」时的最长等待：只要代理层还在往下拉字节，
   /// 就不把这次 open 判成失败。
@@ -931,9 +948,9 @@ class FxPlayer implements Listenable {
       final cores = Platform.numberOfProcessors;
       final threads = cores <= 4 ? 2 : (cores <= 6 ? 3 : 4);
       await platform.setProperty('vd-lavc-threads', '$threads');
-      // 4) cache-pause-wait 调小：缓冲补到 1.5 秒就继续播，
-      //    默认 10 秒意味着「卡一下要等满 10 秒才恢复」。
-      await platform.setProperty('cache-pause-wait', '1.5');
+      // 4) cache-pause-wait 压到 0.5 秒：默认 10 秒意味着「卡一下要等满
+      //    10 秒才恢复」。4K 码率下 0.5 秒≈80KB，一有点数据就能续播。
+      await platform.setProperty('cache-pause-wait', '0.5');
       // 5) 起播不等缓存填满：默认会等 demuxer 预读到位才出画，
       //    4K 大分片下就是十几秒的白屏。
       await platform.setProperty('cache-pause-initial', 'no');
