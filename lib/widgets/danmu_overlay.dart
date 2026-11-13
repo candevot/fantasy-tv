@@ -78,6 +78,9 @@ class _DanmuOverlayState extends State<DanmuOverlay>
   /// 上次 tick 的时间戳（用于算 dt）。
   Duration _lastPos = Duration.zero;
 
+  /// 上一帧的 ticker 时间，用来算真实帧间隔。
+  Duration _lastElapsed = Duration.zero;
+
   /// 累计播放时间（暂停时不累加）。
   Duration _clock = Duration.zero;
 
@@ -149,16 +152,37 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     if (!mounted) return;
     if (!widget.enabled || !widget.playing) {
       _lastPos = widget.position;
+      _lastElapsed = elapsed;
       return;
     }
-    // 用播放器位置推进，不用 ticker 的 elapsed —— 倍速、缓冲都能跟上。
-    // 有高频通道就优先读它：父组件不重建也能拿到最新位置。
+    // DANMU_FRAME_DT（2026-11-14）：用「渲染帧间隔」推进，不再用播放器位置差。
+    //
+    // 换 ExoPlayer 之后，位置回调的频率从每 50~200ms 掉到每 500ms 一次，
+    // 而弹幕是靠「位置差」推进的 —— 于是每 500ms 才动一下，
+    // 肉眼就是「一帧一帧、卡死」。
+    //
+    // 现在：位移用 ticker 的真实帧间隔（跟屏幕刷新率一致，60/120fps），
+    // 播放器位置只用来对齐时钟（发射时机 / 检测 seek）。
+    final frameDt = elapsed - _lastElapsed;
+    _lastElapsed = elapsed;
+
     final pos = widget.positionListenable?.value ?? widget.position;
-    var dt = pos - _lastPos;
+    final posDelta = pos - _lastPos;
     _lastPos = pos;
-    if (dt.isNegative || dt > const Duration(seconds: 2)) {
+    if (posDelta.isNegative || posDelta > const Duration(seconds: 2)) {
       _seekTo(pos);
       return;
+    }
+
+    // 推进时钟：正常按帧间隔走；与播放器位置偏差过大时以播放器为准。
+    var dt = frameDt;
+    if (dt.isNegative || dt > const Duration(milliseconds: 200)) {
+      // 掉帧 / 后台回来：这一帧别按超大 dt 推进，直接跟播放器对齐
+      dt = posDelta.isNegative ? Duration.zero : posDelta;
+    }
+    final drift = (_clock + frameDt) - pos;
+    if (drift.abs() > const Duration(milliseconds: 600)) {
+      dt = posDelta.isNegative ? Duration.zero : posDelta;
     }
     _clock += dt;
 

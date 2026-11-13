@@ -247,13 +247,16 @@ class FxPlayer implements Listenable {
     unawaited(_engine.init());
     // STATE_POLL（2026-11-14）：不能只等 EventChannel 的事件。
     //
+    // 250ms：弹幕已经改成按帧间隔推进，但进度条还是吃这个位置回调，
+    // 500ms 会让进度条一跳一跳，250ms 看起来就顺了。
+    //
     // 实测症状：画面已经出来了（ExoPlayer 在播），但 Dart 侧状态一直是
     // 初始值（buffering=true / position=0）——
     //   · UI 上「缓冲中」永远不消失
     //   · open() 等不到首帧，30 秒后判失败，用户看到「线路播不出来」
     // 原因就是事件没送达漏了。这里加 500ms 轮询兜底，
     // 直接调内核的 state 方法取快照，事件通道只当加速用。
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
       if (_disposed) return;
       unawaited(_engine.poll());
     });
