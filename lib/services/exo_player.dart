@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -242,11 +243,12 @@ class ExoPlayerView extends StatelessWidget {
           ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
           ..create();
       },
-      // hitTestBehavior 用默认值（opaque）：显式引用
-      // PlatformViewHitTestBehavior 在部分 Flutter 版本里不可见。
+      // hitTestBehavior 是必填参数；枚举定义在 rendering 库，
+      // widgets.dart 不会把它重新导出，所以要显式 import。
       surfaceFactory: (context, controller) => AndroidViewSurface(
         controller: controller as AndroidViewController,
         gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
+        hitTestBehavior: PlatformViewHitTestBehavior.opaque,
       ),
     );
   }
