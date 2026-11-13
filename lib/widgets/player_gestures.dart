@@ -24,6 +24,7 @@ class FxPlayerGestures extends StatefulWidget {
     required this.player,
     required this.onTap,
     required this.onDoubleTap,
+    this.onDoubleTapZone,
     required this.onSeek,
     this.onLongPressStart,
     this.onLongPressEnd,
@@ -37,6 +38,12 @@ class FxPlayerGestures extends StatefulWidget {
   final FxPlayer player;
   final VoidCallback onTap;
   final VoidCallback onDoubleTap;
+
+  /// 双击分区的回调（参数是横向位置占比 0~1）。
+  ///
+  /// 腾讯 / 爱奇艺的做法：双击左三分之一后退、右三分之一快进，
+  /// 中间仍然是暂停/播放。传了这个就不再走 [onDoubleTap]。
+  final ValueChanged<double>? onDoubleTapZone;
   final ValueChanged<Duration> onSeek;
 
   /// 长按倍速：仅在需要该能力的页面（全屏）传入，竖屏不传。
@@ -330,6 +337,15 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
     final last = _lastTapAt;
     if (last != null && now.difference(last) < kPlayerDoubleTapWindow) {
       _lastTapAt = null;
+      final zone = widget.onDoubleTapZone;
+      if (zone != null) {
+        final w = context.size?.width ?? 0;
+        final frac = w > 0
+            ? (details.localPosition.dx / w).clamp(0.0, 1.0)
+            : 0.5;
+        zone(frac);
+        return;
+      }
       widget.onDoubleTap();
       _flash(_playing ? Icons.pause_rounded : Icons.play_arrow_rounded);
       return;

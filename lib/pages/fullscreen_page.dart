@@ -1971,6 +1971,20 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                     enabled: !_error,
                     onTap: _onSurfaceTap,
                     onDoubleTap: _togglePlay,
+                    // 双击分区：左后退 10 秒 / 右快进 10 秒 / 中间暂停。
+                    onDoubleTapZone: (f) {
+                      if (_isLive) {
+                        _togglePlay();
+                        return;
+                      }
+                      if (f < 0.35) {
+                        _seekBy(-10);
+                      } else if (f > 0.65) {
+                        _seekBy(10);
+                      } else {
+                        _togglePlay();
+                      }
+                    },
                     onSeek: _seekTo,
                     enableSeek: !_isLive,
                     onLongPressStart: _isLive ? null : _startHold2x,
