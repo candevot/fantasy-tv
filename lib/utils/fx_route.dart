@@ -92,6 +92,56 @@ class FxFadeScaleRoute<T> extends PageRouteBuilder<T> {
         );
 }
 
+
+/// 全屏播放器专用转场：小窗从顶部「铺开」成整屏，退出时收回。
+///
+/// PLAYER_FS_ANIM（2026-11-14）：用户要腾讯 / 爱奇艺那种横竖屏切换动画。
+/// 原来只有「淡入 + 放大 2%」，观感是画面凭空闪一下，没有「从竖屏那块
+/// 小窗长到全屏」的空间感。
+///
+/// 现在的做法（进入）：
+///   · 背景快速压黑（120ms），先把注意力收到画面上
+///   · 视频层从 0.55 倍、顶部居中对齐，放大到 1 倍铺满（300ms easeOutCubic）
+///   · 同时淡入，避免放大过程中露出底下的列表
+/// 退出完全反向，看起来就是「收回到竖屏那块小窗」。
+///
+/// 为什么对齐点用 topCenter：竖屏时视频就在页面顶部，从这里长出去
+/// 和真实位置一致；对齐中心反而会像从屏幕中间凭空出现。
+class FxFullscreenRoute<T> extends PageRouteBuilder<T> {
+  FxFullscreenRoute({
+    required WidgetBuilder builder,
+    super.settings,
+    Duration duration = const Duration(milliseconds: 300),
+  }) : super(
+          transitionDuration: duration,
+          reverseTransitionDuration: duration,
+          opaque: false,
+          barrierColor: Colors.black,
+          pageBuilder: (context, animation, secondaryAnimation) =>
+              builder(context),
+          transitionsBuilder:
+              (context, animation, secondaryAnimation, child) {
+            final a = CurvedAnimation(
+              parent: animation,
+              curve: Curves.easeOutCubic,
+              reverseCurve: Curves.easeInCubic,
+            );
+            return FadeTransition(
+              opacity: a,
+              child: AnimatedBuilder(
+                animation: a,
+                builder: (context, inner) => Transform.scale(
+                  alignment: Alignment.topCenter,
+                  scale: 0.55 + 0.45 * a.value,
+                  child: inner,
+                ),
+                child: child,
+              ),
+            );
+          },
+        );
+}
+
 /// 全局 `PageTransitionsTheme`：让所有没用 [FxPageRoute] 的地方
 /// （第三方页面、系统弹层等）也走同一套曲线，避免风格割裂。
 const fxPageTransitionsTheme = PageTransitionsTheme(

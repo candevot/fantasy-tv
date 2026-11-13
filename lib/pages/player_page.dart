@@ -1510,7 +1510,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       result = await Navigator.of(context).push<FullPlayerResult>(
         // 进全屏用「淡入 + 放大 2%」而不是横向推：
         // 视频画面横向滑动会让人以为画面在动。
-        FxFadeScaleRoute<FullPlayerResult>(
+        FxFullscreenRoute<FullPlayerResult>(
           builder: (context) => FullPlayerPage(
             player: c,
             videoId: widget.videoId,

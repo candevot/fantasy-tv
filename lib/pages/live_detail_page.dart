@@ -444,7 +444,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     _hideTimer?.cancel();
     final line = _line;
     await Navigator.of(context).push<FullPlayerResult>(
-      FxPageRoute(
+      // 直播进全屏同样用「小窗铺开」转场，和点播保持一致。
+      FxFullscreenRoute<FullPlayerResult>(
         builder: (_) => FullPlayerPage(
           player: player,
           title: _channel.title,
