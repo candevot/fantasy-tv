@@ -1,9 +1,11 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../services/app_settings.dart';
 import '../services/download_service.dart';
 import '../services/download_storage.dart';
 import '../services/network_status.dart';
+import '../services/storage_access.dart';
 import '../theme.dart';
 import 'category_page.dart';
 
@@ -68,26 +70,75 @@ class _DownloadSettingsPageState extends State<DownloadSettingsPage> {
 
   Future<void> _pickLocation() async {
     if (_switching) return;
-    final selected = await showModalBottomSheet<DownloadLocation>(
+    final action = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (ctx) => _LocationSheet(current: _downloads.location),
+      builder: (ctx) => _LocationSheet(
+        currentPath: _downloads.displayRootPath,
+        usingDefault: _downloads.customRoot == null,
+      ),
     );
-    if (selected == null || !mounted || selected == _downloads.location) return;
+    if (action == null || !mounted) return;
+
+    if (action == 'default') {
+      // 默认目录在公共 Download，Android 11+ 需要「所有文件访问」。
+      if (!await _ensureStorageAccess(
+        DownloadStorage.publicRootPath,
+      )) {
+        return;
+      }
+      if (!mounted) return;
+      setState(() => _switching = true);
+      try {
+        await _downloads.setCustomRoot(null);
+        if (mounted) _toast('已恢复默认：Download/幻想影视');
+      } catch (_) {
+        if (mounted) _toast('切换下载目录失败，请稍后重试');
+      } finally {
+        if (mounted) setState(() => _switching = false);
+      }
+      return;
+    }
+
+    // 调系统文件管理器选目录
+    String? picked;
+    try {
+      picked = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '选择缓存目录',
+      );
+    } catch (_) {
+      picked = null;
+    }
+    if (picked == null || picked.trim().isEmpty || !mounted) return;
+    if (!await _ensureStorageAccess(picked)) return;
+    if (!mounted) return;
     setState(() => _switching = true);
     try {
-      await _downloads.setLocation(selected);
+      await _downloads.setCustomRoot(picked);
       if (!mounted) return;
       final fallback = _downloads.storageFallback;
       _toast(fallback
-          ? '已切换，但系统限制写入公共目录，已使用应用专属目录'
-          : '下载目录已切换为「${selected.label}」');
+          ? '该目录不可写，已回退到 ${_downloads.displayRootPath}'
+          : '缓存目录已改为 ${_downloads.displayRootPath}');
     } catch (_) {
       if (mounted) _toast('切换下载目录失败，请稍后重试');
     } finally {
       if (mounted) setState(() => _switching = false);
     }
+  }
+
+  /// 公共目录写入需要「所有文件访问」；没开就跳到系统授权页并提示。
+  ///
+  /// 返回 true = 可以继续；false = 已经把用户送去授权，这次先不切目录。
+  Future<bool> _ensureStorageAccess(String path) async {
+    if (!StorageAccess.needsManager(path)) return true;
+    if (await StorageAccess.isManager()) return true;
+    await StorageAccess.requestManager();
+    if (mounted) {
+      _toast('请在「所有文件访问」里允许本应用，然后重新选择目录');
+    }
+    return false;
   }
 
   Future<void> _refreshUsage() async {
@@ -520,9 +571,16 @@ class _SectionTitle extends StatelessWidget {
 }
 
 class _LocationSheet extends StatelessWidget {
-  const _LocationSheet({required this.current});
+  const _LocationSheet({
+    required this.currentPath,
+    required this.usingDefault,
+  });
 
-  final DownloadLocation current;
+  /// 当前实际使用的缓存根目录（已转成「手机存储/...」这种可读形式）。
+  final String currentPath;
+
+  /// 是否在用默认目录（默认时「恢复默认」置灰）。
+  final bool usingDefault;
 
   @override
   Widget build(BuildContext context) {
@@ -550,92 +608,97 @@ class _LocationSheet extends StatelessWidget {
               ),
             ),
             const Text(
-              '选择下载目录',
+              '下载目录',
               style: TextStyle(
                 fontSize: 16.5,
                 fontWeight: FontWeight.w700,
                 color: Fx.ink,
               ),
             ),
-            const SizedBox(height: 12),
-            for (final location in DownloadLocation.values) ...[
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.pop(context, location),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 13,
-                  ),
-                  decoration: BoxDecoration(
-                    color: current == location
-                        ? Fx.accent.withValues(alpha: .07)
-                        : Colors.white.withValues(alpha: .72),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: current == location
-                          ? Fx.accent.withValues(alpha: .45)
-                          : Colors.white,
+            const SizedBox(height: 6),
+            Text(
+              '当前：$currentPath',
+              style: const TextStyle(fontSize: 11, height: 1.5, color: Fx.sub),
+            ),
+            const SizedBox(height: 14),
+            _row(
+              context,
+              icon: Icons.folder_open_rounded,
+              title: '选择目录',
+              subtitle: '打开系统文件管理器挑一个位置',
+              value: 'pick',
+            ),
+            const SizedBox(height: 10),
+            _row(
+              context,
+              icon: Icons.restart_alt_rounded,
+              title: '恢复默认',
+              subtitle: 'Download/幻想影视',
+              value: usingDefault ? null : 'default',
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '缓存结构：幻想影视/剧名/剧集',
+              style: TextStyle(fontSize: 10.5, color: Color(0xFFA6B1C2)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _row(
+    BuildContext context, {
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required String? value,
+  }) {
+    final enabled = value != null;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: enabled ? () => Navigator.pop(context, value) : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        decoration: BoxDecoration(
+          color: enabled
+              ? Colors.white.withValues(alpha: .72)
+              : Colors.white.withValues(alpha: .38),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white),
+        ),
+        child: Row(
+          children: [
+            Icon(icon,
+                size: 20, color: enabled ? Fx.accent : const Color(0xFFB6C0CD)),
+            const SizedBox(width: 11),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: enabled ? Fx.ink : const Color(0xFFB6C0CD),
                     ),
                   ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        location == DownloadLocation.phone
-                            ? Icons.smartphone_rounded
-                            : Icons.lock_outline_rounded,
-                        size: 20,
-                        color: current == location ? Fx.accent : Fx.sub,
-                      ),
-                      const SizedBox(width: 11),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              location.label,
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: current == location ? Fx.accent : Fx.ink,
-                              ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              location.description,
-                              style: const TextStyle(
-                                fontSize: 10.5,
-                                height: 1.45,
-                                color: Fx.sub,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Icon(
-                        current == location
-                            ? Icons.check_circle_rounded
-                            : Icons.radio_button_unchecked_rounded,
-                        size: 19,
-                        color: current == location
-                            ? Fx.accent
-                            : const Color(0xFFC3CDDA),
-                      ),
-                    ],
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(
+                      fontSize: 10.5,
+                      height: 1.45,
+                      color: Fx.sub,
+                    ),
                   ),
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-            const SizedBox(height: 4),
-            const Text(
-              '「手机存储」会优先写入 手机存储/Download/幻想影视；Android 10 及以上若系统不允许写入公共目录，会自动改为应用专属外部目录。',
-              style: TextStyle(
-                fontSize: 10,
-                height: 1.6,
-                color: Color(0xFFA6B1C2),
+                ],
               ),
             ),
+            Icon(Icons.chevron_right_rounded,
+                size: 18,
+                color: enabled ? Fx.sub : const Color(0xFFD6DEE9)),
           ],
         ),
       ),

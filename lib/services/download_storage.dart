@@ -5,31 +5,34 @@ import 'package:path_provider/path_provider.dart';
 
 /// 离线缓存目录位置。
 ///
-/// - [phone]：优先公共下载目录 `手机存储/Download/幻想影视`；系统限制写入时
-///   自动退回应用专属外部目录（`Android/data/<包名>/files/Download/幻想影视`）。
-/// - [appPrivate]：应用私有目录，卸载 App 后随应用一起删除。
-enum DownloadLocation { phone, appPrivate }
+/// DOWNLOAD_DIR（2026-11-14 用户要求）：
+///   · 去掉「应用私有」这个选项 —— 用户要能在文件管理器里直接看到缓存
+///   · 默认落在 `手机存储/Download/幻想影视`
+///   · 允许自己选目录（系统文件管理器），选中后仍然套一层 `幻想影视`
+///
+/// 缓存结构统一为 `<根目录>/幻想影视/<剧名>/<剧集>`。
+enum DownloadLocation { phone, custom }
 
 extension DownloadLocationText on DownloadLocation {
   String get key => switch (this) {
         DownloadLocation.phone => 'phone',
-        DownloadLocation.appPrivate => 'app_private',
+        DownloadLocation.custom => 'custom',
       };
 
   String get label => switch (this) {
         DownloadLocation.phone => '手机存储',
-        DownloadLocation.appPrivate => '应用私有',
+        DownloadLocation.custom => '自定义目录',
       };
 
   String get description => switch (this) {
         DownloadLocation.phone => 'Download/幻想影视，文件管理器可直接找到',
-        DownloadLocation.appPrivate => '仅本应用可访问，卸载后自动清理',
+        DownloadLocation.custom => '自己选位置，同样会建「幻想影视」子目录',
       };
 }
 
 DownloadLocation downloadLocationFromKey(String? key) {
-  return key == DownloadLocation.appPrivate.key
-      ? DownloadLocation.appPrivate
+  return key == DownloadLocation.custom.key
+      ? DownloadLocation.custom
       : DownloadLocation.phone;
 }
 
@@ -88,48 +91,62 @@ class DownloadStorage {
     }
   }
 
+  /// 默认基目录：公共下载目录。
+  static const String defaultBasePath = '/storage/emulated/0/Download';
+
   /// 解析当前设置对应的真实目录，并确保目录可写。
-  static Future<DownloadStorageInfo> resolve(DownloadLocation location) async {
-    if (location == DownloadLocation.phone) {
-      final publicDir = Directory(publicRootPath);
-      if (await _ensureWritable(publicDir)) {
-        return const DownloadStorageInfo(
-          path: publicRootPath,
-          location: DownloadLocation.phone,
-          isPublic: true,
+  ///
+  /// [customBase] 是用户自选的基目录；真正的缓存根永远是
+  /// `<基目录>/幻想影视`，保证文件管理器里一眼能认出来。
+  static Future<DownloadStorageInfo> resolve(
+    DownloadLocation location, {
+    String? customBase,
+  }) async {
+    // 1) 自定义目录优先：用户自己选的基目录 + 「幻想影视」
+    if (location == DownloadLocation.custom &&
+        customBase != null &&
+        customBase.trim().isNotEmpty) {
+      final base = customBase.trim();
+      final root = base.endsWith('/$folderName') ? base : '$base/$folderName';
+      if (await _ensureWritable(Directory(root))) {
+        return DownloadStorageInfo(
+          path: root,
+          location: DownloadLocation.custom,
+          isPublic: base.startsWith('/storage/emulated/0/'),
           fallback: false,
         );
       }
-      final external = await _appExternalPath();
-      if (external != null) {
-        final dir = Directory(external);
-        if (await _ensureWritable(dir)) {
-          return DownloadStorageInfo(
-            path: dir.path,
-            location: DownloadLocation.phone,
-            isPublic: false,
-            fallback: true,
-          );
-        }
-      }
-      // 极端情况下（外部存储不可用）退回应用私有目录，至少保证可下载。
-      final private = Directory(await _privatePath());
-      await _ensureWritable(private);
-      return DownloadStorageInfo(
-        path: private.path,
+    }
+
+    // 2) 公共下载目录（默认；自定义目录不可写时也回落到这里）
+    if (await _ensureWritable(Directory(publicRootPath))) {
+      return const DownloadStorageInfo(
+        path: publicRootPath,
         location: DownloadLocation.phone,
+        isPublic: true,
+        fallback: false,
+      );
+    }
+
+    // 3) 应用专属外部目录：分区存储不让写公共 Download 时用这个
+    final external = await _appExternalPath();
+    if (external != null && await _ensureWritable(Directory(external))) {
+      return DownloadStorageInfo(
+        path: external,
+        location: location,
         isPublic: false,
         fallback: true,
       );
     }
 
+    // 4) 最后兜底：应用私有目录，至少保证能下载
     final private = Directory(await _privatePath());
     await _ensureWritable(private);
     return DownloadStorageInfo(
       path: private.path,
-      location: DownloadLocation.appPrivate,
+      location: location,
       isPublic: false,
-      fallback: false,
+      fallback: true,
     );
   }
 

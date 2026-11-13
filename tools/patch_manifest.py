@@ -40,6 +40,10 @@ LABEL = '幻想影视'
 ICON_ATTR = A + 'icon'
 INTERNET = 'android.permission.INTERNET'
 STORAGE = 'android.permission.WRITE_EXTERNAL_STORAGE'
+# ANDROID11_STORAGE（2026-11-14）：默认缓存目录改到 手机存储/Download/幻想影视，
+# Android 11+ 直接写公共目录需要「所有文件访问」；用户在设置页授权后生效，
+# 没授权会自动回退到应用专属目录。
+MANAGE_STORAGE = 'android.permission.MANAGE_EXTERNAL_STORAGE'
 STORAGE_MAX_SDK = '28'
 # DLNA/SSDP 投屏：读 WiFi 状态 + 使用组播（MulticastLock 在 MainActivity
 # 的 fantasy_tv/cast 通道里按需申请，二者都是 normal 权限，安装即授予）。
@@ -181,6 +185,8 @@ def patch(root):
         notes.append('ACCESS_WIFI_STATE %s' % what)
     for what in ensure_permission(root, MULTICAST):
         notes.append('CHANGE_WIFI_MULTICAST_STATE %s' % what)
+    for what in ensure_permission(root, MANAGE_STORAGE):
+        notes.append('MANAGE_EXTERNAL_STORAGE %s' % what)
     for what in ensure_permission(root, INSTALL):
         notes.append('REQUEST_INSTALL_PACKAGES %s' % what)
 

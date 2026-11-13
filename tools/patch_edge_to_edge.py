@@ -76,6 +76,52 @@ ORIENTATION_FUNC = '''
 ORIENTATION_CALL = '''
         registerOrientationChannel(flutterEngine)'''
 
+STORAGE_FUNC = """
+    // 「所有文件访问」：Android 11+ 直接写公共 Download 目录必须这个权限，
+    // 否则只能落到 Android/data/<包名>/… 里，文件管理器看不到。
+    // 设置里没开时，下载会自动回退到应用专属目录（设置页会提示）。
+    private fun registerStorageChannel(
+        flutterEngine: io.flutter.embedding.engine.FlutterEngine
+    ) {
+        io.flutter.plugin.common.MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fantasy_tv/storage"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isManager" -> {
+                    val ok = if (android.os.Build.VERSION.SDK_INT >= 30) {
+                        android.os.Environment.isExternalStorageManager()
+                    } else true
+                    result.success(ok)
+                }
+                "requestManager" -> {
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= 30 &&
+                            !android.os.Environment.isExternalStorageManager()
+                        ) {
+                            startActivity(
+                                android.content.Intent(
+                                    android.provider.Settings
+                                        .ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                    android.net.Uri.parse("package:" + packageName)
+                                )
+                            )
+                        }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("storage", e.message, null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+"""
+
+STORAGE_CALL = """
+        registerStorageChannel(flutterEngine)"""
+
 CAST_BLOCK = '''
     private var castMulticastLock: android.net.wifi.WifiManager.MulticastLock? = null
 
@@ -224,6 +270,27 @@ def patch_orientation(kt: str):
     return kt, True
 
 
+
+
+def patch_storage_access(kt: str):
+    """在 MainActivity 里加「所有文件访问」通道；已存在则不动。"""
+    if 'fantasy_tv/storage' in kt:
+        return kt, False
+    pattern = re.compile(
+        r'class\s+MainActivity\s*:\s*FlutterActivity\(\)\s*\{')
+    match = pattern.search(kt)
+    if not match:
+        return kt, False
+    kt = kt[:match.end()] + STORAGE_FUNC + kt[match.end():]
+    hook = 'super.configureFlutterEngine(flutterEngine)'
+    index = kt.find(hook)
+    if index < 0:
+        return kt, False
+    insert_at = index + len(hook)
+    kt = kt[:insert_at] + '\n' + STORAGE_CALL + kt[insert_at:]
+    return kt, True
+
+
 def main() -> int:
     styles = io.open(STYLE, encoding='utf-8').read()
     if 'windowLightNavigationBar' not in styles:
@@ -275,6 +342,11 @@ def main() -> int:
         print('cannot patch DLNA multicast lock channel in %s' % activity,
               file=sys.stderr)
         return 1
+    kt, storage_patched = patch_storage_access(kt)
+    if 'fantasy_tv/storage' not in kt:
+        print('cannot patch storage access channel in %s' % activity,
+              file=sys.stderr)
+        return 1
     kt, orient_patched = patch_orientation(kt)
     if 'fantasy_tv/orientation' not in kt:
         print('cannot patch orientation channel in %s' % activity,
@@ -285,7 +357,7 @@ def main() -> int:
               file=sys.stderr)
         return 1
     io.open(activity, 'w', encoding='utf-8').write(kt)
-    if edge_patched or cast_patched or orient_patched:
+    if edge_patched or cast_patched or orient_patched or storage_patched:
         print('patched %s' % activity)
     else:
         print('keep %s' % activity)

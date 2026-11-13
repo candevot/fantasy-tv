@@ -45,6 +45,7 @@ class AppSettings extends ChangeNotifier {
 
   static const String _kWifiOnlyDownload = 'fx_settings_wifi_only_download';
   static const String _kDownloadLocation = 'fx_settings_download_location';
+  static const String _kDownloadCustomRoot = 'fx_settings_download_custom_root';
   static const String _kDownloadConcurrency =
       'fx_settings_download_concurrency';
 
@@ -147,6 +148,11 @@ class AppSettings extends ChangeNotifier {
   int _sleepEndsAt = 0;
   bool _wifiOnlyDownload = defaultWifiOnlyDownload;
   DownloadLocation _downloadLocation = DownloadLocation.phone;
+
+  /// 用户自选的下载基目录（真正写入 `<它>/幻想影视`）；null = 用默认 Download。
+  String? _downloadCustomRoot;
+
+  String? get downloadCustomRoot => _downloadCustomRoot;
   int _downloadConcurrency = defaultDownloadConcurrency;
 
   bool _ready = false;
@@ -200,6 +206,8 @@ class AppSettings extends ChangeNotifier {
       _downloadLocation = downloadLocationFromKey(
         sp.getString(_kDownloadLocation),
       );
+      final custom = sp.getString(_kDownloadCustomRoot)?.trim();
+      _downloadCustomRoot = (custom == null || custom.isEmpty) ? null : custom;
       _downloadConcurrency = _validConcurrency(
         sp.getInt(_kDownloadConcurrency),
       );
@@ -291,6 +299,19 @@ class AppSettings extends ChangeNotifier {
     await _saveBool(_kWifiOnlyDownload, value);
   }
 
+  Future<void> setDownloadCustomRoot(String? value) async {
+    final next = value?.trim();
+    final normalized = (next == null || next.isEmpty) ? null : next;
+    if (_downloadCustomRoot == normalized) return;
+    _downloadCustomRoot = normalized;
+    notifyListeners();
+    if (normalized == null) {
+      await _remove(_kDownloadCustomRoot);
+    } else {
+      await _saveString(_kDownloadCustomRoot, normalized);
+    }
+  }
+
   Future<void> setDownloadLocation(DownloadLocation value) async {
     if (_downloadLocation == value) return;
     _downloadLocation = value;
@@ -312,6 +333,15 @@ class AppSettings extends ChangeNotifier {
       await sp.setBool(key, value);
     } catch (e) {
       debugPrint('AppSettings: save $key failed: $e');
+    }
+  }
+
+  Future<void> _remove(String key) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.remove(key);
+    } catch (e) {
+      debugPrint('AppSettings: remove $key failed: $e');
     }
   }
 

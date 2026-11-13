@@ -356,6 +356,12 @@ class DownloadService extends ChangeNotifier {
   AppLifecycleState? _lifecycle;
 
   DownloadLocation _location = DownloadLocation.phone;
+
+  /// 用户自选的下载基目录；null = 默认公共 Download。
+  String? _customRoot;
+
+  /// 当前自定义基目录（设置页展示用）。
+  String? get customRoot => _customRoot;
   DownloadStorageInfo? _storageInfo;
   Directory? _rootDirCache;
   int _usedBytes = 0;
@@ -402,7 +408,8 @@ class DownloadService extends ChangeNotifier {
     try {
       await AppSettings.instance.init();
       _location = AppSettings.instance.downloadLocation;
-      _storageInfo = await DownloadStorage.resolve(_location);
+      _customRoot = AppSettings.instance.downloadCustomRoot;
+      _storageInfo = await DownloadStorage.resolve(_location, customBase: _customRoot);
       final sp = await SharedPreferences.getInstance();
       final raw = sp.getString(queuePrefsKey);
       if (raw != null && raw.trim().isNotEmpty) {
@@ -485,7 +492,31 @@ class DownloadService extends ChangeNotifier {
     _rootDirCache = null;
     _storageInfo = null;
     await AppSettings.instance.setDownloadLocation(value);
-    _storageInfo = await DownloadStorage.resolve(value);
+    _storageInfo = await DownloadStorage.resolve(value, customBase: _customRoot);
+    await _rootDir();
+    _notifyNow();
+    await refreshUsage();
+  }
+
+  /// 设置自定义下载目录（[path] 为 null 时恢复默认 Download）。
+  ///
+  /// 真正的缓存根永远是 `<path>/幻想影视`，所以用户选 Download 得到的是
+  /// Download/幻想影视，选别的目录就是 <那个目录>/幻想影视。
+  Future<void> setCustomRoot(String? path) async {
+    await init();
+    final normalized = (path == null || path.trim().isEmpty) ? null : path.trim();
+    _customRoot = normalized;
+    _location = normalized == null
+        ? DownloadLocation.phone
+        : DownloadLocation.custom;
+    _rootDirCache = null;
+    _storageInfo = null;
+    await AppSettings.instance.setDownloadCustomRoot(normalized);
+    await AppSettings.instance.setDownloadLocation(_location);
+    _storageInfo = await DownloadStorage.resolve(
+      _location,
+      customBase: _customRoot,
+    );
     await _rootDir();
     _notifyNow();
     await refreshUsage();
@@ -933,7 +964,7 @@ class DownloadService extends ChangeNotifier {
     // 删除所有已知缓存目录里的残留（包括下载中断留下的分片目录）。
     await DownloadStorage.clearAllCaches();
     _rootDirCache = null;
-    _storageInfo = await DownloadStorage.resolve(_location);
+    _storageInfo = await DownloadStorage.resolve(_location, customBase: _customRoot);
     await _rootDir();
     await refreshUsage();
   }
@@ -2341,7 +2372,7 @@ class DownloadService extends ChangeNotifier {
   Future<Directory> _rootDir() async {
     final cached = _rootDirCache;
     if (cached != null) return cached;
-    _storageInfo ??= await DownloadStorage.resolve(_location);
+    _storageInfo ??= await DownloadStorage.resolve(_location, customBase: _customRoot);
     final dir = Directory(_storageInfo!.path);
     if (!await dir.exists()) {
       await dir.create(recursive: true);
