@@ -31,7 +31,7 @@ dependencies:
   image: ^4.2.0
   path_provider: '>=2.1.4 <3.0.0'
   # DOWNLOAD_DIR（2026-11-14）：调用系统文件管理器选缓存目录
-  file_picker: '>=8.1.2 <11.0.0'
+  file_picker: '>=13.3.0 <14.0.0'
   # 读取 Android 真实 versionName / versionCode（设置页、关于页、检查更新）。
   # 播放器顶栏电量显示
   battery_plus: ^7.1.2

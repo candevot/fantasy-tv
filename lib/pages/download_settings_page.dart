@@ -104,7 +104,8 @@ class _DownloadSettingsPageState extends State<DownloadSettingsPage> {
     // 调系统文件管理器选目录
     String? picked;
     try {
-      picked = await FilePicker.platform.getDirectoryPath(
+      // file_picker 13.x 起是静态方法（没有 .platform 了）
+      picked = await FilePicker.getDirectoryPath(
         dialogTitle: '选择缓存目录',
       );
     } catch (_) {
