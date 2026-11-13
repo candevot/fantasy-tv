@@ -303,6 +303,9 @@ class FxPlayer implements Listenable {
   bool _disposed = false;
   bool _playIntent = false;
   int _decodeErrorSerial = 0;
+
+  /// 上一次已经处理过的内核错误文案（去重用，open 时清空）。
+  String _lastHandledError = '';
   int _openToken = 0;
 
   /// 画面层代际：每次真正 open（含救援链重开）都 +1。
@@ -395,9 +398,19 @@ class FxPlayer implements Listenable {
     BoxFit fit = BoxFit.contain,
     Alignment alignment = Alignment.center,
   }) {
+    // BoxFit → Media3 的缩放模式。不映射的话 PlayerView 永远按 FIT 缩放，
+    // 「铺满」「拉伸」两个档位会失效。
+    final mode = switch (fit) {
+      BoxFit.cover => exoResizeZoom,
+      BoxFit.fill => exoResizeFill,
+      _ => exoResizeFit,
+    };
     return ColoredBox(
       color: Colors.black,
-      child: ExoPlayerView(key: ValueKey<int>(_renderEpoch)),
+      child: ExoPlayerView(
+        key: ValueKey<String>('$_renderEpoch-$mode'),
+        resizeMode: mode,
+      ),
     );
   }
 
@@ -471,6 +484,7 @@ class FxPlayer implements Listenable {
     _lastFlowState = -1;
     _lastBufferedMs = -1;
     _lastSpeedAt = DateTime.now();
+    _lastHandledError = '';
     _value = const FxPlayerValue();
     _notify();
     _sourceUrl = url;
@@ -636,6 +650,9 @@ class FxPlayer implements Listenable {
     if (!ok) {
       throw FxPlayerException(_engine.error ?? '播放器打开失败');
     }
+    // 内核在 open 时会把 lastError 清空，Dart 侧的去重标记也要跟着清，
+    // 否则救援重开之后同类错误会被当成「已处理过」而漏掉。
+    _lastHandledError = '';
     if (play) {
       await _engine.play();
     }
@@ -834,6 +851,13 @@ class FxPlayer implements Listenable {
         next.duration != _value.duration ||
         next.width != _value.width;
     _value = next;
+    // 首帧 / 时长就绪就立刻放行 open，不能等 _setValue ——
+    // 这条路径不走 _setValue，之前漏了这一步，结果每次 open 都要
+    // 干等到 30 秒停摆门槛或 2 分钟硬上限才返回（表现出来就是「加载很慢」）。
+    if (next.isInitialized) {
+      final ready = _ready;
+      if (ready != null && !ready.isCompleted) ready.complete();
+    }
     if (secondChanged || stateChanged) {
       _emitStreams(next);
       _notify();
@@ -894,6 +918,10 @@ class FxPlayer implements Listenable {
       _logFx('忽略取消事件(cancelled 不算失败): $message');
       return;
     }
+    // 内核把 lastError 一直带在每次状态快照里（只在 open 时清空），
+    // 不去重的话同一个错误会反复触发救援链，3 轮之后误报「线路不稳定」。
+    if (message == _lastHandledError) return;
+    _lastHandledError = message;
     if (_value.errorText == message) return;
     _decodeErrorSerial++;
     final mediaReady = _mediaReady;

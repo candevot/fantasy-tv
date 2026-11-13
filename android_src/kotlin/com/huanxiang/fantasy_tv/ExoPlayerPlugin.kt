@@ -228,6 +228,10 @@ class ExoView(context: Context, messenger: BinaryMessenger, id: Int, params: Any
     init {
         val plugin = ExoPluginHolder.get(messenger)
         pv = plugin?.createView() ?: PlayerView(context)
+        // 画面比例档位（适应 / 铺满 / 拉伸）由 Flutter 侧通过 creationParams 传进来。
+        // 不传这个的话 PlayerView 永远按 FIT 缩放，"铺满"档位会失效。
+        val mode = (params as? Map<*, *>)?.get("resizeMode") as? Int
+        if (mode != null) pv.resizeMode = mode
     }
 
     override fun getView(): View = pv

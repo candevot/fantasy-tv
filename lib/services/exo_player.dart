@@ -210,7 +210,11 @@ class ExoPlayerState {
 /// 只在 [ExoPlayerEngine.isSupported] 时可用；其它平台返回占位。
 /// PlayerView 的 useController 是 false，控制层全部由我们自绘。
 class ExoPlayerView extends StatelessWidget {
-  const ExoPlayerView({super.key});
+  const ExoPlayerView({super.key, this.resizeMode = exoResizeFit});
+
+  /// Media3 AspectRatioFrameLayout 的缩放模式：
+  /// 0=FIT(适应) 3=FILL(拉伸) 4=ZOOM(铺满裁切)。
+  final int resizeMode;
 
   @override
   Widget build(BuildContext context) {
@@ -219,9 +223,17 @@ class ExoPlayerView extends StatelessWidget {
     }
     return AndroidView(
       viewType: ExoPlayerEngine.viewType,
-      // PlayerView 自己处理比例，这里铺满由 RESIZE_MODE_FIT 决定
-      creationParams: const <String, dynamic>{},
+      creationParams: <String, dynamic>{'resizeMode': resizeMode},
       creationParamsCodec: const StandardMessageCodec(),
     );
   }
 }
+
+/// AspectRatioFrameLayout.RESIZE_MODE_FIT
+const int exoResizeFit = 0;
+
+/// AspectRatioFrameLayout.RESIZE_MODE_FILL
+const int exoResizeFill = 3;
+
+/// AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+const int exoResizeZoom = 4;

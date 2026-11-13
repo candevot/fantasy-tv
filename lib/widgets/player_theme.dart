@@ -233,9 +233,12 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     // 换成 ExoPlayer 之后没有再「往纹理里写字幕」这回事：硬字幕是画面像素的
     // 一部分，镜像时会跟着翻；独立软字幕轨由 PlayerView 自己渲染。
     // 原来的 mpv sub-visibility / FxMirrorSubtitle 那一套随之去掉。
+    final fit = fxAspectFit(aspect);
+    // key 带上档位：改「铺满 / 适应 / 拉伸」要重建 PlatformView，
+    // 否则 resizeMode 是创建时定的，切档不会有反应。
     final surface = KeyedSubtree(
-      key: ValueKey<int>(_renderEpoch),
-      child: widget.player.buildVideo(fit: fxAspectFit(aspect)),
+      key: ValueKey<String>('$_renderEpoch-${aspect.name}'),
+      child: widget.player.buildVideo(fit: fit),
     );
     final framed = fxAspectFrame(aspect, surface);
     return fxMirrorWrap(mirror, framed);
