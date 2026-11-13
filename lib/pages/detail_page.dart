@@ -51,7 +51,6 @@ class _DetailPageState extends State<DetailPage>
   int _ep = 1;
   String _lineId = '';
   bool _descOpen = false;
-  bool _noticeClosed = false;
   bool _fav = false;
   bool _openingTogether = false;
   bool _openingRelated = false;
@@ -1103,6 +1102,8 @@ class _DetailPageState extends State<DetailPage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // 用户要求：详情页下面这两行公告不再显示
+          // （「欢迎使用幻想影视…」和「温馨提示：本站不存储任何视频资源…」）
           Row(
             children: [
               DetailTabs(
@@ -1112,26 +1113,7 @@ class _DetailPageState extends State<DetailPage>
                     ? '${_comments.length}${_commentsHasMore ? '+' : ''}'
                     : null,
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _noticeClosed
-                    ? const SizedBox.shrink()
-                    : DetailNoticeBar(
-                        text: '欢迎使用幻想影视，全网高清影视免费看～',
-                        onClose: () => setState(() => _noticeClosed = true),
-                      ),
-              ),
             ],
-          ),
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.only(right: 4),
-            child: DetailNoticeBar(
-              text: '温馨提示：本站不存储任何视频资源，请勿轻信视频中的广告与打赏信息。',
-              icon: Icons.verified_user_outlined,
-              bare: true,
-              period: const Duration(seconds: 16),
-            ),
           ),
         ],
       ),
@@ -1184,6 +1166,8 @@ class _DetailPageState extends State<DetailPage>
                         active: line.id == _lineId,
                         // degraded 线路照常展示并可点，只在卡片名后补灰色小字。
                         unstable: line.degraded,
+                        // 量子 / 红牛是免费站，播放前有广告，名字上标出来。
+                        ads: fxLineHasAds(line.displayName),
                         // 切换/重试期间不禁用点击：播放器内部有 _pendingSwitch
                         // 排队机制（记住最后一次选择，当前切换一结束就执行）。
                         // 这里把 onTap 置 null 的话，用户点线路完全没反应，

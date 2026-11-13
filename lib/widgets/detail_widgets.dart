@@ -364,6 +364,15 @@ class DetailActionButton extends StatelessWidget {
 }
 
 /// 横滑线路卡：线路名 + 共 N 集。
+/// 哪些线路会带广告。
+///
+/// 量子和红牛都是免费采集站，播放前会有贴片 / 悬浮广告，
+/// 用户要求在线路名上直接标出来，免得点进去才发现。
+bool fxLineHasAds(String name) {
+  final n = name.trim();
+  return n.contains('量子') || n.contains('红牛');
+}
+
 class DetailLineCard extends StatelessWidget {
   const DetailLineCard({
     super.key,
@@ -373,6 +382,7 @@ class DetailLineCard extends StatelessWidget {
     this.onTap,
     this.subtitle,
     this.unstable = false,
+    this.ads = false,
     this.width = 102,
   });
 
@@ -386,6 +396,9 @@ class DetailLineCard extends StatelessWidget {
 
   /// 服务端标记 degraded 的线路：照常显示、可点，只在卡片名后补灰色小字。
   final bool unstable;
+
+  /// 带广告的免费站线路（量子 / 红牛）：名字后打「广告」标记。
+  final bool ads;
 
   /// 卡片宽度；直播线路文字更长时可适当加宽。
   final double width;
@@ -433,6 +446,15 @@ class DetailLineCard extends StatelessWidget {
                         fontSize: 9.5,
                         fontWeight: FontWeight.w500,
                         color: Fx.sub.withValues(alpha: .85),
+                      ),
+                    ),
+                  if (ads)
+                    TextSpan(
+                      text: ' 广告',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        color: const Color(0xFFE0703A),
                       ),
                     ),
                 ],
