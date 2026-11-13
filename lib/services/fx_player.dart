@@ -254,7 +254,7 @@ class FxPlayer implements Listenable {
       ),
     );
     _bindStreams();
-    unawaited(_setCacheLimits(_startupBufferBytes));
+    unawaited(_setCacheLimits(_startupBufferBytes, readahead: _startupReadaheadSeconds));
     // 长播兜底：每 5 分钟压一次回看缓存，避免长播内存无限涨。
     // 注意不能无条件写回 _steadyBufferBytes —— 那会覆盖首帧后按网速
     // 算出的自适应值（之前就是这样被打回 192MB 的）。
@@ -317,7 +317,16 @@ class FxPlayer implements Listenable {
 
   /// mpv demuxer 预读秒数（demuxer-readahead-secs）：配合 192MiB 缓存，
   /// 网络好时把后续内容尽量读进本地，播放过程不中断。
-  static const String _readaheadSeconds = '120';
+  /// 稳态预读时长。
+  static const String _readaheadSeconds = '20';
+
+  /// 起播预读时长。
+  ///
+  /// STARTUP_READAHEAD（2026-11-13）：这是「点播放要等 20 秒」的真正原因。
+  /// mpv 起播时会把 demuxer-readahead-secs 填满才开始播放。
+  /// 福盈 4K 一片 6 秒 / 5.5MB，原来要 120 秒 → 缓冲 20 片 ≈ 110MB 才出画。
+  /// 现在起播只要 6 秒（1 片），首帧后立刻恢复到 120 秒。
+  static const String _startupReadaheadSeconds = '6';
 
   /// 起播「还在进展」时的最长等待：只要代理层还在往下拉字节，
   /// 就不把这次 open 判成失败。
@@ -860,7 +869,7 @@ class FxPlayer implements Listenable {
     required bool play,
     required int token,
   }) async {
-    await _setCacheLimits(_startupBufferBytes);
+    await _setCacheLimits(_startupBufferBytes, readahead: _startupReadaheadSeconds);
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
     }
@@ -878,7 +887,9 @@ class FxPlayer implements Listenable {
     _notify();
     _lastVideoPts = null;
     _lastVideoAt = DateTime.now();
-    unawaited(_setCacheLimits(_steadyBufferBytes));
+    // 这里也不能用默认的 120 秒预读：open 之后 mpv 立刻开始缓冲，
+    // 预读太长会一直不出画。等首帧到了 _raiseCacheAfterStart 再恢复。
+    unawaited(_setCacheLimits(_steadyBufferBytes, readahead: _startupReadaheadSeconds));
     await opening;
   }
 
@@ -892,13 +903,14 @@ class FxPlayer implements Listenable {
     _cacheRaised = true;
     final throughput = _hlsProxy?.recentThroughput;
     _currentForwardBuffer = _steadyBufferFor(throughput);
-    unawaited(_setCacheLimits(_currentForwardBuffer));
+    // 首帧已经出来了，把预读恢复到 120 秒，长播才有足够前向缓冲。
+    unawaited(_setCacheLimits(_currentForwardBuffer, readahead: _readaheadSeconds));
   }
 
   /// 限制 demuxer 前向 / 回看缓存并固定 60 秒预读（demuxer-readahead-secs，
   /// 4K 高码率 seek / 抖动后不至于瞬间断粮）；mpv 会按新上限回收旧缓存，
   /// 长播时不会因为回看缓存累积而内存无限增长。
-  Future<void> _setCacheLimits(int forwardBytes) async {
+  Future<void> _setCacheLimits(int forwardBytes, {String? readahead}) async {
     if (_disposed) return;
     _currentForwardBuffer = forwardBytes;
     final platform = _player.platform;
@@ -906,7 +918,10 @@ class FxPlayer implements Listenable {
     try {
       await platform.setProperty('demuxer-max-bytes', '$forwardBytes');
       await platform.setProperty('demuxer-max-back-bytes', '$_backBufferBytes');
-      await platform.setProperty('demuxer-readahead-secs', _readaheadSeconds);
+      await platform.setProperty(
+        'demuxer-readahead-secs',
+        readahead ?? _readaheadSeconds,
+      );
       // 直连模式下没有客户端代理的整集缓存，开启 mpv 自己的磁盘缓存：
       // 已播过的分片留在本地，往回 seek / 短暂卡顿都不用重新下载。
       // 4K 码率高，磁盘缓存比内存划算，也不会占用 App 内存。
@@ -939,6 +954,9 @@ class FxPlayer implements Listenable {
       // 4) cache-pause-wait 调小：缓冲补到 1.5 秒就继续播，
       //    默认 10 秒意味着「卡一下要等满 10 秒才恢复」。
       await platform.setProperty('cache-pause-wait', '1.5');
+      // 5) 起播不等缓存填满：默认会等 demuxer 预读到位才出画，
+      //    4K 大分片下就是十几秒的白屏。
+      await platform.setProperty('cache-pause-initial', 'no');
     } catch (_) {
       // 旧版本 / 特殊平台没有这些属性时静默跳过。
     }
@@ -968,7 +986,39 @@ class FxPlayer implements Listenable {
   /// 播放状态流；页面可用它驱动播放 / 暂停图标。
   Stream<bool> get playingStream => _player.stream.playing;
 
-  Future<void> seek(Duration position) => _player.seek(position);
+  Future<void> seek(Duration position) async {
+    // SEEK_FAST（2026-11-13）：拖动时临时把预读降到 6 秒。
+    //
+    // mpv seek 后会从新位置重新预读 demuxer-readahead-secs 秒的数据，
+    // 4K 每片 6 秒 / 5.5MB，20 秒就要先下 3 片（16MB）才出画。
+    // 降到 6 秒只要 1 片，出画快 3 倍；3 秒后自动恢复。
+    final platform = _player.platform;
+    if (platform is NativePlayer) {
+      unawaited(
+        platform
+            .setProperty('demuxer-readahead-secs', _startupReadaheadSeconds)
+            .catchError((_) {}),
+      );
+    }
+    await _player.seek(position);
+    _restoreReadaheadSoon();
+  }
+
+  /// seek 后 3 秒把预读恢复到稳态值。
+  Timer? _readaheadRestore;
+  void _restoreReadaheadSoon() {
+    _readaheadRestore?.cancel();
+    _readaheadRestore = Timer(const Duration(seconds: 3), () {
+      if (_disposed) return;
+      final platform = _player.platform;
+      if (platform is! NativePlayer) return;
+      unawaited(
+        platform
+            .setProperty('demuxer-readahead-secs', _readaheadSeconds)
+            .catchError((_) {}),
+      );
+    });
+  }
 
   /// 兼容 video_player 命名。
   Future<void> seekTo(Duration position) => seek(position);
@@ -1044,6 +1094,7 @@ class FxPlayer implements Listenable {
     // 救援链 / 看门狗在释放后一律停手。
     _rescueGen++;
     _rescueBusy = false;
+    _readaheadRestore?.cancel();
     _positionNotifier.dispose();
     _watchdogTimer?.cancel();
     _watchdogTimer = null;
