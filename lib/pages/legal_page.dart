@@ -50,7 +50,7 @@ const LegalDocument privacyPolicy = LegalDocument(
     ),
     LegalSection(
       '四、第三方组件',
-      '本应用使用 Flutter、media_kit 等开源组件完成界面和播放能力，这些组件不会用于广告追踪。片源由你所配置的服务器或公开测试流提供，其内容与隐私实践由对应提供方负责。',
+      '本应用使用 Flutter、ExoPlayer(Media3) 等开源组件完成界面和播放能力，这些组件不会用于广告追踪。片源由你所配置的服务器或公开测试流提供，其内容与隐私实践由对应提供方负责。',
     ),
     LegalSection(
       '五、你的权利',

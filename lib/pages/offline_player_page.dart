@@ -24,7 +24,7 @@ import '../widgets/player_theme.dart'
         fxSaveProgress,
         kPlayerControlsAutoHide;
 
-/// 离线播放页：用 media_kit（[FxPlayer]）打开已下载的本地文件。
+/// 离线播放页：用 [FxPlayer]（ExoPlayer 内核）打开已下载的本地文件。
 ///
 /// 打开即横屏全屏（与在线全屏一致），横屏控件**完全复用在线全屏组件**：
 /// [FsTopBar] 返回·剧名·集数·⋯设置 / [FsSideControls] 左锁右±10s /

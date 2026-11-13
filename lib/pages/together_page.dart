@@ -1642,7 +1642,7 @@ class _TogetherPageState extends State<TogetherPage>
     _setControllerRate(_baseRate(state));
   }
 
-  /// 微调倍速：media_kit / libmpv 理论上支持任意小数倍速；
+  /// 微调倍速：ExoPlayer 支持任意小数倍速；
   /// 若内核读数与请求值偏差过大，标记不支持并等下一次同步再试。
   void _setMicroRate(double rate, TogetherRoomState state) {
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -3303,7 +3303,7 @@ class _TogetherPageState extends State<TogetherPage>
       await controller.pause();
     } catch (_) {}
     try {
-      await controller.player.stop();
+      await controller.stop();
     } catch (_) {}
     try {
       await controller.dispose();

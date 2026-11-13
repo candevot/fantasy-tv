@@ -72,7 +72,7 @@ class FullPlayerResult {
 
 /// 全屏横屏播放页
 ///
-/// 直接复用竖屏传入的 [FxPlayer]（同一个 Player / VideoController）：
+/// 直接复用竖屏传入的 [FxPlayer]（同一个内核实例）：
 /// 进入和退出全屏都不重新创建、不重新 open，进度与暂停状态自然保持。
 /// 进入即横屏 + 沉浸式，退出恢复竖屏；控件 5 秒自动隐藏，点击画面切换显隐；
 /// 锁屏后只剩解锁按钮（锁定瞬间亮 3 秒自动淡出，点屏幕切换显隐），
@@ -155,7 +155,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 首帧超时看门狗。
   Timer? _firstFrameTimer;
 
-  /// media_kit 平台错误（解码 / 输出 / 网络）：作为 Video 层错误源。
+  /// 内核错误（解码 / 输出 / 网络）：作为画面层错误源。
   StreamSubscription<String>? _platformErrorSub;
 
   /// 当前片源是否已经出过视频首帧；未出首帧时展示加载文案。
@@ -431,7 +431,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _loading = !c.value.isInitialized;
     _firstFrame = _hasFirstFrame(c);
     // 全屏复用的是竖屏已经打开的播放器：这里只监听平台错误，不重新 open。
-    _platformErrorSub = c.player.stream.error.listen(_onPlatformError);
+    _platformErrorSub = c.errorStream.listen(_onPlatformError);
     c.addListener(_onVideoValue);
     if (!_firstFrame) _armFirstFrameTimer();
     if (c.value.hasError) {
@@ -1034,7 +1034,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     });
   }
 
-  /// media_kit 平台错误（Video 层解码 / 输出失败）：直接进错误页。
+  /// 内核错误（画面层解码 / 输出失败）：直接进错误页。
   /// open / 重连期间由各自 try/catch 处理，避免重复弹错误。
   void _onPlatformError(String message) {
     if (!mounted || _exiting || _error || _loading) return;
@@ -1585,7 +1585,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!c.value.isPlaying && CastService.instance.isCasting) {
       unawaited(CastService.instance.stop());
     }
-    // 直接让 media_kit 切换，图标由 player.stream.playing 驱动，避免本地态覆盖。
+    // 直接让内核切换，图标由 playingStream 驱动，避免本地态覆盖。
     unawaited(c.playOrPause());
     _wake();
   }

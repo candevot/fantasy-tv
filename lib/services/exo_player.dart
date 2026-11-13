@@ -10,6 +10,8 @@ import 'package:flutter/widgets.dart';
 ///   · 播放列表重写时容易丢 #EXT-X-ENDLIST，被误判成直播（4K 只播 19 秒）
 ///   · 分片 302 跳转要自己处理，每片多一次往返
 ///   · 4K 高码率的自适应缓冲不成熟
+///   · demuxer-readahead-secs / cache-buffering-state 这些属性难调，
+///     反复出现「加载慢 / 出画黑屏 / 缓冲卡 99」
 /// ExoPlayer 是腾讯/阿里播放器的同款内核，这些它原生就解决。
 ///
 /// 设计：只管「播放」这一件事，画面用 PlatformView 交给 Android，
@@ -38,6 +40,7 @@ class ExoPlayerEngine {
   final EventChannel _event;
   StreamSubscription<dynamic>? _sub;
 
+  /// 内核上报的最新状态；FxPlayer 监听它同步到自己的 value。
   final ValueNotifier<ExoPlayerState> state =
       ValueNotifier<ExoPlayerState>(const ExoPlayerState());
 
@@ -143,6 +146,10 @@ class ExoPlayerState {
     this.playing = false,
     this.buffering = true,
     this.error,
+    this.width = 0,
+    this.height = 0,
+    this.ended = false,
+    this.state = 1,
   });
 
   final Duration position;
@@ -151,6 +158,16 @@ class ExoPlayerState {
   final bool playing;
   final bool buffering;
   final String? error;
+
+  /// 解码后的显示宽高（已按 rotationDegrees 交换横竖屏方向）；0 表示还没拿到。
+  final int width;
+  final int height;
+
+  /// 是否播放到结尾。
+  final bool ended;
+
+  /// Media3 Player.STATE_* 原值：1=IDLE 2=BUFFERING 3=READY 4=ENDED。
+  final int state;
 
   factory ExoPlayerState.fromMap(Map<String, dynamic> m) {
     Duration d(String k) =>
@@ -162,8 +179,15 @@ class ExoPlayerState {
       playing: m['playing'] == true,
       buffering: m['buffering'] == true,
       error: m['error'] as String?,
+      width: (m['width'] as num?)?.toInt() ?? 0,
+      height: (m['height'] as num?)?.toInt() ?? 0,
+      ended: m['ended'] == true,
+      state: (m['state'] as num?)?.toInt() ?? 1,
     );
   }
+
+  /// 画面尺寸是否已经拿到（首帧就绪的判据之一）。
+  bool get hasSize => width > 0 && height > 0;
 
   /// 缓冲百分比（0-100）。duration 未知时按 0 处理。
   double get bufferPercent {
@@ -177,12 +201,14 @@ class ExoPlayerState {
   @override
   String toString() =>
       'ExoPlayerState(pos=$position, dur=$duration, buf=$buffered, '
-      'playing=$playing, buffering=$buffering, err=$error)';
+      'playing=$playing, buffering=$buffering, ${width}x$height, '
+      'ended=$ended, state=$state, err=$error)';
 }
 
 /// 画面视图：把 Android 的 PlayerView 嵌进 Flutter。
 ///
 /// 只在 [ExoPlayerEngine.isSupported] 时可用；其它平台返回占位。
+/// PlayerView 的 useController 是 false，控制层全部由我们自绘。
 class ExoPlayerView extends StatelessWidget {
   const ExoPlayerView({super.key});
 

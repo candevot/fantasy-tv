@@ -1461,7 +1461,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (!c.value.isPlaying && CastService.instance.isCasting) {
       unawaited(CastService.instance.stop());
     }
-    // 以播放器真实状态为准：交给 media_kit 切换，按钮图标随后续
+    // 以播放器真实状态为准：交给内核切换，按钮图标随后续
     // player.stream.playing 事件刷新，不用本地布尔抢先改状态。
     unawaited(c.playOrPause());
     _touch();

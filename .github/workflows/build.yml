@@ -94,7 +94,13 @@ jobs:
             echo 'dependency_overrides must be removed' >&2
             exit 1
           fi
-          grep -E '^  media_kit(_video|_libs_video)?:' pubspec.yaml
+          # PLAYER_CORE：内核已换成 ExoPlayer（原生桥在 android_src/，
+          # 由 patch_exoplayer.py 注入），libmpv 依赖必须彻底消失。
+          if grep -qE '^  media_kit(_video|_libs_video)?:' pubspec.yaml; then
+            echo 'media_kit 依赖应已移除' >&2
+            exit 1
+          fi
+          grep -q 'ExoPlayer' android_src/kotlin/com/huanxiang/fantasy_tv/ExoPlayerPlugin.kt
       - run: flutter pub get
       - run: flutter analyze
       - name: Playback recovery regressions

@@ -5,7 +5,6 @@ import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:media_kit/media_kit.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'api.dart';
@@ -83,12 +82,6 @@ class Boot {
     if (_running) return;
     _running = true;
     String? failed;
-
-    try {
-      MediaKit.ensureInitialized();
-    } catch (e, st) {
-      AppLog.write('boot.media_kit', e, st);
-    }
 
     // 下载服务启动即恢复队列（幂等）：暂停中的任务保持暂停，不自动跑。
     // 放在首帧之后，不阻塞启动；失败只记日志，不影响进入主界面。

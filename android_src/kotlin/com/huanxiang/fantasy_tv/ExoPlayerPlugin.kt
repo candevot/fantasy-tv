@@ -144,15 +144,29 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private fun snapshot(): Map<String, Any?> {
         val p = player ?: return mapOf(
             "positionMs" to 0, "durationMs" to 0, "bufferedMs" to 0,
-            "playing" to false, "buffering" to true, "error" to null
+            "playing" to false, "buffering" to true, "error" to null,
+            "width" to 0, "height" to 0, "ended" to false, "state" to 1
         )
+        // 画面尺寸：FxPlayer 的 value.width/height 和分辨率胶囊都靠它，
+        // 拿不到就一直显示 "0x0"。format 在 READY 之后才有值。
+        val fmt = p.videoFormat
+        val rotation = fmt?.rotationDegrees ?: 0
+        var w = fmt?.width ?: 0
+        var h = fmt?.height ?: 0
+        if (rotation == 90 || rotation == 270) {
+            val t = w; w = h; h = t
+        }
         return mapOf(
             "positionMs" to p.currentPosition,
             "durationMs" to p.duration.coerceAtLeast(0),
             "bufferedMs" to p.bufferedPosition,
             "playing" to p.isPlaying,
             "buffering" to (p.playbackState == Player.STATE_BUFFERING),
-            "error" to lastError
+            "error" to lastError,
+            "width" to w,
+            "height" to h,
+            "ended" to (p.playbackState == Player.STATE_ENDED),
+            "state" to p.playbackState
         )
     }
 
@@ -171,7 +185,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 .setReadTimeoutMs(20_000)
                 .setDefaultRequestProperties(headers)
 
-            val dataSource = DefaultDataSource.Factory(context, httpFactory)
+            // 本地文件（离线播放页）走 DefaultDataSource：它能识别 file:// 和
+            // 绝对路径，直接套 HttpDataSource 会失败。
+            val isLocal = !url.startsWith("http://") && !url.startsWith("https://")
+            val dataSource = if (isLocal) {
+                DefaultDataSource.Factory(context)
+            } else {
+                DefaultDataSource.Factory(context, httpFactory)
+            }
             val item = MediaItem.fromUri(url)
             val source: MediaSource = if (isHls) {
                 HlsMediaSource.Factory(dataSource).createMediaSource(item)
