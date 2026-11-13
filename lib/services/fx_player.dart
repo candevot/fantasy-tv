@@ -318,7 +318,7 @@ class FxPlayer implements Listenable {
   /// mpv demuxer 预读秒数（demuxer-readahead-secs）：配合 192MiB 缓存，
   /// 网络好时把后续内容尽量读进本地，播放过程不中断。
   /// 稳态预读时长。
-  static const String _readaheadSeconds = '20';
+  static const String _readaheadSeconds = '60';
 
   /// 起播预读时长。
   ///
@@ -937,20 +937,14 @@ class FxPlayer implements Listenable {
         'demuxer-readahead-secs',
         readahead ?? _readaheadSeconds,
       );
-      // 直连模式下没有客户端代理的整集缓存，开启 mpv 自己的磁盘缓存：
-      // 已播过的分片留在本地，往回 seek / 短暂卡顿都不用重新下载。
-      // 4K 码率高，磁盘缓存比内存划算，也不会占用 App 内存。
-      // 目录必须先存在，否则 mpv 会静默放弃磁盘缓存。
-      try {
-        unawaited(_sweepStaleCacheDirs());
-        final dir = Directory(_diskCacheDir);
-        if (!await dir.exists()) await dir.create(recursive: true);
-      } catch (_) {
-        // 建目录失败就只用内存缓存，不影响播放。
-      }
+      // NO_DISK_CACHE（2026-11-13）：关掉 mpv 磁盘缓存，只用内存。
+      //
+      // 之前开了 cache-on-disk：4K 每片 5.5MB 全往手机存储写，
+      // 闪存随机写慢的时候整个 demuxer 被拖住 —— 用户看到的是
+      // 「播着播着一直缓冲」「卡死后无法继续」。
+      // 现在直连线路靠 192MB 内存缓存就够，不碰磁盘。
       await platform.setProperty('cache', 'yes');
-      await platform.setProperty('cache-on-disk', 'yes');
-      await platform.setProperty('cache-dir', _diskCacheDir);
+      await platform.setProperty('cache-on-disk', 'no');
       await platform.setProperty('demuxer-max-back-bytes', '$_backBufferBytes');
       // ── 以下四条照搬腾讯云播放器的策略（从咕噜 APK 的 droppedCap /
       //    concurrentThreads 逆出来的思路），目的是「网络一抖不卡死」：
@@ -1008,8 +1002,6 @@ class FxPlayer implements Listenable {
   ///
   /// 做法分三步：
   ///   1. 先把预读降到 [_startupReadaheadSeconds]（6 秒 ≈ 1 片），
-  ///      并同时把 demuxer-max-bytes 压到 [_seekBufferBytes] ——
-  ///      上限一压，mpv 立刻丢弃旧位置的分片，不再占带宽。
   ///   2. seek 到目标位置，只下那一片就能出画。
   ///   3. [_seekSettle] 时间内没有新的 seek（用户松手了），
   ///      再把预读和缓存恢复到稳态，转入「边播边预热」。
@@ -1020,25 +1012,20 @@ class FxPlayer implements Listenable {
     final platform = _player.platform;
     final native = platform is NativePlayer;
     if (native) {
+      // 只降预读，**不动 demuxer-max-bytes**。
+      //
+      // 之前把上限压到 24MB：4K 一片 5.5MB 只装得下 4 片，
+      // 拖动后刚播几秒缓冲就吃光 —— 用户看到的就是「拖完一直缓冲」。
+      // mpv 自己的 seek 会丢弃不可用区间的缓存，不需要我们再压上限。
       unawaited(
         platform
             .setProperty('demuxer-readahead-secs', _startupReadaheadSeconds)
-            .catchError((_) {}),
-      );
-      // 压上限 = 主动放弃旧缓冲。不压的话 mpv 会继续把旧位置的分片读满，
-      // 带宽被占着，seek 后还得排队。
-      unawaited(
-        platform
-            .setProperty('demuxer-max-bytes', '$_seekBufferBytes')
             .catchError((_) {}),
       );
     }
     await _player.seek(position);
     _restoreAfterSeek();
   }
-
-  /// 拖动时允许占用的字节上限（约 3 片 4K，够出画又不浪费带宽）。
-  static const int _seekBufferBytes = 24 * 1024 * 1024;
 
   /// 松手后 1.5 秒恢复稳态预读。
   Timer? _readaheadRestore;
