@@ -1309,42 +1309,17 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
   /// 顺带挡住那颗按钮的点击与长按提示）。遮罩按 FsTopBar 的排布定位：
   /// 右内边距 10 + ⋯钮 32·s + 间距 7·s + 投屏钮 32·s，上下拉满整条顶栏。
   Widget _topBar({required bool compact}) {
-    final s = compact ? .9 : 1.0;
-    // FsTopBar 会按屏幕安全边距右移一列，遮罩跟着移才能继续盖住投屏钮。
-    final safeRight = MediaQuery.viewPaddingOf(context).right;
-    return Stack(
-      children: [
-        FsTopBar(
-          title: _task.title,
-          epLabel: '${_task.epLabel} · ${_task.sizeLabel} · 已下载',
-          compact: compact,
-          qualityLabel: fxPlayerQuality(_player),
-          onBack: () => unawaited(_leave()),
-          onCast: () {}, // 离线不投屏：这一列已被下面的遮罩盖住
-          onMore: () => unawaited(_openSettingsSheet()),
-        ),
-        Positioned(
-          right: 5 + 39 * s + safeRight,
-          width: 32 * s + 10,
-          top: 0,
-          bottom: 0,
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [
-                    Colors.black.withValues(alpha: .52),
-                    Colors.black.withValues(alpha: 0),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
+    return FsTopBar(
+      title: _task.title,
+      epLabel: '${_task.epLabel} · ${_task.sizeLabel} · 已下载',
+      compact: compact,
+      qualityLabel: fxPlayerQuality(_player),
+      onBack: () => unawaited(_leave()),
+      onCast: () {},
+      // 离线播放没有投屏：直接不渲染那颗按钮（之前是用渐变色块盖住，
+      // 位置一改就会露出来，而且挡不住长按提示）。
+      showCast: false,
+      onMore: () => unawaited(_openSettingsSheet()),
     );
   }
 

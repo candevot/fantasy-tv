@@ -8,7 +8,6 @@ import '../models.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
-import 'live_groups_page.dart';
 import 'search_page.dart';
 import 'together_page.dart';
 import '../utils/fx_route.dart';
@@ -33,7 +32,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _Channel('movie', '电影'),
     _Channel('zongyi', '综艺'),
     _Channel('manhua', '动漫'),
-    _Channel('live', '直播'),
   ];
 
   final PageController _bannerCtrl = PageController(viewportFraction: .88);
@@ -52,7 +50,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 紧接着 _loadLive()（req=2），等 _load 的响应回来时 req(1) != _req(2)，
   /// 首页数据被当成「过期请求」丢掉 —— 表现就是进入 App 首页空白，
   /// 必须下拉刷新才出来。
-  int _liveReq = 0;
   bool _loading = true;
   bool _dragging = false;
   bool _tabVisible = true;
@@ -62,19 +59,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _error;
 
   /// 直播频道单独维护：接口可能为空 / 404，失败也按空态处理，不弹错误。
-  List<LiveGroup> _liveGroups = const <LiveGroup>[];
-  bool _liveLoading = false;
-  bool _liveLoaded = false;
 
   /// 直播首屏搜索：本地过滤全部频道，输入即出结果。
-  final TextEditingController _liveSearchCtrl = TextEditingController();
-  String _liveQuery = '';
 
-  List<LiveSection> get _liveSections => buildLiveSections(_liveGroups);
 
-  List<LiveChannel> get _liveAllChannels => <LiveChannel>[
-    for (final section in _liveSections) ...section.channels,
-  ];
 
   @override
   void initState() {
@@ -128,7 +116,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _timer?.cancel();
     _bannerCtrl.dispose();
     _bannerPage.dispose();
-    _liveSearchCtrl.dispose();
     super.dispose();
   }
 
@@ -232,33 +219,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _loadLive() async {
-    final req = ++_liveReq;
-    if (mounted) setState(() => _liveLoading = true);
-    try {
-      final groups = await Api.liveGroups();
-      // LIVE_LOAD_GUARD（2026-11-12）：不能再判 _channel != 'live'。
-      //
-      // 分类页签删掉后 _channel 恒为 recommend，而 initState 里就会调
-      // _loadLive() 给首页末尾的直播区取数据 —— 数据拉回来了却被这个
-      // 守卫丢掉，直播区永远是空的。现在只判「请求是否过期」。
-      if (!mounted || req != _liveReq) return;
-      setState(() {
-        _liveGroups = groups;
-        _liveLoaded = true;
-        _liveLoading = false;
-      });
-    } catch (_) {
-      // 404 / 网络异常 / 脏数据都按「暂无直播」处理，不弹错误也不影响其它分区。
-      if (!mounted || req != _liveReq) return;
-      setState(() {
-        _liveGroups = const <LiveGroup>[];
-        _liveLoaded = true;
-        _liveLoading = false;
-      });
-    }
-  }
-
   void _restartAuto() {
     _timer?.cancel();
     if (!mounted || !_tabVisible || !_appResumed) return;
@@ -278,21 +238,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _selectChannel(String key) {
     if (_channel == key) return;
-    if (key == 'live' && _liveQuery.isNotEmpty) {
-      _liveSearchCtrl.clear();
-      _liveQuery = '';
-    }
     setState(() {
       _channel = key;
       _bannerPage.value = 0;
       _error = null;
-      _loading = key != 'live' && !_cache.containsKey(key);
+      _loading = !_cache.containsKey(key);
     });
     _timer?.cancel();
-    if (key == 'live') {
-      _loadLive();
-      return;
-    }
     if (_cache.containsKey(key)) {
       _restartAuto();
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -420,7 +372,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       child: RefreshIndicator(
         color: Fx.accent,
         backgroundColor: Colors.white,
-        onRefresh: () => _channel == 'live' ? _loadLive() : _load(force: true),
+        onRefresh: () => _load(force: true),
         child: CustomScrollView(
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           physics: const AlwaysScrollableScrollPhysics(
@@ -437,7 +389,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   List<Widget> _body(HomeData? data) {
-    if (_channel == 'live') return _liveBody();
     if (data == null) {
       if (_loading) {
         return const [SliverToBoxAdapter(child: _HomeSkeleton())];
@@ -508,244 +459,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   /// 直播首屏：搜索 + 固定顺序的分组卡；输入台名时直接出频道结果。
-  List<Widget> _liveBody() {
-    if (_liveLoading && !_liveLoaded) {
-      return const [SliverToBoxAdapter(child: _HomeSkeleton())];
-    }
-    final sections = _liveSections;
-    if (sections.isEmpty) {
-      return [
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: FxEmptyView(
-            icon: Icons.live_tv_rounded,
-            title: '暂无直播频道 · 敬请期待',
-            subtitle: '频道上线后会在这里出现',
-            actionText: '刷新试试',
-            onAction: _loadLive,
-          ),
-        ),
-      ];
-    }
-
-    final query = _liveQuery.trim();
-    final matches = query.isEmpty
-        ? const <LiveChannel>[]
-        : <LiveChannel>[
-            for (final channel in _liveAllChannels)
-              if (liveChannelMatches(channel, query)) channel,
-          ];
-    return [
-      SliverToBoxAdapter(child: _liveSearchBar()),
-      if (query.isEmpty) ...[
-        SliverToBoxAdapter(child: _liveSectionHeader(sections)),
-        _liveSectionGrid(sections),
-      ] else if (matches.isEmpty)
-        SliverFillRemaining(
-          hasScrollBody: false,
-          child: FxEmptyView(
-            icon: Icons.search_off_rounded,
-            title: '没找到「$query」',
-            subtitle: '换个台名试试，如 CCTV5、湖南',
-          ),
-        )
-      else ...[
-        SliverToBoxAdapter(child: _liveSearchHeader(matches.length)),
-        _liveChannelGrid(matches),
-      ],
-    ];
-  }
-
-  void _clearLiveSearch() {
-    if (_liveQuery.isEmpty) return;
-    _liveSearchCtrl.clear();
-    setState(() => _liveQuery = '');
-    FocusScope.of(context).unfocus();
-  }
-
-  Widget _liveSearchBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-      child: Container(
-        height: 44,
-        padding: const EdgeInsets.only(left: 13, right: 6),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: .72),
-          borderRadius: BorderRadius.circular(22),
-          border: Border.all(color: Colors.white),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF50729F).withValues(alpha: .08),
-              blurRadius: 18,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.search_rounded, size: 19, color: Fx.sub),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextField(
-                controller: _liveSearchCtrl,
-                textInputAction: TextInputAction.search,
-                textAlignVertical: TextAlignVertical.center,
-                cursorColor: Fx.accent,
-                style: const TextStyle(fontSize: 13, color: Fx.ink),
-                decoration: const InputDecoration(
-                  isDense: true,
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.zero,
-                  hintText: '搜索台名，如 CCTV5 / 湖南',
-                  hintStyle: TextStyle(
-                    fontSize: 12.5,
-                    color: Color(0xFF9AA6B8),
-                  ),
-                ),
-                onChanged: (value) {
-                  final query = value.trim();
-                  if (query == _liveQuery) return;
-                  setState(() => _liveQuery = query);
-                },
-              ),
-            ),
-            if (_liveQuery.isNotEmpty)
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _clearLiveSearch,
-                child: const SizedBox(
-                  width: 32,
-                  height: 32,
-                  child: Icon(Icons.close_rounded, size: 17, color: Fx.sub),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _liveSectionHeader(List<LiveSection> sections) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          const Text(
-            '频道分组',
-            style: TextStyle(
-              fontSize: 16.5,
-              height: 1.2,
-              fontWeight: FontWeight.w800,
-              color: Fx.ink,
-            ),
-          ),
-          const SizedBox(width: 7),
-          Text(
-            '${sections.length} 组',
-            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-          ),
-          const Spacer(),
-          Text(
-            '${_liveAllChannels.length} 台',
-            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _liveSearchHeader(int count) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 18, 16, 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          const Text(
-            '搜索结果',
-            style: TextStyle(
-              fontSize: 16.5,
-              height: 1.2,
-              fontWeight: FontWeight.w800,
-              color: Fx.ink,
-            ),
-          ),
-          const SizedBox(width: 7),
-          Text(
-            '$count 台',
-            style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-          ),
-          const Spacer(),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _clearLiveSearch,
-            child: const Padding(
-              padding: EdgeInsets.symmetric(vertical: 4, horizontal: 2),
-              child: Text(
-                '清空',
-                style: TextStyle(fontSize: 11.5, color: Fx.sub),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _liveSectionGrid(List<LiveSection> sections) {
-    return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-      sliver: SliverLayoutBuilder(
-        builder: (context, constraints) {
-          final columns = constraints.crossAxisExtent >= 560 ? 3 : 2;
-          return SliverGrid(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              childAspectRatio: columns == 3 ? 1.45 : 1.25,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (context, i) => LiveGroupCard(
-                section: sections[i],
-                onTap: () => openLiveSection(context, sections[i]),
-              ),
-              childCount: sections.length,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _liveChannelGrid(List<LiveChannel> channels) {
-    return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
-      sliver: SliverLayoutBuilder(
-        builder: (context, constraints) {
-          final columns = constraints.crossAxisExtent >= 700 ? 3 : 2;
-          final itemWidth =
-              (constraints.crossAxisExtent - 12 * (columns - 1)) / columns;
-          final extent = (itemWidth - 12) * 9 / 16 + 58;
-          return SliverGrid(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              mainAxisSpacing: 12,
-              crossAxisSpacing: 12,
-              mainAxisExtent: extent,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              (context, i) => LiveChannelCard(
-                channel: channels[i],
-                onTap: () => openLiveChannel(context, channels[i]),
-              ),
-              childCount: channels.length,
-            ),
-          );
-        },
-      ),
-    );
-  }
 
   Widget _header() {
     return Padding(

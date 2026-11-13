@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models.dart';
 import '../services/download_service.dart';
+import '../pages/downloads_page.dart';
 import '../theme.dart';
 import 'detail_widgets.dart' show detailEpisodeLabel;
 
@@ -305,6 +306,36 @@ class _DownloadSheetState extends State<DownloadSheet> {
                   style: const TextStyle(fontSize: 11, color: Fx.sub),
                 ),
                 const Spacer(),
+                // 用户要求：在下载选集面板里就要能进「下载管理」，
+                // 不用先退出去再到「我的 → 离线缓存」找。
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    Navigator.of(context).maybePop();
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const DownloadsPage(),
+                      ),
+                    );
+                  },
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Fx.accent.withValues(alpha: .10),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text(
+                      '下载管理',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: Fx.accent,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => Navigator.of(context).maybePop(),

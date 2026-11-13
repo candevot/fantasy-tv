@@ -245,6 +245,18 @@ class FxPlayer implements Listenable {
     _engine = ExoPlayerEngine();
     _engine.state.addListener(_onEngineState);
     unawaited(_engine.init());
+    // STATE_POLL（2026-11-14）：不能只等 EventChannel 的事件。
+    //
+    // 实测症状：画面已经出来了（ExoPlayer 在播），但 Dart 侧状态一直是
+    // 初始值（buffering=true / position=0）——
+    //   · UI 上「缓冲中」永远不消失
+    //   · open() 等不到首帧，30 秒后判失败，用户看到「线路播不出来」
+    // 原因就是事件没送达漏了。这里加 500ms 轮询兜底，
+    // 直接调内核的 state 方法取快照，事件通道只当加速用。
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (_disposed) return;
+      unawaited(_engine.poll());
+    });
     // 稳定性看门狗：只看「进度 / 缓冲是否还在动」，缓冲中不算失败。
     _watchdogTimer = Timer.periodic(
       _watchdogTick,
@@ -318,6 +330,9 @@ class FxPlayer implements Listenable {
   // ------------------------------------------------- 看门狗 / 救援链状态
 
   Timer? _watchdogTimer;
+
+  /// 内核状态轮询（事件通道的兜底）。
+  Timer? _pollTimer;
   DateTime _lastFlowAt = DateTime.now();
   int _rescueRounds = 0;
   Duration _lastFlowPos = Duration.zero;
@@ -661,9 +676,21 @@ class FxPlayer implements Listenable {
     _lastFlowAt = DateTime.now();
   }
 
+  /// 判断是不是 HLS 播放列表。
+  ///
+  /// HLS_TYPE_FIX（2026-11-14）：不能只看 `.m3u8` 后缀。
+  /// 幻想4K / 幻想蓝光的地址是服务端包装过的 `/api/fyplay?u=…`，
+  /// 里面没有 m3u8 字样，但返回的正文就是 m3u8。之前这里判成 false，
+  /// 交给 ProgressiveMediaSource 解析 → 直接失败，
+  /// 表现就是「除了解析线路，其它线路都播不出来」。
   static bool _looksLikeHls(String url) {
     final lower = Uri.decodeFull(url).toLowerCase();
-    return lower.contains('.m3u8');
+    if (lower.contains('.m3u8')) return true;
+    // 服务端的福盈播放列表包装地址
+    if (lower.contains('/api/fyplay')) return true;
+    // 爱奇艺播放列表（虽然带 .m3u8，单独列出更明确）
+    if (lower.contains('/api/iqiyi.m3u8')) return true;
+    return false;
   }
 
   Future<void> play() {
@@ -766,6 +793,8 @@ class FxPlayer implements Listenable {
     _positionNotifier.dispose();
     _watchdogTimer?.cancel();
     _watchdogTimer = null;
+    _pollTimer?.cancel();
+    _pollTimer = null;
     _opening = null;
     final ready = _ready;
     _ready = null;

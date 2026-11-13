@@ -185,6 +185,7 @@ class FsTopBar extends StatelessWidget {
     this.compact = false,
     this.qualityLabel = '',
     this.speedText = '',
+    this.showCast = true,
   });
 
   final String title;
@@ -198,6 +199,10 @@ class FsTopBar extends StatelessWidget {
 
   final VoidCallback onBack;
   final VoidCallback onCast;
+
+  /// 是否显示投屏按钮。离线播放没有投屏入口，传 false 直接不渲染，
+  /// 不再靠外层盖一层渐变遮罩（那种做法位置一挪就会漏出来）。
+  final bool showCast;
   /// 保留字段：顶栏已不再渲染「更多」按钮（重复入口），
   /// 播放设置统一走底栏。调用方仍可传，留作将来放其它功能。
   final VoidCallback onMore;
@@ -300,15 +305,17 @@ class FsTopBar extends StatelessWidget {
               const SizedBox(width: 6),
               // 当前时间：全屏时看不到系统状态栏，这里补一个
               _ClockChip(size: s),
-              const SizedBox(width: 6),
-              PGlassIcon(
-                icon: Icons.cast_rounded,
-                size: 32 * s,
-                iconSize: 17 * s,
-                tint: .18,
-                tooltip: '投屏',
-                onTap: onCast,
-              ),
+              if (showCast) ...[
+                const SizedBox(width: 6),
+                PGlassIcon(
+                  icon: Icons.cast_rounded,
+                  size: 32 * s,
+                  iconSize: 17 * s,
+                  tint: .18,
+                  tooltip: '投屏',
+                  onTap: onCast,
+                ),
+              ],
             ],
           ),
         ],

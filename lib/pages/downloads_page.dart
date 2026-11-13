@@ -42,6 +42,13 @@ class _DownloadsPageState extends State<DownloadsPage>
   late final TabController _tab = TabController(length: 2, vsync: this);
   bool _loading = true;
 
+  /// 管理态：勾选后批量删除。默认关闭，右上角「管理」进入。
+  ///
+  /// 用户要求：已下载列表只显示「封面 + 剧名 + 集数 + 播放」，
+  /// 每张卡上不再挂删除键；要删就进管理态，全选 / 取消全选 / 删除。
+  bool _managing = false;
+  final Set<String> _selected = <String>{};
+
   @override
   void initState() {
     super.initState();
@@ -94,55 +101,54 @@ class _DownloadsPageState extends State<DownloadsPage>
   bool get _hasPaused =>
       _service.tasks.any((t) => t.status == DownloadStatus.paused);
 
-  Future<void> _confirmClear() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-        title: const Text('清空离线缓存？',
-            style: TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
-        content: const Text(
-          '将停止所有下载并删除本地缓存文件，不影响观看历史与收藏。',
-          style: TextStyle(fontSize: 12.5, height: 1.5, color: Fx.sub),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消', style: TextStyle(color: Fx.sub)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('清空', style: TextStyle(color: Color(0xFFE45C5C))),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
-    await _service.clearAll();
-    if (!mounted) return;
-    _toast('已清空离线缓存');
+
+  /* ---------------------------- 管理态（全选 / 取消全选 / 删除） ---------------------------- */
+
+  void _toggleManaging() {
+    setState(() {
+      _managing = !_managing;
+      _selected.clear();
+    });
   }
 
-  Future<void> _deleteSeries(_SeriesGroup group) async {
-    final count = group.tasks.length;
+  /// 当前 Tab 可见的剧集分组（管理只作用于当前这一屏）。
+  List<_SeriesGroup> get _visibleGroups =>
+      _tab.index == 0 ? _activeGroups : _finishedGroups;
+
+  void _toggleSelect(String id) {
+    setState(() {
+      if (!_selected.remove(id)) _selected.add(id);
+    });
+  }
+
+  void _selectAll() {
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(_visibleGroups.map((g) => g.id));
+    });
+  }
+
+  void _clearSelection() {
+    setState(_selected.clear);
+  }
+
+  Future<void> _deleteSelected() async {
+    final picks = _visibleGroups.where((g) => _selected.contains(g.id)).toList();
+    if (picks.isEmpty) {
+      _toast('先选择要删除的剧集');
+      return;
+    }
+    final count = picks.fold<int>(0, (n, g) => n + g.tasks.length);
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-        title: Text(
-          count > 1
-              ? '删除「${group.sample.title}」整部缓存？'
-              : '删除「${group.sample.epLabel}」缓存？',
-          style: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
-        ),
-        content: Text(
-          count > 1
-              ? '将删除全部 $count 集的本地文件与任务记录，不影响其它剧集。'
-              : '本地缓存文件会一并删除。',
-          style: const TextStyle(fontSize: 12.5, height: 1.5, color: Fx.sub),
-        ),
+        title: Text('删除选中的 ${picks.length} 部缓存？',
+            style: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
+        content: Text('共 $count 集，本地文件与任务记录一并删除。',
+            style: const TextStyle(fontSize: 12.5, height: 1.5, color: Fx.sub)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -150,18 +156,107 @@ class _DownloadsPageState extends State<DownloadsPage>
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: Text(count > 1 ? '删除整剧' : '删除',
-                style: const TextStyle(color: Color(0xFFE45C5C))),
+            child: const Text('删除',
+                style: TextStyle(color: Color(0xFFE45C5C))),
           ),
         ],
       ),
     );
     if (ok != true || !mounted) return;
-    final removed = await _service.removeSeries(group.id);
+    var removed = 0;
+    for (final g in picks) {
+      removed += await _service.removeSeries(g.id);
+    }
     if (!mounted) return;
-    _toast(count > 1
-        ? '已删除「${group.sample.title}」$removed 集缓存'
-        : '已删除「${group.sample.epLabel}」');
+    setState(() {
+      _selected.clear();
+      _managing = false;
+    });
+    _toast('已删除 $removed 集缓存');
+  }
+
+  Widget _manageBar() {
+    final total = _visibleGroups.length;
+    final picked = _visibleGroups.where((g) => _selected.contains(g.id)).length;
+    final allSelected = total > 0 && picked == total;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .94),
+        border: const Border(top: BorderSide(color: Color(0xFFE8EDF5))),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          children: [
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: allSelected ? _clearSelection : _selectAll,
+              child: Row(
+                children: [
+                  Icon(
+                    allSelected
+                        ? Icons.check_circle_rounded
+                        : Icons.radio_button_unchecked_rounded,
+                    size: 19,
+                    color: allSelected ? Fx.accent : Fx.sub,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    allSelected ? '取消全选' : '全选',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Fx.ink,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Spacer(),
+            Text(
+              '已选 $picked/$total',
+              style: const TextStyle(fontSize: 11.5, color: Fx.sub),
+            ),
+            const SizedBox(width: 12),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: picked > 0 ? _deleteSelected : null,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                decoration: BoxDecoration(
+                  color: picked > 0
+                      ? const Color(0xFFE45C5C).withValues(alpha: .10)
+                      : const Color(0xFFF1F4F8),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.delete_outline_rounded,
+                        size: 15,
+                        color: picked > 0
+                            ? const Color(0xFFE45C5C)
+                            : const Color(0xFFB6C0CD)),
+                    const SizedBox(width: 4),
+                    Text(
+                      '删除',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: picked > 0
+                            ? const Color(0xFFE45C5C)
+                            : const Color(0xFFB6C0CD),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _play(DownloadTask task) async {
@@ -245,6 +340,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                   ],
                 ),
               ),
+              if (_managing) _manageBar(),
             ],
           ),
         ),
@@ -279,25 +375,14 @@ class _DownloadsPageState extends State<DownloadsPage>
       centerTitle: true,
       actions: [
         TextButton(
-          onPressed: canClear ? _confirmClear : null,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.delete_sweep_rounded,
-                size: 16,
-                color: canClear ? Fx.sub : const Color(0xFFB6C0CD),
-              ),
-              const SizedBox(width: 4),
-              Text(
-                '清空',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: canClear ? Fx.sub : const Color(0xFFB6C0CD),
-                ),
-              ),
-            ],
+          onPressed: canClear || _managing ? _toggleManaging : null,
+          child: Text(
+            _managing ? '取消' : '管理',
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: (canClear || _managing) ? Fx.accent : const Color(0xFFB6C0CD),
+            ),
           ),
         ),
         const SizedBox(width: 4),
@@ -516,7 +601,9 @@ class _DownloadsPageState extends State<DownloadsPage>
       padding: const EdgeInsets.all(10),
       radius: 18,
       opacity: .62,
-      onTap: () => _openSeries(group, cachedOnly: !downloadingTab),
+      onTap: _managing
+          ? () => _toggleSelect(id)
+          : () => _openSeries(group, cachedOnly: !downloadingTab),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -551,7 +638,31 @@ class _DownloadsPageState extends State<DownloadsPage>
                     ),
                   ),
                 ),
-                if (completed)
+                if (_managing)
+                  Positioned(
+                    right: 4,
+                    top: 4,
+                    child: Container(
+                      width: 20,
+                      height: 20,
+                      decoration: BoxDecoration(
+                        color: _selected.contains(id)
+                            ? Fx.accent
+                            : Colors.white.withValues(alpha: .92),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _selected.contains(id)
+                              ? Fx.accent
+                              : const Color(0xFFC9D3E0),
+                        ),
+                      ),
+                      child: _selected.contains(id)
+                          ? const Icon(Icons.check_rounded,
+                              size: 13, color: Colors.white)
+                          : null,
+                    ),
+                  ),
+                if (completed && !_managing)
                   Positioned(
                     right: 5,
                     top: 5,
@@ -636,7 +747,8 @@ class _DownloadsPageState extends State<DownloadsPage>
                     ),
                   ),
                   const Spacer(),
-                  Row(
+                  if (!_managing)
+                    Row(
                     children: [
                       if (downloadingTab && active)
                         _action(
@@ -671,13 +783,6 @@ class _DownloadsPageState extends State<DownloadsPage>
                           group,
                           cachedOnly: !downloadingTab,
                         ),
-                      ),
-                      const SizedBox(width: 6),
-                      _action(
-                        icon: Icons.delete_outline_rounded,
-                        label: '删除',
-                        color: const Color(0xFFE45C5C),
-                        onTap: () => _deleteSeries(group),
                       ),
                       const Spacer(),
                       Text(
