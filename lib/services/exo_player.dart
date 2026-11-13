@@ -242,10 +242,11 @@ class ExoPlayerView extends StatelessWidget {
           ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
           ..create();
       },
+      // hitTestBehavior 用默认值（opaque）：显式引用
+      // PlatformViewHitTestBehavior 在部分 Flutter 版本里不可见。
       surfaceFactory: (context, controller) => AndroidViewSurface(
         controller: controller as AndroidViewController,
         gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
-        hitTestBehavior: PlatformViewHitTestBehavior.opaque,
       ),
     );
   }
