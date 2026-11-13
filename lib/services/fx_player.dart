@@ -352,9 +352,6 @@ class FxPlayer implements Listenable {
   /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
   static const int _rescueTries = 2;
 
-  static int _instanceSeq = 0;
-  final String _instanceId = 'p${DateTime.now().microsecondsSinceEpoch}_${_instanceSeq++}';
-
   /// 本地分片代理的缓存上限（字节）。
   ///
   /// 无限预加载要把整集拉到本地，缓存太小会「拉进来又被淘汰」，
