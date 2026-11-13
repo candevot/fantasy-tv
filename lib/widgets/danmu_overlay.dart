@@ -405,21 +405,37 @@ class _DanmuPainter extends CustomPainter {
   /// 文本排版缓存：同一条弹幕的内容不重复 layout。
   static final Map<String, TextPainter> _cache = <String, TextPainter>{};
 
+  /// 把整体透明度算进文字颜色，避免每条弹幕都开一次离屏层。
+  ///
+  /// DANMU_NO_SAVELAYER（2026-11-14）：之前 opacity < 1 时对**每条**弹幕
+  /// canvas.saveLayer 一次做离屏合成 —— 屏幕上二三十条就是每帧二三十次
+  /// 离屏叠加，这是整个弹幕层最贵的操作，中低端机直接掉帧，肉眼就是
+  /// 「一帧一帧卡住」。默认透明度是 0.92（< 1），所以每条都命中了这条慢路径。
+  ///
+  /// 现在把 alpha 直接乘进 color，普通绘制即可，缓存键带上透明度档位。
   TextPainter _painterFor(_Flying f) {
-    final key = '${f.item.color}|${f.item.text}';
+    final alpha = (opacity.clamp(0.05, 1.0) * 255).round();
+    final key = '$alpha|$fontSize|${f.item.color}|${f.item.text}';
     final cached = _cache[key];
     if (cached != null) return cached;
+    final base = Color(0xFF000000 | f.item.color);
     final tp = TextPainter(
       text: TextSpan(
         text: f.item.text,
         style: TextStyle(
           fontSize: fontSize,
           fontWeight: FontWeight.w600,
-          color: Color(0xFF000000 | f.item.color),
+          color: base.withValues(alpha: alpha / 255),
           height: 1.25,
-          shadows: const [
-            Shadow(color: Colors.black87, blurRadius: 3),
-            Shadow(color: Colors.black54, blurRadius: 6),
+          shadows: [
+            Shadow(
+              color: Colors.black.withValues(alpha: .68 * alpha / 255),
+              blurRadius: 3,
+            ),
+            Shadow(
+              color: Colors.black.withValues(alpha: .42 * alpha / 255),
+              blurRadius: 6,
+            ),
           ],
         ),
       ),
@@ -438,19 +454,9 @@ class _DanmuPainter extends CustomPainter {
       final tp = _painterFor(f);
       canvas.save();
       canvas.translate(f.x, f.y);
-      // 整体透明度：saveLayer 做一次离屏合成。
-      // 注意 Canvas.saveLayer 返回 void（不是 layer id），
-      // 只能用 save / restore 配对。
-      if (opacity < 1) {
-        canvas.saveLayer(
-          Rect.fromLTWH(-4, -4, tp.width + 8, tp.height + 8),
-          Paint()..color = Colors.white.withValues(alpha: opacity),
-        );
-        tp.paint(canvas, Offset.zero);
-        canvas.restore();
-      } else {
-        tp.paint(canvas, Offset.zero);
-      }
+      // 透明度已经在 _painterFor 里乘进颜色了，这里直接画，
+      // 不再对每条弹幕 saveLayer（那是每帧 N 次离屏合成）。
+      tp.paint(canvas, Offset.zero);
       canvas.restore();
     }
   }
