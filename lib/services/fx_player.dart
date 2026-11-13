@@ -352,14 +352,6 @@ class FxPlayer implements Listenable {
   /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
   static const int _rescueTries = 2;
 
-  /// mpv 磁盘缓存目录：放在系统临时目录，按播放实例隔离。
-  ///
-  /// 4K 码率高，磁盘缓存不设上限会一直涨。这里用实例 id 隔离，
-  /// 播放器 dispose 时整目录删掉；另外在创建时顺手清理过期目录，
-  /// 避免异常退出（被杀进程）留下的残留越积越多。
-  String get _diskCacheDir =>
-      '${Directory.systemTemp.path}/fx_mpv_cache/$_instanceId';
-
   static int _instanceSeq = 0;
   final String _instanceId = 'p${DateTime.now().microsecondsSinceEpoch}_${_instanceSeq++}';
 
@@ -386,24 +378,6 @@ class FxPlayer implements Listenable {
     } catch (_) {
       return 0;
     }
-  }
-
-  /// 清理超过 1 天没动过的缓存目录（异常退出的残留）。
-  static Future<void> _sweepStaleCacheDirs() async {
-    try {
-      final root = Directory('${Directory.systemTemp.path}/fx_mpv_cache');
-      if (!await root.exists()) return;
-      final now = DateTime.now();
-      await for (final e in root.list()) {
-        if (e is! Directory) continue;
-        try {
-          final st = await e.stat();
-          if (now.difference(st.modified) > const Duration(days: 1)) {
-            await e.delete(recursive: true);
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
   }
 
   /// 同一次播放最多进几轮救援链。没有这个上限时，每轮救援结束都会
@@ -1151,13 +1125,6 @@ class FxPlayer implements Listenable {
       await hlsProxy?.dispose();
     } catch (_) {
       // 本地代理关闭失败不影响页面退出。
-    }
-    // 删掉本实例的 mpv 磁盘缓存目录：4K 码率高，不清理会一直占存储。
-    try {
-      final dir = Directory(_diskCacheDir);
-      if (await dir.exists()) await dir.delete(recursive: true);
-    } catch (_) {
-      // 删除失败留待下次启动的过期清理。
     }
   }
 
