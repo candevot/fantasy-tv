@@ -422,8 +422,11 @@ class FxPlayer implements Listenable {
     };
     return ColoredBox(
       color: Colors.black,
+      // 只按缩放模式做 key：切集 / 换线路**不重建** PlatformView。
+      // ExoPlayer 的 PlayerView 一直绑着同一个内核实例，重建只会多一次
+      // 纹理重新挂载，用户看到的就是切换瞬间的黑一下。
       child: ExoPlayerView(
-        key: ValueKey<String>('$_renderEpoch-$mode'),
+        key: ValueKey<String>('exo-surface-$mode'),
         resizeMode: mode,
       ),
     );

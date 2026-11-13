@@ -236,8 +236,9 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     final fit = fxAspectFit(aspect);
     // key 带上档位：改「铺满 / 适应 / 拉伸」要重建 PlatformView，
     // 否则 resizeMode 是创建时定的，切档不会有反应。
+    // 只按画面比例做 key：切集不重建画面层。
     final surface = KeyedSubtree(
-      key: ValueKey<String>('$_renderEpoch-${aspect.name}'),
+      key: ValueKey<String>('surface-${aspect.name}'),
       child: widget.player.buildVideo(fit: fit),
     );
     final framed = fxAspectFrame(aspect, surface);
