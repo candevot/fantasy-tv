@@ -901,11 +901,26 @@ class FxPlayer implements Listenable {
   void _raiseCacheAfterStart() {
     if (_disposed || _cacheRaised) return;
     _cacheRaised = true;
-    final throughput = _hlsProxy?.recentThroughput;
+    // 直连模式下没有本地代理，吞吐只能取 mpv 的 cache-speed；
+    // 两个都拿不到就用默认稳态值。
+    final throughput = _hlsProxy?.recentThroughput ?? _cachedMpvSpeed;
     _currentForwardBuffer = _steadyBufferFor(throughput);
-    // 首帧已经出来了，把预读恢复到 120 秒，长播才有足够前向缓冲。
-    unawaited(_setCacheLimits(_currentForwardBuffer, readahead: _readaheadSeconds));
+    // PLAY_PHASE（2026-11-13 用户要求）：出画之后再进预热。
+    //
+    // 「首次秒加载 → 后面正常预热边播放」：
+    // 首帧一到不能立刻放开大缓存，否则刚出画就跟播放抢带宽，
+    // 前几秒反而容易卡。这里先保持轻量缓冲，1.5 秒稳定后再放开。
+    _warmupTimer?.cancel();
+    _warmupTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (_disposed) return;
+      unawaited(
+        _setCacheLimits(_currentForwardBuffer, readahead: _readaheadSeconds),
+      );
+    });
   }
+
+  /// 出画后延迟进入预热的定时器。
+  Timer? _warmupTimer;
 
   /// 限制 demuxer 前向 / 回看缓存并固定 60 秒预读（demuxer-readahead-secs，
   /// 4K 高码率 seek / 抖动后不至于瞬间断粮）；mpv 会按新上限回收旧缓存，
@@ -986,36 +1001,57 @@ class FxPlayer implements Listenable {
   /// 播放状态流；页面可用它驱动播放 / 暂停图标。
   Stream<bool> get playingStream => _player.stream.playing;
 
+  /// 拖动进度：放弃当前全部缓冲，只加载目标位置的那一片。
+  ///
+  /// SEEK_FAST（2026-11-13 用户要求）：
+  ///   「自己拖进度，放弃当前全部到拖到的地方秒播，后面正常预热边播放」
+  ///
+  /// 做法分三步：
+  ///   1. 先把预读降到 [_startupReadaheadSeconds]（6 秒 ≈ 1 片），
+  ///      并同时把 demuxer-max-bytes 压到 [_seekBufferBytes] ——
+  ///      上限一压，mpv 立刻丢弃旧位置的分片，不再占带宽。
+  ///   2. seek 到目标位置，只下那一片就能出画。
+  ///   3. [_seekSettle] 时间内没有新的 seek（用户松手了），
+  ///      再把预读和缓存恢复到稳态，转入「边播边预热」。
+  ///
+  /// 连续拖动时恢复定时器会被不断重置，所以整个拖动过程一直是轻量缓冲，
+  /// 松手后 1.5 秒才转正常预热 —— 不会出现「拖一下就狂下几十 MB」。
   Future<void> seek(Duration position) async {
-    // SEEK_FAST（2026-11-13）：拖动时临时把预读降到 6 秒。
-    //
-    // mpv seek 后会从新位置重新预读 demuxer-readahead-secs 秒的数据，
-    // 4K 每片 6 秒 / 5.5MB，20 秒就要先下 3 片（16MB）才出画。
-    // 降到 6 秒只要 1 片，出画快 3 倍；3 秒后自动恢复。
     final platform = _player.platform;
-    if (platform is NativePlayer) {
+    final native = platform is NativePlayer;
+    if (native) {
       unawaited(
         platform
             .setProperty('demuxer-readahead-secs', _startupReadaheadSeconds)
             .catchError((_) {}),
       );
+      // 压上限 = 主动放弃旧缓冲。不压的话 mpv 会继续把旧位置的分片读满，
+      // 带宽被占着，seek 后还得排队。
+      unawaited(
+        platform
+            .setProperty('demuxer-max-bytes', '$_seekBufferBytes')
+            .catchError((_) {}),
+      );
     }
     await _player.seek(position);
-    _restoreReadaheadSoon();
+    _restoreAfterSeek();
   }
 
-  /// seek 后 3 秒把预读恢复到稳态值。
+  /// 拖动时允许占用的字节上限（约 3 片 4K，够出画又不浪费带宽）。
+  static const int _seekBufferBytes = 24 * 1024 * 1024;
+
+  /// 松手后 1.5 秒恢复稳态预读。
   Timer? _readaheadRestore;
-  void _restoreReadaheadSoon() {
+
+  void _restoreAfterSeek() {
     _readaheadRestore?.cancel();
-    _readaheadRestore = Timer(const Duration(seconds: 3), () {
+    _warmupTimer?.cancel();
+    _readaheadRestore = Timer(const Duration(milliseconds: 1500), () {
       if (_disposed) return;
       final platform = _player.platform;
       if (platform is! NativePlayer) return;
       unawaited(
-        platform
-            .setProperty('demuxer-readahead-secs', _readaheadSeconds)
-            .catchError((_) {}),
+        _setCacheLimits(_currentForwardBuffer, readahead: _readaheadSeconds),
       );
     });
   }
