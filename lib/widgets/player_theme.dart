@@ -242,6 +242,54 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   }
 }
 
+String fxProgressKey(String videoId, int ep) => 'pos_${videoId}_$ep';
+
+Future<double> fxLoadProgress(String videoId, int ep) async {
+  try {
+    final sp = await SharedPreferences.getInstance();
+    final v = sp.getDouble(fxProgressKey(videoId, ep));
+    if (v == null || v.isNaN || v.isInfinite || v < 0) return 0;
+    return v;
+  } catch (_) {
+    return 0;
+  }
+}
+
+Future<void> fxSaveProgress(String videoId, int ep, double seconds) async {
+  if (seconds.isNaN || seconds.isInfinite) return;
+  try {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setDouble(fxProgressKey(videoId, ep), seconds < 0 ? 0 : seconds);
+  } catch (_) {
+    // 本地存储失败不影响播放
+  }
+}
+
+/// 白玻璃提示，不抢播放器控件的焦点
+void fxToast(BuildContext context, String message) {
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  if (messenger == null) return;
+  messenger.hideCurrentSnackBar();
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(
+        message,
+        style: const TextStyle(
+          color: Fx.ink,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      backgroundColor: Colors.white.withValues(alpha: .96),
+      elevation: 4,
+      behavior: SnackBarBehavior.floating,
+      margin: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      duration: const Duration(seconds: 2),
+    ),
+  );
+}
+
 /// 续播不弹任何提示：静默 seek 回上次位置（见播放页 / 全屏页），
 /// 播放期间不允许有遮挡画面的浮层文案。
 

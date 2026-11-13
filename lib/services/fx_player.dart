@@ -5,7 +5,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:flutter/services.dart' show rootBundle;
 
 import '../api.dart';
 import '../models.dart';
@@ -252,10 +251,6 @@ class FxPlayer implements Listenable {
       (_) => unawaited(_watchdogTickAsync()),
     );
   }
-
-  /// 起播缓冲上限：ExoPlayer 的 DefaultLoadControl 自己按**时长**调度，
-  /// 我们不需要（也不能）再手调字节数。这里只保留网速自适应的展示值。
-  static const int _steadyBufferBytes = 64 * 1024 * 1024;
 
   /// 起播「还在进展」时的最长等待：只要还在往下拉就一直等，
   /// 避免把「大分片加载慢」误判成「线路不可用」并自动换线。
