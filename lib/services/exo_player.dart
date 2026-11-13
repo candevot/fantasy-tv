@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -221,10 +222,31 @@ class ExoPlayerView extends StatelessWidget {
     if (!ExoPlayerEngine.isSupported) {
       return const ColoredBox(color: Color(0xFF000000));
     }
-    return AndroidView(
+    // SURFACE_VIEW（2026-11-14）：必须走混合合成（initSurfaceAndroidView）。
+    //
+    // Media3 的 PlayerView 内部是 SurfaceView，而 AndroidView 默认用
+    // 虚拟显示（VirtualDisplay）把原生视图画进纹理 —— SurfaceView 的内容
+    // 在虚拟显示里通常渲染不出来，表现就是「有声音、画面全黑」。
+    // 混合合成把原生视图直接叠到 Flutter 视图层级上，SurfaceView 才正常。
+    return PlatformViewLink(
       viewType: ExoPlayerEngine.viewType,
-      creationParams: <String, dynamic>{'resizeMode': resizeMode},
-      creationParamsCodec: const StandardMessageCodec(),
+      onCreatePlatformView: (params) {
+        return PlatformViewsService.initSurfaceAndroidView(
+          id: params.id,
+          viewType: params.viewType,
+          layoutDirection: TextDirection.ltr,
+          creationParams: <String, dynamic>{'resizeMode': resizeMode},
+          creationParamsCodec: const StandardMessageCodec(),
+          onFocus: () => params.onFocusChanged(true),
+        )
+          ..addOnPlatformViewCreatedListener(params.onPlatformViewCreated)
+          ..create();
+      },
+      surfaceFactory: (context, controller) => AndroidViewSurface(
+        controller: controller as AndroidViewController,
+        gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{},
+        hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+      ),
     );
   }
 }
