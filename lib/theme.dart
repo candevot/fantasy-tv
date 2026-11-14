@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -216,7 +217,7 @@ class FxFadeIn extends StatelessWidget {
 /// - 地址统一走 [Api.imgProxy]，本站 / 本机地址直连；
 /// - 加载中灰底微光，失败显示图标，首帧 150ms 淡入；
 /// - 同一 URL 复用 ImageProvider 缓存，列表回收不重复请求。
-class FxNetworkImage extends StatelessWidget {
+class FxNetworkImage extends StatefulWidget {
   const FxNetworkImage({
     super.key,
     required this.url,
@@ -244,43 +245,98 @@ class FxNetworkImage extends StatelessWidget {
   final double fallbackIconSize;
   final String? semanticLabel;
 
+  /// 单张图的等待上限（IMAGE_TIMEOUT 2026-11-15）。
+  ///
+  /// Flutter 的 [NetworkImage] 走的是默认 HttpClient，**没有超时**：源站不回
+  /// 响应（黑洞 IP / 卡住的 CDN）时图片会一直停在 shimmer 上，用户看到的是
+  /// 「封面永远在转」。这里给 10 秒硬上限，到点直接换成首字渐变占位，
+  /// 页面其余部分照常可用。
+  static const Duration timeout = Duration(seconds: 10);
+
+  @override
+  State<FxNetworkImage> createState() => _FxNetworkImageState();
+}
+
+class _FxNetworkImageState extends State<FxNetworkImage> {
+  Timer? _watchdog;
+
+  /// 图片数据已经到过（首帧 / 同步命中缓存都算）。
+  bool _loaded = false;
+
+  /// 10 秒到了还没到 → 放弃等，直接显示占位。
+  bool _timedOut = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _arm();
+  }
+
+  @override
+  void didUpdateWidget(FxNetworkImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) {
+      _loaded = false;
+      _timedOut = false;
+      _arm();
+    }
+  }
+
+  void _arm() {
+    _watchdog?.cancel();
+    _watchdog = Timer(FxNetworkImage.timeout, () {
+      if (!mounted || _loaded) return;
+      setState(() => _timedOut = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _watchdog?.cancel();
+    super.dispose();
+  }
+
   Widget _fallback() {
-    final custom = fallback;
+    final custom = widget.fallback;
     if (custom != null) return custom;
     return FxImageFallback(
-      icon: fallbackIcon,
-      iconSize: fallbackIconSize,
+      icon: widget.fallbackIcon,
+      iconSize: widget.fallbackIconSize,
     );
   }
 
   @override
   Widget build(BuildContext context) {
     final provider = fxImageProvider(
-      url,
-      cacheWidth: cacheWidth,
-      cacheHeight: cacheHeight,
+      widget.url,
+      cacheWidth: widget.cacheWidth,
+      cacheHeight: widget.cacheHeight,
     );
     Widget image;
-    if (provider == null) {
+    if (provider == null || _timedOut) {
       image = _fallback();
     } else {
       image = Image(
         image: provider,
-        width: width,
-        height: height,
-        fit: fit,
-        filterQuality: filterQuality,
-        semanticLabel: semanticLabel,
+        width: widget.width,
+        height: widget.height,
+        fit: widget.fit,
+        filterQuality: widget.filterQuality,
+        semanticLabel: widget.semanticLabel,
         frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
-          if (wasSynchronouslyLoaded) return child;
+          if (wasSynchronouslyLoaded) {
+            _loaded = true;
+            return child;
+          }
           if (frame == null) return const FxShimmer();
+          _loaded = true;
           return FxFadeIn(child: child);
         },
         errorBuilder: (context, error, stackTrace) => _fallback(),
       );
     }
-    if (width == null && height == null) return image;
-    return SizedBox(width: width, height: height, child: image);
+    if (widget.width == null && widget.height == null) return image;
+    return SizedBox(width: widget.width, height: widget.height, child: image);
   }
 }
 

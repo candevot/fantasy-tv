@@ -41,14 +41,17 @@ void main() {
       }
     });
 
-    test('线路类型判定：令牌 / 页面地址需要解析，真 m3u8 直链不用', () {
+    test('线路类型判定按地址本身走，不按线路名猜', () {
       final byName = <String, CmsLine>{
         for (final line in parseLines(_realVod())) line.info.name: line,
       };
-      // 量子是 /share/<md5> 页面，幻想4K / 幻想蓝光是 FY-* 令牌。
+      // 量子给的是 /share/<md5> 页面（不是 m3u8），要现场交给 hxparse。
       expect(byName['量子']!.needsParse, isTrue);
-      expect(byName['幻想4K']!.needsParse, isTrue);
-      expect(byName['幻想蓝光']!.needsParse, isTrue);
+      // 幻想4K / 幻想蓝光的令牌已经包在 hxparse 的 m3u8 地址里
+      // （`/hxparse/play/fuying/FY-SH4K-<md5>/index.m3u8`），可以直接播。
+      expect(byName['幻想4K']!.needsParse, isFalse);
+      expect(byName['幻想4K']!.urls.first, endsWith('index.m3u8'));
+      expect(byName['幻想蓝光']!.needsParse, isFalse);
       // 红牛给的是 hn.bfvvs.com 的真 m3u8 直链。
       expect(byName['红牛']!.needsParse, isFalse);
       expect(byName['红牛']!.urls.first, contains('.m3u8'));
