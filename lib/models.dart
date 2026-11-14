@@ -546,6 +546,13 @@ class LineInfo {
   /// 健康度成功率（0–1），服务端未给时为 0。
   final double healthRate;
 
+  /// 这条线路**自己**的集名（如「正片」「粤语版」「国语中字」）。
+  ///
+  /// LINE_EPNAMES：以前所有线路共用「合并后最长那条线路」的集名，
+  /// 于是三条线路都显示同一套 5 集，可有些线路根本没这些集，
+  /// 点进去就播不出来。现在按线路显示该线路真实的集。
+  final List<String> epNames;
+
   LineInfo(
     this.id,
     this.name,
@@ -555,6 +562,7 @@ class LineInfo {
     this.from,
     this.degraded = false,
     this.healthRate = 0,
+    this.epNames = const <String>[],
   });
 
   factory LineInfo.fromJson(Map<String, dynamic> j) {
@@ -569,6 +577,7 @@ class LineInfo {
       from: _lineOptStr(j['from']),
       degraded: j['degraded'] == true,
       healthRate: rate.toDouble(),
+      epNames: _asStrList(j['epnames']),
     );
   }
 

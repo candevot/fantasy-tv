@@ -184,7 +184,7 @@ class _DetailPageState extends State<DetailPage>
         }
       }
 
-      final eps = _episodesOf(d);
+      final eps = _episodesOf(d, lineId);
       var ep = _ep;
       if (eps.isNotEmpty && !eps.any((e) => e.n == ep)) {
         ep = eps.first.n;
@@ -357,7 +357,23 @@ class _DetailPageState extends State<DetailPage>
     setState(() => _related = cards);
   }
 
-  List<Episode> _episodesOf(VideoDetail d) {
+  /// 剧集列表：**按当前选中线路**返回它自己的集。
+  ///
+  /// LINE_EPNAMES（2026-11-14）：以前所有线路共用「合并后最长那条线路」
+  /// 的集名 —— 三条线路都显示同一套 5 集，可有的线路根本没这些集，
+  /// 点进去就播不出来。现在线路自带 epnames 时优先用它。
+  List<Episode> _episodesOf(VideoDetail d, [String? lineId]) {
+    final wantLine = (lineId ?? _lineId).trim();
+    if (wantLine.isNotEmpty) {
+      for (final l in d.lines) {
+        if (l.id == wantLine && l.epNames.isNotEmpty) {
+          return <Episode>[
+            for (var i = 0; i < l.epNames.length; i++)
+              Episode(i + 1, l.epNames[i], 0),
+          ];
+        }
+      }
+    }
     final all = d.allEpisodes;
     if (all.isNotEmpty) return all;
     return <Episode>[for (var i = 1; i <= d.episodes; i++) Episode(i, '', 0)];
@@ -568,6 +584,13 @@ class _DetailPageState extends State<DetailPage>
     setState(() {
       _lineId = line.id;
       _autoLineTries = 0;
+      // 换线路后集数可能变少（这条线路没有那么多集）：
+      // 把当前集夹到该线路真实拥有的范围内，避免点了播不出来。
+      final eps = _episodesOf(_detail!, line.id);
+      if (eps.isNotEmpty && !eps.any((e) => e.n == _ep)) {
+        _ep = eps.first.n;
+      }
+      _groupIndex = _groupIndexOf(_episodeGroups, _ep);
     });
     _saveHistory();
     fxToast(context, '正在切换播放源…');
@@ -1173,7 +1196,11 @@ class _DetailPageState extends State<DetailPage>
                         name: line.displayName.isEmpty
                             ? '线路${i + 1}'
                             : line.displayName,
-                        count: total,
+                        // 集数用这条线路自己的：合并后的总集数套给所有线路，
+                        // 会出现「显示 5 集、点第 4 集播不出来」。
+                        count: line.epNames.isNotEmpty
+                            ? line.epNames.length
+                            : total,
                         // 电影不显示「共 N 集」，标「正片」
                         subtitle: _isMovie ? '正片' : null,
                         active: line.id == _lineId,
