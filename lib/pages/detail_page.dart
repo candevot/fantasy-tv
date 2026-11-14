@@ -444,28 +444,13 @@ class _DetailPageState extends State<DetailPage>
   bool get _isMovie {
     final d = _detail;
     if (d == null) return false;
-
-    // MOVIE_DYNAMIC（2026-11-14）：按**当前线路实际集数**动态判断，
-    // 不再写死分类。
-    //
-    // 之前只要 category 含「电影」就当电影，结果《尚公主》标着电影却有
-    // 41 集，界面上出现「正片 · 41 个版本」下面又排「第01集」——自相矛盾。
-    //
-    // 现在的规则：
-    //   · 当前线路集数 ≤ 3  → 电影，显示「正片」「N 个版本」
-    //   · 当前线路集数 > 3  → 剧集，显示「第NN集」「更新至 N 集」
-    // 判断对象是这条线路自己的集数，所以同一部片不同线路可以各自表现。
-    final own = () {
-      final id = _lineId.trim();
-      if (id.isNotEmpty) {
-        for (final l in d.lines) {
-          if (l.id == id && l.epNames.isNotEmpty) return l.epNames.length;
-        }
-      }
-      return d.episodes;
-    }();
-    return own > 0 && own <= 3;
+    // MOVIE_BY_CATEGORY（2026-11-14 用户明确要求）：只看分类。
+    //   · 分类是「电影」→ 正片（多个版本时显示版本名）
+    //   · 其它一切（电视剧/动漫/综艺…）→ 剧集，显示集数
+    // 不再用集数兜底判断，也不写死单个线路。
+    return d.category.contains('电影');
   }
+
 
 
   String get _statusText {
@@ -1269,16 +1254,16 @@ class _DetailPageState extends State<DetailPage>
                         // 现在：
                         //   · 该线路 ≤ 3 集 → 显示它自己的版本名（正片/粤语/国语）
                         //   · 该线路 > 3 集 → 显示「共 N 集」
+                        // 电影显示它自己的版本名（正片/粤语/国语），
+                        // 其它分类一律显示「共 N 集」。
                         subtitle: (() {
                           final names = line.epNames;
-                          final n = names.isNotEmpty
-                              ? names.length
-                              : (line.episodeCount > 0
-                                  ? line.episodeCount
-                                  : total);
-                          if (n > 0 && n <= 3 && names.isNotEmpty) {
-                            final first = names.first.trim();
-                            if (first.isNotEmpty) return first;
+                          final n = names.isNotEmpty ? names.length : total;
+                          if (_isMovie) {
+                            final first = names.isNotEmpty
+                                ? names.first.trim()
+                                : '';
+                            return first.isNotEmpty ? first : '正片';
                           }
                           return n > 0 ? '共 $n 集' : null;
                         })(),
