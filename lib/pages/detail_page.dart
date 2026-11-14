@@ -396,6 +396,15 @@ class _DetailPageState extends State<DetailPage>
     return fxEpisodeLabel(_ep);
   }
 
+  /// 是不是电影：电影没有「集」的概念，它的多条是「正片 / 国语 / 粤语」
+  /// 这类版本。列表与详情都不该给电影显示「共 N 集 / 更新至 N 集」。
+  bool get _isMovie {
+    final d = _detail;
+    if (d == null) return false;
+    return d.category.contains('电影') ||
+        d.type.trim().toLowerCase() == 'movie';
+  }
+
   String get _statusText {
     final d = _detail;
     if (d == null) return '';
@@ -404,6 +413,8 @@ class _DetailPageState extends State<DetailPage>
       if (RegExp(r'^全\s*\d+\s*集$').hasMatch(s)) return '已完结';
       return s;
     }
+    // 电影没有「更新至 N 集」这一说
+    if (_isMovie) return '电影';
     final n = fxMainEpisodeCount(_episodes);
     return n > 0 ? '更新至$n集' : '';
   }
@@ -1163,6 +1174,8 @@ class _DetailPageState extends State<DetailPage>
                             ? '线路${i + 1}'
                             : line.displayName,
                         count: total,
+                        // 电影不显示「共 N 集」，标「正片」
+                        subtitle: _isMovie ? '正片' : null,
                         active: line.id == _lineId,
                         // degraded 线路照常展示并可点，只在卡片名后补灰色小字。
                         unstable: line.degraded,
@@ -1544,7 +1557,10 @@ class _DetailPageState extends State<DetailPage>
 
   Widget _episodeHeader(int total, {int available = 0}) {
     final avail = available > 0 ? available : total;
-    final title = total > 0 ? '更新至 $avail 集 · 全 $total 集' : '选集';
+    // 电影没有集数概念：一条是「正片」，多条是「国语 / 粤语」这类版本
+    final title = _isMovie
+        ? (total > 1 ? '正片 · $total 个版本' : '正片')
+        : (total > 0 ? '更新至 $avail 集 · 全 $total 集' : '选集');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
