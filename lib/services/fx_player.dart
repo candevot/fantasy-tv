@@ -633,7 +633,10 @@ class FxPlayer implements Listenable {
         token: token,
         startPositionMs: startPositionMs,
         // 毫秒数交给原生，并进同一条时间线（原生时间线的起点就是 open）。
-        resolveMs: resolveWatch.elapsedMilliseconds,
+        // 加上 FxPlayCache 记下的 /api/play（hxparse）耗时：那一步在 open
+        // 之前，属于同一次「用户点播放」的等待。
+        resolveMs:
+            resolveWatch.elapsedMilliseconds + FxPlayCache.recentResolveMs(),
       ).timeout(_openHardCap);
     } catch (error) {
       if (_disposed || token != _openToken) {
@@ -1686,7 +1689,8 @@ class FxPlayer implements Listenable {
           startPositionMs: live || resume <= Duration.zero
               ? 0
               : resume.inMilliseconds,
-          resolveMs: resolveWatch.elapsedMilliseconds,
+          resolveMs:
+              resolveWatch.elapsedMilliseconds + FxPlayCache.recentResolveMs(),
         ).timeout(_rescueOpenTimeout);
         if (_disposed || token != _openToken) return false;
         await mediaReady.future.timeout(_rescueOpenTimeout);
@@ -1862,6 +1866,24 @@ class FxPlayCache {
   static final Map<String, Future<PlayInfo>> _inflight =
       <String, Future<PlayInfo>>{};
 
+  /// 最近一次「真的发了一次 /api/play（hxparse / CMS 现解析）」花了多少毫秒。
+  ///
+  /// DIAG（2026-11-15）：解析地址这一步发生在 [FxPlayer.open] **之前**，
+  /// 播放器（原生）完全看不到它，但它属于用户等待。这里记一手，
+  /// [FxPlayer.open] 开计时线时把它并进「解析」那一段 —— 否则诊断浮层上的
+  /// 「解析」永远是 0ms，看起来像是不花时间，实际都藏在 open 之前的停顿里。
+  static int _lastResolveMs = 0;
+  static DateTime? _lastResolveAt;
+
+  /// 取「刚刚解析地址花掉的毫秒数」：5 秒内有效，过期按 0 算
+  /// （过期说明这次 open 用的是缓存/预取结果，本来就不花时间）。
+  static int recentResolveMs() {
+    final at = _lastResolveAt;
+    if (at == null) return 0;
+    if (DateTime.now().difference(at) > const Duration(seconds: 5)) return 0;
+    return _lastResolveMs;
+  }
+
   static String _key(String id, int ep, String line) => '$id|$ep|$line';
 
   static PlayInfo? _fresh(String key) {
@@ -1896,7 +1918,11 @@ class FxPlayCache {
     if (pending != null) return pending;
     // 播放地址统一走 CmsBridge：CMS 影片按 vod_id 现解析，旧接口的影片
     // 照旧走 /api/play —— 两套编号不能互换（见 cms_bridge 的说明）。
+    final resolveWatch = Stopwatch()..start();
     final future = CmsBridge.play(id, ep, line).then((info) {
+      resolveWatch.stop();
+      _lastResolveMs = resolveWatch.elapsedMilliseconds;
+      _lastResolveAt = DateTime.now();
       _cache[key] = _CachedPlayInfo(info, DateTime.now());
       _trim();
       return info;
