@@ -86,14 +86,6 @@ jobs:
           # 内核就是它：少了这一步 Dart 侧的 fantasy_tv/exo_player 通道没有实现，
           # 一开播就黑屏且没有任何错误。
           python3 tools/patch_exoplayer.py
-      - name: Inject jar spider (TVBox type 3) support
-        run: |
-          # 把 android_src/libs/*.jar（api.jar + okhttp/gson/jsoup/commons-*）
-          # 拷进 android/app/libs，加 fileTree 依赖，并在 MainActivity 注册
-          # fantasy_tv/spider 通道。必须在 ExoPlayer 注入之后跑：
-          # 那一步负责把 android_src/kotlin 下的 .kt 拷进工程。
-          python3 tools/patch_jar_spider.py
-          ls -l android/app/libs
       - name: Check Android 8+ / 16KB compatibility
         run: |
           python3 tools/check_android_compat.py

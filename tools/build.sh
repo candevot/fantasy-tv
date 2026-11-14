@@ -156,11 +156,6 @@ python3 tools/patch_edge_to_edge.py
 echo "[build] patch: 注入 ExoPlayer(Media3) 内核（patch_exoplayer.py）"
 python3 tools/patch_exoplayer.py
 
-# JAR_SPIDER：TVBox type 3 的 jar 源。依赖上一步把 .kt 拷进工程，
-# 再把 android_src/libs/*.jar 拷进 app/libs 并在 MainActivity 注册通道。
-echo "[build] patch: 注入 jar 源支持（patch_jar_spider.py）"
-python3 tools/patch_jar_spider.py
-
 echo "[build] check: Android 8+ / 16KB 兼容（check_android_compat.py）"
 python3 tools/check_android_compat.py
 

@@ -9,7 +9,6 @@ import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
-import 'jar_spider.dart';
 
 /// 片源的种类。
 enum KSourceKind {
@@ -22,14 +21,7 @@ enum KSourceKind {
   /// `type: "live"` —— 直播播放列表（M3U / TXT / JSON）。
   live,
 
-  /// `type: 3` —— TVBox 的 jar 解析插件（`api` 是 jar 里的类名，`ext` 是站点配置）。
-  ///
-  /// 走 `JAR_SPIDER` 通道：原生 DexClassLoader 加载 `spider.jar`，反射调
-  /// `com.github.catvod.crawler.Spider`，返回的 JSON 在 jar_spider.dart 里
-  /// 转成 [VideoCard] / [VideoDetail] / [PlayInfo]。
-  jar,
-
-  /// `type: 4`（python 解析脚本）—— 暂不支持。
+  /// `type: 3` / `type: 4`（jar / py 解析脚本）—— 暂不支持。
   unsupported,
 }
 
@@ -58,7 +50,6 @@ class KSource {
     this.enabled = true,
     this.tag = '',
     this.reason = '',
-    this.ext = '',
   });
 
   final String key;
@@ -76,11 +67,7 @@ class KSource {
   /// 来源备注（目前只有 TVBox 导入会填）。
   final String tag;
 
-  /// TVBox 的 `ext`：jar 源里常用来区分同一个类下的不同站点
-  /// （例如肥猫 / 饭太硬 / 二小都用 `csp_Xxx`，靠 ext 指向各自的地址）。
-  final String ext;
-
-  /// 不可用原因（目前只有 type 4 会填）。
+  /// 不可用原因（目前只有 type 3/4 会填）。
   final String reason;
 
   bool get usable =>
@@ -89,13 +76,8 @@ class KSource {
   bool get isLive => kind == KSourceKind.live;
 
   /// 能否参与搜索 / 分类（直播源不参与内容检索）。
-  ///
-  /// jar 源也算：它的内容检索走 `JAR_SPIDER` 通道，和 CMS 一样能搜能分类。
   bool get searchable =>
-      usable &&
-      (kind == KSourceKind.cms ||
-          kind == KSourceKind.direct ||
-          kind == KSourceKind.jar);
+      usable && (kind == KSourceKind.cms || kind == KSourceKind.direct);
 
   String get kindLabel {
     switch (kind) {
@@ -105,8 +87,6 @@ class KSource {
         return '直接地址';
       case KSourceKind.live:
         return '直播列表';
-      case KSourceKind.jar:
-        return 'jar 插件';
       case KSourceKind.unsupported:
         return '暂不支持';
     }
@@ -120,7 +100,6 @@ class KSource {
     String? api,
     KSourceKind? kind,
     bool? enabled,
-    String? ext,
   }) =>
       KSource(
         key: key,
@@ -132,7 +111,6 @@ class KSource {
         enabled: enabled ?? this.enabled,
         tag: tag,
         reason: reason,
-        ext: ext ?? this.ext,
       );
 
   Map<String, dynamic> toMap() => <String, dynamic>{
@@ -145,7 +123,6 @@ class KSource {
         'enabled': enabled,
         'tag': tag,
         'reason': reason,
-        'ext': ext,
       };
 
   static KSource? fromMap(Object? raw) {
@@ -172,7 +149,6 @@ class KSource {
       enabled: m['enabled'] != false,
       tag: _text(m['tag']),
       reason: _text(m['reason']),
-      ext: _text(m['ext']),
     );
   }
 }
@@ -268,12 +244,7 @@ class SourceHub extends ChangeNotifier {
     final seen = <String>{};
     void take(KSource s) {
       if (!s.searchable) return;
-      // jar 源的 api 是类名，同一个类靠 ext 区分不同站点（肥猫 / 饭太硬 / 二小
-      // 常常共用一个 csp_Xxx），只按 api 去重会把它们合并成一个源。
-      final key = s.kind == KSourceKind.jar
-          ? '${s.api.trim()}|${s.ext}'
-          : s.api.trim();
-      if (!seen.add(key)) return;
+      if (!seen.add(s.api.trim())) return;
       out.add(s);
     }
 
@@ -456,7 +427,6 @@ class SourceHub extends ChangeNotifier {
       builtin: m['builtin'] != false,
       enabled: m['enabled'] != false,
       reason: _reasonOf(m['type'], kind),
-      ext: _text(m['ext']),
     );
   }
 
@@ -478,7 +448,6 @@ class SourceHub extends ChangeNotifier {
       case 1:
         return KSourceKind.cms;
       case 3:
-        return KSourceKind.jar;
       case 4:
         return KSourceKind.unsupported;
       default:
@@ -490,6 +459,7 @@ class SourceHub extends ChangeNotifier {
     if (kind != KSourceKind.unsupported) return '';
     final text = _text(raw);
     final n = int.tryParse(text);
+    if (n == 3) return 'type 3（jar 解析插件）暂不支持';
     if (n == 4) return 'type 4（python 解析脚本）暂不支持';
     return 'type $text 暂不支持';
   }
@@ -519,7 +489,6 @@ class SourceHub extends ChangeNotifier {
     required String api,
     Object? type = 1,
     String tag = '',
-    String ext = '',
   }) async {
     final address = api.trim();
     if (address.isEmpty) throw ApiException('填一下片源地址');
@@ -541,7 +510,6 @@ class SourceHub extends ChangeNotifier {
       enabled: true,
       tag: tag,
       reason: _reasonOf(type, kind),
-      ext: ext.trim(),
     );
     _user = <KSource>[..._user, source];
     await _saveUser();
@@ -555,7 +523,6 @@ class SourceHub extends ChangeNotifier {
     String? name,
     String? api,
     Object? type,
-    String? ext,
   }) async {
     final k = key.trim();
     if (k.isEmpty) return;
@@ -579,7 +546,6 @@ class SourceHub extends ChangeNotifier {
         enabled: true,
         tag: s.tag,
         reason: _reasonOf(type, kind),
-        ext: (ext ?? s.ext).trim(),
       ));
     }
     _user = next;
@@ -601,9 +567,8 @@ class SourceHub extends ChangeNotifier {
 
   /// TVBox / 猫源导入：粘贴 JSON 或填一个配置地址，解析 `sites` 数组。
   ///
-  /// 收 `type: 1`（CMS 接口）、`type: 0`（直接地址）、`type: 3`（jar 插件，
-  /// `api` 是类名、`ext` 是站点配置，需要先装好 `spider.jar`）；
-  /// `type: 4`（python 脚本）标记「暂不支持」后跳过。
+  /// 只收 `type: 1`（CMS 接口）和 `type: 0`（直接地址）；
+  /// `type: 3` / `type: 4`（jar / py 脚本）标记「暂不支持」后跳过。
   Future<TvBoxImport> importTvBox(String input) async {
     final text = input.trim();
     if (text.isEmpty) throw ApiException('先粘贴 TVBox 配置或填一个地址');
@@ -628,19 +593,13 @@ class SourceHub extends ChangeNotifier {
 
     final notes = <String>[];
     final added = <KSource>[];
-    // 去重键：普通源看地址；jar 源看「类名 + ext」（同类不同 ext 是不同的站点）。
-    final taken = <String>{
-      for (final s in _user)
-        s.kind == KSourceKind.jar ? '${s.api.trim()}|${s.ext}' : s.api.trim(),
-    };
+    final taken = <String>{for (final s in _user) s.api.trim()};
     var skipped = 0;
-    var jarNotice = false;
     for (final site in sites) {
       final name = _text(site['name']).isEmpty
           ? _text(site['key'])
           : _text(site['name']);
       final api = _text(site['api']);
-      final ext = _text(site['ext']);
       final kind = kindOf(site['type']);
       if (api.isEmpty) {
         skipped++;
@@ -657,13 +616,10 @@ class SourceHub extends ChangeNotifier {
         notes.add('「$name」是直播列表，请到「直播」页添加');
         continue;
       }
-      final dedupeKey =
-          kind == KSourceKind.jar ? '$api|$ext' : api;
-      if (!taken.add(dedupeKey)) {
+      if (!taken.add(api)) {
         skipped++;
         continue;
       }
-      if (kind == KSourceKind.jar) jarNotice = true;
       added.add(KSource(
         key: _newUserKey(name.isEmpty ? 'tvbox' : name),
         name: name.isEmpty ? 'TVBox 片源' : name,
@@ -672,14 +628,7 @@ class SourceHub extends ChangeNotifier {
         origin: KSourceOrigin.user,
         enabled: true,
         tag: 'TVBox',
-        ext: ext,
       ));
-    }
-    if (jarNotice) {
-      final jar = JarSpider.cachedStatus ?? await JarSpider.status();
-      notes.add(jar.installed
-          ? 'jar 源已导入，解析交给本地的 spider.jar'
-          : '导入了 jar 源，但还没装 spider.jar：到片源页点「安装 jar 插件」，这些源才能出内容');
     }
     if (added.isNotEmpty) {
       _user = <KSource>[..._user, ...added];
@@ -792,14 +741,6 @@ class SourceHub extends ChangeNotifier {
     final q = keyword.trim();
     if (q.isEmpty) return const <VideoCard>[];
     try {
-      if (source.kind == KSourceKind.jar) {
-        return await JarSpider.search(
-          api: source.api,
-          ext: source.ext,
-          key: q,
-          page: page,
-        );
-      }
       return await CmsClient.of(source.api).search(q, page);
     } catch (_) {
       return const <VideoCard>[];
@@ -812,22 +753,6 @@ class SourceHub extends ChangeNotifier {
     int page,
   ) async {
     try {
-      if (source.kind == KSourceKind.jar) {
-        // jar 源的分类 id 来自它自己的 homeContent（class 列表），
-        // 先按名字映射到我们的频道键，再拿它真实的 type_id 去取列表。
-        final typeId = await JarSpider.typeIdOfChannel(
-          source.api,
-          source.ext,
-          channelKey,
-        );
-        if (typeId.isEmpty) return const <VideoCard>[];
-        return await JarSpider.category(
-          api: source.api,
-          ext: source.ext,
-          tid: typeId,
-          page: page,
-        );
-      }
       final client = CmsClient.of(source.api);
       await client.classes();
       final typeId = client.typeIdOfChannel(channelKey);

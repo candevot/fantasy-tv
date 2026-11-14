@@ -2,7 +2,6 @@ import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
-import 'jar_spider.dart';
 import 'source_hub.dart';
 
 /// CMS 数据层 ↔ 现有 UI 的接线层（CMS_WIRING，2026-11-14）。
@@ -566,16 +565,6 @@ class CmsBridge {
     _boot();
     final external = await _externalSource(id);
     if (external != null) {
-      // jar 源（TVBox type 3）：详情走 JarSpider，模型出口与 CMS 一致。
-      if (external.kind == KSourceKind.jar) {
-        final detail = await JarSpider.detail(
-          api: external.api,
-          ext: external.ext,
-          vodId: SourceHub.rawIdOf(id),
-        );
-        _mark(id, _Origin.cms);
-        return detail;
-      }
       final detail = await CmsClient.of(external.api).detail(
         SourceHub.rawIdOf(id),
       );
@@ -637,18 +626,6 @@ class CmsBridge {
     _boot();
     final external = await _externalSource(vodId);
     if (external != null) {
-      if (external.kind == KSourceKind.jar) {
-        // jar 源：拿详情里的集地址交给 playerContent（解析在 jar 内部完成）。
-        final info = await JarSpider.play(
-          api: external.api,
-          ext: external.ext,
-          vodId: SourceHub.rawIdOf(vodId),
-          lineName: line,
-          ep: ep,
-        );
-        _mark(vodId, _Origin.cms);
-        return info;
-      }
       final info = await CmsClient.of(external.api).play(
         SourceHub.rawIdOf(vodId),
         line,
@@ -685,16 +662,6 @@ class CmsBridge {
   static Future<String> playUrl(String vodId, String line, int ep) async {
     final external = await _externalSource(vodId);
     if (external != null) {
-      if (external.kind == KSourceKind.jar) {
-        final info = await JarSpider.play(
-          api: external.api,
-          ext: external.ext,
-          vodId: SourceHub.rawIdOf(vodId),
-          lineName: line,
-          ep: ep,
-        );
-        return info.url;
-      }
       final info = await CmsClient.of(external.api).play(
         SourceHub.rawIdOf(vodId),
         line,
