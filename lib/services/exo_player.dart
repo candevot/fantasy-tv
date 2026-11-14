@@ -67,6 +67,9 @@ class ExoPlayerEngine {
     String url, {
     Map<String, String> headers = const {},
     bool isHls = true,
+    /// 起始播放位置（毫秒）：原生在 `prepare()` 之前 seekTo，
+    /// ExoPlayer 直接从目标分片开始选片，不先请求第 0 片。
+    int startPositionMs = 0,
   }) async {
     if (_disposed || !isSupported) return false;
     _error = null;
@@ -75,6 +78,7 @@ class ExoPlayerEngine {
         'url': url,
         'headers': headers,
         'isHls': isHls,
+        'startPositionMs': startPositionMs < 0 ? 0 : startPositionMs,
       });
       return r ?? false;
     } on PlatformException catch (e) {

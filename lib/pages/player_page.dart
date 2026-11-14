@@ -1034,6 +1034,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               headers: info.headers,
               play: shouldPlay,
               waitForWarm: waitForWarm,
+              // 续播：起始位置直接交给 open（原生 prepare 之前 seekTo），
+              // 首个分片请求就是目标片。以前先拉第 0 片再 seek，第 0 片会
+              // 把服务端 /api/seg 的首片中转名额用掉，续播反而更慢。
+              startPosition: Duration(
+                milliseconds: saved.isFinite ? (saved * 1000).round() : 0,
+              ),
               // 用服务端声明的类型：幻想自建的地址没有 .m3u8 后缀，
               // 按后缀猜会被当成普通视频，直接解析失败。
               isHls: info.isHls,
@@ -1106,11 +1112,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         if (fxIsFinishedPosition(resume, durationMs / 1000.0)) {
           resume = 0;
         }
+        final landedSeconds = controller.value.position.inMilliseconds / 1000.0;
         if (resume > 0) {
-          // 静默续播：直接 seek 到上次位置，不弹任何提示。
-          await controller.seekTo(
-            Duration(milliseconds: (resume * 1000).round()),
-          );
+          // 静默续播：open 已带着起始位置就位，没落准时才补跳一次
+          // （补跳会让目标分片重下一次）。
+          if ((landedSeconds - resume).abs() > 1.0) {
+            await controller.seekTo(
+              Duration(milliseconds: (resume * 1000).round()),
+            );
+          }
+        } else if (landedSeconds > 1.0) {
+          // 片尾窗口 / 越界：明确回到开头，不能停在片尾。
+          await controller.seekTo(Duration.zero);
         }
         if (shouldPlay) {
           await controller.play();

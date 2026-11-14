@@ -23,6 +23,23 @@ const double togetherMicroRateStep = 0.05;
 /// 硬 seek 后 2 秒内不再纠正，防止 seek 尚未落位又被下一次纠偏打断。
 const int togetherSeekCooldownMs = 2000;
 
+/// 成员硬 seek 错峰步长：第 i 位成员等 i * 200ms 再跳。
+///
+/// 房主拖动后所有成员会在同一帧收到同一份 room_state，如果同时硬 seek，
+/// 就会同时去抢服务端 `/api/seg` 的首片中转槽位，抢不到的人被 302 降级
+/// 成直连（首屏明显更慢）。按成员序号错开，槽位自然排队。
+const int togetherSeekStaggerStepMs = 200;
+
+/// 错峰上限：第 10 位之后统一等 2 秒，别让后排成员等到「已经不在乎」。
+const int togetherSeekStaggerMaxMs = 2000;
+
+/// 第 [index] 位成员硬 seek 的等待毫秒数（index 从 0 开始）。
+int togetherSeekStaggerMs(int index) {
+  if (index <= 0) return 0;
+  final ms = index * togetherSeekStaggerStepMs;
+  return ms > togetherSeekStaggerMaxMs ? togetherSeekStaggerMaxMs : ms;
+}
+
 /// 播放倍速允许范围（与房间 UI / 服务端一致）。
 const double togetherMinRate = 0.25;
 const double togetherMaxRate = 4.0;

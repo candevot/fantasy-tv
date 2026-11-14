@@ -154,11 +154,21 @@ class _TogetherPageState extends State<TogetherPage>
   /// 等待房间状态的兜底定时器：room_state 迟迟不来时不能让画面一直转圈。
   Timer? _awaitingStateTimer;
 
+  /// 成员硬 seek 错峰：房主拖动后 N 个成员会在同一帧收到同一份 room_state，
+  /// 同时硬 seek 就会同时抢服务端 `/api/seg` 的首片中转槽位，抢不到的人
+  /// 被降级成直连。这里按「自己在成员列表里的序号」把 seek 延后
+  /// i * 200ms（上限 2 秒），错峰只作用于硬 seek，倍速微调照旧即时。
+  Timer? _staggerSeekTimer;
+
+  bool get _waitingStaggerSeek => _staggerSeekTimer != null;
+
   bool get _canCorrectMember => togetherCanCorrectMember(
         online: _online,
         connected: _client.connected,
         clockSynced: _client.synced,
-        awaitingRoomState: _awaitingRoomState,
+        // 错峰等待期间也复用同一个 gate：心跳到达不能把这段等待顶掉，
+        // 否则周期纠偏会先跳一次，等于错峰白做。
+        awaitingRoomState: _awaitingRoomState || _waitingStaggerSeek,
       );
 
   /// 应用房主操作后的短暂静默期：先让 play / pause / seek 落位，再开始纠偏。
@@ -492,6 +502,8 @@ class _TogetherPageState extends State<TogetherPage>
     if (!mounted) return;
     final wasOnline = _online;
     _armAwaitingState();
+    // 断线后错峰等待也没有意义：重连回来会拿到新的权威状态。
+    _cancelStaggerSeek();
     // Losing the control socket must not leave a member locally paused while
     // the host's last playback intent was play. Do not extrapolate/seek against
     // that stale snapshot; let the media stream continue until rejoin succeeds.
@@ -522,6 +534,7 @@ class _TogetherPageState extends State<TogetherPage>
     _remote = null;
     _awaitingRoomState = false;
     _awaitingStateTimer?.cancel();
+    _cancelStaggerSeek();
     _seqGate.reset();
     _applyHoldUntil = 0;
     _seekGuardUntil = 0;
@@ -1713,6 +1726,8 @@ class _TogetherPageState extends State<TogetherPage>
     final expected = _targetPosition(state);
     _logSync('手动同步房主：当前 ${controller.value.position.inSeconds}s → '
         '目标 ${expected.toStringAsFixed(1)}s');
+    // 手动同步是用户点出来的：不吃错峰延迟，还要顶掉排队中的错峰 seek。
+    _cancelStaggerSeek();
     _hardSeek(expected, state);
     // 房主在播就跟着播。
     if (state.playing) _followPlayIntent(state);
@@ -1749,6 +1764,48 @@ class _TogetherPageState extends State<TogetherPage>
     );
   }
 
+  /// 自己在房间成员列表里的序号（房主 / 还没拿到成员表时为 0）。
+  ///
+  /// 只用来算硬 seek 错峰：序号越靠后等得越久，N 个成员就不会同时去抢
+  /// 服务端的首片中转槽位。
+  int get _selfMemberIndex {
+    final index = _members.indexWhere((member) => member.id == _myId);
+    return index < 0 ? 0 : index;
+  }
+
+  /// 成员硬 seek 错峰：第 i 位延迟 i * 200ms（上限 2 秒）再跳。
+  ///
+  /// 等待期间只更新「还有一跳没做」这个状态，不重置截止时间 ——
+  /// 心跳照常到来、照常更新 _remote，但不能把这段等待一直往后推。
+  void _staggerHardSeek(TogetherRoomState state) {
+    final delayMs = togetherSeekStaggerMs(_selfMemberIndex);
+    if (delayMs <= 0) {
+      _cancelStaggerSeek();
+      _hardSeek(_targetPosition(state), state);
+      return;
+    }
+    if (_staggerSeekTimer != null) return; // 已在等：目标到点按最新 state 取
+    _staggerSeekTimer = Timer(Duration(milliseconds: delayMs), () {
+      _staggerSeekTimer = null;
+      if (!mounted || _isHost || _isLive) return;
+      final remote = _remote;
+      final controller = _controller;
+      if (remote == null ||
+          controller == null ||
+          !controller.value.isInitialized) {
+        return;
+      }
+      if (!_online || !_client.connected) return;
+      // 到点用最新权威状态算目标：错峰期间房主可能又拖了一次。
+      _hardSeek(_targetPosition(remote), remote);
+    });
+  }
+
+  void _cancelStaggerSeek() {
+    _staggerSeekTimer?.cancel();
+    _staggerSeekTimer = null;
+  }
+
   /// 收到新房主 state：先立即应用 play / pause / seek / rate，再做一次 drift 决策。
   void _applyRemoteState(
     TogetherRoomState state, {
@@ -1760,6 +1817,8 @@ class _TogetherPageState extends State<TogetherPage>
     if (controller == null || !controller.value.isInitialized) return;
     if (mediaChanged) {
       // 新剧集 / 新线路由 _loadVideo 按最新 state 定位，避免先对旧流 seek。
+      // 旧流上的错峰 seek 也一起作废，否则新流刚起来就被跳一下。
+      _cancelStaggerSeek();
       _restoreBaseRate(state);
       _authStall = false;
       _stallHold = false;
@@ -1821,11 +1880,13 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
 
-    // 5) 明确的房主主动 seek：立即硬跳，不受上一次 seek 防抖限制。
+    // 5) 明确的房主主动 seek：硬跳到权威位置，不受上一次 seek 防抖限制。
+    //    成员按自己的序号错峰（0 / 200 / 400… ms，上限 2 秒），
+    //    避免所有人在同一帧一起抢 /api/seg 的首片中转槽位。
     if (verdict.isSeek) {
       _stallHold = false;
       _followPlayIntent(state);
-      _hardSeek(expected, state);
+      _staggerHardSeek(state);
       return;
     }
 
@@ -1958,6 +2019,9 @@ class _TogetherPageState extends State<TogetherPage>
 
   /// 房主广播一份进度状态：净化 → 发送 →（可选）同步本地权威镜像。
   /// 返回真正发出去的 position。
+  ///
+  /// [coalesce] 为真时交给客户端 200ms 合并窗口（拖拽进度这种高频操作）：
+  /// 窗口内只发最后一次，服务端 rev 递增与成员 seq gate 都不受影响。
   double _reportHostState(
     String state,
     double position, {
@@ -1967,12 +2031,15 @@ class _TogetherPageState extends State<TogetherPage>
     double? rate,
     bool fresh = false,
     bool mark = true,
+    bool coalesce = false,
   }) {
     final safe = _sanitizeHostPosition(
       state,
       position,
       fresh: fresh || _hostReportFresh,
     );
+    // 房主操作一律立刻推 room_state（不等心跳）；合并窗口只削掉拖拽途中的
+    // 中间态。本地镜像要按原始目标立即更新，不能等窗口到点。
     if (_online) {
       _client.sendState(
         state,
@@ -1981,6 +2048,7 @@ class _TogetherPageState extends State<TogetherPage>
         ep: ep,
         line: line,
         rate: rate,
+        coalesce: coalesce,
       );
     }
     if (mark) _markRemote(state, safe, rate: rate);
@@ -2146,8 +2214,18 @@ class _TogetherPageState extends State<TogetherPage>
     // 主动拖动进度：把锚点挪到目标，别让后续上报被当成读数回退冻结。
     _noteHostSeek(target);
     if (_online) {
-      _client.sendSeek(target);
-      _markRemote(_remote?.playing == true ? 'play' : 'pause', target);
+      // 房主自己拖动：立刻推一次权威 room_state，不等 9 秒心跳。
+      // 以前这里发的是只带 position 的 `seek`，成员要等下一次 state 才敢跳，
+      // 表现就是「房主拖完 1~3 秒，成员才跳过去」。
+      // 走 `state` 通道后服务端照常递增 rev，成员 seq gate 判重逻辑不变；
+      // 连续拖拽由客户端 200ms 合并窗口收口，只推最后一次。
+      _reportHostState(
+        _remote?.playing == true ? 'play' : 'pause',
+        target,
+        rate: _hostRate,
+        fresh: true,
+        coalesce: true,
+      );
     }
     if (mounted) _position.value = target;
   }
@@ -2958,6 +3036,25 @@ class _TogetherPageState extends State<TogetherPage>
     }
   }
 
+  /// 本次 open 应该带的起始位置（秒）。
+  ///
+  /// 房主优先用「继续播放」的本地位置；成员用当前权威进度外推值。
+  /// 只作为 open 的起始位置，真正的落位仍是 open 之后的 target 计算。
+  double _desiredStartSeconds(double? localResumePos) {
+    // 房主显式给过续播位置就以它为准（0 也是有效值：从开头播），
+    // 不能退回去用房间进度，否则会先跳到房主进度再跳回 0。
+    if (_isHost && localResumePos != null) {
+      return localResumePos.isFinite && localResumePos > 0
+          ? localResumePos
+          : 0;
+    }
+    final state = _remote;
+    if (state == null) return 0;
+    final value = _targetPosition(state);
+    if (!value.isFinite || value <= 0) return 0;
+    return value;
+  }
+
   Future<void> _loadVideo(String videoId, int ep, String line) async {
     final key = '$videoId|$ep|$line';
     _loadingKey = key;
@@ -2972,6 +3069,8 @@ class _TogetherPageState extends State<TogetherPage>
     _lastProgressAt = 0;
     _lastProgressPositionMs = 0;
     _endedSent = false;
+    // 旧流上的错峰 seek 作废：新流由 open 的起始位置一次性定位。
+    _cancelStaggerSeek();
     // 切剧 / 切集发起时记下本地的「继续播放」意图：加载期间 room_state
     // 可能先到并清掉 _resume*，不能让它把这次切换变成暂停。
     final localResumePos = _resumePos;
@@ -3051,10 +3150,17 @@ class _TogetherPageState extends State<TogetherPage>
           // 只要还在下载就继续等（FxPlayer 内部按下载进展判定）。
           controller = FxPlayer.create();
           final qualityKey = _qualityKey;
+          // 续播 / 跟房主进度：把起始位置直接交给 open（原生在 prepare 之前
+          // seekTo），第一个分片请求就是目标片，不会先拉第 0 片把服务端
+          // `/api/seg` 的首片中转名额用掉 —— 这就是「带 27:55 续播比从头播
+          // 慢很多」的根因。
           await controller.open(
             url,
             headers: play.headers,
             isHls: play.isHls,
+            startPosition: Duration(
+              milliseconds: (_desiredStartSeconds(localResumePos) * 1000).round(),
+            ),
             // 采集线路直连（让 mpv 边下边播），只有平台签名线路才走代理。
             // 一起看卡顿的主因就是这里：4K/大分片走代理要整片下完才播。
             // 按实际地址判断（腾讯直连是 CDN 绝对地址，不需要代理）。
@@ -3109,10 +3215,16 @@ class _TogetherPageState extends State<TogetherPage>
           }
           if (!target.isFinite || target < 0) target = 0;
           if (duration > 0 && target > duration - 1) target = 0;
-          if (target > 0) {
+          // open 已经带着起始位置准备好了：落位正确就不再补跳
+          // （补跳会把刚拉到的目标分片又丢一次）。
+          final landed = controller.value.position.inMilliseconds / 1000.0;
+          if (target > 0 && (landed - target).abs() > 1.0) {
             await controller.seekTo(
               Duration(milliseconds: (target * 1000).round()),
             );
+          } else if (target <= 0 && landed > 1.0) {
+            // 片尾窗口等情况下改成从头播：明确跳回 0。
+            await controller.seekTo(Duration.zero);
           }
           final controllerRate = togetherClampRate(
             _isHost ? _hostRate : (_remote?.rate ?? 1.0),

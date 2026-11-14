@@ -141,7 +141,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 val url = call.argument<String>("url") ?: return result.error("bad_arg", "url 为空", null)
                 val headers = call.argument<Map<String, String>>("headers") ?: emptyMap()
                 val isHls = call.argument<Boolean>("isHls") ?: true
-                open(url, headers, isHls, result)
+                // RESUME_START：续播 / 跟进度打开时带起始位置，prepare 之前就落位。
+                val startMs = call.argument<Number>("startPositionMs")?.toLong() ?: 0L
+                open(url, headers, isHls, startMs, result)
             }
             "play" -> { player?.play(); result.success(true) }
             "pause" -> { player?.pause(); result.success(true) }
@@ -358,7 +360,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         events?.success(snapshot())
     }
 
-    private fun open(url: String, headers: Map<String, String>, isHls: Boolean, result: MethodChannel.Result) {
+    private fun open(
+        url: String,
+        headers: Map<String, String>,
+        isHls: Boolean,
+        startPositionMs: Long,
+        result: MethodChannel.Result,
+    ) {
         ensurePlayer()
         lastError = null
         try {
@@ -399,11 +407,23 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             player!!.clearMediaItems()
             lastError = null
             player!!.setMediaSource(source)
+            // RESUME_FIRST_SEG（2026-11-14）：带续播位置打开。
+            //
+            // setMediaSource 之后、prepare 之前 seekTo 是 ExoPlayer 支持的
+            // 「起始位置」写法：prepare 会从这个位置开始选分片，第一个网络
+            // 请求就是目标片。以前是 prepare（从第 0 片开始拉）之后再 seek，
+            // 第 0 片先到服务器，把 /api/seg 的首片中转名额用掉了，
+            // 真正需要的目标片只能 302 直连 —— 表现就是「带 27:55 打开比
+            // 从头播慢很多」。
+            if (startPositionMs > 0) {
+                player!!.seekTo(startPositionMs)
+            }
             player!!.prepare()
             // 预取随 open 立刻开灌（改动 ②）：HLS 才需要分片级预取，
-            // 本地文件 / 渐进式源跳过。
+            // 本地文件 / 渐进式源跳过。起点同样是这个起始位置，
+            // 不然预取会先把前几片拉一遍，继续占用中转槽位。
             if (!isLocal && isHls) {
-                ensurePreloader()?.start(url, headers)
+                ensurePreloader()?.start(url, headers, startPositionMs)
             }
             result.success(true)
         } catch (e: Throwable) {

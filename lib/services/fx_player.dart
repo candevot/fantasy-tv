@@ -475,6 +475,13 @@ class FxPlayer implements Listenable {
     /// ProgressiveMediaSource，直接解析失败 —— 表现就是「自建线路播不出来」。
     /// libmpv 时代能播是因为 ffmpeg 会自己嗅探格式，ExoPlayer 不会。
     bool? isHls,
+    /// 起始播放位置（续播 / 跟房主进度）。
+    ///
+    /// 原生侧在 `prepare()` 之前就 `seekTo(起始位置)`：ExoPlayer 会直接
+    /// 从目标分片开始选片，**不会**先请求第 0 片。这正是「带上次进度打开
+    /// 比从头播慢」的根因 —— 第 0 片先到，服务端 `/api/seg` 的首片中转
+    /// 名额就被它用掉了，真正需要的目标片只能直连。
+    Duration startPosition = Duration.zero,
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
     FxLineRescue? rescueLines,
@@ -495,7 +502,10 @@ class FxPlayer implements Listenable {
     _lastHandledError = '';
     // 记下服务端声明的类型，供 _openMedia / 救援重开使用。
     _typeHint = isHls;
-    final key = _openKey(url, headers, direct);
+    final startMs = startPosition.inMilliseconds < 0
+        ? 0
+        : startPosition.inMilliseconds;
+    final key = _openKey(url, headers, direct, startMs);
     final pending = _opening;
     if (pending != null && pending.key == key) return pending.future;
     final future = _openInternal(
@@ -504,6 +514,7 @@ class FxPlayer implements Listenable {
       play,
       waitForWarm,
       direct,
+      startMs,
       refreshPlay,
       onPlayExpired,
       rescueLines,
@@ -515,13 +526,21 @@ class FxPlayer implements Listenable {
     });
   }
 
-  static String _openKey(String url, Map<String, String> headers, bool direct) {
+  /// 同一地址 + 同一组请求头 + 同一起始位置才算同一次 open；
+  /// 起始位置不同（续播位置变了）必须重新打开，不能复用上一次的 future。
+  static String _openKey(
+    String url,
+    Map<String, String> headers,
+    bool direct,
+    int startPositionMs,
+  ) {
     final suffix = direct ? '|direct=1' : '';
-    if (headers.isEmpty) return '$url$suffix';
+    final start = startPositionMs > 0 ? '|from=$startPositionMs' : '';
+    if (headers.isEmpty) return '$url$suffix$start';
     final entries =
         headers.entries.map((entry) => '${entry.key}=${entry.value}').toList()
           ..sort();
-    return '$url$suffix|${entries.join('&')}';
+    return '$url$suffix$start|${entries.join('&')}';
   }
 
   Future<void> _openInternal(
@@ -530,6 +549,7 @@ class FxPlayer implements Listenable {
     bool play,
     bool waitForWarm,
     bool direct,
+    int startPositionMs,
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
     FxLineRescue? rescueLines,
@@ -574,7 +594,12 @@ class FxPlayer implements Listenable {
       // 清单索引（§10 改动 4）：后台建一份「分片 ↔ 时间」的本地索引，
       // 不占 open 的预算，建不出来也只是少一层拖动优化。
       unawaited(_primeSegmentIndex(source.url, headers, token));
-      await _openMedia(source, play: play, token: token).timeout(_openHardCap);
+      await _openMedia(
+        source,
+        play: play,
+        token: token,
+        startPositionMs: startPositionMs,
+      ).timeout(_openHardCap);
     } catch (error) {
       if (_disposed || token != _openToken) {
         if (identical(_ready, ready)) _ready = null;
@@ -700,6 +725,7 @@ class FxPlayer implements Listenable {
     _PlaybackSource source, {
     required bool play,
     required int token,
+    int startPositionMs = 0,
   }) async {
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
@@ -710,6 +736,9 @@ class FxPlayer implements Listenable {
       source.url,
       headers: source.headers,
       isHls: isHls,
+      // RESUME_FIRST_SEG：起始位置交给原生，在 prepare 之前落位，
+      // 首个分片请求就是目标片。
+      startPositionMs: startPositionMs,
     );
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
@@ -1213,6 +1242,8 @@ class FxPlayer implements Listenable {
         headers: headers,
         // 救援重开也要沿用服务端给的类型，否则自建线路永远打不开
         isHls: _typeHint ?? _looksLikeHls(url),
+        // 重连也带着原进度打开：不然位置 0 会先把中转名额用掉。
+        startPositionMs: target.inMilliseconds,
       );
       if (_disposed || gen != _rescueGen) return;
       if (target > Duration.zero) {
@@ -1396,6 +1427,9 @@ class FxPlayer implements Listenable {
           source,
           play: !reopenPaused,
           token: token,
+          startPositionMs: live || resume <= Duration.zero
+              ? 0
+              : resume.inMilliseconds,
         ).timeout(_rescueOpenTimeout);
         if (_disposed || token != _openToken) return false;
         await mediaReady.future.timeout(_rescueOpenTimeout);

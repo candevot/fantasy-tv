@@ -731,6 +731,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               play: continuePlayback,
               waitForWarm: waitForWarm,
               isHls: source.isHls,
+              // 续播：起始位置交给 open，首个分片请求就是目标片，
+              // 不会先拉第 0 片把服务端首片中转名额用掉。
+              startPosition: Duration(
+                milliseconds: resume.isFinite
+                    ? (resume * 1000).round()
+                    : 0,
+              ),
               // 采集线路直连（mpv 边下边播）；只有平台签名线路走代理。
               // 按实际地址判断：腾讯直连是 CDN 绝对地址，不需要代理；
               // 只有爱奇艺 /api/iqiyi.m3u8 这类站内包装地址才需要。
@@ -747,9 +754,15 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         // 片尾窗口内一律从头播：用户上次在最后几十秒退出很常见，
         // 照原样续播就成了「一打开就是片尾曲、总共只剩几十秒」。
         if (fxIsFinishedPosition(start, durationMs / 1000.0)) start = 0;
+        final landedSeconds = c.value.position.inMilliseconds / 1000.0;
         if (start > 0) {
-          // 静默续播：直接 seek 到上次位置，不弹任何提示。
-          await c.seekTo(Duration(milliseconds: (start * 1000).round()));
+          // 静默续播：open 已带着起始位置就位，没落准时才补跳一次。
+          if ((landedSeconds - start).abs() > 1.0) {
+            await c.seekTo(Duration(milliseconds: (start * 1000).round()));
+          }
+        } else if (landedSeconds > 1.0) {
+          // 片尾窗口 / 越界：明确回到开头。
+          await c.seekTo(Duration.zero);
         }
         await c.setLooping(_loopMode == FxLoopMode.single);
         try {
@@ -823,6 +836,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             play: wasPlaying,
             // 重开同一条流，类型沿用服务端声明
             isHls: _info?.isHls,
+            // 重开也要带着原进度打开：位置 0 会先把中转名额用掉。
+            startPosition: resume,
             direct: fxShouldUseHlsProxy(url, isHls: _info?.isHls ?? true),
             refreshPlay: _refreshPlatformUrl,
             onPlayExpired: _onPlatformExpired,
@@ -836,7 +851,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           target >= duration - const Duration(milliseconds: 1500)) {
         target = Duration.zero;
       }
-      if (target > Duration.zero) await c.seekTo(target);
+      final landedSeconds = c.value.position.inMilliseconds / 1000.0;
+      if (target > Duration.zero &&
+          (landedSeconds - target.inMilliseconds / 1000.0).abs() > 1.0) {
+        await c.seekTo(target);
+      }
       await c.setLooping(_loopMode == FxLoopMode.single);
       try {
         await c.setRate(_rate);

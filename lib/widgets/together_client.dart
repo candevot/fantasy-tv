@@ -252,6 +252,14 @@ class TogetherClient {
   /// 重连前探测确认 token 已过期（HTTP 401）时回调；回调后不再重连。
   final void Function()? onAuthFailed;
 
+  /// 房主操作合并窗口。
+  ///
+  /// 房主每次暂停 / 拖动 / 切集 / 改倍速都要**立刻**推一次 room_state，
+  /// 不能等 9 秒心跳；但拖拽过程中 seek 会连续触发，逐条发给服务端等于
+  /// 自己把房间消息刷爆。所以这里只对「可合并」的推送开一个 200ms 窗口：
+  /// 窗口内只保留最后一次 payload，到点发一次。
+  static const Duration hostPushWindow = Duration(milliseconds: 200);
+
   static const Duration _pingPeriod = Duration(seconds: 10);
   static const Duration _clockRefreshPeriod = Duration(seconds: 30);
   static const int _clockPingCount = 3;
@@ -275,6 +283,12 @@ class TogetherClient {
 
   /// 正在用 HTTP 探测 token 是否过期，避免并发探测 / 探测期间又排重连。
   bool _authChecking = false;
+
+  /// 合并窗口里攒着的那一份房主 state（拖拽时只保留最后一次）。
+  Map<String, dynamic>? _pendingHostState;
+
+  /// 合并窗口定时器；非空表示有 payload 还没发出去。
+  Timer? _hostPushTimer;
 
   /// 已确认 token 过期：停止一切自动重连，等用户重新登录。
   bool _authFailed = false;
@@ -392,6 +406,8 @@ class TogetherClient {
     _connected = false;
     _connecting = false;
     _lastPongAt = 0;
+    // 断线后合并窗口里的 seek 已经没有意义（重连再补发会把成员拽回旧位置）。
+    _dropHostState();
     _stopClockSync();
     _clock.reset();
     _openTimeout?.cancel();
@@ -651,6 +667,9 @@ class TogetherClient {
   }
 
   /// 房主：写入权威状态（播放 / 暂停 / 切片）。
+  ///
+  /// [coalesce] 为真时走 [hostPushWindow] 合并窗口：窗口内连续多次调用只发
+  /// 最后一次。服务端照常递增 rev，成员的 seq gate 照常判重，协议没变。
   void sendState(
     String state,
     double position, {
@@ -659,12 +678,13 @@ class TogetherClient {
     String? line,
     double? rate,
     bool live = false,
+    bool coalesce = false,
   }) {
     // 房主标记由服务器判定：即使本地标记过期，也让服务器拒绝并回发权威状态。
     if (videoId != null && videoId.isNotEmpty) _hostVideoId = videoId;
     if (ep != null && ep > 0) _hostEp = ep;
     if (line != null && line.isNotEmpty) _hostLine = line;
-    _send({
+    final payload = <String, dynamic>{
       'action': 'state',
       'state': state,
       'playing': state == 'play',
@@ -678,17 +698,58 @@ class TogetherClient {
         'channelId': _hostChannelId,
         ..._hostLive,
       },
-    });
+    };
+    if (coalesce) {
+      _pendingHostState = payload;
+      _hostPushTimer?.cancel();
+      _hostPushTimer = Timer(hostPushWindow, _flushHostState);
+      return;
+    }
+    // 不可合并的操作（暂停 / 切集 / 改倍速）先把手里的 seek 发掉，
+    // 保证服务端收到的先后顺序和房主操作顺序一致。
+    _flushHostState();
+    _send(payload);
+  }
+
+  /// 把合并窗口里攒着的房主状态立刻发出去（幂等）。
+  void _flushHostState() {
+    _hostPushTimer?.cancel();
+    _hostPushTimer = null;
+    final pending = _pendingHostState;
+    _pendingHostState = null;
+    if (pending != null) _send(pending);
+  }
+
+  /// 丢弃合并窗口里的内容：断线 / 离开房间后不能把旧的 seek 补发出去。
+  void _dropHostState() {
+    _hostPushTimer?.cancel();
+    _hostPushTimer = null;
+    _pendingHostState = null;
   }
 
   /// 房主：修改倍速，立刻广播给成员。
   void sendRate(double rate) {
+    _flushHostState();
     _send({'action': 'rate', 'rate': rate});
   }
 
   /// 房主：拖动进度。
-  void sendSeek(double position) {
-    _send({'action': 'seek', 'position': position < 0 ? 0 : position});
+  ///
+  /// 只带 position 的 seek 会让服务端自己拼一份只改进度的状态；走
+  /// [sendState] 才能带上播放态 / 倍速，成员同一份 room_state 里就拿到
+  /// 全部权威字段。这里默认允许合并（拖拽连续触发时只发最后一次）。
+  void sendSeek(
+    double position, {
+    String state = 'play',
+    double? rate,
+    bool coalesce = true,
+  }) {
+    sendState(
+      state,
+      position < 0 ? 0 : position,
+      rate: rate,
+      coalesce: coalesce,
+    );
   }
 
   /// 返回 false 表示没有发出去（未连接 / socket 写入失败），调用方保留输入。
@@ -702,6 +763,7 @@ class TogetherClient {
   void sendEpisode(int ep, {String? line}) {
     if (ep > 0) _hostEp = ep;
     if (line != null && line.isNotEmpty) _hostLine = line;
+    _flushHostState();
     _send({
       'action': 'episode',
       'ep': ep,
@@ -711,6 +773,7 @@ class TogetherClient {
 
   void leave() {
     if (_connected && code.isNotEmpty) _send({'action': 'leave'});
+    _dropHostState();
     _hostCredential.clear();
     code = '';
     host = false;
@@ -719,6 +782,7 @@ class TogetherClient {
   }
 
   void dispose() {
+    _dropHostState();
     _hostCredential.clear();
     _closed = true;
     _retry?.cancel();
@@ -821,6 +885,7 @@ class TogetherClient {
         onError(errCode, errMsg);
         break;
       case 'closed':
+        _dropHostState();
         _hostCredential.clear();
         code = '';
         host = false;

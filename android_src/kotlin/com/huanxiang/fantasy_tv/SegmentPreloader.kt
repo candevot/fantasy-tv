@@ -92,8 +92,12 @@ class SegmentPreloader(
      *
      * 播放器一创建本类就存在，这里只是把「源」交进来：线程池在构造时就建好了，
      * 所以预取随播放器创建即启动，不等 prepare 完成（对应 START_DELAY_MS = 0）。
+     *
+     * [startPositionMs] 是本次 open 的起始播放位置（续播 / 跟房主进度）：
+     * 预取也从这一片开始，而不是从第 0 片 —— 否则「续播」时预取会先把前
+     * 几片拉一遍，服务端 `/api/seg` 的首片中转名额就被它们用掉了。
      */
-    fun start(playlistUrl: String, headers: Map<String, String>) {
+    fun start(playlistUrl: String, headers: Map<String, String>, startPositionMs: Long = 0L) {
         if (released || playlistUrl.isEmpty()) return
         requestHeaders = headers
         val generationAtStart = nextGeneration()
@@ -109,8 +113,9 @@ class SegmentPreloader(
                 segments = list
                 cachedFlags = BooleanArray(list.size)
             }
-            log("预取: ${list.size} 片，从第 0 片开始顺序灌缓存")
-            downloadFrom(0, generationAtStart, headers)
+            val startIndex = if (startPositionMs > 0) findIndex(startPositionMs) else 0
+            log("预取: ${list.size} 片，从第 $startIndex 片开始顺序灌缓存")
+            downloadFrom(startIndex, generationAtStart, headers)
         }
     }
 

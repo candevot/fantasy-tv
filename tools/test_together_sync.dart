@@ -457,5 +457,19 @@ void main() {
     'seek 未落位时不新建 pause hold',
   );
 
+  // 成员硬 seek 错峰：第 i 位等 i*200ms，房主 / 首位不等待，上限 2 秒。
+  check(togetherSeekStaggerMs(0) == 0, '第 0 位立即 seek');
+  check(togetherSeekStaggerMs(-3) == 0, '负序号按 0 处理');
+  check(togetherSeekStaggerMs(1) == 200, '第 1 位等 200ms');
+  check(togetherSeekStaggerMs(4) == 800, '第 4 位等 800ms');
+  check(
+    togetherSeekStaggerMs(10) == togetherSeekStaggerMaxMs,
+    '第 10 位到达 2 秒上限',
+  );
+  check(
+    togetherSeekStaggerMs(99) == togetherSeekStaggerMaxMs,
+    '超过上限一律 2 秒，不随人数无限增长',
+  );
+
   print('together sync tests passed: $_passed checks');
 }
