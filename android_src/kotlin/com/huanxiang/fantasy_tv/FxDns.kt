@@ -98,21 +98,36 @@ object FxDns : Dns {
         literalIp(host)?.let { return listOf(it) }
 
         // 1) 钉住的 IP（上次真的连通过的那条）—— 壳的 hosts 映射效果。
+        //
+        // 注意：钉住的那颗**排第一**，但把缓存里其它地址也带上。
+        // 只返回一颗会让 OkHttp 没有可换的地址：这颗 IP 一旦被 CDN 摘掉，
+        // 这一次请求就白失败一轮（起播直接多一次重试）。
+        val hit0 = cache[host]
+        val cachedUsable = hit0
+            ?.takeIf { System.currentTimeMillis() - it.atMs < CACHE_TTL_MS }
+            ?.addresses
+            ?.filterNot { isBad(host, it) }
+            ?: emptyList()
         val pin = pinned[host]
         if (pin != null && System.currentTimeMillis() - pin.atMs < PIN_TTL_MS &&
             !isBad(host, pin.address)
         ) {
             statPinned += 1
-            return listOf(pin.address)
+            if (cachedUsable.isEmpty()) return listOf(pin.address)
+            val merged = ArrayList<InetAddress>(cachedUsable.size + 1)
+            merged.add(pin.address)
+            for (address in cachedUsable) {
+                if (address != pin.address) merged.add(address)
+            }
+            return merged
         }
 
         // 2) 内存缓存。
-        val hit = cache[host]
+        val hit = hit0
         if (hit != null && System.currentTimeMillis() - hit.atMs < CACHE_TTL_MS) {
-            val usable = hit.addresses.filterNot { isBad(host, it) }
-            if (usable.isNotEmpty()) {
+            if (cachedUsable.isNotEmpty()) {
                 statCached += 1
-                return usable
+                return cachedUsable
             }
         }
 
