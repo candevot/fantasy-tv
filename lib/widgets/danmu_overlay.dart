@@ -193,11 +193,15 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     // 就会在那一瞬间炸出一整批，用户看到的就是「一组一组地冒」，
     // 而不是连续飘过。现在限制每帧最多发射 3 条，多出来的留在
     // cursor 里下一帧继续，视觉上就是平滑的流水。
-    var spawned = 0;
+    // DANMU_FLOW（2026-11-14）：不再按帧限流 3 条。
+    //
+    // 之前每帧最多吐 3 条，而弹幕数据本身是成簇的（同一秒几十条），
+    // 于是用户看到的是「一下冒三条 → 空一段 → 又冒三条」。
+    // 现在把该出现的都交给 _spawn：轨道满了它会自己返回 false（丢弃），
+    // 不会叠字，真正决定节奏的是弹幕数据本身的时间分布。
     while (_cursor < widget.items.length &&
-        widget.items[_cursor].time <= _clock &&
-        spawned < 3) {
-      if (_spawn(widget.items[_cursor])) spawned++;
+        widget.items[_cursor].time <= _clock) {
+      _spawn(widget.items[_cursor]);
       _cursor++;
     }
     // 把「本该早就出现」的过时弹幕丢掉，避免 seek 后一次性补一堆。
