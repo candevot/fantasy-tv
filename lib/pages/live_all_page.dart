@@ -2,16 +2,25 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/live_source.dart';
 import '../theme.dart';
 import '../utils/fx_route.dart';
+import 'category_page.dart' show fxErrorText;
 import 'live_detail_page.dart';
 import 'live_groups_page.dart' show LiveChannelCard, LiveSection, buildLiveSections;
+import 'source_settings_page.dart';
 
-/// 直播总览页：从首页「直播 · 全部」进入。
+/// 直播专区（底部导航「直播」的独立入口）。
 ///
-/// 首页只放横向滚动的精选频道，这里给出完整分组（央视 / 卫视 / 地方台…），
-/// 每个分组一组网格，点任意台进播放页。样式复用 [LiveChannelCard]，
-/// 与首页、直播详情保持一致。
+/// 频道不写死在 App 里：地址由云端下发（后台 `/api/config` 的 `live_url`，
+/// 或云端 `type: "live"` 的片源），App 只负责拉、自动识别格式（M3U / TXT /
+/// JSON）、按「央视频道 / 卫视频道 / 地方频道 …」分组展示。
+///
+/// 直播与点播是两条数据线：首页推荐、搜索、排行榜都不查直播（见
+/// `CmsBridge` 的多源合并逻辑），这里也不拿 CMS 的任何点播数据。
+///
+/// 云端没配直播地址时，回落到旧接口 `/api/live` —— 老服务端还有这份数据，
+/// 只是新的直播源已经改成云端下发，回落只为「升级不瞎屏」。
 class LiveAllPage extends StatefulWidget {
   const LiveAllPage({super.key});
 
@@ -20,9 +29,13 @@ class LiveAllPage extends StatefulWidget {
 }
 
 class _LiveAllPageState extends State<LiveAllPage> {
-  List<LiveGroup> _groups = const <LiveGroup>[];
+  List<LiveSection> _sections = const <LiveSection>[];
+  LiveCatalog? _catalog;
   bool _loading = true;
+  bool _refreshing = false;
   String? _error;
+  bool _fromLegacy = false;
+  int _req = 0;
 
   @override
   void initState() {
@@ -30,53 +43,169 @@ class _LiveAllPageState extends State<LiveAllPage> {
     _load();
   }
 
-  Future<void> _load() async {
-    if (mounted) setState(() => _loading = true);
-    try {
-      final groups = await Api.liveGroups();
-      if (!mounted) return;
+  Future<void> _load({bool force = false}) async {
+    final req = ++_req;
+    if (mounted) {
       setState(() {
-        _groups = groups;
-        _loading = false;
+        _loading = _catalog == null;
+        _refreshing = _catalog != null;
         _error = null;
       });
+    }
+    try {
+      final catalog = await LiveSourceService.load(force: force);
+      if (!mounted || req != _req) return;
+      final sections = buildLiveSections(catalog.groups);
+      setState(() {
+        _catalog = catalog;
+        _sections = sections;
+        _fromLegacy = false;
+        _loading = false;
+        _refreshing = false;
+        _error = sections.isEmpty ? '直播列表里没有可用频道，检查后台配置' : null;
+      });
     } catch (e) {
-      if (!mounted) return;
+      if (mounted && req == _req) await _loadLegacy(e, req);
+    }
+  }
+
+  /// 云端没配 / 拉不到：回落到旧接口的分组数据。
+  Future<void> _loadLegacy(Object cause, int req) async {
+    try {
+      final groups = await Api.liveGroups();
+      if (!mounted || req != _req) return;
+      final sections = buildLiveSections(groups);
+      if (!mounted || req != _req) return;
+      setState(() {
+        _sections = sections;
+        _catalog = null;
+        _fromLegacy = true;
+        _loading = false;
+        _refreshing = false;
+        _error = sections.isEmpty ? fxErrorText(cause) : null;
+      });
+    } catch (_) {
+      if (!mounted || req != _req) return;
       setState(() {
         _loading = false;
-        _error = '$e';
+        _refreshing = false;
+        _error = fxErrorText(cause);
       });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final sections = buildLiveSections(_groups);
     return Scaffold(
-      appBar: AppBar(title: const Text('直播')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('加载失败：$_error',
-                          style: const TextStyle(color: Fx.sub)),
-                      const SizedBox(height: 12),
-                      FilledButton(onPressed: _load, child: const Text('重试')),
-                    ],
-                  ),
-                )
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                    itemCount: sections.length,
-                    itemBuilder: (ctx, i) => _section(sections[i]),
-                  ),
-                ),
+      appBar: AppBar(
+        title: const Text('直播'),
+        actions: [
+          IconButton(
+            tooltip: '片源设置',
+            onPressed: _openSettings,
+            icon: const Icon(Icons.tune_rounded),
+          ),
+          IconButton(
+            tooltip: '刷新频道',
+            onPressed: _refreshing ? null : () => _load(force: true),
+            icon: _refreshing
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: _body(),
     );
+  }
+
+  Widget _body() {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_error != null && _sections.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.live_tv_rounded, size: 40, color: Fx.sub),
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Text(
+                '加载失败：$_error',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Fx.sub),
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '直播地址在「设置 → 片源管理」里配置（后台下发）',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 11, color: Color(0xFFA6B1C2)),
+            ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: () => _load(force: true),
+              child: const Text('重试'),
+            ),
+          ],
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () => _load(force: true),
+      child: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        itemCount: _sections.length + 1,
+        itemBuilder: (ctx, i) {
+          if (i == 0) return _statusBar();
+          return _section(_sections[i - 1]);
+        },
+      ),
+    );
+  }
+
+  /// 顶部状态条：来源格式 + 频道数 + 更新时间（缓存时会说明）。
+  Widget _statusBar() {
+    final catalog = _catalog;
+    final chips = <String>[
+      if (_fromLegacy) '旧接口兜底',
+      if (catalog != null) catalog.formatLabel,
+      if (catalog != null) '${catalog.channelCount} 个台',
+      if (catalog?.fromCache == true) '离线缓存',
+    ];
+    final at = catalog?.fetchedAt;
+    if (at != null) chips.add('更新 ${_timeText(at)}');
+    if (chips.isEmpty && _error == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          const Icon(Icons.bolt_rounded, size: 13, color: Fx.accent),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              chips.isEmpty ? '$_error' : chips.join(' · '),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11, color: Fx.sub),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _timeText(DateTime at) {
+    final now = DateTime.now();
+    final sameDay = now.year == at.year &&
+        now.month == at.month &&
+        now.day == at.day;
+    final hm = '${at.hour.toString().padLeft(2, '0')}:'
+        '${at.minute.toString().padLeft(2, '0')}';
+    return sameDay ? '今天 $hm' : '${at.month}-${at.day} $hm';
   }
 
   Widget _section(LiveSection s) {
@@ -141,5 +270,14 @@ class _LiveAllPageState extends State<LiveAllPage> {
         builder: (_) => LiveDetailPage(channel: c, playlist: playlist),
       ),
     );
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(
+      FxPageRoute(builder: (_) => const SourceSettingsPage()),
+    );
+    if (!mounted) return;
+    // 从设置回来可能换过直播地址：强制重拉一次。
+    await _load(force: true);
   }
 }

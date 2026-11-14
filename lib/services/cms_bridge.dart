@@ -1,6 +1,8 @@
 import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
+import 'cms_client.dart';
+import 'source_hub.dart';
 
 /// CMS 数据层 ↔ 现有 UI 的接线层（CMS_WIRING，2026-11-14）。
 ///
@@ -150,7 +152,7 @@ class CmsBridge {
   /// 取一行；失败返回 null（首页按「这一行没有」处理，不影响其它行）。
   static Future<List<VideoCard>?> _tryRow(int typeId) async {
     try {
-      final list = await CmsApi.categoryList(typeId, 1);
+      final list = _withoutLive(await CmsApi.categoryList(typeId, 1));
       _markAll(list, _Origin.cms);
       return list;
     } catch (_) {
@@ -158,13 +160,22 @@ class CmsBridge {
     }
   }
 
+  /// 旧接口兜底：直播有独立入口，首页不铺直播分区（分区名含「直播」或
+  /// 卡片本身是直播频道都丢掉）。
   static Future<HomeData> _legacyHome(CmsChannel? ch) async {
     final data = await Api.home(ch?.legacy ?? 'recommend');
     _markAll(<VideoCard>[
       for (final s in data.sections) ...s.items,
     ], _Origin.legacy);
     _markIds(<String>[for (final b in data.banners) b.id], _Origin.legacy);
-    return data;
+    final sections = <HomeSection>[];
+    for (final section in data.sections) {
+      if (section.title.contains('直播')) continue;
+      final items = _withoutLive(section.items);
+      if (items.isEmpty) continue;
+      sections.add(HomeSection(section.title, items));
+    }
+    return HomeData(data.banners, sections);
   }
 
   /* ------------------------------------------------------------ 分类页 */
@@ -182,27 +193,41 @@ class CmsBridge {
   }) async {
     _boot();
     final typeId = CmsApi.typeIdOf(type);
+    // 外部源（云端 / 自加）与主站并行查：外部源内部也是并行的，
+    // 这里先发车再等主站，两边的耗时取长的那个，不是相加。
+    final extraFuture = SourceHub.instance.categoryAll(type, page);
     List<VideoCard> raw = const <VideoCard>[];
     var ok = false;
     try {
-      raw = await CmsApi.list(type: typeId, page: page, sort: sort);
+      raw = _withoutLive(await CmsApi.list(
+        type: typeId,
+        page: page,
+        sort: sort,
+      ));
       ok = raw.isNotEmpty || page > 1;
       if (ok) _markAll(raw, _Origin.cms);
     } catch (_) {
       ok = false;
     }
-    if (!ok) {
-      final legacy = await Api.category(
+    final extra = await _safe(extraFuture);
+    if (ok) return _mergeWith(_filter(raw, area: area, year: year), extra);
+
+    List<VideoCard> legacy = const <VideoCard>[];
+    try {
+      legacy = _withoutLive(await Api.category(
         type: CmsApi.legacyTypeOf(typeId),
         area: area,
         year: year,
         sort: sort,
         page: page,
-      );
+      ));
       _markAll(legacy, _Origin.legacy);
-      return legacy;
+    } catch (e) {
+      // 两边都不通：外部源有结果就先给结果，否则把错误抛给页面。
+      if (extra.isNotEmpty) return extra;
+      throw e;
     }
-    return _filter(raw, area: area, year: year);
+    return _mergeWith(legacy, extra);
   }
 
   static List<VideoCard> _filter(
@@ -227,19 +252,71 @@ class CmsBridge {
     _boot();
     final q = keyword.trim();
     if (q.isEmpty) return const <VideoCard>[];
+    // 主站采集库 + 所有启用的云端 / 自加源并行查，结果按「片名 + 年份」合并去重。
+    final extraFuture = SourceHub.instance.searchAll(q, page);
+    List<VideoCard> primary = const <VideoCard>[];
+    var primaryOk = false;
     try {
-      final list = await CmsApi.search(q, page);
-      if (list.isNotEmpty || page > 1) {
-        _markAll(list, _Origin.cms);
-        return list;
-      }
-      // 空结果按「这条路走不通」处理：交给旧接口再试一次。
+      primary = _withoutLive(await CmsApi.search(q, page));
+      primaryOk = primary.isNotEmpty || page > 1;
+      if (primaryOk) _markAll(primary, _Origin.cms);
     } catch (_) {
-      // 超时 / 接口不对：下面回落。
+      primaryOk = false;
     }
-    final legacy = await Api.search(q, page);
+    final extra = await _safe(extraFuture);
+    if (extra.isNotEmpty) return _mergeWith(primary, extra);
+    if (primaryOk) return primary;
+    // 主站空结果按「这条路走不通」处理：交给旧接口再试一次。
+    final legacy = _withoutLive(await Api.search(q, page));
     _markAll(legacy, _Origin.legacy);
     return legacy;
+  }
+
+  /// 外部源检索的结果统一带 `云端 / 自加` 标记；只要有多源参与，
+  /// 主站采集库的卡片也统一标成 `采集库`，让「这条来自哪个源」一眼可辨。
+  static List<VideoCard> _mergeWith(
+    List<VideoCard> primary,
+    List<VideoCard> extra,
+  ) {
+    if (extra.isEmpty) return primary;
+    final seen = <String>{};
+    final out = <VideoCard>[];
+    for (final card in primary) {
+      if (!seen.add(SourceHub.dedupeKey(card))) continue;
+      out.add(SourceHub.relabel(card, label: '采集库'));
+    }
+    for (final card in extra) {
+      if (!seen.add(SourceHub.dedupeKey(card))) continue;
+      out.add(card);
+    }
+    return out;
+  }
+
+  /// 直播内容不进搜索 / 分类 / 排行（直播有独立入口）。
+  static List<VideoCard> _withoutLive(List<VideoCard> list) {
+    var clean = true;
+    for (final card in list) {
+      if (SourceHub.isLiveCard(card)) {
+        clean = false;
+        break;
+      }
+    }
+    if (clean) return list;
+    return <VideoCard>[
+      for (final card in list)
+        if (!SourceHub.isLiveCard(card)) card,
+    ];
+  }
+
+  /// 外部源失败不能拖垮整页：当作「这个源没结果」。
+  static Future<List<VideoCard>> _safe(
+    Future<List<VideoCard>> task,
+  ) async {
+    try {
+      return await task;
+    } catch (_) {
+      return const <VideoCard>[];
+    }
   }
 
   /// 热搜词：CMS 按点击量排的片名；拿不到再用旧接口的日榜。
@@ -276,7 +353,7 @@ class CmsBridge {
     _boot();
     final typeId = CmsApi.typeIdOf(type);
     try {
-      final list = await CmsApi.list(type: typeId, sort: 'hot');
+      final list = _withoutLive(await CmsApi.list(type: typeId, sort: 'hot'));
       if (list.isNotEmpty) {
         _markAll(list, _Origin.cms);
         return list;
@@ -284,7 +361,7 @@ class CmsBridge {
     } catch (_) {
       // 下面回落。
     }
-    final legacy = await Api.rank(type);
+    final legacy = _withoutLive(await Api.rank(type));
     _markAll(legacy, _Origin.legacy);
     return legacy;
   }
@@ -298,6 +375,14 @@ class CmsBridge {
   /// 失败再试旧接口 —— 两套编号不通用，所以不做「无脑互换」。
   static Future<VideoDetail> detail(String id) async {
     _boot();
+    final external = await _externalSource(id);
+    if (external != null) {
+      final detail = await CmsClient.of(external.api).detail(
+        SourceHub.rawIdOf(id),
+      );
+      _mark(id, _Origin.cms);
+      return detail;
+    }
     final origin = _originOf(id);
     if (origin == _Origin.legacy) return _legacyDetail(id);
     try {
@@ -336,6 +421,16 @@ class CmsBridge {
     bool fresh = false,
   }) async {
     _boot();
+    final external = await _externalSource(vodId);
+    if (external != null) {
+      final info = await CmsClient.of(external.api).play(
+        SourceHub.rawIdOf(vodId),
+        line,
+        ep,
+      );
+      _mark(vodId, _Origin.cms);
+      return info;
+    }
     final origin = _originOf(vodId);
     if (origin == _Origin.legacy) return Api.play(vodId, ep, line, fresh: fresh);
     try {
@@ -357,11 +452,32 @@ class CmsBridge {
   }
 
   /// 只要直链（下载 / 投屏 / 外挂播放）。
-  static Future<String> playUrl(String vodId, String line, int ep) =>
-      CmsApi.playUrl(vodId, line, ep);
+  static Future<String> playUrl(String vodId, String line, int ep) async {
+    final external = await _externalSource(vodId);
+    if (external != null) {
+      final info = await CmsClient.of(external.api).play(
+        SourceHub.rawIdOf(vodId),
+        line,
+        ep,
+      );
+      return info.url;
+    }
+    return CmsApi.playUrl(vodId, line, ep);
+  }
 
   /// 这个 id 是不是 CMS 的 `vod_id`（详情页据此跳过旧接口的平台线路逻辑）。
-  static bool isCms(String id) => _originOf(id) == _Origin.cms;
+  ///
+  /// 外部源（云端 / 自加）的卡片 id 带 `@src:` 前缀，同样按 CMS 处理，
+  /// 否则详情页会为它去查旧接口的平台线路。
+  static bool isCms(String id) =>
+      id.trim().startsWith(SourceHub.idMark) || _originOf(id) == _Origin.cms;
+
+  /// 带 `@src:` 前缀的 id → 它所属的源；不是外部 id 返回 null。
+  static Future<KSource?> _externalSource(String id) async {
+    if (!id.trim().startsWith(SourceHub.idMark)) return null;
+    await SourceHub.instance.ensureReady();
+    return SourceHub.instance.decodeSource(id);
+  }
 
   /* ------------------------------------------------------------ 来源记账 */
 

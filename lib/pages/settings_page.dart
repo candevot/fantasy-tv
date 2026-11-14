@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -6,6 +8,7 @@ import '../services/app_info.dart';
 import '../services/app_settings.dart';
 import '../services/app_update_service.dart';
 import '../services/download_service.dart';
+import '../services/source_hub.dart';
 import '../theme.dart';
 import 'about_page.dart';
 import 'category_page.dart';
@@ -13,6 +16,7 @@ import 'change_password_page.dart';
 import 'download_settings_page.dart';
 import 'feedback_page.dart';
 import 'login_page.dart';
+import 'source_settings_page.dart';
 import '../utils/fx_route.dart';
 
 /// 设置页：账号安全 / 播放设置 / 下载与缓存 / 关于 / 退出登录。
@@ -36,6 +40,9 @@ class _SettingsPageState extends State<SettingsPage> {
     _settings.addListener(_onChanged);
     _downloads.addListener(_onChanged);
     Auth.instance.addListener(_onChanged);
+    SourceHub.instance.addListener(_onChanged);
+    // 片源配置在后台补一次（有缓存就直接用，不挡设置页渲染）。
+    unawaited(SourceHub.instance.ensureReady());
     _load();
   }
 
@@ -44,6 +51,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _settings.removeListener(_onChanged);
     _downloads.removeListener(_onChanged);
     Auth.instance.removeListener(_onChanged);
+    SourceHub.instance.removeListener(_onChanged);
     super.dispose();
   }
 
@@ -341,6 +349,24 @@ class _SettingsPageState extends State<SettingsPage> {
               showChevron: false,
             ),
           ),
+          const _SectionTitle('片源与直播'),
+          GlassCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            radius: 20,
+            child: _row(
+              icon: Icons.cloud_queue_rounded,
+              color: const Color(0xFF5B8CFF),
+              title: '片源管理',
+              subtitle: _sourceHint(),
+              trailing: const Icon(
+                Icons.chevron_right_rounded,
+                size: 18,
+                color: Color(0xFFC3CDDA),
+              ),
+              onTap: _openSources,
+              showChevron: false,
+            ),
+          ),
           const _SectionTitle('关于'),
           GlassCard(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
@@ -411,6 +437,23 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
+  }
+
+  String _sourceHint() {
+    final hub = SourceHub.instance;
+    final parts = <String>[
+      '${hub.querySources.length} 个源参与检索',
+      if (hub.userSources.isNotEmpty) '自加 ${hub.userSources.length} 个',
+      hub.liveUrl.isEmpty ? '直播地址未配置' : '直播已配置',
+    ];
+    return parts.join(' · ');
+  }
+
+  Future<void> _openSources() async {
+    await Navigator.of(context).push(
+      FxPageRoute(builder: (_) => const SourceSettingsPage()),
+    );
+    if (mounted) setState(() {});
   }
 
   String _downloadHint() {

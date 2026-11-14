@@ -12,6 +12,7 @@ import 'auth.dart';
 import 'fx_globals.dart';
 import 'services/app_update_service.dart';
 import 'services/download_service.dart';
+import 'services/source_hub.dart';
 import 'theme.dart';
 import 'widgets/update_dialog.dart';
 import 'pages/home_page.dart';
@@ -108,6 +109,16 @@ class Boot {
     } catch (e, st) {
       AppLog.write('boot.auth', e, st);
       failed ??= '登录状态读取失败，部分功能可能不可用';
+    }
+
+    // 片源中心：先读本地缓存（快），云端配置再后台补一次。
+    // 失败不影响启动 —— 搜索 / 分类会退回「只有主站采集库」的老行为。
+    try {
+      await SourceHub.instance
+          .ensureReady()
+          .timeout(const Duration(seconds: 3));
+    } catch (e, st) {
+      AppLog.write('boot.sources', e, st);
     }
 
     try {
