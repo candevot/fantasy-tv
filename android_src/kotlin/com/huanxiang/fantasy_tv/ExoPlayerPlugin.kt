@@ -337,7 +337,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
 
 /** PlatformView：把 PlayerView 交给 Flutter */
 @OptIn(UnstableApi::class)
-class ExoView(context: Context, messenger: BinaryMessenger, id: Int, params: Any?) :
+class ExoView(context: Context, private val messenger: BinaryMessenger, id: Int, params: Any?) :
     PlatformView {
     private val tv: android.view.TextureView
 
