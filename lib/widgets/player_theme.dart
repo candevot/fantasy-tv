@@ -3,8 +3,6 @@ import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
-import 'package:media_kit/media_kit.dart' show NativePlayer;
-import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models.dart';
@@ -194,10 +192,6 @@ class FxPlayerSurface extends StatefulWidget {
 }
 
 class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
-  /// 已经同步到 mpv 的字幕可见性与对应播放器，避免改画面比例这类无关档位时
-  /// 重复写属性，同时保证换播放器实例（切线路 / 换集）后重新写一次。
-  bool? _subtitleVisible;
-  Object? _subtitlePlayer;
   int _renderEpoch = 0;
 
   // 放在共享画面层处理，普通播放、直播、离线和一起看都不会漏接。
@@ -215,7 +209,6 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     _renderEpoch = widget.player.renderEpoch;
     // 幂等：读回已保存的画面比例 / 镜像档位，读完会再通知一次。
     unawaited(FxDisplaySettings.instance.ensureLoaded());
-    _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
   }
 
   @override
@@ -225,36 +218,11 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     oldWidget.player.removeListener(_onPlayerChanged);
     widget.player.addListener(_onPlayerChanged);
     _renderEpoch = widget.player.renderEpoch;
-    // 换了播放器实例：新 mpv 的 sub-visibility 是默认值，需要按当前镜像档位重写。
-    _subtitlePlayer = null;
-    _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
   }
 
   void _onSettingsChanged() {
     if (!mounted) return;
-    _syncMirrorSubtitle(FxDisplaySettings.instance.mirror);
     setState(() {});
-  }
-
-  /// 镜像模式下的字幕处理：本项目字幕由 libass 画进视频纹理（libass: true），
-  /// 翻转画面会把字幕一起翻成反字。打开镜像时用 mpv `sub-visibility=no`
-  /// 把纹理里的字幕藏起来，改由 [FxMirrorSubtitle] 以正字显示；
-  /// 关掉镜像再还原成 `yes`。
-  Future<void> _syncMirrorSubtitle(FxMirrorMode mode) async {
-    final visible = mode == FxMirrorMode.none;
-    final player = widget.player;
-    if (_subtitleVisible == visible && identical(_subtitlePlayer, player)) {
-      return;
-    }
-    _subtitleVisible = visible;
-    _subtitlePlayer = player;
-    try {
-      final platform = player.player.platform;
-      if (platform is! NativePlayer) return;
-      await platform.setProperty('sub-visibility', visible ? 'yes' : 'no');
-    } catch (_) {
-      // 播放器已释放 / 属性不可用：保持现状，不影响播放。
-    }
   }
 
   @override
@@ -269,111 +237,24 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     final settings = FxDisplaySettings.instance;
     final aspect = settings.aspect;
     final mirror = settings.mirror;
-    final mirrored = mirror != FxMirrorMode.none;
-    final bottom = widget.subtitleBottom < fxSubtitleMinBottom
-        ? fxSubtitleMinBottom
-        : widget.subtitleBottom;
-    final video = Video(
-      key: ValueKey<int>(_renderEpoch),
-      controller: widget.player.videoController,
-      controls: NoVideoControls,
-      fit: fxAspectFit(aspect),
-      alignment: Alignment.center,
-      fill: Colors.black,
-      wakelock: true,
-      pauseUponEnteringBackgroundMode: false,
-      resumeUponEnteringForegroundMode: false,
-      subtitleViewConfiguration: SubtitleViewConfiguration(
-        padding: EdgeInsets.fromLTRB(24, 0, 24, bottom),
-        // 兜底（本项目走 libass，字幕画在纹理里，已由 mpv sub-visibility
-        // 隐藏）：非 libass 路径下镜像时也不显示会翻转的内部字幕。
-        visible: !mirrored,
-      ),
+    // 画面由 PlatformView 承载（ExoPlayer 的 PlayerView，useController=false）。
+    // 换成 ExoPlayer 之后没有再「往纹理里写字幕」这回事：硬字幕是画面像素的
+    // 一部分，镜像时会跟着翻；独立软字幕轨由 PlayerView 自己渲染。
+    // 原来的 mpv sub-visibility / FxMirrorSubtitle 那一套随之去掉。
+    final fit = fxAspectFit(aspect);
+    // key 带上档位：改「铺满 / 适应 / 拉伸」要重建 PlatformView，
+    // 否则 resizeMode 是创建时定的，切档不会有反应。
+    // 只按画面比例做 key：切集不重建画面层。
+    final surface = KeyedSubtree(
+      key: ValueKey<String>('surface-${aspect.name}'),
+      child: widget.player.buildVideo(fit: fit),
     );
-    final framed = fxAspectFrame(aspect, video);
-    final body = fxMirrorWrap(mirror, framed);
-    if (!mirrored) return body;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        body,
-        FxMirrorSubtitle(player: widget.player, bottom: bottom),
-      ],
-    );
-  }
-}
-
-/// 镜像模式下的字幕层：内容不参与翻转，位置与字号缩放对齐 media_kit 的
-/// SubtitleView（同样的面积缩放公式与安全距离），保证正字可读。
-/// 纹理里的 libass 字幕已由 mpv `sub-visibility=no` 隐藏，不会重复。
-class FxMirrorSubtitle extends StatefulWidget {
-  const FxMirrorSubtitle({
-    super.key,
-    required this.player,
-    required this.bottom,
-  });
-
-  final FxPlayer player;
-  final double bottom;
-
-  @override
-  State<FxMirrorSubtitle> createState() => _FxMirrorSubtitleState();
-}
-
-class _FxMirrorSubtitleState extends State<FxMirrorSubtitle> {
-  List<String> _subtitle = <String>[];
-  StreamSubscription<List<String>>? _subscription;
-
-  @override
-  void initState() {
-    super.initState();
-    _subtitle = widget.player.player.state.subtitle;
-    _subscription = widget.player.player.stream.subtitle.listen((value) {
-      if (!mounted) return;
-      setState(() => _subtitle = value);
-    });
-  }
-
-  @override
-  void dispose() {
-    _subscription?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final lines = <String>[
-      for (final line in _subtitle)
-        if (line.trim().isNotEmpty) line.trim(),
-    ];
-    if (lines.isEmpty) return const SizedBox.shrink();
-    return IgnorePointer(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          // 与 media_kit SubtitleView 相同的缩放公式：按画面面积缩放字号。
-          final area = constraints.maxWidth * constraints.maxHeight;
-          final reference = 1920.0 * 1080.0;
-          final scale = math.sqrt((area / reference).clamp(0.0, 1.0));
-          return Align(
-            alignment: Alignment.bottomCenter,
-            child: Padding(
-              padding: EdgeInsets.fromLTRB(24, 0, 24, widget.bottom),
-              child: Text(
-                lines.join('\n'),
-                textAlign: TextAlign.center,
-                textScaler: TextScaler.linear(scale),
-                style: const TextStyle(
-                  height: 1.4,
-                  fontSize: 32,
-                  color: Colors.white,
-                  backgroundColor: Color(0xaa000000),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
+    final framed = fxAspectFrame(aspect, surface);
+    // MIRROR_NATIVE（2026-11-14）：镜像不能再用 Transform.flip 包 PlatformView。
+    // 混合合成下原生视图不跟随 Flutter 变换，翻不了（或翻一下就错位）。
+    // 改成下发到原生，翻 PlayerView 自己的 scaleX/scaleY。
+    widget.player.setMirror(flipX: mirror.flipX, flipY: mirror.flipY);
+    return framed;
   }
 }
 
@@ -607,7 +488,7 @@ class _PProgressBarState extends State<PProgressBar> {
 
   double get _bufferedFraction {
     if (!_hasDuration) return 0;
-    // FxPlayer 的 buffered 来自 media_kit `stream.buffer`
+    // FxPlayer 的 buffered 来自 ExoPlayer 上报的 bufferedPosition
     // （libmpv demuxer-cache-time），它本身就是已缓冲到的绝对位置，
     // 不要再叠加 position，否则会虚高成假的 100%。
     return (widget.buffered.inMilliseconds / widget.duration.inMilliseconds)

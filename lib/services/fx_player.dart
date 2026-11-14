@@ -5,11 +5,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 
 import '../api.dart';
 import '../models.dart';
+import 'exo_player.dart';
 import 'hls_segment_index.dart';
 import 'local_hls_proxy.dart';
 import 'playback_recovery.dart';
@@ -49,7 +48,7 @@ class FxLineSource {
 /// 播放器状态快照。
 ///
 /// 字段刻意对齐 video_player 的 `VideoPlayerValue` 常用子集，
-/// 方便从旧播放内核平滑迁移，同时补充 media_kit 的原始宽高信息。
+/// 方便从旧播放内核平滑迁移，同时补充解码后的原始宽高信息。
 class FxPlayerValue {
   const FxPlayerValue({
     this.isInitialized = false,
@@ -226,164 +225,67 @@ class FxPlayerValue {
   }
 }
 
-/// 基于 media_kit（libmpv）的播放内核封装。
+/// 基于 ExoPlayer（Android Media3）的播放内核封装。
 ///
-/// - 统一处理 HLS / 加密流 / 各种奇怪编码（libmpv + ffmpeg）；
-/// - 提供与 video_player 类似的 `value` / `addListener` / `dispose` 接口；
-/// - 以 Stream 形式暴露 position / duration / buffering / error / completed；
-/// - [buildVideo] 返回可直接放进页面的视频 Widget。
+/// PLAYER_CORE（2026-11-13）：内核从 libmpv 换成 ExoPlayer，控件完全不变 ——
+/// 页面只拿到一个画面视图，进度条 / 弹幕 / 选集 / 手势全部还是我们自绘的。
+/// 参考 FongMi/TV：它也是 ExoPlayer 内核 + 自绘控件。
+///
+/// 保留的东西（这些是稳定性的来源，跟内核无关）：
+///   · 无感救援链：①换签名 ②同地址重开 ③换下一条线路，全程静默
+///   · 无字节流动看门狗：连续 30 秒没进展才进救援，缓冲中不算失败
+///   · HLS 起播预热：DNS + playlist + 前几片
+///   · 高频位置通道：进度条 / 弹幕独立订阅，不跟着整对象重建
+///
+/// 去掉的东西（ExoPlayer 原生就解决了，不需要我们再管）：
+///   · demuxer-readahead-secs / cache-pause-wait / cache-buffering-state
+///     那一整套 mpv 属性 —— 这是「加载慢 / 黑屏 / 卡 99」的根源。
+///     ExoPlayer 的 DefaultLoadControl 按**时长**缓冲，自己调度分片。
 class FxPlayer implements Listenable {
-  FxPlayer._({this.readyTimeout = const Duration(seconds: 20)}) {
-    final android = defaultTargetPlatform == TargetPlatform.android;
-    _player = Player(
-      // 注意：不能加 const —— bufferSize 现在是按设备内存算的 getter，
-      // const 构造要求所有参数是编译期常量。
-      configuration: PlayerConfiguration(
-        title: '幻想影视',
-        // 字幕 / ASS 交给 libass，复杂样式不走 Flutter 层。
-        libass: true,
-        // 起播缓冲：**不能写死小值**。
-        //
-        // media_kit 的 bufferSize 是 demuxer-max-bytes 的硬上限，
-        // 后面 _setCacheLimits 再怎么调都超不过它。
-        //
-        // 原来写 16MB：4K 分片 2.8~4.4MB/片，只装得下 4~5 片，
-        // 而 4K 第一片就有 21.68 秒 —— 缓冲一空就停在 19~21 秒，
-        // 这就是用户报的「4K 只播 19 秒」。
-        //
-        // 现在按设备内存给：低端 64MB，中端 128MB，高端 192MB。
-        // 4K 高码率下 128MB ≈ 30 片 ≈ 10 分钟前向缓冲，够播了。
-        bufferSize: _startupBufferBytes,
-        logLevel: MPVLogLevel.error,
-      ),
-    );
-    _controller = VideoController(
-      _player,
-      configuration: VideoControllerConfiguration(
-        // Android 用 gpu 输出 + 硬解优先；其它平台保持 media_kit 默认输出，
-        // 避免 vo=gpu 与 libmpv 纹理渲染冲突。
-        vo: android ? 'gpu' : 'libmpv',
-        hwdec: android ? 'auto-safe' : 'auto',
-        enableHardwareAcceleration: true,
-      ),
-    );
-    _bindStreams();
-    unawaited(_setCacheLimits(_startupBufferBytes, readahead: _startupReadaheadSeconds));
-    // 长播兜底：每 5 分钟压一次回看缓存，避免长播内存无限涨。
-    // 注意不能无条件写回 _steadyBufferBytes —— 那会覆盖首帧后按网速
-    // 算出的自适应值（之前就是这样被打回 192MB 的）。
-    _cacheGuardTimer = Timer.periodic(
-      const Duration(minutes: 5),
-      (_) => unawaited(_setCacheLimits(_currentForwardBuffer)),
-    );
-    // 稳定性看门狗：只看「字节是否还在流动」，缓冲中不算失败。
+  FxPlayer._({this.readyTimeout = const Duration(seconds: 10)}) {
+    _engine = ExoPlayerEngine();
+    _engine.state.addListener(_onEngineState);
+    unawaited(_engine.init());
+    // STATE_POLL（2026-11-14）：不能只等 EventChannel 的事件。
+    //
+    // 250ms：弹幕已经改成按帧间隔推进，但进度条还是吃这个位置回调，
+    // 500ms 会让进度条一跳一跳，250ms 看起来就顺了。
+    //
+    // 实测症状：画面已经出来了（ExoPlayer 在播），但 Dart 侧状态一直是
+    // 初始值（buffering=true / position=0）——
+    //   · UI 上「缓冲中」永远不消失
+    //   · open() 等不到首帧，30 秒后判失败，用户看到「线路播不出来」
+    // 原因就是事件没送达漏了。这里加 500ms 轮询兜底，
+    // 直接调内核的 state 方法取快照，事件通道只当加速用。
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (_disposed) return;
+      unawaited(_engine.poll());
+    });
+    // 稳定性看门狗：只看「进度 / 缓冲是否还在动」，缓冲中不算失败。
     _watchdogTimer = Timer.periodic(
       _watchdogTick,
       (_) => unawaited(_watchdogTickAsync()),
     );
   }
 
-  /// 起播前向缓存（字节）：按设备内存给，**不再写死 16MB**。
-  ///
-  /// 16MB 在 4K 下只能装 4~5 个分片（每片 2.8~4.4MB），而 4K 首片时长
-  /// 就有 21.68 秒 —— 缓冲一空播放器就停，表现为「4K 只播 19 秒」。
-  ///
-  /// 现在：≤3GB 内存给 64MB，≤6GB 给 128MB，再高给 192MB。
-  /// 128MB 在 4K 码率下约等于 30 个分片、10 分钟前向缓冲。
-  ///
-  /// 注意 media_kit 的 bufferSize 是 demuxer-max-bytes 的**硬上限**，
-  /// 后面 _setCacheLimits 调的值不能超过它，所以这个基数必须够大。
-  static int get _startupBufferBytes {
-    final mb = _deviceMemoryMb();
-    if (mb <= 0) return 128 * 1024 * 1024;
-    if (mb <= 3072) return 64 * 1024 * 1024;
-    if (mb <= 6144) return 128 * 1024 * 1024;
-    return 192 * 1024 * 1024;
-  }
+  /// 起播「还在进展」时的最长等待：只要还在往下拉就一直等，
+  /// 避免把「大分片加载慢」误判成「线路不可用」并自动换线。
+  /// 硬上限：再慢也不等超过这个时间。
+  static const Duration _openHardCap = Duration(seconds: 30);
 
-  /// 稳态缓存上下限：首帧后按实测吞吐在 64~192MB 之间自适应。
-  ///
-  /// 为什么下限从 32MB 提到 64MB、上限从 96MB 提到 192MB：
-  /// 4K 分片 2.8~4.4MB/片、单片时长 16~22 秒，32MB 只够 8 片，
-  /// 网速抖动一下缓冲就见底。192MB 在 4K 下约 45 片、15 分钟余量。
-  ///
-  /// 上限不再往大调：mpv 的 cache-buffering-state 是「缓存填满多少」，
-  /// 设到 256MB+ 时 4K 码率要缓很久才填满，界面会长期停在
-  /// 「缓冲中 99%」。而且代理层已经把整集预热到本地，
-  /// mpv 这层只需要足够的前向缓冲兜住解复用抖动即可。
-  static const int _minSteadyBufferBytes = 96 * 1024 * 1024;
-  // NO_REBUFFER（2026-11-14）：正常播放全程不许出现第二次缓冲。
-  // 60s 预读在 4K 上只有约 9MB，一次网络抖动就见底；加深到 128MB。
-  static const int _steadyBufferBytes = 128 * 1024 * 1024;
-  static const int _maxSteadyBufferBytes = 192 * 1024 * 1024;
-  static const int _backBufferBytes = 8 * 1024 * 1024;
-
-  /// 按实测吞吐挑稳态缓冲：取「约 60 秒的码率量」，夹在 64~192MB。
-  ///
-  /// 为什么是 60 秒而不是 30 秒：4K 单分片就有 16~22 秒，30 秒只等于
-  /// 一两片，网速一抖就见底。60 秒约等于 3~4 片，能扛住一次瞬时卡顿。
-  ///
-  /// 网络一般（2MB/s）→ 120MB，很好（8MB/s）→ 到上限 192MB，
-  /// 很差（0.5MB/s）→ 取下限 64MB（先保证能播，别等太久才起画）。
-  static int _steadyBufferFor(double? throughput) {
-    if (throughput == null || throughput <= 0) return _steadyBufferBytes;
-    final target = (throughput * 60).round();
-    return target.clamp(_minSteadyBufferBytes, _maxSteadyBufferBytes);
-  }
-
-  /// mpv demuxer 预读秒数（demuxer-readahead-secs）：配合 192MiB 缓存，
-  /// 网络好时把后续内容尽量读进本地，播放过程不中断。
-  /// 稳态预读时长。
-  static const String _readaheadSeconds = '120';
-
-  /// 起播预读时长。
-  ///
-  /// STARTUP_READAHEAD（2026-11-13）：这是「点播放要等 20 秒」的真正原因。
-  /// mpv 起播时会把 demuxer-readahead-secs 填满才开始播放。
-  /// 福盈 4K 一片 6 秒 / 5.5MB，原来要 120 秒 → 缓冲 20 片 ≈ 110MB 才出画。
-  /// 现在起播只要 6 秒（1 片），首帧后立刻恢复到 120 秒。
-  /// 起播预读：2 秒。
-  ///
-  /// 4K 一片 6 秒 / 5.5MB，2 秒只要「首片的前三分之一」就能开始解码。
-  /// TS 是流式的，mpv 拿到关键帧就能出画，不需要等下完整片。
-  static const String _startupReadaheadSeconds = '2';
-
-  /// 起播「还在进展」时的最长等待：只要代理层还在往下拉字节，
-  /// 就不把这次 open 判成失败。
-  ///
-  /// 原先是死等 [readyTimeout]（20 秒），大分片 4K 源（单片 13~22MB）
-  /// 在网络很好的情况下也可能超过 20 秒 —— 于是「好线路被判定成不可用」
-  /// 并触发自动换线（用户报障原话）。现在改成：有字节进来就继续等，
-  /// 只有「连续 [_stallTimeout] 没有任何进展」才算真失败。
-  static const Duration _openHardCap = Duration(minutes: 2);
-
-  /// 看门狗采样间隔。
-  ///
-  /// PERF（2026-11-13）：2 秒 → 4 秒。
-  /// 每次 tick 都要跨平台读一次 mpv 的 cache-speed（最多等 1 秒），
-  /// 4K 大分片时这个读取本身就会阻塞主线程，导致弹幕和进度条掉帧。
-  /// 看门狗只用来判「彻底不动了」，4 秒足够。
+  /// 看门狗采样间隔。ExoPlayer 的状态事件本来就不密，4 秒够。
   static const Duration _watchdogTick = Duration(seconds: 4);
 
-  /// 停摆判定门槛：连续 [stall] 完全没有字节流动才算失败候选
-  /// （原 12 秒太激进，4K 高码率 seek / 起播都可能超过 12 秒）。
-  static const Duration _stallTimeout = Duration(seconds: 30);
+  /// 停摆判定门槛：连续这么久完全没有进度 / 缓冲推进才算失败候选。
+  /// 卡住多久判定这条线路不行。
+  ///
+  /// FAST_FAIL（2026-11-14）：原来 30 秒。分片地址拿不到的时候，
+  /// 用户看到的就是「转圈转到放弃」——30 秒才轮到自动换线。
+  /// 压到 8 秒：坏的立刻换走，好的根本不受影响（正常起播 < 2 秒）。
+  static const Duration _stallTimeout = Duration(seconds: 8);
 
   /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
   static const int _rescueTries = 2;
-
-  /// 本地分片代理的缓存上限（字节）。
-  ///
-  /// 无限预加载要把整集拉到本地，缓存太小会「拉进来又被淘汰」，
-  /// 拖回去还得重下。按设备内存的 1/8 给，夹在 512MB~2GB。
-  static int get _proxyCacheLimit {
-    final total = _deviceMemoryMb();
-    if (total <= 0) return 512 * 1024 * 1024;
-    final bytes = (total * 1024 * 1024) ~/ 8;
-    const min = 512 * 1024 * 1024;
-    const max = 2 * 1024 * 1024 * 1024;
-    return bytes.clamp(min, max);
-  }
 
   /// 设备物理内存（MB）；拿不到返回 0。
   static int _deviceMemoryMb() {
@@ -399,89 +301,60 @@ class FxPlayer implements Listenable {
 
   /// 同一次播放最多进几轮救援链。没有这个上限时，每轮救援结束都会
   /// 重置 _lastFlowAt，于是又能再等 30 秒 → 再救 → 再等，表现就是
-  /// 「一直卡在那几秒、一直循环」。超过上限就把错误交给页面（换线路 / 提示），
-  /// 不再无限重连。
+  /// 「一直卡在那几秒、一直循环」。超过上限就把错误交给页面。
   static const int _maxRescueRounds = 3;
 
-  /// 救援重开时等待新流首帧 / 时长的上限。
+  /// 救援重开时等待新流就绪的上限。
   static const Duration _rescueOpenTimeout = Duration(seconds: 8);
 
   /// 创建播放器实例。
-  ///
-  /// 调用前必须已在 `main()` 中执行 `MediaKit.ensureInitialized()`。
   static FxPlayer create({
-    Duration readyTimeout = const Duration(seconds: 20),
+    Duration readyTimeout = const Duration(seconds: 10),
   }) {
     return FxPlayer._(readyTimeout: readyTimeout);
   }
 
-  /// 等待首帧/时长的超时时间；超时视为该地址不可播。
+  /// 打开地址后等首帧的最长时间。
   final Duration readyTimeout;
 
-  late final Player _player;
-  late final VideoController _controller;
+  late final ExoPlayerEngine _engine;
 
   final Set<VoidCallback> _listeners = <VoidCallback>{};
-  final List<StreamSubscription<dynamic>> _subscriptions =
-      <StreamSubscription<dynamic>>[];
 
   FxPlayerValue _value = const FxPlayerValue();
   bool _disposed = false;
   bool _playIntent = false;
   int _decodeErrorSerial = 0;
+
+  /// 上一次已经处理过的内核错误文案（去重用，open 时清空）。
+  String _lastHandledError = '';
   int _openToken = 0;
 
   /// 画面层代际：每次真正 open（含救援链重开）都 +1。
-  ///
-  /// 内部救援重开同样要通知共享画面层重新挂载。重挂是画面输出异常的
-  /// 恢复措施，不代表已证明具体设备的黑屏一定由旧纹理造成；真实显示
-  /// 仍需要设备验证，解码截图只能证明解码器产生了画面。
   int _renderEpoch = 0;
 
-  /// 当前画面层代际；页面在监听回调里比对它来决定是否重建 Video。
+  /// 当前画面层代际；页面在监听回调里比对它来决定是否重建画面。
   int get renderEpoch => _renderEpoch;
   Completer<void>? _ready;
-  Timer? _cacheGuardTimer;
-
-  // ------------------------------------------------------ seek 音频闸（③）
-  //
-  // SEEK_AUDIO_GATE（2026-11-14，按逆向报告 §10 改动 3）：
-  //   拖动时画面还停在旧帧、声音已经跳到新位置，这是拖动体验里最刺耳的
-  //   一项。做法是拖动瞬间把播放器音量闸到 0，等新位置的首帧（或
-  //   [_seekAudioGateTimeout] 兜底）再把音量恢复成拖动前的值。
-  //   兜底必须有：否则一次没出帧的 seek 会让播放器永久静音。
-
-  /// 静音闸超时：超时无条件恢复音量（对标 1200ms）。
-  static const Duration _seekAudioGateTimeout = Duration(milliseconds: 1200);
-
-  Timer? _seekGateTimer;
-
-  /// 当前是否处于「拖动静音」状态。
-  bool _seekGateMuted = false;
-
-  /// 拖动前的音量（0~100，media_kit 的量纲）。
-  double _volumeBeforeSeekGate = 100;
 
   // ------------------------------------------------- 看门狗 / 救援链状态
 
-  /// 无字节流动看门狗（30 秒门槛）。
   Timer? _watchdogTimer;
 
-  /// 最近一次「有字节流动」的时间；停摆计时从它开始。
-  DateTime _lastFlowAt = DateTime.now();
+  /// 内核状态轮询（事件通道的兜底）。
+  Timer? _pollTimer;
 
-  /// 本次播放已执行的救援轮数。
+  /// 失败时是否自动切到下一条线路。默认关闭：自动换线会把用户选中的
+  /// 线路顶掉（用户报「自动跳线路、切回去也放不了」）。
+  static const bool _autoSwitchLine = false;
+
+  /// 本次 open 的类型提示（来自服务端的 type 字段）。
+  bool? _typeHint;
+  DateTime _lastFlowAt = DateTime.now();
   int _rescueRounds = 0;
   Duration _lastFlowPos = Duration.zero;
   Duration _lastFlowBuffered = Duration.zero;
-  double _lastFlowPct = -1;
-  int? _lastFlowStreamPos;
-
-  // 网络/音频进度仍前进时，也单独检查视频时间戳，避免音频掩盖视频停摆。
-  double? _lastVideoPts;
-  Duration _lastVideoPosition = Duration.zero;
-  DateTime _lastVideoAt = DateTime.now();
-  bool _videoProbeBusy = false;
+  int _lastFlowState = -1;
 
   /// 救援链正在执行（防止看门狗 / 错误事件重复进入）。
   bool _rescueBusy = false;
@@ -495,7 +368,7 @@ class FxPlayer implements Listenable {
   /// 停摆期间我们主动点亮的「缓冲中」，恢复后要自己熄灭。
   bool _stallIndicated = false;
 
-  /// 救援重开时等待新流就绪（首帧 / 时长 / 位置）的信号。
+  /// 救援重开时等待新流就绪的信号。
   Completer<void>? _mediaReady;
 
   // ------------------------------------------------------ 当前播放源信息
@@ -510,123 +383,97 @@ class FxPlayer implements Listenable {
   /// 正在执行的 open（url+headers）：同一地址并发 open 直接复用，防重复。
   _OpenRequest? _opening;
 
-  /// 本集是否已经把起播小缓冲提升到稳定值。
-  bool _cacheRaised = false;
-
-  /// 当前生效的前向缓冲字节数。首帧后按实测网速定，之后兜底定时器
-  /// 复用它，避免把自适应结果覆盖成固定值。
-  int _currentForwardBuffer = _startupBufferBytes;
-
   /// 直链 HLS 的本地分片代理；只在 direct 模式下懒创建。
   LocalHlsProxy? _hlsProxy;
 
-  /// 当前这集清单的本地时间索引（④）。
+  /// 当前这集清单的本地时间索引（逆向报告 §10 改动 4）。
   ///
   /// 拿它做两件事：seek 时把目标时间换算成分片、对目标分片做一次大小校验，
   /// 校验不过就回源直连重取。索引建不出来时为 null，seek 照常工作。
   HlsPlaylistIndex? _segmentIndex;
 
   /// 高频播放位置通道（每 50~200ms 更新一次）。
-  ///
-  /// 进度条、弹幕这类需要「每帧跟手」的组件订阅它，
-  /// 不再跟着 FxPlayerValue 的整对象通知一起重建。
   final ValueNotifier<Duration> _positionNotifier =
       ValueNotifier<Duration>(Duration.zero);
 
   /// 高频位置（供进度条 / 弹幕订阅）。
   ValueListenable<Duration> get positionListenable => _positionNotifier;
 
-  /// 是否启用本地 HLS 代理。
-  ///
-  /// 默认 false —— 让播放器直连，和 FongMi/TV 的做法一致。
-  /// 代理层的实测副作用：4K 单片 16~30MB 被拆成几十个 Range 重下，
-  /// 代理自己判超时/重试/回退直连，导致加载慢、卡死、黑屏。
-  /// 服务端整条链路只要 87ms，代理没有任何收益。
+  /// 是否启用本地 HLS 代理。默认 false —— 让播放器直连，
+  /// 和 FongMi/TV 的做法一致（ExoPlayer 原生 HLS 比我们再套一层代理稳）。
   static const bool _enableLocalHlsProxy = false;
 
-  /// 底层 media_kit Player，需要高级能力（音轨/字幕/属性）时可直接使用。
-  Player get player => _player;
-
-  /// media_kit 的视频输出控制器。
-  VideoController get videoController => _controller;
+  /// 底层内核。需要高级能力（缓冲统计等）时可直接使用。
+  ExoPlayerEngine get player => _engine;
 
   /// 当前状态快照。
   FxPlayerValue get value => _value;
 
   /// 流式播放进度。
-  Stream<Duration> get positionStream => _player.stream.position;
+  Stream<Duration> get positionStream => _positionCtrl.stream;
+  Stream<Duration> get durationStream => _durationCtrl.stream;
+  Stream<bool> get bufferingStream => _bufferingCtrl.stream;
+  Stream<String> get errorStream => _errorCtrl.stream;
+  Stream<bool> get completedStream => _completedCtrl.stream;
+  Stream<bool> get playingStream => _playingCtrl.stream;
 
-  /// 流式总时长。
-  Stream<Duration> get durationStream => _player.stream.duration;
+  final StreamController<Duration> _positionCtrl =
+      StreamController<Duration>.broadcast();
+  final StreamController<Duration> _durationCtrl =
+      StreamController<Duration>.broadcast();
+  final StreamController<bool> _bufferingCtrl =
+      StreamController<bool>.broadcast();
+  final StreamController<String> _errorCtrl =
+      StreamController<String>.broadcast();
+  final StreamController<bool> _completedCtrl =
+      StreamController<bool>.broadcast();
+  final StreamController<bool> _playingCtrl =
+      StreamController<bool>.broadcast();
 
-  /// 流式缓冲状态。
-  Stream<bool> get bufferingStream => _player.stream.buffering;
-
-  /// 流式错误信息。
-  Stream<String> get errorStream => _player.stream.error;
-
-  /// 流式播放完成状态。
-  Stream<bool> get completedStream => _player.stream.completed;
-
-  /// 画面组件（media_kit Video，内置控件已关闭，交给页面自绘）。
+  /// 画面组件：PlatformView 承载 ExoPlayer 的 PlayerView，
+  /// 内置控件已关（useController=false），全部交给页面自绘。
   Widget buildVideo({
     BoxFit fit = BoxFit.contain,
     Alignment alignment = Alignment.center,
   }) {
-    return Video(
-      controller: _controller,
-      controls: NoVideoControls,
-      fit: fit,
-      alignment: alignment,
-      fill: Colors.black,
-      wakelock: true,
-      pauseUponEnteringBackgroundMode: false,
-      resumeUponEnteringForegroundMode: false,
+    // BoxFit → Media3 的缩放模式。不映射的话 PlayerView 永远按 FIT 缩放，
+    // 「铺满」「拉伸」两个档位会失效。
+    final mode = switch (fit) {
+      BoxFit.cover => exoResizeZoom,
+      BoxFit.fill => exoResizeFill,
+      _ => exoResizeFit,
+    };
+    return ColoredBox(
+      color: Colors.black,
+      // 只按缩放模式做 key：切集 / 换线路**不重建** PlatformView。
+      // ExoPlayer 的 PlayerView 一直绑着同一个内核实例，重建只会多一次
+      // 纹理重新挂载，用户看到的就是切换瞬间的黑一下。
+      child: ExoPlayerView(
+        key: ValueKey<String>('exo-surface-$mode'),
+        resizeMode: mode,
+      ),
     );
   }
 
   /// [buildVideo] 的简写入口。
   Widget video({BoxFit fit = BoxFit.contain}) => buildVideo(fit: fit);
 
-  /// 抓取当前画面的一帧（JPEG 字节）。
-  ///
-  /// media_kit 的 Video 在 open 新地址时会清空纹理，切线路 / 切集前先存下
-  /// 这张快照，切换期间垫在画面层上，等新流首帧就绪后再淡出。
-  /// 播放器未就绪、设备不支持或抓取异常时返回 null，调用方退回纯黑即可。
-  Future<Uint8List?> captureFrame() async {
-    if (_disposed || !_value.isInitialized) return null;
-    try {
-      final bytes = await _player.screenshot();
-      if (bytes == null || bytes.isEmpty) return null;
-      return bytes;
-    } catch (_) {
-      return null;
-    }
-  }
+  /// ExoPlayer 没有截帧接口：返回 null，页面退回纯黑垫片。
+  Future<Uint8List?> captureFrame() async => null;
 
   /// 打开一个网络地址并等待其就绪。
-  ///
-  /// [headers] 会透传给 libmpv（Referer / User-Agent 等）。
-  /// [play] 为 true 时 open 后立即起播（首帧优先），不等待全部 metadata；
-  /// 默认 false 保持旧调用方（一起看等）先 seek 再播的语义。
-  /// [direct] 为 true（调用方已确认是 HLS 直链）时，先走本地分片
-  /// 代理（多连接 Range 下载 + 预取）；代理启动失败自动回退直连。
-  /// [refreshPlay] 仅供平台线路（临时签名 m3u8）使用：代理遇到 403/404
-  /// 或每 90 秒回调它重新请求 `/api/play?...&fresh=1` 拿新地址。
-  /// [onPlayExpired] 在连续两次拿不到新地址时回调，由页面提示切换线路。
-  /// [rescueLines] 是无感救援链第③步：播放中出现任何失败 / 停摆时，
-  /// 播放器内部按 ①refreshPlay 换地址 ②同地址重新 open 并 seek 回原进度
-  /// ③换下一条线路 的顺序静默自救（①②各先试 2 次），三步都失败才把
-  /// 「播放中断」一次性抛给页面；不传则跳过第③步。
-  /// 打不开、解码失败或超时会抛出 [FxPlayerException]，方便上层切换备用地址。
   Future<void> open(
     String url, {
     Map<String, String> headers = const <String, String>{},
     bool play = false,
     bool waitForWarm = false,
     bool direct = false,
-    /// 服务端声明的类型。libmpv 会自己嗅探格式，这个参数只为保持调用方
-    /// 一致（ExoPlayer 时代需要它，回退 mpv 后不再使用）。
+    /// 服务端给的类型（PlayInfo.isHls）。给了就以它为准，不再靠地址后缀猜。
+    ///
+    /// 幻想自建（pt_zijian）返回的是 `.../cloud/flv/xxx` 这种没有 .m3u8 的
+    /// 地址，但 302 之后就是 m3u8 列表。按后缀猜会当成普通视频交给
+    /// ProgressiveMediaSource，直接解析失败 —— 表现就是「自建线路播不出来」。
+    /// libmpv 时代能播是因为 ffmpeg 会自己嗅探格式，ExoPlayer 不会。
     bool? isHls,
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
@@ -635,9 +482,21 @@ class FxPlayer implements Listenable {
     if (_disposed) {
       return Future<void>.error(const FxPlayerException('播放器已释放'));
     }
+    // OPEN_RESET（2026-11-14）：每次打开都先把上一次的救援状态清干净。
+    //
+    // 用户报「默认线路加载不出来，手动切其它线路就开始卡」。根因是
+    // 上一次 open 失败时 _rescueHold / _rescueBusy 停在 true：
+    //   · play() 里 `if (_rescueHold) return` 直接吞掉起播
+    //   · 救援链看到 _rescueBusy 也直接返回
+    // 于是之后无论手动还是自动切线路，都只是「一直加载」。
+    _rescueHold = false;
+    _rescueBusy = false;
+    _rescueRounds = 0;
+    _lastHandledError = '';
+    // 记下服务端声明的类型，供 _openMedia / 救援重开使用。
+    _typeHint = isHls;
     final key = _openKey(url, headers, direct);
     final pending = _opening;
-    // 同一 url + headers 正在打开：忽略重复请求，复用同一个结果。
     if (pending != null && pending.key == key) return pending.future;
     final future = _openInternal(
       url,
@@ -677,19 +536,20 @@ class FxPlayer implements Listenable {
   ) async {
     _playIntent = play;
     final token = ++_openToken;
-    // 新的 open 取代正在进行的救援链。
     _rescueGen++;
     _rescueBusy = false;
     _rescueHold = false;
     _rescueRounds = 0;
-    _cacheRaised = false;
-    _lastVideoPts = null;
-    _lastVideoAt = DateTime.now();
+    _lastFlowPos = Duration.zero;
+    _lastFlowBuffered = Duration.zero;
+    _lastFlowState = -1;
+    _lastBufferedMs = -1;
+    _lastSpeedAt = DateTime.now();
+    _lastHandledError = '';
     _value = const FxPlayerValue();
     // 换集 / 换源：上一集的清单索引作废（不同集的时长和分片完全不同）。
     _segmentIndex = null;
     _notify();
-    // 记住当前播放源：救援链（refresh → 重开 → 换线路）全程要用。
     _sourceUrl = url;
     _sourceHeaders = headers;
     _sourceDirect = direct;
@@ -698,12 +558,8 @@ class FxPlayer implements Listenable {
     _lineRescue = rescueLines;
     final ready = Completer<void>();
     _ready = ready;
-    // 如果 open 自身先抛错而没来得及 await ready，提前吞掉这个错误，
-    // 避免出现未处理的异步异常。
     unawaited(ready.future.catchError((Object _) {}));
     try {
-      // 1) 直链 HLS 走本机代理（多连接 Range + 预取），代理失败回退直连；
-      //    非代理路径保留原有 m3u8 预热。被新 open 取代时返回 null 静默让位。
       final source = await _resolvePlaybackSource(
         url,
         headers,
@@ -715,23 +571,12 @@ class FxPlayer implements Listenable {
         if (identical(_ready, ready)) _ready = null;
         return;
       }
-      // 4) 清单索引（④）：后台建一份「分片 ↔ 时间」的本地索引，
-      //    不占 open 的预算，建不出来也只是少一层拖动优化。
+      // 清单索引（§10 改动 4）：后台建一份「分片 ↔ 时间」的本地索引，
+      // 不占 open 的预算，建不出来也只是少一层拖动优化。
       unawaited(_primeSegmentIndex(source.url, headers, token));
-      // 2) 交给 mpv：12MB 小缓冲先出画，open 发出后立刻调到 96MiB。
-      //
-      // 这里**不能**再用 readyTimeout 一刀切：_openMedia 内部要先等本地代理
-      // 起好、mpv 接受 URL，大分片源在这一步就可能超过 20 秒。
-      // 用 _openHardCap 兜底，真正的「卡死」由后面的 _awaitReadyOrProgress
-      // 按下载进展判定，避免把慢线路误判成坏线路。
-      await _openMedia(
-        source,
-        play: play,
-        token: token,
-      ).timeout(_openHardCap);
+      await _openMedia(source, play: play, token: token).timeout(_openHardCap);
     } catch (error) {
       if (_disposed || token != _openToken) {
-        // 已被新的播放请求取代：不报错，也不去污染新 open 的状态。
         if (identical(_ready, ready)) _ready = null;
         return;
       }
@@ -741,25 +586,19 @@ class FxPlayer implements Listenable {
     }
     if (_disposed || token != _openToken) return;
     try {
-      // 不再用固定的 readyTimeout 死等：那会把「大分片加载慢」误判成
-      // 「线路不可用」并自动换线。这里只要代理层还在拉字节就一直等，
-      // 连续 _stallTimeout 毫无进展才放弃；另外加一个硬上限兜底。
       await _awaitReadyOrProgress(ready.future, token);
     } finally {
       if (identical(_ready, ready)) _ready = null;
     }
-    // 首帧 / 时长已就绪：把起播小缓冲动态升到 96MiB，长播更稳。
-    _raiseCacheAfterStart();
   }
 
   /// 等首帧，但把「还在下载」和「卡死」区分开。
   ///
-  /// 判据是代理层的已下载字节数：数值在涨就说明线路活着，继续等；
-  /// 连续 [_stallTimeout] 字节不动才算这次 open 失败。整体另有
-  /// [_openHardCap] 硬上限。
+  /// 判据是 ExoPlayer 上报的缓冲位置 / 播放位置：在动就说明线路活着，
+  /// 继续等；连续 [_stallTimeout] 纹丝不动才算这次 open 失败。
   Future<void> _awaitReadyOrProgress(Future<void> ready, int token) async {
     final startedAt = DateTime.now();
-    var lastBytes = -1;
+    var lastMs = -1;
     var lastProgressAt = DateTime.now();
     while (true) {
       if (_disposed || token != _openToken) return;
@@ -771,32 +610,28 @@ class FxPlayer implements Listenable {
       }
       if (_disposed || token != _openToken) return;
 
-      final proxy = _hlsProxy;
-      final bytes = proxy == null ? -1 : proxy.cacheBytes;
+      final st = _engine.state.value;
+      final ms = st.buffered.inMilliseconds + st.position.inMilliseconds;
       final now = DateTime.now();
-      if (bytes > lastBytes) {
-        lastBytes = bytes;
+      if (ms > lastMs) {
+        lastMs = ms;
         lastProgressAt = now;
       }
-      // 直连（没有代理）时无从判断进度，退回按 readyTimeout 兜底。
-      final idle = proxy == null
-          ? now.difference(startedAt)
-          : now.difference(lastProgressAt);
-      if (idle >= _stallTimeout) {
-        _logFx('OPEN 放弃：${idle.inSeconds}s 无下载进展');
+      if (now.difference(lastProgressAt) >= _stallTimeout) {
+        _logFx('OPEN 放弃：${_stallTimeout.inSeconds}s 无进展');
         _fail('播放超时，线路可能不可用');
         throw const FxPlayerException('播放超时');
       }
       if (now.difference(startedAt) >= _openHardCap) {
-        _logFx('OPEN 放弃：超过硬上限 ${_openHardCap.inSeconds}s');
+        _logFx('OPEN 放弃：超过硬上限 ${_openHardCap.inSeconds}');
         _fail('播放超时，线路可能不可用');
         throw const FxPlayerException('播放超时');
       }
     }
   }
 
-  /// 解析出真正交给 mpv 的地址：直链先过本地分片代理（代理失败回退
-  /// 直连），非代理路径做 m3u8 预热。返回 null = 这次 open 已被取代。
+  /// 解析出真正交给内核的地址：直链先过本地分片代理（默认关闭），
+  /// 非代理路径做 m3u8 预热。返回 null = 这次 open 已被取代。
   Future<_PlaybackSource?> _resolvePlaybackSource(
     String url,
     Map<String, String> headers, {
@@ -807,35 +642,13 @@ class FxPlayer implements Listenable {
     var playbackUrl = url;
     var playbackHeaders = headers;
     var proxied = false;
-    // NO_LOCAL_PROXY（2026-11-12）：本地 HLS 代理默认关闭，播放器直连。
-    //
-    // 参考 FongMi/TV：它完全信任 ExoPlayer 原生 HLS 实现，不套任何代理。
-    // 我们之前每播一路都要经过「播放器 → 本地代理 → 拆 Range 并发 → 拼回」，
-    // 4K 单片 16~30MB 被切成几十个 Range 请求重下，代理还要自己判超时、
-    // 自己重试、失败就回退直连 —— 用户看到的就是加载慢、卡死、黑屏、跳线路。
-    //
-    // 实测服务端链路全程 < 250ms（api/play 23ms、m3u8 31ms、首片 208ms），
-    // 所以代理带来的只有副作用，没有收益。
-    //
-    // 保留 LocalHlsProxy 代码与开关：某些需要签名重写的源将来还能用，
-    // 但默认路径不受它影响。
     final useLocalProxy = _enableLocalHlsProxy;
     if (direct && useLocalProxy) {
-      // 缓存上限按设备内存定：无限预加载要把整集尽量拉下来，
-      // 512MB 对 1080P（一集 300~600MB）刚好够，但对 4K 完全不够。
-      // 这里取可用内存的 1/8，夹在 512MB~2GB：
-      //   · 6GB 机 → 768MB   · 8GB 机 → 1GB   · 12GB 机 → 1.5GB
-      // 上限同时被 mpv 那层（demuxer 96MB）和系统可用内存兜住，
-      // 不会因为开太大把整机拖垮。
       final proxy = _hlsProxy ??= LocalHlsProxy(
         log: debugPrint,
         cacheLimitBytes: _proxyCacheLimit,
       );
       try {
-        // 超时不能在 4 秒就放弃代理：平台线路首次代理要做签名重写 +
-        // 拉整集列表，很容易超过 4 秒。一旦超时就会回退直连并销毁代理，
-        // 之后所有抖动都直连裸奔 —— 这就是「掉线」的主因。
-        // 放宽到 20 秒，且超时只当作「这次慢」而不是「代理不可用」。
         final localUrl = await proxy
             .proxy(
               url,
@@ -849,14 +662,6 @@ class FxPlayer implements Listenable {
                       if (expired != null) expired();
                     },
             )
-            // 超时从 8 秒放宽到 15 秒。
-            //
-            // 4K 线路（幻想4K）播放列表 127KB，含 540 个分片，
-            // 代理要拉正文 + 逐行改写 + 建立别名表。实测服务端这段 87ms，
-            // 但客户端还要过一次 HTTP + 解析，冷启动偏慢。
-            // 8 秒一旦不够就回退直连 → mpv 自己再拉一遍同一个 m3u8，
-            // 两个请求串起来就是用户看到的「加载 20 秒」。
-            // 现在给足 15 秒，宁可多等一点也不要重复拉流。
             .timeout(const Duration(seconds: 15));
         if (_disposed || token != _openToken) return null;
         if (localUrl.isNotEmpty) {
@@ -866,14 +671,10 @@ class FxPlayer implements Listenable {
         }
       } catch (error) {
         debugPrint('FxPlayer: 本地 HLS 代理本次启动失败，回退直连: $error');
-        // 注意：不销毁代理。之前失败就 dispose + 置空，导致后面整段播放
-        // 都直连裸奔（失去整集预热、失去签名刷新），表现就是「经常掉线」。
-        // 代理实例本身是好的，只是这一次没能在时限内就绪，留着给下次复用。
       }
     }
     if (_disposed || token != _openToken) return null;
 
-    // 非代理路径保留原有 m3u8 预热；代理路径本身已经拉过列表并预取。
     if (!proxied) {
       final warmup = _FxHlsWarmup.prepare(url, headers);
       if (waitForWarm) {
@@ -886,221 +687,110 @@ class FxPlayer implements Listenable {
     return _PlaybackSource(playbackUrl, playbackHeaders);
   }
 
-  /// 把地址交给 mpv：先按 24MB 起播（首帧优先），首帧后按实测吞吐
-  /// 把 demuxer 缓存在 64~256MB 之间自适应，并加大 readahead。
+  /// 本地代理缓存上限：按设备内存的 1/8，夹在 512MB~2GB。
+  static int get _proxyCacheLimit {
+    final total = _deviceMemoryMb();
+    if (total <= 0) return 512 * 1024 * 1024;
+    final bytes = (total * 1024 * 1024) ~/ 8;
+    return bytes.clamp(512 * 1024 * 1024, 2 * 1024 * 1024 * 1024);
+  }
+
+  /// 把地址交给连接器内核。
   Future<void> _openMedia(
     _PlaybackSource source, {
     required bool play,
     required int token,
   }) async {
-    await _setCacheLimits(_startupBufferBytes, readahead: _startupReadaheadSeconds);
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
     }
-    final opening = _player.open(
-      Media(
-        source.url,
-        httpHeaders: source.headers.isEmpty ? null : source.headers,
-      ),
-      // 立即解除暂停，先出画面，不等 duration / 全部元数据。
-      play: play,
+    // 优先用服务端声明的类型；没有才退回按地址猜。
+    final isHls = _typeHint ?? _looksLikeHls(source.url);
+    final ok = await _engine.open(
+      source.url,
+      headers: source.headers,
+      isHls: isHls,
     );
-    // 这次 open 会重建 mpv 的视频输出：画面层代际 +1，通知页面重建 Video，
-    // 否则救援链重开之后就是「有声音没画面」。
+    if (_disposed || token != _openToken) {
+      throw StateError('open 已被新的播放请求取代');
+    }
+    if (!ok) {
+      throw FxPlayerException(_engine.error ?? '播放器打开失败');
+    }
+    // 内核在 open 时会把 lastError 清空，Dart 侧的去重标记也要跟着清，
+    // 否则救援重开之后同类错误会被当成「已处理过」而漏掉。
+    _lastHandledError = '';
+    if (play) {
+      await _engine.play();
+    }
     _renderEpoch++;
     _notify();
-    _lastVideoPts = null;
-    _lastVideoAt = DateTime.now();
-    // 这里也不能用默认的 120 秒预读：open 之后 mpv 立刻开始缓冲，
-    // 预读太长会一直不出画。等首帧到了 _raiseCacheAfterStart 再恢复。
-    unawaited(_setCacheLimits(_steadyBufferBytes, readahead: _startupReadaheadSeconds));
-    await opening;
+    _lastFlowAt = DateTime.now();
   }
 
-  /// 首帧后按实测吞吐提升前向缓存；每集只升一次。
+  /// 判断是不是 HLS 播放列表。
   ///
-  /// 网络好（代理已整集预热，吞吐样本很快就有）直接给到 192~256MB，
-  /// 长播不再回源；网络一般则停在 64~128MB，避免为了不可能的带宽
-  /// 去占内存、也避免起播阶段等太久。
-  void _raiseCacheAfterStart() {
-    if (_disposed || _cacheRaised) return;
-    _cacheRaised = true;
-    // 直连模式下没有本地代理，吞吐只能取 mpv 的 cache-speed；
-    // 两个都拿不到就用默认稳态值。
-    final throughput = _hlsProxy?.recentThroughput ?? _cachedMpvSpeed;
-    _currentForwardBuffer = _steadyBufferFor(throughput);
-    // PLAY_PHASE（2026-11-13 用户要求）：出画之后再进预热。
-    //
-    // 「首次秒加载 → 后面正常预热边播放」：
-    // 首帧一到不能立刻放开大缓存，否则刚出画就跟播放抢带宽，
-    // 前几秒反而容易卡。这里先保持轻量缓冲，1.5 秒稳定后再放开。
-    _warmupTimer?.cancel();
-    _warmupTimer = Timer(const Duration(milliseconds: 1500), () {
-      if (_disposed) return;
-      unawaited(
-        _setCacheLimits(_currentForwardBuffer, readahead: _readaheadSeconds),
-      );
-    });
-  }
-
-  /// 出画后延迟进入预热的定时器。
-  Timer? _warmupTimer;
-
-  /// 限制 demuxer 前向 / 回看缓存并固定 60 秒预读（demuxer-readahead-secs，
-  /// 4K 高码率 seek / 抖动后不至于瞬间断粮）；mpv 会按新上限回收旧缓存，
-  /// 长播时不会因为回看缓存累积而内存无限增长。
-  Future<void> _setCacheLimits(int forwardBytes, {String? readahead}) async {
-    if (_disposed) return;
-    _currentForwardBuffer = forwardBytes;
-    final platform = _player.platform;
-    if (platform is! NativePlayer) return;
-    try {
-      await platform.setProperty('demuxer-max-bytes', '$forwardBytes');
-      await platform.setProperty('demuxer-max-back-bytes', '$_backBufferBytes');
-      await platform.setProperty(
-        'demuxer-readahead-secs',
-        readahead ?? _readaheadSeconds,
-      );
-      // NO_DISK_CACHE（2026-11-13）：关掉 mpv 磁盘缓存，只用内存。
-      //
-      // 之前开了 cache-on-disk：4K 每片 5.5MB 全往手机存储写，
-      // 闪存随机写慢的时候整个 demuxer 被拖住 —— 用户看到的是
-      // 「播着播着一直缓冲」「卡死后无法继续」。
-      // 现在直连线路靠 192MB 内存缓存就够，不碰磁盘。
-      await platform.setProperty('cache', 'yes');
-      await platform.setProperty('cache-on-disk', 'no');
-      await platform.setProperty('demuxer-max-back-bytes', '$_backBufferBytes');
-      // ── 以下四条照搬腾讯云播放器的策略（从咕噜 APK 的 droppedCap /
-      //    concurrentThreads 逆出来的思路），目的是「网络一抖不卡死」：
-      //
-      // 1) video-sync=audio：以音频为主时钟。默认的 display-resample 会在
-      //    掉帧时反复微调音调，弱网下表现为声音发飘；跟音频走最稳。
-      await platform.setProperty('video-sync', 'audio');
-      // 2) framedrop=vo：解码跟不上时**丢帧**而不是停下来等。
-      //    腾讯云的 droppedCap 就是这个语义 —— 宁可少几帧，也不要卡住。
-      await platform.setProperty('framedrop', 'vo');
-      // 3) 解码线程数按 CPU 核数给（腾讯云的 concurrentThreads）。
-      //    太少解不动 4K，太多抢 CPU 反而掉帧。
-      final cores = Platform.numberOfProcessors;
-      final threads = cores <= 4 ? 2 : (cores <= 6 ? 3 : 4);
-      await platform.setProperty('vd-lavc-threads', '$threads');
-      // 4) cache-pause-wait 压到 0.5 秒：默认 10 秒意味着「卡一下要等满
-      //    10 秒才恢复」。4K 码率下 0.5 秒≈80KB，一有点数据就能续播。
-      await platform.setProperty('cache-pause-wait', '0.5');
-      // 5) 起播不等缓存填满：默认会等 demuxer 预读到位才出画，
-      //    4K 大分片下就是十几秒的白屏。
-      await platform.setProperty('cache-pause-initial', 'no');
-    } catch (_) {
-      // 旧版本 / 特殊平台没有这些属性时静默跳过。
-    }
+  /// HLS_TYPE_FIX（2026-11-14）：不能只看 `.m3u8` 后缀。
+  /// 幻想4K / 幻想蓝光的地址是服务端包装过的 `/api/fyplay?u=…`，
+  /// 里面没有 m3u8 字样，但返回的正文就是 m3u8。之前这里判成 false，
+  /// 交给 ProgressiveMediaSource 解析 → 直接失败，
+  /// 表现就是「除了解析线路，其它线路都播不出来」。
+  static bool _looksLikeHls(String url) {
+    final lower = Uri.decodeFull(url).toLowerCase();
+    if (lower.contains('.m3u8')) return true;
+    // 服务端的福盈播放列表包装地址
+    if (lower.contains('/api/fyplay')) return true;
+    // 爱奇艺播放列表（虽然带 .m3u8，单独列出更明确）
+    if (lower.contains('/api/iqiyi.m3u8')) return true;
+    return false;
   }
 
   Future<void> play() {
     _playIntent = true;
-    // 成员同步可能在救援期间请求 play；先记意图，落点验证完成后执行。
     if (_rescueHold) return Future<void>.value();
-    return _player.play();
+    return _engine.play();
   }
 
   Future<void> pause() {
     _playIntent = false;
-    // 暂停时把拖动闸收掉：带着 0 音量停在这里，用户下次播放会「没声音」。
-    _endSeekAudioGate();
-    return _player.pause();
+    return _engine.pause();
+  }
+
+  /// 停止播放（直播页 / 一起看退出时用）。
+  Future<void> stop() async {
+    _playIntent = false;
+    await _engine.pause();
+    await _engine.seek(Duration.zero);
   }
 
   /// 显式播放意图与缓冲状态分开，防止报错亮缓冲后把主动暂停误当播放。
-  Future<void> playOrPause() => _player.state.playing ? pause() : play();
+  Future<void> playOrPause() => isPlaying ? pause() : play();
 
-  /// 停止：暂停并回到开头，不释放内核。
+  /// 内核真实播放状态，按钮图标以此为准。
+  bool get isPlaying => _engine.state.value.playing;
+
+  /// 内核当前真实倍速；跨页面交接时以此为准，避免本地状态落后。
   ///
-  /// ExoPlayer 版本有这个接口，回退 mpv 后直播页仍在调用
-  /// （live_detail_page 离开时停流）。缺它会直接编译失败。
-  Future<void> stop() async {
-    _playIntent = false;
-    try {
-      await _player.pause();
-      await _player.seek(Duration.zero);
-    } catch (_) {
-      // 内核还没就绪时停止是空操作。
-    }
-  }
+  /// ExoPlayer 的状态回包里没有倍速字段（我们不常用），所以自己记最近一次
+  /// setRate 的值 —— 竖屏 → 全屏交接时读它，倍速不会被重置回 1.0。
+  double get rate => _lastRate;
 
-  /// 播放器真实播放状态（libmpv 当前值），按钮图标以此为准。
-  bool get isPlaying => _player.state.playing;
+  double _lastRate = 1.0;
 
-  /// libmpv 当前真实倍速；跨页面交接时以此为准，避免本地状态落后。
-  double get rate => _player.state.rate;
-
-  /// 播放状态流；页面可用它驱动播放 / 暂停图标。
-  Stream<bool> get playingStream => _player.stream.playing;
-
-  /// 拖动进度：放弃当前全部缓冲，只加载目标位置的那一片。
+  /// 拖动进度：ExoPlayer 自己会重新调度分片，不需要我们干预缓冲参数。
   ///
-  /// SEEK_FAST（2026-11-13 用户要求）：
-  ///   「自己拖进度，放弃当前全部到拖到的地方秒播，后面正常预热边播放」
-  ///
-  /// 做法分三步：
-  ///   1. 先把预读降到 [_startupReadaheadSeconds]（6 秒 ≈ 1 片），
-  ///   2. seek 到目标位置，只下那一片就能出画。
-  ///   3. [_seekSettle] 时间内没有新的 seek（用户松手了），
-  ///      再把预读和缓存恢复到稳态，转入「边播边预热」。
-  ///
-  /// 连续拖动时恢复定时器会被不断重置，所以整个拖动过程一直是轻量缓冲，
-  /// 松手后 1.5 秒才转正常预热 —— 不会出现「拖一下就狂下几十 MB」。
+  /// 拖动静音闸（§10 改动 3，1200ms + 首帧解锁）在原生 `ExoPlayerPlugin`
+  /// 的 `seek` 分支里做：它拿得到 `player.volume` 与 `onRenderedFirstFrame`，
+  /// Dart 侧再闸一次只会和它互相打架。这里只补「按目标位置校验分片」。
   Future<void> seek(Duration position) async {
-    final platform = _player.platform;
-    final native = platform is NativePlayer;
-    if (native) {
-      // 只降预读，**不动 demuxer-max-bytes**。
-      //
-      // 之前把上限压到 24MB：4K 一片 5.5MB 只装得下 4 片，
-      // 拖动后刚播几秒缓冲就吃光 —— 用户看到的就是「拖完一直缓冲」。
-      // mpv 自己的 seek 会丢弃不可用区间的缓存，不需要我们再压上限。
-      unawaited(
-        platform
-            .setProperty('demuxer-readahead-secs', _startupReadaheadSeconds)
-            .catchError((_) {}),
-      );
-    }
-    // 闸音量 → seek → 首帧回来再放开（见 [_beginSeekAudioGate]）。
-    _beginSeekAudioGate();
-    await _player.seek(position);
+    await _engine.seek(position);
+    _positionNotifier.value = position;
+    _setValue(_value.copyWith(position: position));
     // 拖动后按目标位置把本地清单索引对到一个分片，先校验再预热。
     _warmSegmentAt(position);
-    _restoreAfterSeek();
   }
 
-  /// 拖动静音闸：把播放器音量压到 0，并起一个 1200ms 的兜底。
-  ///
-  /// 只在「正在播」时生效 —— 暂停状态下拖动没有音画撕裂可言，
-  /// 动音量反而会让用户下次播放听不到声音。
-  void _beginSeekAudioGate() {
-    if (_disposed || _seekGateMuted) return;
-    if (!_player.state.playing) return;
-    _seekGateMuted = true;
-    _volumeBeforeSeekGate = _player.state.volume;
-    unawaited(_player.setVolume(0).catchError((_) {}));
-    _seekGateTimer?.cancel();
-    _seekGateTimer = Timer(_seekAudioGateTimeout, _endSeekAudioGate);
-    _logFx('SEEK 静音闸开：音量 ${_volumeBeforeSeekGate.toStringAsFixed(0)} → 0');
-  }
-
-  /// 首帧回来 / 超时：恢复拖动前的音量。
-  ///
-  /// 幂等：重复调用只在真的处于静音状态时动作一次。
-  void _endSeekAudioGate() {
-    _seekGateTimer?.cancel();
-    _seekGateTimer = null;
-    if (!_seekGateMuted) return;
-    _seekGateMuted = false;
-    if (_disposed) return;
-    final volume = _volumeBeforeSeekGate.clamp(0.0, 100.0);
-    unawaited(_player.setVolume(volume).catchError((_) {}));
-    _logFx('SEEK 静音闸关：音量恢复到 ${volume.toStringAsFixed(0)}');
-  }
-
-  /// 后台建当前清单的本地时间索引（④）。
+  /// 后台建当前清单的本地时间索引（§10 改动 4）。
   ///
   /// 不阻塞 open：索引只是「seek 时知道该预取哪一片」的加速器，
   /// 拉不到 / 超时就当作没有。
@@ -1119,7 +809,7 @@ class FxPlayer implements Listenable {
     );
   }
 
-  /// 拖动后按目标位置校验命中的分片（④）。
+  /// 拖动后按目标位置校验命中的分片（§10 改动 4）。
   ///
   /// 分片大小和清单声明对不上时，[HlsSegmentIndex.verify] 会立刻回源直连
   /// 重取这一片。校验是后台的，不挡 seek。
@@ -1141,35 +831,10 @@ class FxPlayer implements Listenable {
     }());
   }
 
-  /// 松手后 1.5 秒恢复稳态预读。
-  Timer? _readaheadRestore;
-
-  void _restoreAfterSeek() {
-    _readaheadRestore?.cancel();
-    _warmupTimer?.cancel();
-    _readaheadRestore = Timer(const Duration(milliseconds: 1500), () {
-      if (_disposed) return;
-      final platform = _player.platform;
-      if (platform is! NativePlayer) return;
-      unawaited(
-        _setCacheLimits(_currentForwardBuffer, readahead: _readaheadSeconds),
-      );
-    });
-  }
-
   /// 兼容 video_player 命名。
   Future<void> seekTo(Duration position) => seek(position);
 
-  /// 切后台回来后的自愈：确认 mpv 还在出画、进度没被系统重置。
-  ///
-  /// Android 在后台可能回收音频焦点 / 冻结进程，回前台时 libmpv 会停在
-  /// 「有 duration 但位置不再推进、playing 变 false」的半死状态，也可能
-  /// 被系统 seek 回 0 —— 用户手动点播放就从片头重来（报障原话）。
-  ///
-  /// [expected] 是切后台那一刻的位置；[wasPlaying] 是切后台那一刻是否在播。
-  /// 用户切后台前就主动暂停的，回前台绝不自动续播，只按需把进度拉回去。
-  ///
-  /// 返回是否做了自愈（页面可据此刷新进度条）。
+  /// 切后台回来后的自愈：确认还在出画、进度没被系统重置。
   Future<bool> recoverAfterBackground(
     Duration expected, {
     bool wasPlaying = true,
@@ -1178,20 +843,14 @@ class FxPlayer implements Listenable {
     final v = _value;
     if (!v.isInitialized || v.hasError) return false;
     final pos = v.position;
-    // 位置被系统重置到片头 / 明显回退。
     final rewound =
         expected > const Duration(seconds: 5) &&
         pos + const Duration(seconds: 3) < expected;
-    // 冻结：本该在播却停了（系统收回音频焦点 / 进程被挂起）。
     final frozen = wasPlaying && !v.isPlaying;
     if (!rewound && !frozen) return false;
-    _logFx(
-      'RESUME 自愈：rewound=$rewound frozen=$frozen wasPlaying=$wasPlaying '
-      'pos=${pos.inSeconds}s target=${expected.inSeconds}s',
-    );
+    _logFx('RESUME 自愈：rewound=$rewound frozen=$frozen');
     try {
-      if (rewound) await _player.seek(expected);
-      // 只有本来就在播的才恢复播放；用户主动暂停的保持暂停。
+      if (rewound) await _engine.seek(expected);
       if (wasPlaying) await play();
       _lastFlowAt = DateTime.now();
       _lastFlowPos = expected;
@@ -1202,17 +861,28 @@ class FxPlayer implements Listenable {
     }
   }
 
-  Future<void> setRate(double rate) => _player.setRate(rate);
+  Future<void> setRate(double rate) async {
+    _lastRate = rate;
+    await _engine.setRate(rate);
+    _setValue(_value.copyWith());
+  }
 
   /// 兼容 video_player 命名。
   Future<void> setPlaybackSpeed(double rate) => setRate(rate);
 
-  /// 兼容 video_player 命名；单集播放固定不循环。
-  Future<void> setLooping(bool looping) async {
-    await _player.setPlaylistMode(
-      looping ? PlaylistMode.loop : PlaylistMode.none,
-    );
+  /// 上一次下发的镜像档位（0=无,1=X,2=Y,3=XY），避免每帧重复过通道。
+  int _mirrorFlags = -1;
+
+  /// 镜像（原生翻转，PlatformView 不支持 Flutter Transform）。
+  void setMirror({required bool flipX, required bool flipY}) {
+    final flags = (flipX ? 1 : 0) | (flipY ? 2 : 0);
+    if (flags == _mirrorFlags) return;
+    _mirrorFlags = flags;
+    unawaited(_engine.setMirror(flipX: flipX, flipY: flipY));
   }
+
+  /// 兼容 video_player 命名；单集播放固定不循环（同地址重开即从头）。
+  Future<void> setLooping(bool looping) async {}
 
   @override
   void addListener(VoidCallback listener) {
@@ -1228,19 +898,13 @@ class FxPlayer implements Listenable {
     if (_disposed) return;
     _disposed = true;
     _openToken++;
-    // 救援链 / 看门狗在释放后一律停手。
     _rescueGen++;
     _rescueBusy = false;
-    _readaheadRestore?.cancel();
-    // 拖动闸：释放后不再动音量，只需把定时器和标记收掉。
-    _seekGateTimer?.cancel();
-    _seekGateTimer = null;
-    _seekGateMuted = false;
     _positionNotifier.dispose();
     _watchdogTimer?.cancel();
     _watchdogTimer = null;
-    _cacheGuardTimer?.cancel();
-    _cacheGuardTimer = null;
+    _pollTimer?.cancel();
+    _pollTimer = null;
     _opening = null;
     final ready = _ready;
     _ready = null;
@@ -1252,16 +916,19 @@ class FxPlayer implements Listenable {
     if (mediaReady != null && !mediaReady.isCompleted) {
       mediaReady.completeError(const FxPlayerException('播放器已释放'));
     }
-    for (final subscription in _subscriptions) {
-      unawaited(subscription.cancel());
-    }
-    _subscriptions.clear();
+    await _positionCtrl.close();
+    await _durationCtrl.close();
+    await _bufferingCtrl.close();
+    await _errorCtrl.close();
+    await _completedCtrl.close();
+    await _playingCtrl.close();
     _listeners.clear();
     final hlsProxy = _hlsProxy;
     _hlsProxy = null;
     hlsProxy?.cancelPrefetch();
+    _engine.state.removeListener(_onEngineState);
     try {
-      await _player.dispose();
+      await _engine.dispose();
     } catch (_) {
       // 释放失败不影响页面退出。
     }
@@ -1274,140 +941,134 @@ class FxPlayer implements Listenable {
 
   // ------------------------------------------------------------- internals
 
-  void _bindStreams() {
-    _subscriptions.add(
-      // PERF（2026-11-13）：position 流是高频的（每 50~200ms 一条），
-      // 原来每条都 _setValue → 通知全部监听者，导致顶栏、底栏、
-      // 弹幕层一起重建 —— 这是播放界面掉帧的主因之一。
-      //
-      // 现在把 position 单独拆到 _positionNotifier：
-      //   · 进度条 / 弹幕只订阅它，粒度细、重建范围小
-      //   · _setValue 里的 position 只在整秒变化时才更新，
-      //     避免每秒几十次的整对象通知
-      _player.stream.position.listen((position) {
-        // 救援重开期间新流的 position 会先归零：保留原进度显示，
-        // 避免 UI 进度条 / 观看进度回写读到 0。
-        if (position > Duration.zero) _signalMediaReady();
-        final shown = recoveryVisiblePosition(
-          holding: _rescueHold,
-          previous: _value.position,
-          incoming: position,
-        );
-        // 高频通道：只给进度条 / 弹幕用
-        _positionNotifier.value = shown;
-        // 低频通道：整秒才写进 FxPlayerValue，减少整体重建
-        final initialized = _value.isInitialized || position > Duration.zero;
-        final changedSecond = shown.inSeconds != _value.position.inSeconds;
-        if (!initialized || changedSecond) {
-          _setValue(_value.copyWith(isInitialized: initialized, position: shown));
-        }
-      }),
-    );
-    _subscriptions.add(
-      _player.stream.duration.listen((duration) {
-        if (duration > Duration.zero) _signalMediaReady();
-        if (_rescueHold && duration <= Duration.zero) return;
-        _setValue(
-          _value.copyWith(
-            isInitialized: _value.isInitialized || duration > Duration.zero,
-            duration: duration,
-          ),
-        );
-      }),
-    );
-    _subscriptions.add(_player.stream.videoParams.listen(_onVideoParams));
-    _subscriptions.add(
-      _player.stream.buffering.listen((buffering) {
-        // 缓冲结束 = 新位置的数据到了：拖动闸可以放开了。
-        if (!buffering) _endSeekAudioGate();
-        _setValue(_value.copyWith(isBuffering: _rescueHold || buffering));
-      }),
-    );
-    _subscriptions.add(
-      _player.stream.buffer.listen((buffered) {
-        _setValue(_value.copyWith(buffered: buffered));
-      }),
-    );
-    _subscriptions.add(
-      _player.stream.bufferingPercentage.listen((percentage) {
-        _setValue(_value.copyWith(bufferingPercentage: percentage));
-      }),
-    );
-    _subscriptions.add(
-      _player.stream.playing.listen((playing) {
-        _setValue(_value.copyWith(isPlaying: playing));
-      }),
-    );
-    _subscriptions.add(
-      _player.stream.completed.listen((completed) {
-        if (_rescueHold) return;
-        _setValue(_value.copyWith(isCompleted: completed));
-      }),
-    );
-    _subscriptions.add(
-      _player.stream.error.listen((message) {
-        _onError(message);
-      }),
-    );
-  }
-
-  void _onVideoParams(VideoParams params) {
-    var width = params.dw;
-    var height = params.dh;
-    if (width == null || width <= 0) width = params.w;
-    if (height == null || height <= 0) height = params.h;
-    final rotate = params.rotate ?? 0;
-    if (width != null && height != null && (rotate == 90 || rotate == 270)) {
-      final swap = width;
-      width = height;
-      height = swap;
-    }
-    final hasSize = width != null && height != null && width > 0 && height > 0;
-    var aspect = _value.aspectRatio;
-    final reportedAspect = params.aspect;
-    if (reportedAspect != null && reportedAspect > 0) {
-      aspect = reportedAspect;
-    }
-    if (hasSize) {
-      aspect = width / height;
-      // 新流出画面尺寸 = 首帧就绪信号（救援重开用它判断这步是否成功）。
-      _signalMediaReady();
-      // 首帧回来了：拖动闸可以放开音量了（③）。
-      _endSeekAudioGate();
-    }
-    _setValue(
-      _value.copyWith(
-        isInitialized: _value.isInitialized || hasSize,
-        width: width,
-        height: height,
-        videoWidth: params.w ?? width,
-        videoHeight: params.h ?? height,
-        aspectRatio: aspect,
-      ),
-    );
-  }
-
-  /// mpv / media_kit 报错入口。
+  /// 内核状态回调：把 ExoPlayerState 同步成 FxPlayerValue。
   ///
-  /// - seek / 切集时 mpv 主动取消产生的 canceled 不算失败（也不会触发
-  ///   refreshPlay / onPlayExpired）；
-  /// - 首帧还没出来：保持旧行为，把错误抛给 open 的调用方去试备用地址；
+  /// 高频位置单独走 _positionNotifier，整对象只在「整秒 / 关键状态变化」
+  /// 时才通知，避免顶栏、底栏、弹幕层跟着每帧重建。
+  void _onEngineState() {
+    if (_disposed) return;
+    final st = _engine.state.value;
+
+    final shown = recoveryVisiblePosition(
+      holding: _rescueHold,
+      previous: _value.position,
+      incoming: st.position,
+    );
+    _positionNotifier.value = shown;
+
+    final hasSize = st.hasSize;
+    if (hasSize || st.position > Duration.zero || st.hasDuration) {
+      _signalMediaReady();
+    }
+
+    final aspect = hasSize ? st.width / st.height : _value.aspectRatio;
+    // 实时网速：ExoPlayer 不直接给下载速度，用「已缓冲位置的推进量 ÷ 时间」
+    // 估算。原来这值是 mpv 的 cache-speed，换内核后得自己算，
+    // 否则顶栏网速会一直空着。必须在 copyWith 之前算，否则会被覆盖。
+    final speed = _estimateSpeed(st.buffered.inMilliseconds);
+    final next = _value.copyWith(
+      isInitialized: _value.isInitialized || hasSize || st.hasDuration,
+      isPlaying: st.playing,
+      isBuffering: _rescueHold ? true : st.buffering,
+      buffered: st.buffered,
+      isCompleted: st.ended,
+      position: shown,
+      duration: st.duration,
+      width: hasSize ? st.width : _value.width,
+      height: hasSize ? st.height : _value.height,
+      videoWidth: hasSize ? st.width : _value.videoWidth,
+      videoHeight: hasSize ? st.height : _value.videoHeight,
+      aspectRatio: aspect,
+      bytesPerSecond: speed > 0 ? speed : null,
+    );
+
+    final secondChanged = shown.inSeconds != _value.position.inSeconds;
+    final stateChanged =
+        next.isPlaying != _value.isPlaying ||
+        next.isBuffering != _value.isBuffering ||
+        next.isCompleted != _value.isCompleted ||
+        next.duration != _value.duration ||
+        next.width != _value.width;
+    _value = next;
+    // 首帧 / 时长就绪就立刻放行 open，不能等 _setValue ——
+    // 这条路径不走 _setValue，之前漏了这一步，结果每次 open 都要
+    // 干等到 30 秒停摆门槛或 2 分钟硬上限才返回（表现出来就是「加载很慢」）。
+    if (next.isInitialized) {
+      final ready = _ready;
+      if (ready != null && !ready.isCompleted) ready.complete();
+    }
+    if (secondChanged || stateChanged) {
+      _emitStreams(next);
+      _notify();
+    }
+
+    final err = st.error;
+    if (err != null && err.isNotEmpty) {
+      _onError(err);
+    }
+  }
+
+  /// 上一次采样：已缓冲毫秒数 + 采样时间，用来估算下载速度。
+  int _lastBufferedMs = -1;
+  DateTime _lastSpeedAt = DateTime.now();
+
+  /// 用已缓冲位置的推进量估算下载速度（字节/秒）。
+  ///
+  /// 只有「缓冲在往前长」才算速度；缓冲停住说明要么下完了、要么卡着，
+  /// 两种都不该显示一个假的正数。
+  double _estimateSpeed(int bufferedMs) {
+    final now = DateTime.now();
+    final prevMs = _lastBufferedMs;
+    final prevAt = _lastSpeedAt;
+    if (bufferedMs < prevMs) {
+      // 换源 / seek 之后缓冲位置回退，重新起算。
+      _lastBufferedMs = bufferedMs;
+      _lastSpeedAt = now;
+      return 0;
+    }
+    final dtMs = now.difference(prevAt).inMilliseconds;
+    if (prevMs < 0 || dtMs < 900) return 0;
+    _lastBufferedMs = bufferedMs;
+    _lastSpeedAt = now;
+    final grewMs = bufferedMs - prevMs;
+    if (grewMs <= 0) return 0;
+    // 不知道真实码率，按 4K 经验值 0.9MB/s 折算：
+    // 只用来给用户一个「快 / 慢」的相对参考，不是精确测速。
+    const bytesPerSecondOfMedia = 900 * 1024.0;
+    return grewMs / 1000.0 * bytesPerSecondOfMedia / (dtMs / 1000.0);
+  }
+
+  void _emitStreams(FxPlayerValue v) {
+    if (!_positionCtrl.isClosed) _positionCtrl.add(v.position);
+    if (!_durationCtrl.isClosed) _durationCtrl.add(v.duration);
+    if (!_bufferingCtrl.isClosed) _bufferingCtrl.add(v.isBuffering);
+    if (!_playingCtrl.isClosed) _playingCtrl.add(v.isPlaying);
+    if (!_completedCtrl.isClosed) _completedCtrl.add(v.isCompleted);
+    if (!_errorCtrl.isClosed && v.hasError) _errorCtrl.add(v.errorText);
+  }
+
+  /// 内核报错入口。
+  ///
+  /// - 首帧还没出来：把错误抛给 open 的调用方去试备用地址；
   /// - 首帧之后的任何失败：静默进入三步救援链，期间只显示「缓冲中」。
   void _onError(String message) {
     if (_disposed) return;
     if (_looksCancelled(message)) {
-      _logFx('忽略 mpv 取消事件(cancelled 不算失败): $message');
+      _logFx('忽略取消事件(cancelled 不算失败): $message');
       return;
     }
+    // 内核把 lastError 一直带在每次状态快照里（只在 open 时清空），
+    // 不去重的话同一个错误会反复触发救援链，3 轮之后误报「线路不稳定」。
+    if (message == _lastHandledError) return;
+    _lastHandledError = message;
+    if (_value.errorText == message) return;
     _decodeErrorSerial++;
-    // 救援重开正在等新流就绪：立刻结束等待，让这一步判失败。
     final mediaReady = _mediaReady;
     if (mediaReady != null && !mediaReady.isCompleted) {
       mediaReady.completeError(FxPlayerException(message));
     }
     final ready = _ready;
     if (ready == null && _value.isInitialized) {
-      // 播放中出错：静默走救援链，绝不弹错误层。
       _logFx('播放中报错，进入救援链: $message');
       _stallIndicated = true;
       _setValue(
@@ -1416,8 +1077,7 @@ class FxPlayer implements Listenable {
       unawaited(_runRescue('播放错误: $message'));
       return;
     }
-    _value = _value.copyWith(hasError: true, errorText: message);
-    _notify();
+    _setValue(_value.copyWith(hasError: true, errorText: message));
     if (ready != null && !ready.isCompleted) {
       ready.completeError(FxPlayerException(message));
     }
@@ -1425,86 +1085,16 @@ class FxPlayer implements Listenable {
 
   void _fail(String message) {
     if (_disposed) return;
-    _value = _value.copyWith(hasError: true, errorText: message);
-    _notify();
+    _setValue(_value.copyWith(hasError: true, errorText: message));
   }
 
   // ------------------------------------------------- 看门狗 / 无感救援链
 
-  /// 每 2 秒采样一次：只有「完全无字节流动」才累计停摆时间。
-  ///
-  /// 缓冲中（字节仍在进来）绝不计入失败，也不弹错误层，只让页面显示
-  /// 「缓冲中 xx%」；连续 [_stallTimeout]（30 秒）毫无流动才进救援链。
-  /// 把代理层的真实起播进度 / 下载速度同步到 value。
-  ///
-  /// 每 2 秒一次（跟看门狗同频）：够平滑，也不会因为高频 setState
-  /// 让播放页每帧重建。
-  /// 把「起播进度 + 实时网速」同步到 value。
-  ///
-  /// 两条来源：
-  ///  · 走了本地代理（平台线路）：用代理层按真实下载字节算的进度和速度，
-  ///    这是最准的；
-  ///  · 直连 mpv（采集线路：红牛 / 量子 / 蓝光 / 4K）：代理层根本不存在，
-  ///    之前 speed 恒为 0 —— 用户看到的就是「没有实时网速」。
-  ///    这里改用 mpv 自己的 `cache-speed`（字节/秒）读速度。
-  void _syncProxyProgress() {
-    final proxy = _hlsProxy;
-    final pct = proxy?.startupPercent ?? _value.measuredBufferPercent;
-    double speed = proxy?.liveSpeed ?? 0;
-    // 代理不存在或还没测到速度时，退回 mpv 的 cache-speed。
-    if (speed <= 0 && _cachedMpvSpeed > 0) speed = _cachedMpvSpeed;
-    if (pct == _value.measuredBufferPercent && speed == _value.bytesPerSecond) {
-      return;
-    }
-    _setValue(
-      _value.copyWith(
-        measuredBufferPercent: pct,
-        bytesPerSecond: speed,
-      ),
-    );
-  }
-
-  /// mpv `cache-speed`（字节/秒）的最近一次读数。
-  ///
-  /// 单独缓存在这里，而不是每次同步都去 getProperty —— 读属性要走
-  /// 平台通道，2 秒一次已经够；读失败就保持上一次的值，不要闪成 0。
-  double _cachedMpvSpeed = 0;
-
-  /// 从 mpv 读实时下载速度（cache-speed，字节/秒）。直连线路用它显示网速。
-  /// 上次读取 mpv 速度的时间（节流用）。
-  DateTime _lastSpeedRead = DateTime.fromMillisecondsSinceEpoch(0);
-
-  Future<void> _readMpvSpeed() async {
-    final platform = _player.platform;
-    if (platform is! NativePlayer) return;
-    if (_disposed || _rescueBusy) return;
-    // 8 秒内读过就不再读：界面上显示的速度本来也不需要更高频率。
-    final now = DateTime.now();
-    if (now.difference(_lastSpeedRead) < const Duration(seconds: 8)) return;
-    _lastSpeedRead = now;
-    try {
-      final raw = await platform
-          .getProperty('cache-speed', waitForInitialization: false)
-          .timeout(const Duration(seconds: 1));
-      final v = double.tryParse(raw.trim());
-      if (v != null && v.isFinite && v >= 0) _cachedMpvSpeed = v;
-    } catch (_) {
-      // 不支持此属性 / 读取超时：保持上一次的值，不清零。
-    }
-  }
-
   Future<void> _watchdogTickAsync() async {
     if (_disposed || _rescueBusy) return;
-    // 直连线路没有代理层，速度只能问 mpv。
-    if (_hlsProxy == null) await _readMpvSpeed();
-    _syncProxyProgress();
     final v = _value;
-    // 救援 / 最终失败之后都由新的 open 接管，看门狗不再自作主张。
     if (v.hasError) return;
-    if (_opening != null ||
-        _ready != null ||
-        !v.isInitialized ||
-        v.isCompleted) {
+    if (_opening != null || _ready != null || !v.isInitialized || v.isCompleted) {
       _lastFlowAt = DateTime.now();
       return;
     }
@@ -1514,106 +1104,32 @@ class FxPlayer implements Listenable {
       _clearStallIndication();
       return;
     }
-    await _checkVideoProgress();
-    if (_disposed || _rescueBusy) return;
-    final flowing = await _bytesFlowing();
-    if (_disposed || _rescueBusy) return;
+    final flowing = _flowing();
     if (flowing) {
       _lastFlowAt = DateTime.now();
       _clearStallIndication();
       return;
     }
-    // 没有字节流动：只亮「缓冲中 xx%」，错误层一步都不碰。
     if (!_stallIndicated) {
       _stallIndicated = true;
       _setValue(_value.copyWith(isBuffering: true));
     }
     final stalled = DateTime.now().difference(_lastFlowAt);
     if (stalled < _stallTimeout) return;
-    unawaited(_runRescue('连续 ${stalled.inSeconds}s 无字节流动'));
+    unawaited(_runRescue('连续 ${stalled.inSeconds}s 无进展'));
   }
 
-  Future<void> _checkVideoProgress() async {
-    final state = WidgetsBinding.instance.lifecycleState;
-    if (state != null && state != AppLifecycleState.resumed) {
-      // 系统允许后台只解音频，不能把后台视频停摆当成断流。
-      _lastVideoAt = DateTime.now();
-      _lastVideoPts = null;
-      return;
-    }
-    final platform = _player.platform;
-    if (_videoProbeBusy || platform is! NativePlayer) return;
-    _videoProbeBusy = true;
-    final token = _openToken;
-    try {
-      final raw = await platform
-          .getProperty('video-pts', waitForInitialization: false)
-          .timeout(const Duration(seconds: 1));
-      if (_disposed || token != _openToken || _rescueBusy) return;
-      final pts = double.tryParse(raw);
-      if (pts == null ||
-          !pts.isFinite ||
-          !_value.isPlaying ||
-          _value.isBuffering) {
-        // 不支持此属性时不猜测。未就绪/正常缓冲也不算视频卡死。
-        _lastVideoPts = null;
-        _lastVideoAt = DateTime.now();
-        return;
-      }
-      final previous = _lastVideoPts;
-      final audioAdvanced = _value.position > _lastVideoPosition;
-      _lastVideoPosition = _value.position;
-      _lastVideoPts = pts;
-      if (previous == null || (pts - previous).abs() > .001 || !audioAdvanced) {
-        _lastVideoAt = DateTime.now();
-      } else if (DateTime.now().difference(_lastVideoAt) >= _stallTimeout) {
-        _logFx('VIDEO 视频时间戳停摆，音频状态=${_value.isPlaying}');
-        unawaited(_runRescue('视频时间戳连续30秒未推进'));
-      }
-    } catch (_) {
-      _lastVideoAt = DateTime.now();
-      _lastVideoPts = null;
-    } finally {
-      _videoProbeBusy = false;
-    }
-  }
-
-  /// 字节是否还在流动：位置 / 已缓存时长 / 缓冲百分比 / stream-pos
-  /// 任一有变化即算流动，只有全都纹丝不动才算停摆。
-  Future<bool> _bytesFlowing() async {
+  /// 播放位置 / 缓冲位置 / 内核状态任一有变化即算「还在流动」。
+  bool _flowing() {
     final v = _value;
+    final st = _engine.state.value;
     final posMoved = v.position != _lastFlowPos;
     final bufferedMoved = v.buffered != _lastFlowBuffered;
-    final pctMoved = v.bufferingPercentage != _lastFlowPct;
+    final stateMoved = st.state != _lastFlowState;
     _lastFlowPos = v.position;
     _lastFlowBuffered = v.buffered;
-    _lastFlowPct = v.bufferingPercentage;
-    var streamMoved = false;
-    final streamPos = await _readStreamPos();
-    if (streamPos != null) {
-      final previous = _lastFlowStreamPos;
-      _lastFlowStreamPos = streamPos;
-      // 首次采样视为有流动，避免刚起播就误判停摆。
-      streamMoved = previous == null || previous != streamPos;
-    }
-    if (_disposed) return true;
-    return posMoved || bufferedMoved || pctMoved || streamMoved;
-  }
-
-  /// 读 mpv 的 stream-pos（当前流的字节位置）；读不到就退回
-  /// position / 缓存时长这些信号，不影响看门狗工作。
-  Future<int?> _readStreamPos() async {
-    final platform = _player.platform;
-    if (platform is! NativePlayer) return null;
-    try {
-      final raw = await platform.getProperty(
-        'stream-pos',
-        waitForInitialization: false,
-      );
-      return int.tryParse(raw.trim());
-    } catch (_) {
-      return null;
-    }
+    _lastFlowState = st.state;
+    return posMoved || bufferedMoved || stateMoved;
   }
 
   /// 字节恢复流动 / 暂停：熄灭我们自己点亮的「缓冲中」。
@@ -1625,14 +1141,6 @@ class FxPlayer implements Listenable {
 
   /// 救援重开时的新流就绪信号（首帧 / 时长 / 位置任一到达）。
   void _signalMediaReady() {
-    // 首帧已出：放开本地代理的整集预热。
-    //
-    // 对标咕噜咕噜的做法 —— 它的 APK 里有两条明确日志：
-    //   「Playlist preload paused:」（起播期间暂停预取）
-    //   「Rebalanced to deepen protected next preload:」（首帧后再加深预取）
-    // 也就是说它**先保证首片拿满带宽，再开始后台预热**。
-    // 我们之前一拿到播放列表就开 6 路预取，首片被挤到后面排队，
-    // 这就是「4K 起播比它慢」的直接原因。
     _hlsProxy?.markFirstFrameReady();
     final completer = _mediaReady;
     if (completer != null && !completer.isCompleted) completer.complete();
@@ -1653,16 +1161,8 @@ class FxPlayer implements Listenable {
   static String _shortUrl(String url) =>
       url.length <= 120 ? url : '${url.substring(0, 117)}...';
 
-  /// 无感救援链：① refreshPlay 换地址 ② 同地址重新 open 并 seek 回原进度
-  /// ③ 换下一条线路 seek 回原进度；①② 各先试 2 次。
-  /// 全程静默（画面保持 + 「缓冲中」），三步都失败才报一次「播放中断」。
-  /// 直播（[live]）不 seek，步骤② 直接重 open 直播地址。
   /// 回前台自检：切后台期间流可能已经断了（系统冻结进程 / 连接被回收），
   /// 回前台时只重挂画面层是不够的 —— 必须确认还在播，否则自动重连。
-  ///
-  /// 与 [_runRescue] 的区别：这里允许在 hasError 状态下执行（断流后
-  /// value 就是 hasError），并清掉错误态重新打开同一个地址，避免
-  /// 用户看到「加载失败」还得手动点重试。
   Future<void> resumeSelfCheck() async {
     if (_disposed || _rescueBusy) return;
     final v = _value;
@@ -1671,10 +1171,8 @@ class FxPlayer implements Listenable {
     final wantPlay = _playIntent;
     final target = v.position > Duration.zero ? v.position : _lastFlowPos;
 
-    // 判定是否需要重连：报错 / 未初始化 / 本该在播却不动。
     final needReopen = v.hasError;
     if (!needReopen) {
-      // 没报错也要确认真的在走：给 1.2 秒观察位置是否推进。
       final before = v.position;
       await Future<void>.delayed(const Duration(milliseconds: 600));
       if (_disposed || _rescueBusy) return;
@@ -1695,11 +1193,11 @@ class FxPlayer implements Listenable {
     _rescueBusy = true;
     _rescueHold = true;
     final gen = _rescueGen;
+    final token = ++_openToken;
     try {
       _setValue(
         _value.copyWith(isBuffering: true, hasError: false, errorText: ''),
       );
-      // 平台线路先换新签名（后台待久了签名多半已过期）。
       final refresher = _refreshPlay;
       var url = _sourceUrl;
       final headers = _sourceHeaders;
@@ -1710,13 +1208,18 @@ class FxPlayer implements Listenable {
         if (trimmed.startsWith('http')) url = trimmed;
       }
       if (_disposed || gen != _rescueGen) return;
-      await _player.open(Media(url, httpHeaders: headers.isEmpty ? null : headers));
+      await _engine.open(
+        url,
+        headers: headers,
+        // 救援重开也要沿用服务端给的类型，否则自建线路永远打不开
+        isHls: _typeHint ?? _looksLikeHls(url),
+      );
       if (_disposed || gen != _rescueGen) return;
       if (target > Duration.zero) {
-        await _player.seek(target);
+        await _engine.seek(target);
         if (_disposed || gen != _rescueGen) return;
       }
-      if (wantPlay) await _player.play();
+      if (wantPlay) await _engine.play();
       _lastFlowAt = DateTime.now();
       _lastFlowPos = target;
       _setValue(
@@ -1730,18 +1233,20 @@ class FxPlayer implements Listenable {
       _logFx('RESUME 自检：重连完成，回到 ${target.inSeconds}s');
     } catch (error) {
       _logFx('RESUME 自检：重连失败 $error');
-      // 交给页面决定是否提示，这里不强制报错。
     } finally {
-      _rescueHold = false;
-      _rescueBusy = false;
+      if (token == _openToken) {
+        _rescueHold = false;
+        _rescueBusy = false;
+      }
     }
   }
 
+  /// 无感救援链：① refreshPlay 换地址 ② 同地址重新 open 并 seek 回原进度
+  /// ③ 换下一条线路 seek 回原进度；①② 各先试 2 次。
+  /// 全程静默（画面保持 + 「缓冲中」），三步都失败才报一次「播放中断」。
   Future<void> _runRescue(String reason) async {
     if (_disposed || _rescueBusy || _value.hasError) return;
     if (_rescueRounds >= _maxRescueRounds) {
-      // 已经救过足够多轮还不行：说明这条线路本身不可用，
-      // 停止无限重连，交给页面提示换线路。
       _logFx('RESCUE 放弃：已尝试 $_rescueRounds 轮，交给页面处理');
       _fail('这条线路不稳定，请切换其它线路');
       return;
@@ -1800,8 +1305,14 @@ class FxPlayer implements Listenable {
         if (ok) return;
       }
 
-      // ③ 换下一条线路 seek 回原进度
-      final switcher = _lineRescue;
+      // ③ 换下一条线路 —— AUTO_SWITCH_OFF（2026-11-14）：默认关闭。
+      //
+      // 用户明确报「有时候自动跳线路，手动切回去也播放不了」：
+      // 自动换线会把用户选中的线路顶掉，换到一条更差的线路上，
+      // 再切回去时播放器还在上一轮救援的状态里，于是也放不出来。
+      // 线路交给用户自己选。①②（换签名 / 同址重开）仍然保留，
+      // 这两步不改线路，救得回来就不会打断观看。
+      final switcher = _autoSwitchLine ? _lineRescue : null;
       if (switcher == null) {
         _logFx('RESCUE ③-next-line 跳过：页面未提供换线 hook');
       } else if (!_disposed && gen == _rescueGen) {
@@ -1851,8 +1362,8 @@ class FxPlayer implements Listenable {
     }
   }
 
-  /// 救援链的一步：解析地址（代理 / 直连）→ 重新 open → 等新流就绪 →
-  /// seek 回原进度 → 恢复播放。返回这一步是否成功。
+  /// 救援链的一步：解析地址 → 重新 open → 等新流就绪 → seek 回原进度。
+  /// 返回这一步是否成功。
   Future<bool> _rescueOpen(
     String url,
     Map<String, String> headers, {
@@ -1877,13 +1388,8 @@ class FxPlayer implements Listenable {
         return false;
       }
       final mediaReady = Completer<void>();
-      // 提前挂一个空错误监听，避免等待期间出错变成未处理异常。
       unawaited(mediaReady.future.catchError((Object _) {}));
       _mediaReady = mediaReady;
-      // 只有「需要 seek 回原进度」的点播才先暂停打开：先播片头再 seek 会
-      // 让用户听到一小段错位音频。直播没有进度可回，而且直播流在暂停态
-      // 常常不产生首帧 / 时长，等 mediaReady 会白等到超时、把正常直播判死，
-      // 所以直播（以及从 0 开始的点播）一律直接带 play 打开。
       final reopenPaused = !live && resume > Duration.zero;
       try {
         await _openMedia(
@@ -1905,7 +1411,7 @@ class FxPlayer implements Listenable {
       if (_disposed || token != _openToken) return false;
       if (!live && resume > Duration.zero) {
         try {
-          await _player.seek(resume);
+          await _engine.seek(resume);
           _logFx('RESCUE 已 seek 回 ${resume.inSeconds}s');
         } catch (error) {
           _logFx('RESCUE seek 回原进度失败: $error');
@@ -1913,9 +1419,8 @@ class FxPlayer implements Listenable {
         }
       }
       if (_disposed || token != _openToken || gen != _rescueGen) return false;
-      // 暂停态核实 seek 落点，避免高速播放后离开 ±5 秒窗口而误判。
-      // duration / 音频进度不是视频恢复的证据。必须在本次 open 后
-      // 能取到解码画面，并确认 seek 已落到目标附近，才算恢复成功。
+      // 确认 seek 落点：ExoPlayer 没有截帧接口，改用「画面尺寸已就绪 +
+      // 位置落到目标附近」作为恢复证据，两样都要满足。
       final deadline = DateTime.now().add(_rescueOpenTimeout);
       var verified = false;
       while (!_disposed &&
@@ -1923,29 +1428,15 @@ class FxPlayer implements Listenable {
           gen == _rescueGen &&
           errorSerial == _decodeErrorSerial &&
           DateTime.now().isBefore(deadline)) {
-        final position = _player.state.position;
+        final st = _engine.state.value;
         final landed = recoverySeekLanded(
           live: live,
           target: resume,
-          actual: position,
+          actual: st.position,
         );
-        if (landed) {
-          try {
-            // raw BGRA 避免高分辨率 JPEG 编码占满播放器锁。
-            final frame = await _player
-                .screenshot(format: null)
-                .timeout(const Duration(seconds: 4));
-            if (frame != null && frame.isNotEmpty) {
-              verified = true;
-              break;
-            }
-          } on TimeoutException {
-            // timeout 不会取消底层截图；不再排队提交第二次截图。
-            _logFx('RESCUE 解码画面检查超时');
-            return false;
-          } catch (_) {
-            // 可能尚未解码出画面，在同一预算内等待下一次采样。
-          }
+        if (landed && st.hasSize) {
+          verified = true;
+          break;
         }
         await Future<void>.delayed(const Duration(milliseconds: 200));
       }
@@ -1954,25 +1445,26 @@ class FxPlayer implements Listenable {
           token != _openToken ||
           gen != _rescueGen ||
           errorSerial != _decodeErrorSerial) {
-        _logFx('RESCUE 未确认解码画面或 seek 落点，继续恢复链');
+        _logFx('RESCUE 未确认画面或 seek 落点，继续恢复链');
         return false;
       }
-      if (_playIntent) await _player.play();
+      if (_playIntent) await _engine.play();
       if (_disposed || token != _openToken || gen != _rescueGen) return false;
       _sourceUrl = url;
       _sourceHeaders = headers;
       _sourceDirect = direct;
       _rescueHold = false;
       _stallIndicated = false;
+      final st = _engine.state.value;
       _setValue(
         _value.copyWith(
-          position: _player.state.position,
-          isPlaying: _player.state.playing,
+          position: st.position,
+          isPlaying: st.playing,
           isBuffering: false,
         ),
       );
       _lastFlowAt = DateTime.now();
-      _logFx('RESCUE 已确认解码画面与进度');
+      _logFx('RESCUE 已确认画面与进度');
       return true;
     } catch (error) {
       _logFx('RESCUE 重开异常: $error');
@@ -1983,6 +1475,7 @@ class FxPlayer implements Listenable {
   void _setValue(FxPlayerValue next) {
     if (_disposed) return;
     _value = next;
+    _emitStreams(next);
     _notify();
     if (next.isInitialized) {
       final ready = _ready;
@@ -2011,7 +1504,7 @@ class FxSnapshotLayer extends StatelessWidget {
     this.fit = BoxFit.contain,
   });
 
-  /// media_kit `Player.screenshot()` 返回的图片字节。
+  /// 截帧字节；ExoPlayer 无截帧接口时恒为 null。
   final Uint8List? bytes;
 
   /// 是否完全盖住画面；false 时淡出。

@@ -5,7 +5,6 @@ import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:media_kit/media_kit.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'api.dart';
@@ -29,8 +28,6 @@ void main() {
   // 所有 Dart 异步异常的最后一道网；Framework / 平台异常另行接管。
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
-    // libmpv 内核：必须在 runApp 之前初始化。
-    MediaKit.ensureInitialized();
     _installErrorHandlers();
     // IMAGE_CACHE（2026-11-12）：调大图片缓存。
     //
