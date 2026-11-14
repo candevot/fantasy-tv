@@ -311,8 +311,10 @@ class FxPlayer implements Listenable {
   /// 设到 256MB+ 时 4K 码率要缓很久才填满，界面会长期停在
   /// 「缓冲中 99%」。而且代理层已经把整集预热到本地，
   /// mpv 这层只需要足够的前向缓冲兜住解复用抖动即可。
-  static const int _minSteadyBufferBytes = 64 * 1024 * 1024;
-  static const int _steadyBufferBytes = 64 * 1024 * 1024;
+  static const int _minSteadyBufferBytes = 96 * 1024 * 1024;
+  // NO_REBUFFER（2026-11-14）：正常播放全程不许出现第二次缓冲。
+  // 60s 预读在 4K 上只有约 9MB，一次网络抖动就见底；加深到 128MB。
+  static const int _steadyBufferBytes = 128 * 1024 * 1024;
   static const int _maxSteadyBufferBytes = 192 * 1024 * 1024;
   static const int _backBufferBytes = 8 * 1024 * 1024;
 
@@ -332,7 +334,7 @@ class FxPlayer implements Listenable {
   /// mpv demuxer 预读秒数（demuxer-readahead-secs）：配合 192MiB 缓存，
   /// 网络好时把后续内容尽量读进本地，播放过程不中断。
   /// 稳态预读时长。
-  static const String _readaheadSeconds = '60';
+  static const String _readaheadSeconds = '120';
 
   /// 起播预读时长。
   ///
