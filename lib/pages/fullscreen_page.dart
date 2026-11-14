@@ -2129,7 +2129,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             // 改档立即生效、不重载视频，冻结帧用同一套裁切。
             FxPlayerSurface(
               key: ValueKey<int>(_videoEpoch),
-              player: c,
+              player: c!, // AnimatedBuilder 的 builder 参数可空，此处已保证非空
               subtitleBottom: controlsHeight + 12,
             ),
           // 切集 / 重连：最后一帧垫在黑底上，首帧就绪后 200ms 淡出。
