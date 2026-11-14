@@ -777,6 +777,17 @@ class FxPlayer implements Listenable {
   /// 兼容 video_player 命名。
   Future<void> setPlaybackSpeed(double rate) => setRate(rate);
 
+  /// 上一次下发的镜像档位（0=无,1=X,2=Y,3=XY），避免每帧重复过通道。
+  int _mirrorFlags = -1;
+
+  /// 镜像（原生翻转，PlatformView 不支持 Flutter Transform）。
+  void setMirror({required bool flipX, required bool flipY}) {
+    final flags = (flipX ? 1 : 0) | (flipY ? 2 : 0);
+    if (flags == _mirrorFlags) return;
+    _mirrorFlags = flags;
+    unawaited(_engine.setMirror(flipX: flipX, flipY: flipY));
+  }
+
   /// 兼容 video_player 命名；单集播放固定不循环（同地址重开即从头）。
   Future<void> setLooping(bool looping) async {}
 

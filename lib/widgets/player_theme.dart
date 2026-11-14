@@ -242,7 +242,11 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
       child: widget.player.buildVideo(fit: fit),
     );
     final framed = fxAspectFrame(aspect, surface);
-    return fxMirrorWrap(mirror, framed);
+    // MIRROR_NATIVE（2026-11-14）：镜像不能再用 Transform.flip 包 PlatformView。
+    // 混合合成下原生视图不跟随 Flutter 变换，翻不了（或翻一下就错位）。
+    // 改成下发到原生，翻 PlayerView 自己的 scaleX/scaleY。
+    widget.player.setMirror(flipX: mirror.flipX, flipY: mirror.flipY);
+    return framed;
   }
 }
 

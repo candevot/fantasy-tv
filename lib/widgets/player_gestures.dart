@@ -2,8 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:screen_brightness_platform_interface/screen_brightness_platform_interface.dart';
-import 'package:volume_controller/volume_controller.dart';
+import '../services/display_control.dart';
 
 import '../services/fx_player.dart';
 import 'player_theme.dart';
@@ -116,11 +115,6 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
   void initState() {
     super.initState();
     unawaited(_loadSystemValues());
-    try {
-      VolumeController.instance.showSystemUI = false;
-    } catch (_) {
-      // 桌面 / 测试环境没有实现，忽略即可。
-    }
   }
 
   @override
@@ -136,21 +130,16 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
   }
 
   Future<void> _resetBrightness() async {
-    try {
-      await ScreenBrightnessPlatform.instance
-          .resetApplicationScreenBrightness();
-    } catch (_) {}
+    await DisplayControl.resetBrightness();
   }
 
   Future<void> _loadSystemValues() async {
-    try {
-      final b = await ScreenBrightnessPlatform.instance.application;
-      if (b.isFinite && b >= 0 && b <= 1) _brightness = b;
-    } catch (_) {}
-    try {
-      final v = await VolumeController.instance.getVolume();
-      if (v.isFinite && v >= 0 && v <= 1) _volume = v;
-    } catch (_) {}
+    // 窗口亮度返回负值 = 跟随系统，这时手势从 50% 起步（和系统亮度对不上
+    // 也没关系，用户一拖就接管了本窗口的亮度）。
+    final b = await DisplayControl.brightness();
+    if (b.isFinite && b >= 0 && b <= 1) _brightness = b;
+    final v = await DisplayControl.volume();
+    if (v.isFinite && v >= 0 && v <= 1) _volume = v;
   }
 
   /* ------------------------------------------------------------ 状态与动效 */
@@ -301,9 +290,11 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
   }
 
   void _applyVertical(double value) {
-    // 60ms 节流，拖动时不要每个像素都打一次平台通道。
+    // 33ms 节流（约 30fps）：原生侧是直接改窗口属性 / AudioManager，
+    // 每一次调用都很便宜，不需要像插件那样压到 60ms，否则播放时
+    // 拖动会明显「跟不上手」。
     final now = DateTime.now();
-    if (now.difference(_lastApply).inMilliseconds < 60) return;
+    if (now.difference(_lastApply).inMilliseconds < 33) return;
     _lastApply = now;
     if (_mode == _GestureMode.brightness) {
       unawaited(_setBrightness(value));
@@ -313,17 +304,12 @@ class _FxPlayerGesturesState extends State<FxPlayerGestures> {
   }
 
   Future<void> _setBrightness(double value) async {
-    try {
-      await ScreenBrightnessPlatform.instance
-          .setApplicationScreenBrightness(value);
-      FxPlayerGestures._brightnessTouched = true;
-    } catch (_) {}
+    await DisplayControl.setBrightness(value);
+    FxPlayerGestures._brightnessTouched = true;
   }
 
   Future<void> _setVolume(double value) async {
-    try {
-      await VolumeController.instance.setVolume(value);
-    } catch (_) {}
+    await DisplayControl.setVolume(value);
   }
 
   /* -------------------------------------------------------------------- UI */

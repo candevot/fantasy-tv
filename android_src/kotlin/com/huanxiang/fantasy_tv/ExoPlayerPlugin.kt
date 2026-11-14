@@ -117,6 +117,18 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 player?.setPlaybackSpeed(r)
                 result.success(true)
             }
+            // 镜像：PlatformView 不能用 Flutter 的 Transform.flip，
+            // 混合合成下原生视图不跟随变换。直接翻视图自身的 scale。
+            "mirror" -> {
+                val fx = call.argument<Boolean>("flipX") ?: false
+                val fy = call.argument<Boolean>("flipY") ?: false
+                val pv = playerView
+                if (pv != null) {
+                    pv.scaleX = if (fx) -1f else 1f
+                    pv.scaleY = if (fy) -1f else 1f
+                }
+                result.success(true)
+            }
             "state" -> result.success(snapshot())
             "release" -> { dispose(); result.success(true) }
             else -> result.notImplemented()

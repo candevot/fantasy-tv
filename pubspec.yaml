@@ -39,8 +39,6 @@ dependencies:
   battery_plus: ^7.1.2
   package_info_plus: '>=8.3.1 <9.0.0'
   # 播放页上下滑手势：亮度 / 音量。
-  screen_brightness_platform_interface: ^2.1.2
-  volume_controller: '>=3.4.4 <4.0.0'
   # DLNA/UPnP 投屏：SSDP 发现 + AVTransport / RenderingControl SOAP。
   # 纯 Dart 实现，SDK >=3.8，与 Flutter 3.32.8 / Dart 3.8.1 匹配。
   dlna_dart: ^0.1.2

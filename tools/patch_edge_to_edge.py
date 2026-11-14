@@ -76,6 +76,90 @@ ORIENTATION_FUNC = '''
 ORIENTATION_CALL = '''
         registerOrientationChannel(flutterEngine)'''
 
+DISPLAY_FUNC = """
+    // 亮度 / 音量：直接操作 Activity 窗口与 AudioManager。
+    //
+    // 原来亮度走 screen_brightness 的平台接口、音量走 volume_controller，
+    // 两者都可能静默失败（异常被 Dart 侧 catch 吃掉），用户看到的就是
+    // 「拖亮度没反应、拖音量有延迟」。
+    // 这里自己实现，不依赖任何第三方插件的注册时机：
+    //   · 亮度改的是本窗口的 screenBrightness，退出播放页恢复系统值
+    //   · 音量直接 setStreamVolume(flags=0)，不弹系统音量条，没有延迟
+    private fun registerDisplayChannel(
+        flutterEngine: io.flutter.embedding.engine.FlutterEngine
+    ) {
+        io.flutter.plugin.common.MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "fantasy_tv/display"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getBrightness" -> {
+                    val v = window.attributes.screenBrightness
+                    result.success(if (v < 0f) -1.0 else v.toDouble())
+                }
+                "setBrightness" -> {
+                    val v = call.argument<Double>("value")
+                    if (v == null) {
+                        result.success(false)
+                    } else {
+                        try {
+                            window.attributes = window.attributes.apply {
+                                screenBrightness = v.toFloat().coerceIn(0.01f, 1f)
+                            }
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("brightness", e.message, null)
+                        }
+                    }
+                }
+                "resetBrightness" -> {
+                    try {
+                        window.attributes = window.attributes.apply {
+                            screenBrightness = android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                        }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("brightness", e.message, null)
+                    }
+                }
+                "getVolume" -> {
+                    try {
+                        val am = getSystemService(android.content.Context.AUDIO_SERVICE)
+                            as android.media.AudioManager
+                        val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                        val cur = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                        result.success(if (max > 0) cur.toDouble() / max else 0.0)
+                    } catch (e: Exception) {
+                        result.error("volume", e.message, null)
+                    }
+                }
+                "setVolume" -> {
+                    val v = call.argument<Double>("value")
+                    if (v == null) {
+                        result.success(false)
+                    } else {
+                        try {
+                            val am = getSystemService(android.content.Context.AUDIO_SERVICE)
+                                as android.media.AudioManager
+                            val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                            val idx = (v.coerceIn(0.0, 1.0) * max).toInt()
+                            am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, idx, 0)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("volume", e.message, null)
+                        }
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+"""
+
+DISPLAY_CALL = """
+        registerDisplayChannel(flutterEngine)"""
+
 STORAGE_FUNC = """
     // 「所有文件访问」：Android 11+ 直接写公共 Download 目录必须这个权限，
     // 否则只能落到 Android/data/<包名>/… 里，文件管理器看不到。
@@ -291,6 +375,26 @@ def patch_storage_access(kt: str):
     return kt, True
 
 
+
+
+def patch_display(kt: str):
+    """在 MainActivity 里加亮度 / 音量通道；已存在则不动。"""
+    if 'fantasy_tv/display' in kt:
+        return kt, False
+    pattern = re.compile(
+        r'class\s+MainActivity\s*:\s*FlutterActivity\(\)\s*\{')
+    match = pattern.search(kt)
+    if not match:
+        return kt, False
+    kt = kt[:match.end()] + DISPLAY_FUNC + kt[match.end():]
+    hook = 'super.configureFlutterEngine(flutterEngine)'
+    index = kt.find(hook)
+    if index < 0:
+        return kt, False
+    kt = kt[:index + len(hook)] + '\n' + DISPLAY_CALL + kt[index + len(hook):]
+    return kt, True
+
+
 def main() -> int:
     styles = io.open(STYLE, encoding='utf-8').read()
     if 'windowLightNavigationBar' not in styles:
@@ -342,6 +446,10 @@ def main() -> int:
         print('cannot patch DLNA multicast lock channel in %s' % activity,
               file=sys.stderr)
         return 1
+    kt, display_patched = patch_display(kt)
+    if 'fantasy_tv/display' not in kt:
+        print('cannot patch display channel in %s' % activity, file=sys.stderr)
+        return 1
     kt, storage_patched = patch_storage_access(kt)
     if 'fantasy_tv/storage' not in kt:
         print('cannot patch storage access channel in %s' % activity,
@@ -357,7 +465,7 @@ def main() -> int:
               file=sys.stderr)
         return 1
     io.open(activity, 'w', encoding='utf-8').write(kt)
-    if edge_patched or cast_patched or orient_patched or storage_patched:
+    if edge_patched or cast_patched or orient_patched or storage_patched or display_patched:
         print('patched %s' % activity)
     else:
         print('keep %s' % activity)

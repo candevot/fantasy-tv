@@ -95,6 +95,11 @@ class ExoPlayerEngine {
 
   Future<void> setRate(double rate) => _invoke('rate', {'rate': rate});
 
+  /// 镜像：PlatformView 不能用 Flutter 的 Transform.flip，
+  /// 混合合成下原生视图不跟随变换，必须交给原生翻视图自身的 scale。
+  Future<void> setMirror({required bool flipX, required bool flipY}) =>
+      _invoke('mirror', {'flipX': flipX, 'flipY': flipY});
+
   /// 主动拉一次状态（事件通道之外的低频兜底，防止漏事件）。
   Future<ExoPlayerState?> poll() async {
     if (_disposed || !isSupported) return null;
