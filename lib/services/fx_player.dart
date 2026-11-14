@@ -606,7 +606,10 @@ class FxPlayer implements Listenable {
     // m3u8 —— 起播那一瞬间等于同时有「播放器 + 预热 + 预取 + 这份索引」
     // 四条路径去要同一个清单，白白多一次回源。索引只是给拖动用的，
     // 首帧更重要，所以挪到首帧之后（后台建，失败也不影响播放）。
-    if (opened != null && !_disposed && token == _openToken) {
+    // opened 到这里一定已赋值：source == null 的分支上面已经提前 return，
+    // 失败路径是 throw。原来的 `opened != null` 因此永远不会为假，
+    // 新版分析器会报 unnecessary_null_comparison（CI 的 flutter analyze 会挂）。
+    if (!_disposed && token == _openToken) {
       unawaited(_primeSegmentIndex(opened.url, opened.headers, token));
     }
   }
