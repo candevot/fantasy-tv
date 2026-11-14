@@ -821,10 +821,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             url,
             headers: headers,
             play: wasPlaying,
-            isHls: _info?.isHls,
             // 重开同一条流，类型沿用服务端声明
             isHls: _info?.isHls,
-            direct: fxShouldUseHlsProxy(url, isHls: true),
+            direct: fxShouldUseHlsProxy(url, isHls: _info?.isHls ?? true),
             refreshPlay: _refreshPlatformUrl,
             onPlayExpired: _onPlatformExpired,
             rescueLines: _rescueLineSource,
