@@ -95,6 +95,9 @@ class Boot {
 
     try {
       await Api.init().timeout(const Duration(seconds: 5));
+      // 域名 / IP 双地址：谁先通用谁，并记住。
+      // 换服务器只要把 DNS 指过去，客户端不用重装。
+      await Api.pickBase().timeout(const Duration(seconds: 8));
     } catch (e, st) {
       AppLog.write('boot.api', e, st);
       failed = '配置加载失败，已使用默认线路';

@@ -7,10 +7,79 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
 
-/// 服务器接口（默认已部署：阿里云 47.96.0.112:8787）
+/// 服务器接口。
+///
+/// API_BASE_DOMAIN（2026-11-14）：服务器地址不再写死 IP。
+///
+/// 之前 `base` 直接写死 `http://47.96.0.112:8787/api`，换服务器就等于所有
+/// 老用户断连。现在改成「域名优先 + IP 兜底」：
+///   · [_domainBase] 由构建时 --dart-define=API_BASE=… 注入，
+///     也可以直接改下面这个常量
+///   · 启动时 [pickBase] 依次探测，谁先通就用谁并记住
+///   · 域名还没解析好 / 新服务器还没上线时，自动落回老 IP，不会白屏
+///
+/// 换服务器只需要把 DNS 指过去，客户端不用再发版。
 class Api {
-  static String base = 'http://47.96.0.112:8787/api';
-  static String wsBase = 'ws://47.96.0.112:8787/ws/together';
+  /// 域名地址（构建时注入，留空表示只用 IP）。
+  static const String _domainBase =
+      String.fromEnvironment('API_BASE', defaultValue: '');
+
+  /// 老服务器 IP 兜底。
+  static const String _ipBase = 'http://47.96.0.112:8787/api';
+
+  static String base = _domainBase.isNotEmpty ? _domainBase : _ipBase;
+  static String wsBase = _domainBase.isNotEmpty
+      ? _domainBase.replaceFirst('http', 'ws').replaceFirst('/api', '/ws/together')
+      : 'ws://47.96.0.112:8787/ws/together';
+
+  /// 可选的服务地址（按优先级）。
+  static List<String> get _candidates => <String>[
+        if (_domainBase.isNotEmpty) _domainBase,
+        _ipBase,
+      ];
+
+  /// 探测可用地址并切换。返回最终使用的地址。
+  ///
+  /// 只探一次、超时 3 秒，失败就保持当前值——启动路径上不能卡住。
+  static Future<String> pickBase() async {
+    final saved = (await SharedPreferences.getInstance()).getString('apiBase');
+    for (final cand in _candidates) {
+      if (await _probe(cand)) {
+        if (cand != base || saved != cand) {
+          base = cand;
+          wsBase = cand
+              .replaceFirst('http', 'ws')
+              .replaceFirst('/api', '/ws/together');
+          await _save();
+        }
+        return cand;
+      }
+    }
+    // 全部不通：保持上次记住的地址，让错误界面去提示重试。
+    if (saved != null && saved.isNotEmpty) base = saved;
+    return base;
+  }
+
+  static Future<bool> _probe(String cand) async {
+    try {
+      // 探 /api 根路径：服务端对未知路由回 404 JSON，
+      // 能拿到 <500 的响应就说明这条地址活着，不用专门加 /ping 接口。
+      final r = await http
+          .get(Uri.parse(cand), headers: const {'accept': '*/*'})
+          .timeout(const Duration(seconds: 3));
+      return r.statusCode > 0 && r.statusCode < 500;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> _save() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString('apiBase', base);
+      await sp.setString('wsBase', wsBase);
+    } catch (_) {}
+  }
 
   /// 所有接口统一 8 秒超时；失败最多重试 1 次。
   static const Duration _timeout = Duration(seconds: 8);
