@@ -835,6 +835,10 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
     setState(() => _jarBusy = true);
     try {
       final status = await JarSpider.install(url, md5: md5);
+      // 装完立刻让片源中心重查 jar 状态：不然「肥猫的源需要装 jar」这条
+      // 提示会一直挂着，检索也还在跳过 jar 源（直到下次冷启动）。
+      SourceHub.instance.invalidateJarStatus();
+      await SourceHub.instance.ensureJarStatus();
       if (!mounted) return;
       setState(() {
         _jar = status;
@@ -858,6 +862,8 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
     setState(() => _jarBusy = true);
     try {
       await JarSpider.uninstall();
+      SourceHub.instance.invalidateJarStatus();
+      await SourceHub.instance.ensureJarStatus();
     } catch (e) {
       if (mounted) _toast('$e');
     }

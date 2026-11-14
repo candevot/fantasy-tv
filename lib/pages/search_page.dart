@@ -52,6 +52,12 @@ class _SearchPageState extends State<SearchPage> {
   /// 骨架卡片是否已经铺出来（300ms 阈值）。
   bool _skeleton = false;
 
+  /// 一轮搜索的兜底看门狗：16 秒还没收到「查完了」，强制收尾。
+  ///
+  /// 流自己已经有 15 秒硬上限（见 `CmsBridge.searchStream`），这里是页面侧
+  /// 的第二道保险：**任何情况下用户都不会对着骨架屏无限等**。
+  Timer? _watchdog;
+
   String? _mode;
   String? _lastQuery;
   String? _error;
@@ -84,6 +90,7 @@ class _SearchPageState extends State<SearchPage> {
     _scroll.removeListener(_onScroll);
     _sub?.cancel();
     _skeletonTimer?.cancel();
+    _watchdog?.cancel();
     _q.dispose();
     _ai.dispose();
     _focus.dispose();
@@ -220,16 +227,46 @@ class _SearchPageState extends State<SearchPage> {
       if (_results.isNotEmpty || _external.isNotEmpty) return;
       setState(() => _skeleton = true);
     });
+    _watchdog?.cancel();
+    _watchdog = Timer(const Duration(seconds: 16), () {
+      if (!mounted || req != _req) return;
+      if (!_loading && !_skeleton) return;
+      _skeletonTimer?.cancel();
+      setState(() {
+        _loading = false;
+        _skeleton = false;
+        // 有结果就留着结果（只是不再显示「还在查」），一条都没有才给错误。
+        if (_results.isEmpty && _external.isEmpty) {
+          _error = '搜索超时了，检查一下网络后重试';
+        }
+      });
+    });
     _sub = CmsBridge.searchStream(text, 1).listen(
-      (batch) => _onBatch(batch, req, first: true),
+      (batch) {
+        _onBatch(batch, req, first: true);
+        if (batch.finished) _watchdog?.cancel();
+      },
       onError: (Object e) {
         if (!mounted || req != _req) return;
         _skeletonTimer?.cancel();
+        _watchdog?.cancel();
         setState(() {
           _loading = false;
           _skeleton = false;
           _error = fxErrorText(e);
         });
+      },
+      // 流被 close（哪怕没收到 finished 批次）也必须把转圈收掉。
+      onDone: () {
+        if (!mounted || req != _req) return;
+        _skeletonTimer?.cancel();
+        _watchdog?.cancel();
+        if (_skeleton || _loading) {
+          setState(() {
+            _skeleton = false;
+            _loading = false;
+          });
+        }
       },
     );
   }
@@ -846,6 +883,10 @@ class _SearchPageState extends State<SearchPage> {
                     ),
                   ),
                 ),
+              // jar 插件没装时，肥猫的源一个都出不来：把原因写在结果区上面，
+              // 不要让用户以为「外部源就是没有内容」。
+              if (!ai && CmsBridge.sourceNotice.isNotEmpty)
+                SliverToBoxAdapter(child: _sourceNotice(CmsBridge.sourceNotice)),
               // 外部源分区：通栏标题 + 陆续追加的结果（边到边）。
               if (!ai && _external.isNotEmpty) ...[
                 SliverToBoxAdapter(child: _externalHeader()),
@@ -921,6 +962,32 @@ class _SearchPageState extends State<SearchPage> {
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  /// 片源侧提示条（目前是「需要安装 jar 插件」）。
+  Widget _sourceNotice(String text) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: Fx.accent.withValues(alpha: .08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Fx.accent.withValues(alpha: .22)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline_rounded, size: 15, color: Fx.accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(fontSize: 12, height: 1.45, color: Fx.sub),
+            ),
+          ),
         ],
       ),
     );
@@ -1032,6 +1099,11 @@ class _SearchPageState extends State<SearchPage> {
             }
           },
         ),
+        // 空结果时更要说清楚「外部源为什么没东西」（jar 插件没装）。
+        if (!ai && CmsBridge.sourceNotice.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _sourceNotice(CmsBridge.sourceNotice),
+        ],
         if (!ai && _hotWords.isNotEmpty) ...[
           const SizedBox(height: 6),
           const Center(

@@ -86,8 +86,13 @@ class JarSpider {
   /// 与 MainActivity 里注册的通道名必须一致。
   static const MethodChannel channel = MethodChannel('fantasy_tv/spider');
 
-  /// 单次取数据超时（原生侧是 25 秒，这里多留 5 秒等 IO）。
-  static const Duration timeout = Duration(seconds: 30);
+  /// 单次取数据超时：**8 秒**（TIMEOUT_UNIFY 2026-11-15）。
+  ///
+  /// 和原生 `JarSpiderLoader.DEFAULT_TIMEOUT_MS` 取同一个值。原来这里是 30
+  /// 秒、原生 25 秒，比用户能忍的等待长得多：jar 没装 / 源站死了的时候，
+  /// 详情页会先转 8 秒（页面自己的超时）再转 30 秒（这里），用户看到的就是
+  /// 「加载失败，请求超时」之前那段无尽转圈。统一 8 秒，失败立刻有文案。
+  static const Duration timeout = Duration(seconds: 8);
 
   /// 安装 jar 的超时：下载 + 校验，给足 4 分钟。
   static const Duration installTimeout = Duration(minutes: 4);

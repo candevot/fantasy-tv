@@ -53,8 +53,15 @@ class JarSpiderLoader(
     companion object {
         const val TAG = "FXSpider"
 
-        /** 单次反射调用的默认超时：jar 里的同步请求最长给 25 秒。 */
-        const val DEFAULT_TIMEOUT_MS = 25_000L
+        /**
+         * 单次反射调用的默认超时：**8 秒**（TIMEOUT_UNIFY 2026-11-15）。
+         *
+         * 原来给 25 秒，比 Dart 侧的 8 秒超时还长 —— 于是每次搜索都有 41 个
+         * jar 源把原生那两条通道线程占满 25 秒，虽然 Dart 早就按「这个源没结果」
+         * 继续往下走了，原生却还在排队，后面的调用全被堵在队列里。
+         * 现在两侧统一 8 秒：Dart 超时的那一刻原生也差不多收工，不会互相拖。
+         */
+        const val DEFAULT_TIMEOUT_MS = 8_000L
 
         /** 类名没有包名时补这个前缀（TVBox 的约定）。 */
         const val CLASS_PREFIX = "com.github.catvod.spider."

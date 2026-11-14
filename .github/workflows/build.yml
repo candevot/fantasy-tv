@@ -121,6 +121,13 @@ jobs:
       - run: flutter analyze
       - name: Playback recovery regressions
         run: flutter test test/playback_regressions_test.dart
+      # LINES_ALL / HOT_ORDER（2026-11-15）：多线路解析 + 热播排序映射的回归。
+      # 用真实接口数据（test/fixtures/detail_romelia.json，四条线路）钉住
+      # 「详情页只显示一条线路」这个用户实测问题不再回来。
+      - name: Line parsing & hot order regressions
+        run: |
+          flutter test test/cms_lines_test.dart
+          flutter test test/cms_source_test.dart
       - name: Build release APKs (split per ABI)
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"

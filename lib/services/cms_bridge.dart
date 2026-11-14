@@ -185,8 +185,16 @@ class CmsBridge {
   }
 
   /// 取一行；失败抛出去，由 [home] 决定是回落还是报错。
+  ///
+  /// HOT_ORDER（2026-11-15）：首页每一行要的是**热播**，不是「刚更新」。
+  /// 服务端 `Provide.php` 已经修好、`order=vod_hits&by=desc` 实测严格递减
+  /// （1,200,000 → 1,187,000…），所以这里直接把排序交给服务端：
+  /// 之前按 `vod_time` 拉，首页展示的其实是「最近入库」，用户看到的当然
+  /// 不是热播剧。
   static Future<List<VideoCard>> _row(int typeId) async {
-    final list = _withoutLive(await CmsApi.categoryList(typeId, 1));
+    final list = _withoutLive(
+      await CmsApi.list(type: typeId, page: 1, sort: 'hot'),
+    );
     _markAll(list, _Origin.cms);
     return list;
   }
@@ -304,15 +312,14 @@ class CmsBridge {
     final extra = await _safe(extraFuture);
     if (failure == null) {
       return CmsPage(
-        _mergeWith(
-            _sortCards(_filter(raw, area: area, year: year), sort), extra),
+        _mergeWith(_filter(raw, area: area, year: year), extra),
         hasMore: hasMore,
       );
     }
 
     // 主站这一页彻底失败（不是「空结果」）：先看外部源有没有货。
     if (!legacyEnabled) {
-      if (extra.isNotEmpty) return CmsPage(_sortCards(extra, sort));
+      if (extra.isNotEmpty) return CmsPage(extra);
       throw failure;
     }
 
@@ -328,7 +335,7 @@ class CmsBridge {
       _markAll(legacy, _Origin.legacy);
     } catch (_) {
       // 两边都不通：外部源有结果就先给结果，否则把主站的错误抛给页面。
-      if (extra.isNotEmpty) return CmsPage(_sortCards(extra, sort));
+      if (extra.isNotEmpty) return CmsPage(extra);
       throw failure;
     }
     return CmsPage(
@@ -362,38 +369,6 @@ class CmsBridge {
             (!useYear || '${card.year}' == wantYear))
           card,
     ];
-  }
-
-  /// 排序：服务端 `order=` 实测被忽略（`vod_time` / `vod_score` / `vod_hits`
-  /// 三种取值返回的是同一个序列），所以在客户端补一次稳定排序。
-  ///
-  /// 本站 `vod_score` / `vod_hits` 目前全站为 0，按它们排和按更新时间排结果
-  /// 一样 —— 这不是没执行，是没有可比的数据；等后台把评分 / 点击量补上，
-  /// 这里自动就生效了。稳定排序（同分保持服务端原序）保证顺序不会跳。
-  static List<VideoCard> _sortCards(List<VideoCard> src, String sort) {
-    final key = sort.trim().toLowerCase();
-    if (src.length < 2) return src;
-    num Function(VideoCard) metric;
-    switch (key) {
-      case 'rating':
-      case 'score':
-        metric = (card) => card.rating;
-        break;
-      case 'hot':
-      case 'hits':
-        metric = (card) => _heatValue(card.heat);
-        break;
-      default:
-        return src;
-    }
-    final indexed = <MapEntry<int, VideoCard>>[
-      for (var i = 0; i < src.length; i++) MapEntry<int, VideoCard>(i, src[i]),
-    ];
-    indexed.sort((a, b) {
-      final byMetric = metric(b.value).compareTo(metric(a.value));
-      return byMetric != 0 ? byMetric : a.key.compareTo(b.key);
-    });
-    return <VideoCard>[for (final entry in indexed) entry.value];
   }
 
   /// 卡片上的热度文案（`9500` / `1.2万` / 空串）→ 可比较的数值。
@@ -495,6 +470,33 @@ class CmsBridge {
     var closed = false;
     Object? primaryFailure;
 
+    /// 收尾：把「查完了」这一批发出去并关流。
+    ///
+    /// **必须幂等、必须一定被执行**（STREAM_TERMINATE 2026-11-15）。
+    /// 原来这里只写在 `run()` 的最后一行：`run()` 中间任何一个 await 抛出来
+    /// （最典型的是 `hub.ensureReady()` —— 那个 Future 一旦失败会被 SourceHub
+    /// 缓存下来，之后每次搜索都在同一个地方炸），流既不 error 也不 close，
+    /// 页面那边既收不到结果也收不到 done，`_loading` / `_skeleton` 永远是 true,
+    /// 用户看到的就是「骨架屏一直转」。现在用 finally 兜住。
+    void finish() {
+      if (closed) return;
+      closed = true;
+      if (emitted == 0 && primaryFailure != null) {
+        ctrl.addError(primaryFailure!);
+      } else {
+        ctrl.add(
+          SearchBatch(
+            items: const <VideoCard>[],
+            external: false,
+            done: total == 0 ? done : total,
+            total: total == 0 ? done : total,
+            finished: true,
+          ),
+        );
+      }
+      unawaited(ctrl.close());
+    }
+
     void emit(List<VideoCard> cards, {required bool external}) {
       if (closed) return;
       final kept = <VideoCard>[];
@@ -516,7 +518,20 @@ class CmsBridge {
     }
 
     Future<void> run() async {
-      await hub.ensureReady();
+      // 索引准备（读本地缓存 + 片源表）单独兜超时：这一步不该把整轮搜索
+      // 拖死，超时就按「只有主站采集库」继续查。
+      try {
+        await hub.ensureReady().timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => null,
+        );
+      } catch (_) {
+        // 索引坏了也要能搜：下面的 plan 为空表就只查主站。
+      }
+      if (closed) return;
+      // jar 插件状态：没装就**不**去敲那 41 个 jar 源（每个 8 秒），
+      // 页面改为显示「需要先安装 jar 插件」的提示（SourceHub.jarNotice）。
+      await hub.ensureJarStatus();
       if (closed) return;
       final plan = hub.searchPlan;
       total = plan.total;
@@ -552,28 +567,23 @@ class CmsBridge {
       }
 
       await Future.wait(tasks);
-      if (closed) return;
-      if (emitted == 0 && primaryFailure != null) {
-        ctrl.addError(primaryFailure!);
-      } else {
-        ctrl.add(
-          SearchBatch(
-            items: const <VideoCard>[],
-            external: false,
-            done: total,
-            total: total,
-            finished: true,
-          ),
-        );
-      }
-      closed = true;
-      await ctrl.close();
     }
 
     ctrl.onCancel = () {
       closed = true;
     };
-    unawaited(run());
+    // 兜底：不管 run() 怎么结束（正常 / 抛异常 / 单源卡住），都要收尾一次。
+    unawaited(
+      run().then<void>(
+        (_) {},
+        onError: (Object e) {
+          primaryFailure ??= e;
+        },
+      ).whenComplete(finish),
+    );
+    // 硬上限：所有源都按 8 秒单源超时，正常 8 秒内一定收工；这里再兜一层
+    // 「整体 15 秒」，页面最多等 15 秒就一定有结果或错误，绝不允许无限转圈。
+    Timer(const Duration(seconds: 15), finish);
     return ctrl.stream;
   }
 
@@ -657,11 +667,13 @@ class CmsBridge {
 
   /* ------------------------------------------------------------ 排行榜 */
 
-  /// 榜单：热度 → 评分 → 更新时间（见 [_sortRank]）。
+  /// 榜单：**服务端 `order=vod_hits&by=desc` 为主**，[_sortRank] 只做二次稳定
+  /// 排序（同热度时按评分 / 更新时间兜底），不再自己造一套热度算法。
   ///
-  /// 服务端 `order=` 实测被忽略（`vod_hits` / `vod_score` / `vod_time` 传啥都
-  /// 返回同一个序列），所以真排序只能在客户端做；[pages] 决定一次读几页样本
-  /// —— 日榜读 1 页、总榜读 8 页，样本越大越像真榜。
+  /// HOT_ORDER（2026-11-15）：`order=` 现在真生效（热播榜脚本已把 `vod_hits`
+  /// 写成 100.1 万~120 万，实测严格递减），所以排序交给服务端就够；
+  /// 客户端那一层保留是为了「同分不跳」—— 榜单刷新时顺序不该乱动。
+  /// [pages] 决定一次读几页样本 —— 日榜读 1 页、总榜读 8 页。
   ///
   /// 「不要空」：指定分类里一条数据都没有时退到全站再读一次，不把空列表交给
   /// 页面；两边都空、且是真报错，才把错误抛给页面（页面有重试）。
@@ -705,9 +717,10 @@ class CmsBridge {
     return _sortRank(legacy);
   }
 
-  /// 榜单排序：热度 → 评分 → 更新时间 → 年份。
+  /// 榜单二次排序：热度 → 评分 → 更新时间 → 年份。
   ///
-  /// 稳定排序（同分保持服务端原序），所以刷新不会让顺序乱跳；任何时候都
+  /// 服务端已经按 `vod_hits` 降序给了（主排序），这里只保证「同分不乱跳」：
+  /// 稳定排序（同分保持服务端原序）。任何时候都
   /// **不按 id 排** —— id 是采集库的自增编号，按它排出来的是「谁先进库」，
   /// 和热度、评分、更新一点关系都没有。
   static List<VideoCard> _sortRank(List<VideoCard> src) {
@@ -744,10 +757,12 @@ class CmsBridge {
     if (external != null) {
       // jar 源（TVBox type 3）：详情走 JarSpider，模型出口与 CMS 一致。
       if (external.kind == KSourceKind.jar) {
-        final detail = await JarSpider.detail(
-          api: external.api,
-          ext: external.ext,
-          vodId: SourceHub.rawIdOf(id),
+        final detail = await _jarGuard(
+          () => JarSpider.detail(
+            api: external.api,
+            ext: external.ext,
+            vodId: SourceHub.rawIdOf(id),
+          ),
         );
         _mark(id, _Origin.cms);
         return detail;
@@ -815,12 +830,14 @@ class CmsBridge {
     if (external != null) {
       if (external.kind == KSourceKind.jar) {
         // jar 源：拿详情里的集地址交给 playerContent（解析在 jar 内部完成）。
-        final info = await JarSpider.play(
-          api: external.api,
-          ext: external.ext,
-          vodId: SourceHub.rawIdOf(vodId),
-          lineName: line,
-          ep: ep,
+        final info = await _jarGuard(
+          () => JarSpider.play(
+            api: external.api,
+            ext: external.ext,
+            vodId: SourceHub.rawIdOf(vodId),
+            lineName: line,
+            ep: ep,
+          ),
         );
         _mark(vodId, _Origin.cms);
         return info;
@@ -862,12 +879,14 @@ class CmsBridge {
     final external = await _externalSource(vodId);
     if (external != null) {
       if (external.kind == KSourceKind.jar) {
-        final info = await JarSpider.play(
-          api: external.api,
-          ext: external.ext,
-          vodId: SourceHub.rawIdOf(vodId),
-          lineName: line,
-          ep: ep,
+        final info = await _jarGuard(
+          () => JarSpider.play(
+            api: external.api,
+            ext: external.ext,
+            vodId: SourceHub.rawIdOf(vodId),
+            lineName: line,
+            ep: ep,
+          ),
         );
         return info.url;
       }
@@ -881,12 +900,59 @@ class CmsBridge {
     return CmsApi.playUrl(vodId, line, ep);
   }
 
+  /// 片源侧的可读提示（目前只有「jar 插件没装」这一条），没话可说返回空串。
+  ///
+  /// 搜索页 / 片源页都直接展示它：宁可讲清楚「肥猫的源要装 jar」，
+  /// 也不要让用户对着「查了 0 个源」的结果发呆。
+  static String get sourceNotice => SourceHub.instance.jarNotice;
+
   /// 这个 id 是不是 CMS 的 `vod_id`（详情页据此跳过旧接口的平台线路逻辑）。
   ///
   /// 外部源（云端 / 自加）的卡片 id 带 `@src:` 前缀，同样按 CMS 处理，
   /// 否则详情页会为它去查旧接口的平台线路。
   static bool isCms(String id) =>
       id.trim().startsWith(SourceHub.idMark) || _originOf(id) == _Origin.cms;
+
+  /* ------------------------------------------------------ jar 源兜底 */
+
+  /// jar 源的一次调用：**8 秒硬超时 + 可读文案**（JAR_TIMEOUT 2026-11-15）。
+  ///
+  /// 为什么必须有这一层：jar 是第三方 dex，原生那边虽然也有 8 秒 guard，
+  /// 但通道本身不保证一定回话（jar 没装时早年版本、原生插件没注册、dex
+  /// 加载卡在类初始化上，都会让 `invokeMethod` 的 Future 永远挂着）。
+  /// 详情页原来就等着这一个 Future，表现是「点进详情 → 转圈 → 8 秒后
+  /// 加载失败，请求超时」。这里统一兜成 [ApiException]，文案说清是「源」
+  /// 不可用、而不是「网络」不好，用户可以换本站线路继续看。
+  static const Duration jarTimeout = Duration(seconds: 8);
+
+  static Future<T> _jarGuard<T>(Future<T> Function() task) async {
+    if (!JarSpider.supported) {
+      throw ApiException('jar 源只在 Android 客户端上可用，换本站线路试试');
+    }
+    final hub = SourceHub.instance;
+    await hub.ensureJarStatus();
+    if (!hub.jarReady) {
+      throw ApiException(
+        '这个源需要 jar 插件（spider.jar），当前还没安装，换本站线路试试',
+        code: 503,
+      );
+    }
+    try {
+      return await task().timeout(
+        jarTimeout,
+        onTimeout: () => throw ApiException(
+          '该源暂不可用（${jarTimeout.inSeconds} 秒无响应），换本站线路试试',
+          kind: ApiErrorKind.timeout,
+        ),
+      );
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      // jar 内部抛出来的东西五花八门（NoClassDefFoundError / 反射异常…），
+      // 一律收敛成一句话，别把 Java 栈丢到用户脸上。
+      throw ApiException('该源暂不可用，换本站线路试试');
+    }
+  }
 
   /// 带 `@src:` 前缀的 id → 它所属的源；不是外部 id 返回 null。
   static Future<KSource?> _externalSource(String id) async {

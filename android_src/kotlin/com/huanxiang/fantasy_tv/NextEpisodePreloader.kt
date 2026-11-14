@@ -112,6 +112,13 @@ class NextEpisodePreloader(
         executor.shutdownNow()
     }
 
+    /** 读让路判据并吞掉一切异常（同 SegmentPreloader.buffering 的 CRASH_FIX）。 */
+    private fun buffering(): Boolean = try {
+        pauseGate()
+    } catch (_: Throwable) {
+        false
+    }
+
     private fun nextGeneration(): Int = synchronized(lock) {
         generation++
         generation
@@ -161,9 +168,9 @@ class NextEpisodePreloader(
      * 返回 false = 这一轮已经过期，调用方直接退出。
      */
     private fun awaitPlaybackIdle(gen: Int): Boolean {
-        if (!pauseGate()) return !isStale(gen)
+        if (!buffering()) return !isStale(gen)
         log("preload next: 播放器正在缓冲，让路")
-        while (pauseGate()) {
+        while (buffering()) {
             if (isStale(gen)) return false
             try {
                 Thread.sleep(GATE_POLL_MS)

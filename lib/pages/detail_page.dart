@@ -186,7 +186,17 @@ class _DetailPageState extends State<DetailPage>
   Future<void> _loadDetail({bool silent = false}) async {
     if (!silent && mounted) setState(() => _error = null);
     try {
-      final d = await CmsBridge.detail(widget.id);
+      // DETAIL_TIMEOUT（2026-11-15）：详情整条链（主站 8 秒 ×2 重试、
+      // 外部源、jar 源）都必须有一个总上限 —— 页面不能一直转圈。
+      // jar 源自己已经有 8 秒硬超时（CmsBridge._jarGuard），这里是最后一道，
+      // 12 秒还没回来就按「加载失败」给文案 + 重试入口。
+      final d = await CmsBridge.detail(widget.id).timeout(
+        const Duration(seconds: 12),
+        onTimeout: () => throw ApiException(
+          '加载超时了，换个网络或稍后重试',
+          kind: ApiErrorKind.timeout,
+        ),
+      );
       if (!mounted) return;
       _cmsBacked = CmsBridge.isCms(widget.id);
 
@@ -442,7 +452,15 @@ class _DetailPageState extends State<DetailPage>
     final cards = <VideoCard>[];
     Future<VideoDetail?> fetch(String id) async {
       try {
-        return await CmsBridge.detail(id);
+        // 猜你喜欢只是锦上添花：单个 id 8 秒拿不到就当它没有，
+        // 绝不允许它拖住详情页（8 个 id 并行等，最多 8 秒）。
+        return await CmsBridge.detail(id).timeout(
+          const Duration(seconds: 8),
+        );
+      } on TimeoutException {
+        // 超时 = 这条推荐没有（`Future<VideoDetail>` 的 onTimeout 不许返回
+        // null，所以用 catch 兜，不写 onTimeout）。
+        return null;
       } catch (_) {
         return null;
       }

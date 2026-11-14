@@ -42,19 +42,42 @@ PROGUARD_RULES = '''# FX_JAR_SPIDER —— jar 源（TVBox type 3）的 R8 保�
 -keep class com.github.catvod.** { *; }
 -keep interface com.github.catvod.** { *; }
 -keep class okhttp3.** { *; }
+-keep interface okhttp3.** { *; }
 -keep class okio.** { *; }
--keep class okio.** { *; }
--dontwarn okhttp3.**
--dontwarn okio.**
--dontwarn com.github.catvod.**
--dontwarn org.jsoup.**
--dontwarn com.google.gson.**
 -keep class com.google.gson.** { *; }
 -keep class org.jsoup.** { *; }
 -keep class org.apache.commons.** { *; }
-# 插件与 jar 之间的桥：反射按名字找方法，别混淆。
--keep class com.huanxiang.fantasy_tv.JarSpiderLoader { *; }
--keep class com.huanxiang.fantasy_tv.JarSpiderPlugin { *; }
+-dontwarn com.google.gson.**
+-dontwarn org.jsoup.**
+
+# ---------------------------------------------------------------------------
+# FX_TRANSPORT_OKHTTP（2026-11-15）：播放器传输层 R8 保留规则。
+#
+# 为什么必须有这一段：播放传输层从 DefaultHttpDataSource 换成了
+# media3-datasource-okhttp + okhttp 4.12.0，而 release 包一开 minify，
+# 下面这些类就会被当成「没人用」裁掉或者混淆掉名字：
+#   · OkHttpClient / OkHttpDataSource 由 DataSource.Factory 反射式装配；
+#   · okhttp 初始化时会探测 Conscrypt / BouncyCastle / OpenJSSE 这几个
+#     可选 TLS 提供者，类不存在只是警告，但 R8 默认把它当错误；
+#   · PlayerHttp 是 Kotlin object（单例 + @JvmStatic 访问），混淆后
+#     `PlayerHttp.INSTANCE` 找不到 → NoClassDefFoundError → 一点播放就闪退。
+#
+# 这些都是「构建期看不出来、运行期必崩」的坑，所以整段 keep + dontwarn。
+-keep class okhttp3.** { *; }
+-keep interface okhttp3.** { *; }
+-keep class okio.** { *; }
+-keep class androidx.media3.datasource.okhttp.** { *; }
+-keep class com.huanxiang.fantasy_tv.PlayerHttp { *; }
+-keep class com.huanxiang.fantasy_tv.ExoPlayerPlugin { *; }
+-keep class com.huanxiang.fantasy_tv.SegmentPreloader { *; }
+-keep class com.huanxiang.fantasy_tv.NextEpisodePreloader { *; }
+-keep class com.huanxiang.fantasy_tv.FxCacheKeyFactory { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**
+-dontwarn org.openjsse.**
+-dontwarn javax.annotation.**
 '''
 
 

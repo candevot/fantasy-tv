@@ -226,9 +226,9 @@ class SegmentPreloader(
      * 轮询间隔 150ms：比一次分片请求便宜几个数量级，不会成为负担。
      */
     private fun awaitPlaybackIdle(generationAtStart: Int): Boolean {
-        if (!pauseGate()) return true
+        if (!buffering()) return true
         log("预取: 播放器正在缓冲，让路")
-        while (pauseGate()) {
+        while (buffering()) {
             if (released || generationAtStart != generation) return false
             try {
                 Thread.sleep(150)
@@ -237,6 +237,21 @@ class SegmentPreloader(
             }
         }
         return !released && generationAtStart == generation
+    }
+
+    /**
+     * 读让路判据（CRASH_FIX 2026-11-15）。
+     *
+     * 这一层必须自己兜异常：`pauseGate` 是宿主注入的回调，万一它内部碰了
+     * 只能在主线程访问的对象（media3 的 ExoPlayer 就会抛
+     * IllegalStateException），异常漏到这条后台线程上就是
+     * `FATAL EXCEPTION: PreloaderHls` —— 整个 App 闪退。预取只是锦上添花，
+     * 任何异常都该降级成「不让路，继续预取」。
+     */
+    private fun buffering(): Boolean = try {
+        pauseGate()
+    } catch (_: Throwable) {
+        false
     }
 
     private fun downloadSegment(

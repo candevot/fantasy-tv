@@ -262,7 +262,11 @@ class SourceHub extends ChangeNotifier {
   /// 配置缓存有效期：6 小时内不重复拉取（手动刷新不受限）。
   static const Duration cacheTtl = Duration(hours: 6);
 
-  static const Duration timeout = Duration(seconds: 6);
+  /// 云端配置 `/api/config` 的超时：**3 秒**（TIMEOUT_UNIFY 2026-11-15）。
+  ///
+  /// 实测这份配置 0.14 秒就回来了，3 秒已经是很宽的余量；原来给 6 秒，
+  /// 弱网下一次首屏要白等 6 秒才铺片源。列表 / 搜索 / 详情各自另有 8 秒。
+  static const Duration timeout = Duration(seconds: 3);
 
   static const String _kCloud = 'fx_sources_cloud_v1';
   static const String _kLiveUrl = 'fx_sources_live_url_v1';
@@ -300,6 +304,61 @@ class SourceHub extends ChangeNotifier {
 
   /// 单源检索超时：超时按「这个源没结果」处理，不拖住其它源。
   static const Duration sourceTimeout = Duration(seconds: 8);
+
+  /* ------------------------------------------------------ jar 插件可用性 */
+
+  /// jar 插件（`spider.jar`）是否已安装；null = 还没查过。
+  bool? _jarReady;
+
+  Future<void>? _jarChecking;
+
+  /// jar 插件是否可用（没查过按「不可用」算，绝不乐观）。
+  bool get jarReady => _jarReady == true;
+
+  /// 有 jar 源、但插件没装 —— 这正是「肥猫的源完全不加载」的原因。
+  bool get jarMissing =>
+      _jarReady == false && _user.any((s) => s.kind == KSourceKind.jar);
+
+  /// 给页面用的可读提示（没什么可说的就空串）。
+  ///
+  /// JAR_NOTICE（2026-11-15）：`assets/spiders/spider.jar` 并没有打进 APK
+  /// （`android_src/libs/api.jar` 只是 Spider 基类，不是源本身的 jar），
+  /// 所以肥猫那 41 个 jar 源在「没手动装 jar」的机器上**一个都跑不起来**。
+  /// 以前这些源照样进检索队列，每个 8 秒超时后被静默当成「没结果」，
+  /// 用户看到的是「肥猫完全不加载」而且毫无解释。现在直接跳过并给出这句。
+  String get jarNotice => jarMissing
+      ? '肥猫的 ${bundledSources.length} 个 jar 源需要先装 jar 插件（spider.jar）才能出内容，'
+          '到「片源管理 → 安装 jar 插件」装好后重新搜索'
+      : '';
+
+  /// 查一次 jar 插件状态（结果缓存，失败按「没装」处理）。
+  Future<void> ensureJarStatus() {
+    final running = _jarChecking;
+    if (running != null) return running;
+    if (_jarReady != null) return Future<void>.value();
+    final task = () async {
+      try {
+        final status = await JarSpider.status().timeout(
+          const Duration(seconds: 2),
+          onTimeout: () => const JarStatus.missing(),
+        );
+        _jarReady = status.installed;
+      } catch (_) {
+        // 通道没起来 / 非 Android：按没装处理，jar 源跳过。
+        _jarReady = false;
+      }
+    }();
+    _jarChecking = task;
+    return task.whenComplete(() {
+      _jarChecking = null;
+    });
+  }
+
+  /// jar 装好 / 卸载后强制重查（片源页装完 jar 调一次）。
+  void invalidateJarStatus() {
+    _jarReady = null;
+    _jarChecking = null;
+  }
 
   /// 这个源是不是「肥猫」那批量导入的一批。
   static bool isBundledSource(KSource source) =>
@@ -358,6 +417,9 @@ class SourceHub extends ChangeNotifier {
     final seen = <String>{};
     void take(KSource s) {
       if (!s.searchable) return;
+      // jar 插件没装：这些源一次也查不出来（原生只会回 no_jar），
+      // 跳过它们，别让每次搜索白等 8 秒（JAR_NOTICE）。
+      if (s.kind == KSourceKind.jar && _jarReady == false) return;
       // jar 源的 api 是类名，同一个类靠 ext 区分不同站点（肥猫 / 饭太硬 / 二小
       // 常常共用一个 csp_Xxx），只按 api 去重会把它们合并成一个源。
       final key = s.kind == KSourceKind.jar
@@ -423,13 +485,15 @@ class SourceHub extends ChangeNotifier {
     final external = <KSource>[];
     final ownSeen = <String>{};
     final extSeen = <String>{};
+    bool usable(KSource s) =>
+        s.searchable && !(s.kind == KSourceKind.jar && _jarReady == false);
     for (final s in visibleCloud) {
-      if (!s.searchable) continue;
+      if (!usable(s)) continue;
       if (!ownSeen.add(keyOf(s))) continue;
       own.add(s);
     }
     for (final s in _user) {
-      if (!s.searchable) continue;
+      if (!usable(s)) continue;
       final key = keyOf(s);
       // 已经在我们自己的那批里出现过的地址，不再查第二遍。
       if (ownSeen.contains(key)) continue;
@@ -449,11 +513,22 @@ class SourceHub extends ChangeNotifier {
   bool get loaded => _loaded;
 
   /// 至少要读过一次本地缓存（[ensureReady] 内完成）。
+  ///
+  /// BOOT_RESILIENT（2026-11-15）：**失败的初始化不能被缓存下来**。
+  /// 原来 `_booting` 一旦持有一个抛过异常的 Future，之后每一次
+  /// `ensureReady()` 都会立刻拿到同一个失败 —— 搜索流在
+  /// `await hub.ensureReady()` 当场炸掉，而那个异常没人收，流既不 close
+  /// 也不 error，页面就永远停在骨架屏（用户实测的「一直转圈」）。
+  /// 现在失败时把 `_booting` 清空，下次调用重新初始化。
   Future<void> ensureReady() {
     final running = _booting;
     if (running != null) return running;
     final task = _boot();
     _booting = task;
+    // 失败后允许重试：清掉缓存，下次 ensureReady 重新走一遍 _boot。
+    unawaited(task.then<void>((_) {}, onError: (Object _) {
+      if (identical(_booting, task)) _booting = null;
+    }));
     return task;
   }
 
@@ -1193,7 +1268,19 @@ class SourceHub extends ChangeNotifier {
       // 缓存坏了就当没有：下次 refresh 会重新写一遍。
     }
     _loaded = true;
-    notifyListeners();
+    _notifySafely();
+  }
+
+  /// 通知监听者，但绝不让监听者的异常污染调用链（BOOT_RESILIENT）。
+  ///
+  /// `notifyListeners()` 里任何一个监听者抛异常都会原样冒出来 —— 在
+  /// [_boot] 里就意味着「读缓存失败」，进而把 _booting 变成失败的 Future。
+  void _notifySafely() {
+    try {
+      notifyListeners();
+    } catch (_) {
+      // 某个页面监听坏了不该拖垮片源索引。
+    }
   }
 
   /// 缓存里的 JSON 数组 → 源列表（坏条目直接丢）。

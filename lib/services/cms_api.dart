@@ -171,7 +171,13 @@ class CmsApi {
         'ac': 'detail',
         if (type > 0) 't': '$type',
         'pg': '$page',
-        if (sort.isNotEmpty) 'order': _orderOf(sort),
+        // HOT_ORDER（2026-11-15）：服务端 `order=` 已经修好且真生效
+        // （实测 `order=vod_hits` 是严格递减），所以热播行必须把 `order`
+        // 和 `by=desc` 一起带上 —— 只带 order 时后台按升序给「最冷」的那批。
+        if (sort.isNotEmpty) ...<String, String>{
+          'order': _orderOf(sort),
+          'by': 'desc',
+        },
       });
       return <VideoCard>[for (final vod in _items(body)) cardOf(vod)];
     } catch (e) {
@@ -332,6 +338,9 @@ class CmsApi {
           'ep': ep < 1 ? '1' : '$ep',
         },
       );
+
+  /// 排序键 → 服务端的 `order` 字段名（纯函数，单测直接断言）。
+  static String orderOf(String sort) => _orderOf(sort);
 
   /// 清掉详情缓存（切换站点 / 调试用）。
   static void clearCache() => _cache.clear();
@@ -766,6 +775,10 @@ String _heatOf(Object? raw) {
 }
 
 /// 分类排序键 → CMS 的 order 字段。
+///
+/// HOT_ORDER（2026-11-15）：`hot` / `hits` → `vod_hits`。服务端 `Provide.php`
+/// 已经修好、`order=vod_hits&by=desc` 实测严格递减，所以首页与榜单现在真的
+/// 按热播排，不再是「按入库时间」。
 String _orderOf(String sort) {
   switch (sort.toLowerCase()) {
     case 'rating':

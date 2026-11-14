@@ -231,6 +231,25 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     @Volatile
     private var softDecoderPreferred = false
 
+    /**
+     * 「播放器正在缓冲」的**主线程快照**（CRASH_FIX 2026-11-15）。
+     *
+     * 为什么需要这个字段（真机闪退根因）：
+     * 两个预取器（[SegmentPreloader] / [NextEpisodePreloader]）都跑在
+     * 自己的后台线程上，它们的 `pauseGate` 回调原来直接读
+     * `player.playbackState`。而 media3 的 `ExoPlayer.getPlaybackState()`
+     * 第一件事就是 `verifyApplicationThread()`：**非应用线程访问会抛
+     * IllegalStateException**。那个异常在后台线程里没人接，直接
+     * `FATAL EXCEPTION: PreloaderHls` 把进程带走 —— 用户看到的就是
+     * 「一点播放就闪退」。
+     *
+     * 正确做法：播放器状态只在主线程读，读到的结果写进这个 volatile
+     * 字段，后台线程只看字段（纯内存读，不碰播放器）。取值在
+     * [refreshBufferingFlag] / [snapshot] 里刷新（两者都只在主线程执行）。
+     */
+    @Volatile
+    private var playerBuffering: Boolean = true
+
     /// 首页续播预取的单线程队列（并发 = 1，和 [SegmentPreloader] 同一策略）。
     ///
     /// 为什么不由 [SegmentPreloader] 代劳：那个预取器属于「当前播放的那个源」，
@@ -607,13 +626,22 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 「播放的请求永远先于预载的请求」。我们这边单线程预取，
             // 用一条「播放器在缓冲就暂停」的判据达到同样效果：播放器缺数据时
             // 预取线程不占连接、不占带宽，缓冲结束再接着灌。
-            pauseGate = {
-                val p = player
-                p != null && p.playbackState == Player.STATE_BUFFERING
-            },
+            pauseGate = { playerBuffering },
         )
         preloader = created
         return created
+    }
+
+    /**
+     * 把「是否正在缓冲」同步到 [playerBuffering]（**只在主线程调用**）。
+     *
+     * 后台预取线程绝不直接读播放器：media3 的 ExoPlayer 有线程亲和性检查，
+     * 跨线程读 `playbackState` 会抛 IllegalStateException 并把进程干掉
+     * （CRASH_FIX：原来就是这么闪退的）。读一次、缓存进 volatile 字段，
+     * 后台只读字段。
+     */
+    private fun refreshBufferingFlag(p: ExoPlayer? = player) {
+        playerBuffering = p == null || p.playbackState == Player.STATE_BUFFERING
     }
 
     /// 首帧之后才真正开灌（PRELOAD_AFTER_FIRST_FRAME）。
@@ -675,6 +703,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) {
                     endSeekAudioGate()
                 }
+                // CRASH_FIX：缓冲状态只在主线程读，写进 volatile 给预取线程看。
+                playerBuffering = state == Player.STATE_BUFFERING
                 emit()
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -725,7 +755,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     private fun snapshot(): Map<String, Any?> {
-        val p = player ?: return mapOf(
+        val p = player ?: run {
+            playerBuffering = true
+            return mapOf(
             "positionMs" to 0, "durationMs" to 0, "bufferedMs" to 0,
             "preloadedMs" to 0L,
             "playing" to false, "buffering" to true, "error" to null,
@@ -736,9 +768,12 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "retryAttempt" to retryCount,
             "retryReason" to retryReason,
             "retryResolveToken" to retryResolveToken
-        )
+            )
+        }
         // 画面尺寸：FxPlayer 的 value.width/height 和分辨率胶囊都靠它，
         // 拿不到就一直显示 "0x0"。format 在 READY 之后才有值。
+        val buffering = p.playbackState == Player.STATE_BUFFERING
+        playerBuffering = buffering
         val fmt = p.videoFormat
         val rotation = fmt?.rotationDegrees ?: 0
         var w = fmt?.width ?: 0
@@ -760,7 +795,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 灰条就是「已经下到磁盘的段」，拖动条观感才是「大半条灰」。
             "preloadedMs" to (preloader?.continuousCachedMs(p.currentPosition) ?: 0L),
             "playing" to p.isPlaying,
-            "buffering" to (p.playbackState == Player.STATE_BUFFERING),
+            // 同一次主线程读，顺手把后台预取线程要看的快照刷新（CRASH_FIX）。
+            "buffering" to buffering,
             // FIRST_FRAME：Dart 加载层只认这一个字段（open / seek 会重置）。
             "firstFrameRendered" to firstFrameRendered,
             "error" to lastError,
@@ -1066,10 +1102,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // OkHttpDataSource，共用同一个 OkHttpClient 连接池）。
             upstreamFactory = { url, headers -> PlayerHttp.httpFactory(url, headers) },
             // PRIORITY：播放器在缓冲时预载让路（和 SegmentPreloader 同一判据）。
-            pauseGate = {
-                val p = player
-                p != null && p.playbackState == Player.STATE_BUFFERING
-            },
+            // 只读主线程快照 [playerBuffering]，不碰播放器（CRASH_FIX）。
+            pauseGate = { playerBuffering },
             log = { message -> Log.d(LOG_TAG, message) },
         )
         nextPreloader = created
