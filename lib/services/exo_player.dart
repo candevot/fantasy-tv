@@ -150,6 +150,7 @@ class ExoPlayerState {
     this.position = Duration.zero,
     this.duration = Duration.zero,
     this.buffered = Duration.zero,
+    this.preloaded = Duration.zero,
     this.playing = false,
     this.buffering = true,
     this.error,
@@ -161,7 +162,18 @@ class ExoPlayerState {
 
   final Duration position;
   final Duration duration;
+
+  /// 实际可播到的位置：`max(内核 buffered, 磁盘预取估算)`。
+  ///
+  /// BUFFERED_MAX（2026-11-14，按逆向报告 §10 改动 1）：用户看到的缓冲条
+  /// 应该是「已经下到磁盘的段」，而不是解码器那一小段。对方就是把
+  /// `max(exoPlayer.getBufferedPosition(), estimateDiskBufferedPositionMs())`
+  /// 喂给进度条的 —— 灰条从一条细线变成大半条，拖动观感完全不同。
   final Duration buffered;
+
+  /// 内核自己报的 buffered（不含磁盘预取），排查时用。
+  final Duration preloaded;
+
   final bool playing;
   final bool buffering;
   final String? error;
@@ -179,10 +191,14 @@ class ExoPlayerState {
   factory ExoPlayerState.fromMap(Map<String, dynamic> m) {
     Duration d(String k) =>
         Duration(milliseconds: (m[k] as num?)?.toInt() ?? 0);
+    final exoBuffered = d('bufferedMs');
+    // 原生侧预取器报的「从现在起连续已落盘的时长」。
+    final diskBuffered = d('preloadedMs');
     return ExoPlayerState(
       position: d('positionMs'),
       duration: d('durationMs'),
-      buffered: d('bufferedMs'),
+      buffered: diskBuffered > exoBuffered ? diskBuffered : exoBuffered,
+      preloaded: diskBuffered,
       playing: m['playing'] == true,
       buffering: m['buffering'] == true,
       error: m['error'] as String?,
@@ -208,6 +224,7 @@ class ExoPlayerState {
   @override
   String toString() =>
       'ExoPlayerState(pos=$position, dur=$duration, buf=$buffered, '
+      'pre=${preloaded.inSeconds}s, '
       'playing=$playing, buffering=$buffering, ${width}x$height, '
       'ended=$ended, state=$state, err=$error)';
 }

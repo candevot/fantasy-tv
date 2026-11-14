@@ -41,9 +41,11 @@ import io.flutter.plugin.platform.PlatformViewFactory
  *   一起看同步会打架。这里只做「最小内核」—— 只管播放，画面用 PlatformView
  *   交给 Flutter 叠控制层，控制权完全在 FxPlayer 手里。
  *
- * 关键配置（对齐腾讯/阿里播放器策略）：
+ * 关键配置（对齐腾讯/阿里播放器策略，取值见逆向报告 §10）：
  *   · allowCrossProtocolRedirects = true  → 福盈 4K 分片 302 到移动云能跟
- *   · bufferForPlaybackMs = 1500          → 卡一下只需补 1.5 秒（默认 2.5 秒）
+ *   · LoadControl 15s/60s/1s/2s + backBuffer 0 → 首帧只要 1 秒缓冲
+ *   · 分片预取单线程 + seek 代际作废，缓存 LRU 1.5GiB
+ *   · seek 静音闸 1200ms，首帧回来恢复音量
  *   · DefaultHlsPlaylistParser 原生认 #EXT-X-ENDLIST，不会误判成直播
  *   · MediaCodecSelector 自动选硬解，4K HEVC 走硬件解码
  */
@@ -55,6 +57,22 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         const val METHOD_CHANNEL = "fantasy_tv/exo_player"
         const val EVENT_CHANNEL = "fantasy_tv/exo_player_events"
         const val VIEW_TYPE = "fantasy_tv/exo_view"
+
+        /**
+         * seek 静音闸兜底时长（按逆向报告 §10 改动 3，取值 1200ms）。
+         *
+         * 拖动瞬间把音量压到 0，首帧回来再恢复；万一没出帧，这里无条件恢复，
+         * 否则播放器会永久静音。
+         */
+        const val SEEK_AUDIO_GATE_TIMEOUT_MS = 1200L
+
+        /**
+         * 分片磁盘缓存上限：1.5 GiB（逆向报告的取值区间 1.5–2 GiB）。
+         *
+         * 对方把 2 GiB 写成常量却用了 NoOpCacheEvictor（永不淘汰，这是他们的
+         * 漏洞）；这里用 LRU，缓存满了自动淘汰最久未用的分片。
+         */
+        const val CACHE_MAX_BYTES = 1536L * 1024 * 1024
     }
 
     private var player: ExoPlayer? = null
@@ -69,7 +87,18 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
 
     /// 分片磁盘缓存：拖回已看过的地方不再回源（CDN 有 429 限流）。
     private var mediaCache: SimpleCache? = null
+
+    /// 分片预取器：和播放器共用同一份 [mediaCache]（同一个 cacheKey），
+    /// 所以预取过的分片对播放器来说就是缓存命中（改动 ②）。
+    private var preloader: SegmentPreloader? = null
+
     private var lastError: String? = null
+
+    // ---- seek 音频闸（改动 ③）：拖动时静音，首帧回来再恢复 ----
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var seekGateActive = false
+    private var volumeBeforeSeekGate = 1f
+    private val seekGateTimeout = Runnable { endSeekAudioGate() }
 
     fun attach(messenger: BinaryMessenger) {
         MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler(this)
@@ -77,6 +106,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     fun dispose() {
+        mainHandler.removeCallbacks(seekGateTimeout)
+        seekGateActive = false
+        preloader?.release()
+        preloader = null
         player?.clearVideoSurface()
         player?.release()
         player = null
@@ -114,7 +147,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "pause" -> { player?.pause(); result.success(true) }
             "seek" -> {
                 val ms = call.argument<Number>("positionMs")?.toLong() ?: 0L
+                // 先闸音量再 seek：避免「画面还在旧帧、声音已经跳过去」（改动 ③）。
+                beginSeekAudioGate()
                 player?.seekTo(ms)
+                // 预取改道：代际 +1，旧任务立刻作废，从目标分片往后灌（改动 ②）。
+                preloader?.seekTo(ms)
                 result.success(true)
             }
             "rate" -> {
@@ -143,21 +180,28 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun ensurePlayer() {
         if (player != null) return
-        // PERF（2026-11-14）：这几项直接决定「拖几次就卡」。
+        // LOAD_CONTROL（2026-11-14，按逆向报告 §10 改动 1 落地）。
         //
-        // 1) 前向缓冲 30s 保底 / 120s 上限：4K 一片 6 秒约 5.5MB，
-        //    原来 15s 只等于 2.5 片，网速一抖就见底 → 缓冲 → 黑屏。
-        // 2) 回看缓冲 30s：往回拖不用重新回源（上游有 429 限流）。
-        // 3) 起播只要 1 秒：第一帧尽快出来。
-        // 4) 重缓冲只要 2 秒：卡一下立刻续上，不干等。
+        // 对方 MemoryLimitedLoadControl 的确证取值：
+        //   setBufferDurationsMs(15000, 60000, 1000, 2000).setBackBuffer(0, false)
+        //   · minBufferMs 15s / maxBufferMs 60s：比 media3 默认（50s/50s）低，
+        //     停止继续吃带宽的阈值更低，播放器不会为了「多缓冲」把链路占满；
+        //   · bufferForPlaybackMs 1s：**首帧只需要 1 秒缓冲**，这是起播快的
+        //     直接原因（我们之前是 1s，但 max 120s 会在弱网下无限等）；
+        //   · bufferForPlaybackAfterRebufferMs 2s：卡一下补 2 秒就续上；
+        //   · backBuffer 0 / 不保留关键帧：ExoPlayer 不往回缓存，
+        //     「往回拖」全靠分片磁盘缓存命中（配合改动 ② 的预取）。
+        //
+        // 注意我们之前是 30s/120s + backBuffer 30s：120s 上限让弱网下的
+        // 缓冲等得没完，30s 回看缓冲又和磁盘缓存重复占内存。
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                30_000,   // minBufferMs
-                120_000,  // maxBufferMs
+                15_000,   // minBufferMs
+                60_000,   // maxBufferMs
                 1_000,    // bufferForPlaybackMs
                 2_000     // bufferForPlaybackAfterRebufferMs
             )
-            .setBackBuffer(30_000, true)
+            .setBackBuffer(0, false)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         // DECODER_FALLBACK（2026-11-14，用户报「声音出来了、画面还是黑屏卡缓冲」）：
@@ -186,18 +230,91 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // 对齐到最近关键帧是各视频 App 的常规做法，拖动手感快很多。
         player!!.setSeekParameters(SeekParameters.CLOSEST_SYNC)
         bindListener(player!!)
+        // PRELOADER（改动 ②）：线程池在这里随播放器一起建好 ——
+        // 「预取随播放器创建即启动」，拿到源地址（open）后立刻开始灌分片，
+        // 不等 prepare 完成、不等用户点播放。
+        ensurePreloader()
+    }
+
+    /// 建立（或复用）预取器与它共用的磁盘缓存。
+    ///
+    /// 缓存初始化失败时返回 null，预取和磁盘缓存一起退化成「不启用」，
+    /// 播放本身不受影响 —— 这条兜底是之前踩过的坑：SimpleCache 初始化
+    /// 抛的是 Error（NoClassDefFoundError）而不是 Exception。
+    private fun ensurePreloader(): SegmentPreloader? {
+        preloader?.let { return it }
+        val cache = ensureMediaCache() ?: return null
+        val created = SegmentPreloader(
+            context = context,
+            cache = cache,
+            log = { message -> android.util.Log.d("FxExo", message) },
+        )
+        preloader = created
+        return created
+    }
+
+    private fun ensureMediaCache(): SimpleCache? {
+        mediaCache?.let { return it }
+        return try {
+            val dir = File(context.cacheDir, "exo_media_cache")
+            if (!dir.exists()) dir.mkdirs()
+            val created = SimpleCache(
+                dir,
+                // LRU：缓存满 1.5GiB 就淘汰最久未用的分片。
+                LeastRecentlyUsedCacheEvictor(CACHE_MAX_BYTES),
+                StandaloneDatabaseProvider(context)
+            )
+            mediaCache = created
+            created
+        } catch (error: Throwable) {
+            android.util.Log.w("FxExo", "磁盘缓存不可用，退化为直连: ${error.javaClass.simpleName}")
+            null
+        }
+    }
+
+    // ------------------------------------------------ seek 音频闸（改动 ③）
+
+    /// 拖动瞬间闸掉音量。仅在正在播时生效 —— 暂停状态拖动没有音画撕裂，
+    /// 动音量会让用户下次播放「没声音」。
+    private fun beginSeekAudioGate() {
+        val p = player ?: return
+        if (seekGateActive) return
+        if (!p.isPlaying) return
+        seekGateActive = true
+        volumeBeforeSeekGate = p.volume
+        p.volume = 0f
+        mainHandler.removeCallbacks(seekGateTimeout)
+        mainHandler.postDelayed(seekGateTimeout, SEEK_AUDIO_GATE_TIMEOUT_MS)
+    }
+
+    /// 首帧回来 / 超时兜底：恢复拖动前的音量（幂等）。
+    private fun endSeekAudioGate() {
+        mainHandler.removeCallbacks(seekGateTimeout)
+        if (!seekGateActive) return
+        seekGateActive = false
+        player?.volume = volumeBeforeSeekGate
     }
 
     private fun bindListener(p: ExoPlayer) {
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
+                // 拖动后播到结尾 / 被停掉：闸必须收掉，否则会一直静音。
+                if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) {
+                    endSeekAudioGate()
+                }
                 emit()
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 emit()
             }
+            override fun onRenderedFirstFrame() {
+                // 首帧到了：拖动闸放开（对方确证的结束条件之一）。
+                endSeekAudioGate()
+                emit()
+            }
             override fun onPlayerError(error: PlaybackException) {
                 lastError = error.errorCodeName + ": " + (error.message ?: "")
+                endSeekAudioGate()
                 emit()
             }
         })
@@ -206,6 +323,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private fun snapshot(): Map<String, Any?> {
         val p = player ?: return mapOf(
             "positionMs" to 0, "durationMs" to 0, "bufferedMs" to 0,
+            "preloadedMs" to 0L,
             "playing" to false, "buffering" to true, "error" to null,
             "width" to 0, "height" to 0, "ended" to false, "state" to 1
         )
@@ -222,6 +340,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "positionMs" to p.currentPosition,
             "durationMs" to p.duration.coerceAtLeast(0),
             "bufferedMs" to p.bufferedPosition,
+            // 磁盘预取估算（改动 ②）：从当前分片往后连续已落盘的时长。
+            // Dart 侧 buffered 取 max(Exo buffered, 这个值) —— 用户看到的
+            // 灰条就是「已经下到磁盘的段」，拖动条观感才是「大半条灰」。
+            "preloadedMs" to (preloader?.continuousCachedMs(p.currentPosition) ?: 0L),
             "playing" to p.isPlaying,
             "buffering" to (p.playbackState == Player.STATE_BUFFERING),
             "error" to lastError,
@@ -255,12 +377,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } else {
                 DefaultDataSource.Factory(context, httpFactory)
             }
-            // PERF_SAFE（2026-11-14）：先不用磁盘缓存。
-            // 它是优化项，但一旦 SimpleCache 初始化失败（NoClassDefFoundError
-            // 之类的 Error 不是 Exception，catch 不住），会让**所有**线路
-            // 都打不开 —— 表现就是「什么线路都一直加载」。
-            // 播放正确性优先，缓存等这一版稳定后再单独加回来。
-            val cachedFactory = dataSource
+            // SHARED_CACHE（改动 ②）：播放器和预取器共用同一份 SimpleCache，
+            // 所以预取过的分片，播放器读的时候就是缓存命中，不产生网络等待。
+            // 缓存初始化失败 / 本地文件 / 非 HLS 时退回纯直连。
+            val cachedFactory = if (isLocal || !isHls) {
+                dataSource
+            } else {
+                cacheDataSourceFactory(dataSource)
+            }
             val item = MediaItem.fromUri(url)
             val source: MediaSource = if (isHls) {
                 HlsMediaSource.Factory(cachedFactory).createMediaSource(item)
@@ -276,6 +400,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             lastError = null
             player!!.setMediaSource(source)
             player!!.prepare()
+            // 预取随 open 立刻开灌（改动 ②）：HLS 才需要分片级预取，
+            // 本地文件 / 渐进式源跳过。
+            if (!isLocal && isHls) {
+                ensurePreloader()?.start(url, headers)
+            }
             result.success(true)
         } catch (e: Throwable) {
             // 这里必须兜 Throwable：NoClassDefFoundError / OutOfMemoryError
@@ -286,30 +415,23 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         }
     }
 
-    /// 分片磁盘缓存（512MB，LRU）。
+    /// 分片磁盘缓存（1.5 GiB，LRU）。
     ///
     /// 用户现象：第一次拖很快，再拖就开始卡 —— 因为每次拖动都重新回源，
     /// 而上游分片 CDN 对同一 IP 有 429 限流。加了缓存后，
     /// 同一集内来回拖基本不走网络，切集再回来也能命中。
+    ///
+    /// 缓存实例由 [ensureMediaCache] 统一持有，和预取器是同一个对象
+    /// （改动 ② 的前提：缓存只能有一个主人，否则等于两份缓存两份下载）。
     private fun cacheDataSourceFactory(upstream: DataSource.Factory): DataSource.Factory {
+        val cache = ensureMediaCache() ?: return upstream
         return try {
-            val cache = mediaCache ?: run {
-                val dir = File(context.cacheDir, "exo_media_cache")
-                if (!dir.exists()) dir.mkdirs()
-                val c = SimpleCache(
-                    dir,
-                    LeastRecentlyUsedCacheEvictor(512L * 1024 * 1024),
-                    StandaloneDatabaseProvider(context)
-                )
-                mediaCache = c
-                c
-            }
             CacheDataSource.Factory()
                 .setCache(cache)
                 .setUpstreamDataSourceFactory(upstream)
                 // 缓存坏了就忽略、直接回源，别让播放卡死
                 .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             upstream
         }
     }

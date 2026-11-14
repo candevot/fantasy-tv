@@ -8,11 +8,19 @@ import '../services/danmu_service.dart';
 
 /// 弹幕渲染层 —— 对齐成熟方案（弹弹play / B站）的轨道算法。
 ///
-/// 三条轨道规则（这是成熟实现的核心，不是自创）：
+/// 四条轨道规则（这是成熟实现的核心，不是自创）：
 ///   1. **不重叠**：同一轨道上一条弹幕的尾巴离开右边界前，新弹幕不能进这条轨道。
 ///   2. **不追尾**：新弹幕速度相同，若前一条还没完全进入屏幕就放进同轨道，
 ///      会撞上 —— 所以除了「尾巴离开」，还要「头部已完全进入」。
-///   3. **轨道轮转**：从上次用过轨道的下一条开始找，避免总挤在顶部。
+///   3. **同轨最小间隔**：同一条轨道两条弹幕的入场时刻至少隔
+///      [_minLaneGap]（250ms），避免同一簇数据在同一帧挤进同一条轨道。
+///   4. **轨道轮转**：从上次用过轨道的下一条开始找，避免总挤在顶部。
+///
+/// DANMU_POSITION_DRIVEN（2026-11-14，按逆向报告 §10 改动 5）：
+///   之前时钟是 `_clock += 帧间隔` 累加出来的，位置只用来「纠偏」；
+///   现在把播放器 `position` 当成唯一真值，两帧之间只做有上限的外推
+///   （[_maxDeadReckon]）。谁该上屏由 position 决定，不由「数据到达」决定，
+///   所以一条弹幕不会因为某个回调晚到就整簇爆发。
 ///
 /// 顶部/底部弹幕（mode 4/5）不进轨道，居中停留 4 秒。
 class DanmuOverlay extends StatefulWidget {
@@ -27,6 +35,7 @@ class DanmuOverlay extends StatefulWidget {
     this.fontSize = 15,
     this.speed = 1,
     this.areaRatio = 0.7,
+    this.massive = false,
   });
 
   /// 该集全部弹幕（按 time 升序）。
@@ -58,6 +67,11 @@ class DanmuOverlay extends StatefulWidget {
   /// 弹幕占画面高度的比例（0.7 = 上方 70%）。
   final double areaRatio;
 
+  /// 海量模式：轨道数从 8 提到 14（对应逆向报告里的 massive_mode）。
+  ///
+  /// 显示区域拉到 100% 时也会自动进海量模式，见 [_DanmuOverlayState._baseTracks]。
+  final bool massive;
+
   @override
   State<DanmuOverlay> createState() => _DanmuOverlayState();
 }
@@ -69,27 +83,66 @@ class _DanmuOverlayState extends State<DanmuOverlay>
   /// 正在屏幕上飞的弹幕。
   final List<_Flying> _flying = [];
 
-  /// 每条轨道最后一条弹幕的「尾巴离开时刻」与「头部进入时刻」。
+  /// 每条轨道最近一条弹幕的占用状态。
   final Map<int, _LaneState> _lanes = {};
 
   /// 下一条弹幕在 items 里的下标。
   int _cursor = 0;
 
-  /// 上次 tick 的时间戳（用于算 dt）。
+  /// 上一次发射时用到的轨道（轨道轮转的起点）。
+  int _nextLane = 0;
+
+  /// 上一帧的播放器位置（检测 seek）。
   Duration _lastPos = Duration.zero;
 
   /// 上一帧的 ticker 时间，用来算真实帧间隔。
   Duration _lastElapsed = Duration.zero;
 
-  /// 累计播放时间（暂停时不累加）。
+  /// 位置锚点：最近一次读到的播放器位置，以及读到它那一刻的 ticker 时间。
+  Duration _anchorPos = Duration.zero;
+  Duration _anchorElapsed = Duration.zero;
+
+  /// 由位置推导出来的渲染时钟（弹幕时间轴的当前时刻）。
   Duration _clock = Duration.zero;
+
+  /// 两帧之间最多外推多久。
+  ///
+  /// 位置回流的频率不稳定（快时 50ms，慢时 500ms）。外推给了
+  /// [_maxDeadReckon] 的上限：位置一旦停更，弹幕不会一直往前飘，
+  /// 而是停在原地等下一个真实位置，避免「画面停了弹幕还在跑」。
+  static const Duration _maxDeadReckon = Duration(milliseconds: 320);
+
+  /// 播放器位置单帧跳变超过这个值就当 seek 处理。
+  static const Duration _seekJump = Duration(seconds: 3);
+
+  /// 滚动弹幕横穿屏幕的固定时长（对应 danmu.duration，8s）。
+  static const Duration _scrollDuration = Duration(seconds: 8);
+
+  /// 同一条轨道两条弹幕的最小入场间隔。
+  static const Duration _minLaneGap = Duration(milliseconds: 250);
 
   /// 重绘信号：数值变化只触发 CustomPaint 重绘，不重建 Widget 树。
   final ValueNotifier<int> _repaint = ValueNotifier<int>(0);
 
-  int _laneCount = 8;
+  /// 普通模式的轨道数。
+  static const int _normalTracks = 8;
+
+  /// 海量模式的轨道数。
+  static const int _massiveTracks = 14;
+
+  int _laneCount = _normalTracks;
   double _laneHeight = 0;
   double _width = 0;
+
+  /// 弹幕区的上下安全区（尽量避开顶部控件条 / 底部控制栏）。
+  double _areaTop = 0;
+  double _areaHeight = 0;
+
+  /// 轨道数：海量模式（或显示区域拉满）14 条，否则 8 条，再按显示区域比例收缩。
+  int _baseTracks() {
+    if (widget.massive || widget.areaRatio >= 0.95) return _massiveTracks;
+    return _normalTracks;
+  }
 
   @override
   void initState() {
@@ -106,7 +159,7 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     }
     // 跳转：位置回退或跳跃过大时重新定位 cursor
     final delta = widget.position - _lastPos;
-    if (delta.isNegative || delta > const Duration(seconds: 3)) {
+    if (delta.isNegative || delta > _seekJump) {
       _seekTo(widget.position);
     }
   }
@@ -115,15 +168,20 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     _flying.clear();
     _lanes.clear();
     _cursor = 0;
-    _clock = Duration.zero;
+    _nextLane = 0;
+    _clock = widget.position;
     _lastPos = widget.position;
+    _anchorPos = widget.position;
   }
 
   void _seekTo(Duration pos) {
     _flying.clear();
     _lanes.clear();
+    _nextLane = 0;
     _clock = pos;
     _lastPos = pos;
+    _anchorPos = pos;
+    _anchorElapsed = _lastElapsed;
     // 二分找到第一条 time >= pos 的弹幕
     var lo = 0, hi = widget.items.length;
     while (lo < hi) {
@@ -135,6 +193,22 @@ class _DanmuOverlayState extends State<DanmuOverlay>
       }
     }
     _cursor = lo;
+  }
+
+  /// 位置驱动的渲染时钟。
+  ///
+  /// 返回「这一刻弹幕时间轴应该在的位置」：
+  ///   · 播放器位置更新了 → 直接采信它，并把外推锚点挪到当前帧；
+  ///   · 位置还没更新 → 在锚点上按帧间隔外推，最多 [_maxDeadReckon]。
+  Duration _clockNow(Duration elapsed, Duration pos) {
+    if (pos != _anchorPos) {
+      _anchorPos = pos;
+      _anchorElapsed = elapsed;
+      return pos;
+    }
+    final gap = elapsed - _anchorElapsed;
+    if (gap.isNegative) return _anchorPos;
+    return _anchorPos + (gap > _maxDeadReckon ? _maxDeadReckon : gap);
   }
 
   /// 每帧推进。
@@ -150,55 +224,43 @@ class _DanmuOverlayState extends State<DanmuOverlay>
   ///   每帧成本从「重建 N 个组件」降到「一次 canvas 绘制」。
   void _onTick(Duration elapsed) {
     if (!mounted) return;
+    final pos = widget.positionListenable?.value ?? widget.position;
+    // 暂停 / 关闭：时钟跟住播放器，恢复时不会一次补一大段。
     if (!widget.enabled || !widget.playing) {
-      _lastPos = widget.position;
       _lastElapsed = elapsed;
+      _lastPos = pos;
+      _clock = pos;
+      _anchorPos = pos;
+      _anchorElapsed = elapsed;
       return;
     }
-    // DANMU_FRAME_DT（2026-11-14）：用「渲染帧间隔」推进，不再用播放器位置差。
-    //
-    // 换 ExoPlayer 之后，位置回调的频率从每 50~200ms 掉到每 500ms 一次，
-    // 而弹幕是靠「位置差」推进的 —— 于是每 500ms 才动一下，
-    // 肉眼就是「一帧一帧、卡死」。
-    //
-    // 现在：位移用 ticker 的真实帧间隔（跟屏幕刷新率一致，60/120fps），
-    // 播放器位置只用来对齐时钟（发射时机 / 检测 seek）。
-    final frameDt = elapsed - _lastElapsed;
-    _lastElapsed = elapsed;
-
-    final pos = widget.positionListenable?.value ?? widget.position;
+    // seek：位置回退或跳跃过大，重建时钟与游标。
     final posDelta = pos - _lastPos;
     _lastPos = pos;
-    if (posDelta.isNegative || posDelta > const Duration(seconds: 2)) {
+    if (posDelta.isNegative || posDelta > _seekJump) {
+      _lastElapsed = elapsed;
       _seekTo(pos);
       return;
     }
 
-    // 推进时钟：正常按帧间隔走；与播放器位置偏差过大时以播放器为准。
-    var dt = frameDt;
-    if (dt.isNegative || dt > const Duration(milliseconds: 200)) {
-      // 掉帧 / 后台回来：这一帧别按超大 dt 推进，直接跟播放器对齐
-      dt = posDelta.isNegative ? Duration.zero : posDelta;
-    }
-    final drift = (_clock + frameDt) - pos;
-    if (drift.abs() > const Duration(milliseconds: 600)) {
-      dt = posDelta.isNegative ? Duration.zero : posDelta;
-    }
-    _clock += dt;
+    final frameDt = elapsed - _lastElapsed;
+    _lastElapsed = elapsed;
 
-    // 1) 发射到期的弹幕。
+    // 1) 时钟：以播放器位置为准，帧间只做有上限的外推。
+    final clock = _clockNow(elapsed, pos);
+    var dt = clock - _clock;
+    if (dt.isNegative) dt = Duration.zero;
+    // 单帧推进上限：掉帧 / 后台回来时别让整屏弹幕瞬移。
+    if (dt > const Duration(milliseconds: 200)) {
+      dt = const Duration(milliseconds: 200);
+    }
+    _clock = clock;
+
+    // 2) 发射到期的弹幕。
     //
-    // DANMU_CONTINUOUS：之前 here 是 while 一次性把「所有 time <= _clock」
-    // 的都吐出来 —— 一旦某一帧卡了一下（比如解码抖动 dt 变大），
-    // 就会在那一瞬间炸出一整批，用户看到的就是「一组一组地冒」，
-    // 而不是连续飘过。现在限制每帧最多发射 3 条，多出来的留在
-    // cursor 里下一帧继续，视觉上就是平滑的流水。
-    // DANMU_FLOW（2026-11-14）：不再按帧限流 3 条。
-    //
-    // 之前每帧最多吐 3 条，而弹幕数据本身是成簇的（同一秒几十条），
-    // 于是用户看到的是「一下冒三条 → 空一段 → 又冒三条」。
-    // 现在把该出现的都交给 _spawn：轨道满了它会自己返回 false（丢弃），
-    // 不会叠字，真正决定节奏的是弹幕数据本身的时间分布。
+    // 谁该上屏只由 [_clock]（播放器位置）决定；轨道满了 [_spawn] 返回 false
+    // 直接丢弃（成熟方案也这么做，避免叠字）。同一簇 20 条会被 8 条轨道
+    // 按 250ms 间隔摊开，视觉上是连续涌入而不是一簇爆发。
     while (_cursor < widget.items.length &&
         widget.items[_cursor].time <= _clock) {
       _spawn(widget.items[_cursor]);
@@ -210,20 +272,22 @@ class _DanmuOverlayState extends State<DanmuOverlay>
       _cursor++;
     }
 
-    // 2) 推进已发射的弹幕
+    // 3) 推进已发射的弹幕
     final dtSec = dt.inMicroseconds / 1e6;
-    for (final f in _flying) {
-      f.x -= f.speed * dtSec;
-      f.age += dt;
+    if (dtSec > 0) {
+      for (final f in _flying) {
+        f.x -= f.speed * dtSec;
+        f.age += dt;
+      }
     }
-    // 3) 移除飞出屏幕的
+    // 4) 移除飞出屏幕的
     _flying.removeWhere((f) {
       if (f.mode == 1) return f.x + f.width < -20;
       return f.age > const Duration(seconds: 4);
     });
 
     // 只触发重绘，不重建组件树。
-    _repaint.value++;
+    if (frameDt > Duration.zero) _repaint.value++;
   }
 
   /// 屏幕上最近出现过的弹幕文本（去重用，带出现时刻）。
@@ -238,7 +302,7 @@ class _DanmuOverlayState extends State<DanmuOverlay>
   static const Duration _dedupWindow = Duration(seconds: 6);
 
   bool _spawn(DanmuItem item) {
-    if (_width <= 0 || _laneHeight <= 0) return false;
+    if (_width <= 0 || _laneHeight <= 0 || _laneCount <= 0) return false;
     // 去重：同一句话 6 秒内只出现一次
     final key = item.text;
     final last = _recent[key];
@@ -252,11 +316,13 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     final width = _measure(item.text, widget.fontSize);
 
     if (item.mode == 4 || item.mode == 5) {
-      // 顶部/底部：不进轨道，直接加
+      // 顶部/底部：不进轨道，直接加（底部贴着安全区下沿）
       _flying.add(_Flying(
         item: item,
         x: (_width - width) / 2,
-        y: item.mode == 5 ? 8 : _laneHeight * (_laneCount - 1),
+        y: item.mode == 5
+            ? _areaTop + _areaHeight - _laneHeight
+            : _areaTop,
         width: width,
         speed: 0,
         mode: item.mode,
@@ -266,20 +332,25 @@ class _DanmuOverlayState extends State<DanmuOverlay>
     }
 
     // 滚动弹幕：找一条可用轨道
-    final lane = _pickLane(width);
+    final lane = _pickLane();
     if (lane < 0) return false; // 全满，丢弃（成熟方案也这么做，避免叠字）
     final travel = _width + width;
-    // 速度：固定穿过时间 8 秒 / speed 倍率
-    final durationSec = 8 / math.max(0.5, widget.speed);
+    // 速度：固定穿过时长 [_scrollDuration] / speed 倍率
+    final durationSec = _scrollDuration.inMilliseconds /
+        1000 /
+        math.max(0.5, widget.speed);
     final speed = travel / durationSec;
     _lanes[lane] = _LaneState(
-      tailFreeAt: _clock + Duration(milliseconds: ((width + _width) / speed * 1000).round()),
-      headInAt: _clock + Duration(milliseconds: ((width) / speed * 1000).round()),
+      enterAt: _clock + _minLaneGap,
+      tailFreeAt:
+          _clock + Duration(milliseconds: ((width + _width) / speed * 1000).round()),
+      headInAt: _clock + Duration(milliseconds: (width / speed * 1000).round()),
     );
+    _nextLane = (lane + 1) % _laneCount;
     _flying.add(_Flying(
       item: item,
       x: _width,
-      y: lane * _laneHeight,
+      y: _areaTop + lane * _laneHeight,
       width: width,
       speed: speed,
       mode: 1,
@@ -289,13 +360,21 @@ class _DanmuOverlayState extends State<DanmuOverlay>
   }
 
   /// 选轨道：从上一条用过的下一条开始轮转，跳过还没腾出来的。
-  int _pickLane(double width) {
+  ///
+  /// 轨道准入三条件（对应逆向报告改动 5）：
+  ///   1. `_clock >= tailFreeAt`：上一条的尾巴已经离开右边界；
+  ///   2. `_clock >= headInAt`：上一条头部已完全进入（防追尾）；
+  ///   3. `_clock >= enterAt`：同轨最小间隔 [_minLaneGap]。
+  int _pickLane() {
     for (var i = 0; i < _laneCount; i++) {
-      final lane = i;
+      final lane = (_nextLane + i) % _laneCount;
       final st = _lanes[lane];
       if (st == null) return lane;
-      // 尾巴离开右边界 且 头部已完全进入
-      if (_clock >= st.tailFreeAt && _clock >= st.headInAt) return lane;
+      if (_clock >= st.tailFreeAt &&
+          _clock >= st.headInAt &&
+          _clock >= st.enterAt) {
+        return lane;
+      }
     }
     return -1;
   }
@@ -330,11 +409,23 @@ class _DanmuOverlayState extends State<DanmuOverlay>
         // 上下留了约 200dp，按字号算仍有 7~8 条轨道，用户看到的就是
         // 「调到最低还是占半个屏幕」。
         //
-        // 现在 areaRatio 直接换算成轨道条数：30% → 3 条，100% → 10 条。
-        // 这样滑到最低是真的「只在画面上部飘三条」。
-        final lanes = (widget.areaRatio * 10).round().clamp(1, 12);
-        _laneCount = math.max(1, lanes);
-        _laneHeight = (widget.fontSize * 1.6).clamp(18.0, 40.0);
+        // 现在 areaRatio 在地基条数（普通 8 / 海量 14）上按比例收缩：
+        // 30% → 2 条，100% → 全部。滑到最低是真的「只在画面上部飘两条」。
+        final base = _baseTracks();
+        final lanes = (widget.areaRatio * base).round().clamp(1, base);
+        // 行高按字号 1.35 倍（逆向报告的取值），比原来的 1.6 更紧凑，
+        // 同样的显示区域能多放一条轨道。
+        _laneHeight = (widget.fontSize * 1.35).clamp(16.0, 40.0);
+        // 安全区：上避让顶部控件条，下避让底部控制栏。
+        // 小窗（竖屏内嵌播放器）高度不够时按比例收，避免把弹幕区压没。
+        final topInset = math.min(48.0, cons.maxHeight * 0.12);
+        final bottomInset = math.min(72.0, cons.maxHeight * 0.22);
+        final areaHeight = cons.maxHeight - topInset - bottomInset;
+        // 轨道数还要被「实际放得下几条」限制。
+        final fit = areaHeight <= 0 ? 1 : (areaHeight / _laneHeight).floor();
+        _areaTop = topInset;
+        _areaHeight = areaHeight > 0 ? areaHeight : cons.maxHeight;
+        _laneCount = math.max(1, math.min(lanes, math.max(1, fit)));
         return IgnorePointer(
           child: ClipRect(
             // 一次 paint 画完所有弹幕：不再为每条弹幕建 Positioned+Opacity+Text。
@@ -377,8 +468,16 @@ class _Flying {
   Duration age;
 }
 
+/// 一条轨道的占用状态。
 class _LaneState {
-  const _LaneState({required this.tailFreeAt, required this.headInAt});
+  const _LaneState({
+    required this.enterAt,
+    required this.tailFreeAt,
+    required this.headInAt,
+  });
+
+  /// 这条轨道最早什么时候能再放弹幕（同轨最小间隔）。
+  final Duration enterAt;
 
   /// 这条轨道什么时候可以再放弹幕（尾巴离开右边界）。
   final Duration tailFreeAt;
@@ -386,7 +485,6 @@ class _LaneState {
   /// 新弹幕的头部完全进入屏幕的时刻（防追尾）。
   final Duration headInAt;
 }
-
 
 /// 把屏幕上所有弹幕一次性画出来。
 ///

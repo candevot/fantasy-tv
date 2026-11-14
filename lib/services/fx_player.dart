@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../api.dart';
 import '../models.dart';
+import 'hls_segment_index.dart';
 import 'local_hls_proxy.dart';
 import 'playback_recovery.dart';
 
@@ -440,6 +441,25 @@ class FxPlayer implements Listenable {
   Completer<void>? _ready;
   Timer? _cacheGuardTimer;
 
+  // ------------------------------------------------------ seek 音频闸（③）
+  //
+  // SEEK_AUDIO_GATE（2026-11-14，按逆向报告 §10 改动 3）：
+  //   拖动时画面还停在旧帧、声音已经跳到新位置，这是拖动体验里最刺耳的
+  //   一项。做法是拖动瞬间把播放器音量闸到 0，等新位置的首帧（或
+  //   [_seekAudioGateTimeout] 兜底）再把音量恢复成拖动前的值。
+  //   兜底必须有：否则一次没出帧的 seek 会让播放器永久静音。
+
+  /// 静音闸超时：超时无条件恢复音量（对标 1200ms）。
+  static const Duration _seekAudioGateTimeout = Duration(milliseconds: 1200);
+
+  Timer? _seekGateTimer;
+
+  /// 当前是否处于「拖动静音」状态。
+  bool _seekGateMuted = false;
+
+  /// 拖动前的音量（0~100，media_kit 的量纲）。
+  double _volumeBeforeSeekGate = 100;
+
   // ------------------------------------------------- 看门狗 / 救援链状态
 
   /// 无字节流动看门狗（30 秒门槛）。
@@ -497,6 +517,12 @@ class FxPlayer implements Listenable {
 
   /// 直链 HLS 的本地分片代理；只在 direct 模式下懒创建。
   LocalHlsProxy? _hlsProxy;
+
+  /// 当前这集清单的本地时间索引（④）。
+  ///
+  /// 拿它做两件事：seek 时把目标时间换算成分片、对目标分片做一次大小校验，
+  /// 校验不过就回源直连重取。索引建不出来时为 null，seek 照常工作。
+  HlsPlaylistIndex? _segmentIndex;
 
   /// 高频播放位置通道（每 50~200ms 更新一次）。
   ///
@@ -658,6 +684,8 @@ class FxPlayer implements Listenable {
     _lastVideoPts = null;
     _lastVideoAt = DateTime.now();
     _value = const FxPlayerValue();
+    // 换集 / 换源：上一集的清单索引作废（不同集的时长和分片完全不同）。
+    _segmentIndex = null;
     _notify();
     // 记住当前播放源：救援链（refresh → 重开 → 换线路）全程要用。
     _sourceUrl = url;
@@ -685,6 +713,9 @@ class FxPlayer implements Listenable {
         if (identical(_ready, ready)) _ready = null;
         return;
       }
+      // 4) 清单索引（④）：后台建一份「分片 ↔ 时间」的本地索引，
+      //    不占 open 的预算，建不出来也只是少一层拖动优化。
+      unawaited(_primeSegmentIndex(source.url, headers, token));
       // 2) 交给 mpv：12MB 小缓冲先出画，open 发出后立刻调到 96MiB。
       //
       // 这里**不能**再用 readyTimeout 一刀切：_openMedia 内部要先等本地代理
@@ -971,6 +1002,8 @@ class FxPlayer implements Listenable {
 
   Future<void> pause() {
     _playIntent = false;
+    // 暂停时把拖动闸收掉：带着 0 音量停在这里，用户下次播放会「没声音」。
+    _endSeekAudioGate();
     return _player.pause();
   }
 
@@ -1028,8 +1061,82 @@ class FxPlayer implements Listenable {
             .catchError((_) {}),
       );
     }
+    // 闸音量 → seek → 首帧回来再放开（见 [_beginSeekAudioGate]）。
+    _beginSeekAudioGate();
     await _player.seek(position);
+    // 拖动后按目标位置把本地清单索引对到一个分片，先校验再预热。
+    _warmSegmentAt(position);
     _restoreAfterSeek();
+  }
+
+  /// 拖动静音闸：把播放器音量压到 0，并起一个 1200ms 的兜底。
+  ///
+  /// 只在「正在播」时生效 —— 暂停状态下拖动没有音画撕裂可言，
+  /// 动音量反而会让用户下次播放听不到声音。
+  void _beginSeekAudioGate() {
+    if (_disposed || _seekGateMuted) return;
+    if (!_player.state.playing) return;
+    _seekGateMuted = true;
+    _volumeBeforeSeekGate = _player.state.volume;
+    unawaited(_player.setVolume(0).catchError((_) {}));
+    _seekGateTimer?.cancel();
+    _seekGateTimer = Timer(_seekAudioGateTimeout, _endSeekAudioGate);
+    _logFx('SEEK 静音闸开：音量 ${_volumeBeforeSeekGate.toStringAsFixed(0)} → 0');
+  }
+
+  /// 首帧回来 / 超时：恢复拖动前的音量。
+  ///
+  /// 幂等：重复调用只在真的处于静音状态时动作一次。
+  void _endSeekAudioGate() {
+    _seekGateTimer?.cancel();
+    _seekGateTimer = null;
+    if (!_seekGateMuted) return;
+    _seekGateMuted = false;
+    if (_disposed) return;
+    final volume = _volumeBeforeSeekGate.clamp(0.0, 100.0);
+    unawaited(_player.setVolume(volume).catchError((_) {}));
+    _logFx('SEEK 静音闸关：音量恢复到 ${volume.toStringAsFixed(0)}');
+  }
+
+  /// 后台建当前清单的本地时间索引（④）。
+  ///
+  /// 不阻塞 open：索引只是「seek 时知道该预取哪一片」的加速器，
+  /// 拉不到 / 超时就当作没有。
+  Future<void> _primeSegmentIndex(
+    String url,
+    Map<String, String> headers,
+    int token,
+  ) async {
+    if (_disposed) return;
+    final index = await HlsSegmentIndex.instance.indexOf(url, headers);
+    if (_disposed || token != _openToken || index == null) return;
+    _segmentIndex = index;
+    _logFx(
+      'INDEX 就绪：${index.segments.length} 片 / '
+      '总时长 ${(index.totalDurationMs / 1000).round()}s',
+    );
+  }
+
+  /// 拖动后按目标位置校验命中的分片（④）。
+  ///
+  /// 分片大小和清单声明对不上时，[HlsSegmentIndex.verify] 会立刻回源直连
+  /// 重取这一片。校验是后台的，不挡 seek。
+  void _warmSegmentAt(Duration position) {
+    final index = _segmentIndex;
+    if (index == null) return;
+    final segment = index.segmentAt(position);
+    if (segment == null) return;
+    final headers = _sourceHeaders;
+    unawaited(() async {
+      final probe = await HlsSegmentIndex.instance.verify(
+        segment,
+        headers: headers,
+      );
+      _logFx(
+        'SEEK 分片校验 @${position.inSeconds}s → 分片 '
+        '${segment.startMs}ms：${probe.result.name}（${probe.note}）',
+      );
+    }());
   }
 
   /// 松手后 1.5 秒恢复稳态预读。
@@ -1123,6 +1230,10 @@ class FxPlayer implements Listenable {
     _rescueGen++;
     _rescueBusy = false;
     _readaheadRestore?.cancel();
+    // 拖动闸：释放后不再动音量，只需把定时器和标记收掉。
+    _seekGateTimer?.cancel();
+    _seekGateTimer = null;
+    _seekGateMuted = false;
     _positionNotifier.dispose();
     _watchdogTimer?.cancel();
     _watchdogTimer = null;
@@ -1205,6 +1316,8 @@ class FxPlayer implements Listenable {
     _subscriptions.add(_player.stream.videoParams.listen(_onVideoParams));
     _subscriptions.add(
       _player.stream.buffering.listen((buffering) {
+        // 缓冲结束 = 新位置的数据到了：拖动闸可以放开了。
+        if (!buffering) _endSeekAudioGate();
         _setValue(_value.copyWith(isBuffering: _rescueHold || buffering));
       }),
     );
@@ -1257,6 +1370,8 @@ class FxPlayer implements Listenable {
       aspect = width / height;
       // 新流出画面尺寸 = 首帧就绪信号（救援重开用它判断这步是否成功）。
       _signalMediaReady();
+      // 首帧回来了：拖动闸可以放开音量了（③）。
+      _endSeekAudioGate();
     }
     _setValue(
       _value.copyWith(

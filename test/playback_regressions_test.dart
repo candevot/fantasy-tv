@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import '../tools/test_hls_segment_index.dart' as hlsIndex;
 import '../tools/test_local_hls_proxy.dart' as proxy;
 import '../tools/test_playback_recovery.dart' as recovery;
 import '../tools/test_together_sync.dart' as sync;
@@ -22,6 +23,8 @@ void main() {
     },
     timeout: const Timeout(Duration(minutes: 3)),
   );
+  test('HLS manifest index, segment size check and origin fallback',
+      hlsIndex.main);
   test('recovery protects progress and verifies seek landing', recovery.main);
   test('room member drift, stall hold and offline synchronization', sync.main);
 }
