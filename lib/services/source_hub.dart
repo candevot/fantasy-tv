@@ -604,6 +604,16 @@ class SourceHub extends ChangeNotifier {
   /// 收 `type: 1`（CMS 接口）、`type: 0`（直接地址）、`type: 3`（jar 插件，
   /// `api` 是类名、`ext` 是站点配置，需要先装好 `spider.jar`）；
   /// `type: 4`（python 脚本）标记「暂不支持」后跳过。
+  /// 是否指向本站苹果CMS 接口（App 内置源，导入时应跳过）。
+  static bool _isOurOwnApi(String api) {
+    final u = api.trim().toLowerCase();
+    if (u.isEmpty) return false;
+    final root = CmsApi.root.toLowerCase();
+    if (root.isNotEmpty && u.startsWith(root)) return true;
+    return u.contains('125.94.244.87/api.php') ||
+        u.contains('api.php/provide/vod');
+  }
+
   Future<TvBoxImport> importTvBox(String input) async {
     final text = input.trim();
     if (text.isEmpty) throw ApiException('先粘贴 TVBox 配置或填一个地址');
@@ -623,8 +633,25 @@ class SourceHub extends ChangeNotifier {
         throw ApiException.network();
       }
     }
-    final sites = _sitesOf(body);
-    if (sites.isEmpty) throw ApiException('没解析到 sites 数组，检查一下配置内容');
+    final rawSites = _sitesOf(body);
+    if (rawSites.isEmpty) throw ApiException('没解析到 sites 数组，检查一下配置内容');
+    // 排除指向本站接口的源：那是 App 内置的七个源（幻想腾讯/全部线路/4K/1080P/
+    // 爱奇艺/量子/红牛），导入云端配置时再进来一份只会让源列表重复。
+    var selfSkipped = 0;
+    final sites = <Map<String, dynamic>>[];
+    for (final s in rawSites) {
+      final api = _text(s['api']);
+      if (api.isNotEmpty && _isOurOwnApi(api)) {
+        selfSkipped++;
+        continue;
+      }
+      sites.add(s);
+    }
+    if (sites.isEmpty) {
+      throw ApiException(
+        selfSkipped > 0 ? '这份配置里的源都是本站内置的，没有需要导入的' : '没解析到 sites 数组，检查一下配置内容',
+      );
+    }
 
     final notes = <String>[];
     final added = <KSource>[];
