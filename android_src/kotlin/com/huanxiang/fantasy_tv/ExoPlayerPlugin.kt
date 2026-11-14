@@ -812,8 +812,16 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         }
         try {
             manifestQueue.execute {
-                val merged = PlayerHttp.mergeMasterPlaylist(url, headers) { message ->
-                    Log.i(LOG_TAG, message)
+                // 归并对调用方的承诺是「不抛异常、永远返回地址」；这里再兜一层，
+                // 万一真漏出来，也不能让这条线程静默死掉 —— 那会让 result 永远
+                // 不回话，Dart 的 open Future 挂死、UI 一直转圈。
+                val merged = try {
+                    PlayerHttp.mergeMasterPlaylist(url, headers) { message ->
+                        Log.i(LOG_TAG, message)
+                    }
+                } catch (error: Throwable) {
+                    Log.w(LOG_TAG, "清单预归并异常 ${error.javaClass.simpleName}，用原始地址")
+                    url
                 }
                 mainHandler.post {
                     if (generation != openGeneration) {

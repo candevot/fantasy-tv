@@ -262,11 +262,13 @@ object PlayerHttp {
             log("清单预归并: 请求构造失败 ${error.javaClass.simpleName}，用原始地址")
             return url
         }
-        val mergeClient = client.newBuilder()
-            .callTimeout(MANIFEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            .build()
         var response: Response? = null
         return try {
+            // client 的懒初始化（trust-all 的 SSLContext）如果失败，异常必须
+            // 落在 try 里面 —— 这个函数对调用方的承诺是「永不抛、永远有地址」。
+            val mergeClient = client.newBuilder()
+                .callTimeout(MANIFEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .build()
             val resp = mergeClient.newCall(request).execute()
             response = resp
             if (!resp.isSuccessful) {
