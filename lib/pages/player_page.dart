@@ -8,6 +8,7 @@ import '../models.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/fx_player.dart';
+import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
 import '../widgets/cast_sheet.dart';
@@ -1503,6 +1504,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     // 全屏交给全屏页接管画面，切换快照不再需要，避免返回竖屏后留下旧帧。
     _clearFrozenFrame();
+    // 先把屏幕方向切成横屏，再推页面：让系统旋转动画跑在淡入之前，
+    // 新页面第一帧就已经是横屏布局，不会先按竖屏铺一遍再重排
+    // （PlatformView 重排会闪一下）。不 await——淡入不该等旋转完成。
+    unawaited(ScreenOrientation.landscape());
     setState(() => _fullscreenActive = true);
 
     FullPlayerResult? result;

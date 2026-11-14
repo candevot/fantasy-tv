@@ -9,6 +9,7 @@ import '../api.dart';
 import '../models.dart';
 import '../services/cast_service.dart';
 import '../services/fx_player.dart';
+import '../services/screen_orientation.dart';
 import '../theme.dart';
 import '../widgets/cast_sheet.dart';
 import '../widgets/detail_widgets.dart';
@@ -443,8 +444,10 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     if (player == null || _loading || _error != null) return;
     _hideTimer?.cancel();
     final line = _line;
+    // 先转横屏再推页面，淡入时方向已经就位。
+    unawaited(ScreenOrientation.landscape());
     await Navigator.of(context).push<FullPlayerResult>(
-      // 直播进全屏同样用「小窗铺开」转场，和点播保持一致。
+      // 直播进全屏与点播一致：200ms 淡入。
       FxFullscreenRoute<FullPlayerResult>(
         builder: (_) => FullPlayerPage(
           player: player,

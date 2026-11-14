@@ -93,30 +93,30 @@ class FxFadeScaleRoute<T> extends PageRouteBuilder<T> {
 }
 
 
-/// 全屏播放器专用转场：小窗从顶部「铺开」成整屏，退出时收回。
+/// 全屏播放器专用转场：快速淡入 / 淡出。
 ///
-/// PLAYER_FS_ANIM（2026-11-14）：用户要腾讯 / 爱奇艺那种横竖屏切换动画。
-/// 原来只有「淡入 + 放大 2%」，观感是画面凭空闪一下，没有「从竖屏那块
-/// 小窗长到全屏」的空间感。
+/// FSPLAY_ANIM_V2（2026-11-14）：上一版做了「小窗从顶部放大铺开」，
+/// 结果动画是坏的 —— 因为页面里装的是 **PlatformView**（ExoPlayer 的
+/// 原生 SurfaceView，混合合成）。Android 混合合成下原生视图不跟随
+/// Flutter 的 Transform 平滑缩放，缩放过程中会出现跳动、撕裂、黑块，
+/// 而且 opaque:false 让下面那一页一直透出来。
 ///
-/// 现在的做法（进入）：
-///   · 背景快速压黑（120ms），先把注意力收到画面上
-///   · 视频层从 0.55 倍、顶部居中对齐，放大到 1 倍铺满（300ms easeOutCubic）
-///   · 同时淡入，避免放大过程中露出底下的列表
-/// 退出完全反向，看起来就是「收回到竖屏那块小窗」。
+/// 现在改成纯淡入淡出：
+///   · opaque:true，页面自己不透明，旧页面不会透出来
+///   · 200ms，easeOutCubic，进出对称
+///   · 不碰任何 Transform —— 原生画面层保持原样，只做透明度
 ///
-/// 为什么对齐点用 topCenter：竖屏时视频就在页面顶部，从这里长出去
-/// 和真实位置一致；对齐中心反而会像从屏幕中间凭空出现。
+/// 横竖屏切换的「方向变化」由系统旋转动画负责，这里只做画面衔接，
+/// 两者叠在一起就是各家视频 App 的手感。
 class FxFullscreenRoute<T> extends PageRouteBuilder<T> {
   FxFullscreenRoute({
     required WidgetBuilder builder,
     super.settings,
-    Duration duration = const Duration(milliseconds: 300),
+    Duration duration = const Duration(milliseconds: 200),
   }) : super(
           transitionDuration: duration,
           reverseTransitionDuration: duration,
-          opaque: false,
-          barrierColor: Colors.black,
+          opaque: true,
           pageBuilder: (context, animation, secondaryAnimation) =>
               builder(context),
           transitionsBuilder:
@@ -126,18 +126,7 @@ class FxFullscreenRoute<T> extends PageRouteBuilder<T> {
               curve: Curves.easeOutCubic,
               reverseCurve: Curves.easeInCubic,
             );
-            return FadeTransition(
-              opacity: a,
-              child: AnimatedBuilder(
-                animation: a,
-                builder: (context, inner) => Transform.scale(
-                  alignment: Alignment.topCenter,
-                  scale: 0.55 + 0.45 * a.value,
-                  child: inner,
-                ),
-                child: child,
-              ),
-            );
+            return FadeTransition(opacity: a, child: child);
           },
         );
 }
