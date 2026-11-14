@@ -1,3 +1,4 @@
+import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -7,7 +8,7 @@ import '../services/danmu_service.dart';
 import 'danmu_overlay.dart';
 
 /// 弹幕接入层 —— 播放页只放这一个 widget，内部负责：
-///   1. 按「剧名 + 集号」拉弹幕
+///   1. 按「剧名 + 集号」拉弹幕（先让服务端预热，空则退避重试）
 ///   2. 跟随播放器位置渲染
 ///   3. 开关 / 透明度 / 字号从全局设置读
 ///
@@ -68,8 +69,22 @@ class DanmuLayer extends StatefulWidget {
 
 class _DanmuLayerState extends State<DanmuLayer> {
   List<DanmuItem> _items = const [];
-  bool _loading = false;
   String _loadedKey = '';
+
+  /// 每次切集/重载自增。旧的重试循环看到代数变了就自己退出，
+  /// 避免用户快速切集时旧集的弹幕写进新集。
+  int _gen = 0;
+
+  /// 空列表的重试间隔（1.5s / 4s / 8s，累计 13.5 秒）。
+  ///
+  /// /api/danmu 对外预算只有 1.2 秒，冷搜一次却要 3~4 秒（最长见过 12 秒）：
+  /// 第一次问必然空。服务端在后台继续拉、拉完直接写缓存，这三档退避正好
+  /// 卡在它后面把结果取回来。三轮都空就放弃。
+  static const List<Duration> _retryDelays = <Duration>[
+    Duration(milliseconds: 1500),
+    Duration(seconds: 4),
+    Duration(seconds: 8),
+  ];
 
   @override
   void initState() {
@@ -89,26 +104,46 @@ class _DanmuLayerState extends State<DanmuLayer> {
 
   Future<void> _load() async {
     final key = '${widget.title}|${widget.ep}|${widget.reloadKey}';
-    if (key == _loadedKey || _loading) return;
+    if (key == _loadedKey) return;
     _loadedKey = key;
-    _loading = true;
-    final remote = await DanmuService.instance.load(
-      title: widget.title,
-      ep: widget.ep,
-      epName: widget.epName,
-    );
-    // 自己发的弹幕：和远程的合并后一起渲染
+    final gen = ++_gen;
+    // 先让出一拍：_load 会被 didUpdateWidget 同步调用，那一帧里直接 setState
+    // 会撞「build 期间 setState」。
+    await Future<void>.delayed(Duration.zero);
+    if (!mounted || gen != _gen) return;
+    // 切集先把上一集的弹幕清掉：新集还在重试时不能继续飘旧集的弹幕。
+    if (_items.isNotEmpty) setState(() => _items = const <DanmuItem>[]);
+
+    // 自己发的弹幕（本地存储，毫秒级）；每轮都合并进去。
     final local = widget.videoId.isEmpty
         ? const <DanmuItem>[]
         : await DanmuLocal.instance.read(widget.videoId, widget.ep);
-    if (!mounted || _loadedKey != key) return;
-    final merged = <DanmuItem>[...(remote ?? const <DanmuItem>[]), ...local]
-      ..sort((a, b) => a.time.compareTo(b.time));
-    setState(() {
-      _items = merged;
-      _loading = false;
-    });
-    widget.onCount?.call(merged.length);
+    if (!mounted || gen != _gen) return;
+
+    for (var attempt = 0; attempt <= _retryDelays.length; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(_retryDelays[attempt - 1]);
+        if (!mounted || gen != _gen) return;
+      }
+      // 每轮先让服务端去拉：warm 立刻返回，已缓存/正在拉时服务端不重复发起。
+      unawaited(
+        DanmuService.instance.warm(title: widget.title, ep: widget.ep),
+      );
+      final remote = await DanmuService.instance.load(
+        title: widget.title,
+        ep: widget.ep,
+        epName: widget.epName,
+      );
+      if (!mounted || gen != _gen) return;
+      final merged = <DanmuItem>[...(remote ?? const <DanmuItem>[]), ...local]
+        ..sort((a, b) => a.time.compareTo(b.time));
+      if (merged.length != _items.length) {
+        setState(() => _items = merged);
+        widget.onCount?.call(merged.length);
+      }
+      if (remote != null && remote.isNotEmpty) return;
+    }
+    // 三轮都空：直接不渲染，不显示「暂无弹幕」——这集可能只是上游还没拉到。
   }
 
   @override

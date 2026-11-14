@@ -1394,11 +1394,15 @@ class FsDanmuPanel extends StatelessWidget {
                     fontWeight: FontWeight.w600,
                     color: Fx.ink),
               ),
-              const SizedBox(width: 6),
-              Text(
-                count > 0 ? '$count 条' : '暂无弹幕',
-                style: const TextStyle(fontSize: 10.5, color: Fx.sub),
-              ),
+              // 条数只在真的有弹幕时显示：拉取中（空结果还会退避重试）时
+              // 显示「暂无弹幕」会让用户以为这集没弹幕。
+              if (count > 0) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '$count 条',
+                  style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+                ),
+              ],
               const Spacer(),
               Switch(
                 value: enabled,

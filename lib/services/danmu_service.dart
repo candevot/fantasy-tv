@@ -2,41 +2,57 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-/// 弹幕数据层 —— 对接自建 danmu_api（弹弹play 兼容接口）。
+import '../api.dart';
+
+/// 弹幕数据层 —— 走主服务 `GET /api/danmu?title=<片名>&ep=<集>`。
 ///
-/// 服务端：http://47.96.0.112:9321
-///   搜索  GET /api/v2/search/episodes?anime=<剧名>&token=<token>
-///   弹幕  GET /api/v2/comment/<episodeId>?withRelated=true&format=json
+/// 服务端内部四级回退：本地片库 → 弹弹play（无凭证跳过）→ danmu-api → 空，
+/// 并把结果缓存 30 分钟（空结果 5 分钟）。客户端不再自己拼 danmu_api 的
+/// search + comment 两步（旧实现在老机器上已经 404），只按 title + ep 要。
 ///
-/// 为什么不自己爬各平台：danmu_api 已经覆盖爱优腾芒哔咪人等 14 个平台，
-/// 而且输出弹弹play 标准格式，客户端只需实现一次解析。
+/// 冷启动的现实：danmu-api 冷搜一次 3~4 秒，而 /api/danmu 对外预算只有
+/// 1.2 秒 —— 所以「第一次问」经常拿到空数组。解决靠两边配合：
+///   · [warm]：详情页/播放页先让服务端在后台拉（立刻返回），点播放时缓存已热；
+///   · 播放页 [DanmuLayer] 对空结果按 1.5s / 4s / 8s 退避重试。
 class DanmuService {
   DanmuService._();
   static final DanmuService instance = DanmuService._();
 
-  /// 弹幕服务地址：走主服务的 /api/danmu/ 反代。
+  /// 弹幕接口：[Api.base] 形如 `http://host:8787/api` → `…/api/danmu`。
+  /// 用 getter 而不是常量：启动时 [Api.pickBase] 可能把地址切到另一台机器。
+  static String get host {
+    final base = Api.base.trim().replaceFirst(RegExp(r'/+$'), '');
+    return '$base/danmu';
+  }
+
+  /// 已取到的弹幕（30 分钟）。空结果不进缓存 —— 空可能是「服务端还在预热」。
+  final Map<String, List<DanmuItem>> _cache = {};
+  final Map<String, DateTime> _at = {};
+  static const Duration _ttl = Duration(minutes: 30);
+
+  static String _key(String title, int ep) => '$title|$ep';
+
+  /// 预热：请求服务端在后台把 title|ep 拉好写缓存，接口立刻返回 `warming:true`。
   ///
-  /// 直连 9321 走不通 —— 阿里云安全组只开了 8787。
-  /// 服务端把 /api/danmu/* 转到本机 danmu_api（见 index.js 前置拦截）。
-  static String host = 'http://47.96.0.112:8787/api/danmu';
+  /// 纯尽力而为 —— 失败、超时、页面已经关掉都不影响任何 UI，所以这里吞掉所有异常。
+  Future<void> warm({required String title, required int ep}) async {
+    final t = title.trim();
+    if (t.isEmpty || ep <= 0) return;
+    try {
+      final uri = Uri.parse(host)
+          .replace(queryParameters: {'warm': '1', 'title': t, 'ep': '$ep'});
+      await http.get(uri, headers: const {
+        'Accept': 'application/json'
+      }).timeout(const Duration(seconds: 6));
+    } catch (_) {
+      // 预热失败静默：真正取弹幕时会重试。
+    }
+  }
 
-  /// 服务端配置的访问 token（danmu_api 的 TOKEN 环境变量）。
-  static const String token = '87654321';
-
-  /// 按剧名搜到的分集列表（缓存 30 分钟）。
-  final Map<String, _SearchHit?> _searchCache = {};
-  final Map<String, DateTime> _searchAt = {};
-
-  /// 已取到的弹幕（按 episodeId 缓存 1 小时）。
-  final Map<int, List<DanmuItem>> _commentCache = {};
-  final Map<int, DateTime> _commentAt = {};
-
-  static const Duration _searchTtl = Duration(minutes: 30);
-  static const Duration _commentTtl = Duration(hours: 1);
-
-  /// 按剧名 + 集数搜弹幕。
+  /// 按剧名 + 集数取弹幕。
   ///
-  /// 返回 null 表示这个平台没有该剧的弹幕库；返回空列表表示有库但这集没弹幕。
+  /// 返回 `null` 表示请求失败（网络/服务异常，调用方可以重试）；
+  /// 返回空列表表示服务端明确说这一集没有（或还在预热）。
   Future<List<DanmuItem>?> load({
     required String title,
     required int ep,
@@ -44,95 +60,40 @@ class DanmuService {
   }) async {
     final t = title.trim();
     if (t.isEmpty) return null;
+    final key = _key(t, ep);
+    final at = _at[key];
+    if (at != null) {
+      if (DateTime.now().difference(at) < _ttl) {
+        final cached = _cache[key];
+        if (cached != null) return cached;
+      } else {
+        _cache.remove(key);
+        _at.remove(key);
+      }
+    }
     try {
-      final hit = await _search(t);
-      if (hit == null) return null;
-      final epId = hit.episodeIdFor(ep, epName);
-      if (epId == null) return const <DanmuItem>[];
-      return await _comments(epId);
+      final uri =
+          Uri.parse(host).replace(queryParameters: {'title': t, 'ep': '$ep'});
+      final res = await http.get(uri, headers: const {
+        'Accept': 'application/json'
+      }).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      final body = jsonDecode(utf8.decode(res.bodyBytes));
+      final list = body is Map ? body['data'] : null;
+      final out = <DanmuItem>[];
+      for (final c in (list is List ? list : const <dynamic>[])) {
+        final item = DanmuItem.fromJson(c);
+        if (item != null) out.add(item);
+      }
+      out.sort((a, b) => a.time.compareTo(b.time));
+      if (out.isNotEmpty) {
+        _cache[key] = out;
+        _at[key] = DateTime.now();
+      }
+      return out;
     } catch (_) {
       return null;
     }
-  }
-
-  Future<_SearchHit?> _search(String title) async {
-    final cached = _searchAt[title];
-    if (cached != null &&
-        DateTime.now().difference(cached) < _searchTtl &&
-        _searchCache.containsKey(title)) {
-      return _searchCache[title];
-    }
-    final uri = Uri.parse('$host/v2/search/episodes')
-        .replace(queryParameters: {'anime': title, 'token': token});
-    final res = await http.get(uri).timeout(const Duration(seconds: 12));
-    if (res.statusCode != 200) return null;
-    final body = jsonDecode(utf8.decode(res.bodyBytes));
-    final animes = (body is Map ? body['animes'] : null) as List?;
-    if (animes == null || animes.isEmpty) {
-      _searchCache[title] = null;
-      _searchAt[title] = DateTime.now();
-      return null;
-    }
-    // 取第一条（danmu_api 已按匹配度排好）
-    final a = Map<String, dynamic>.from(animes.first as Map);
-    final eps = <_SearchEp>[];
-    for (final e in (a['episodes'] as List? ?? const [])) {
-      final m = Map<String, dynamic>.from(e as Map);
-      eps.add(_SearchEp(
-        id: _asInt(m['episodeId']),
-        title: '${m['episodeTitle'] ?? ''}',
-      ));
-    }
-    final hit = _SearchHit(
-      title: '${a['animeTitle'] ?? title}',
-      episodes: eps,
-    );
-    _searchCache[title] = hit;
-    _searchAt[title] = DateTime.now();
-    return hit;
-  }
-
-  Future<List<DanmuItem>> _comments(int episodeId) async {
-    final at = _commentAt[episodeId];
-    if (at != null &&
-        DateTime.now().difference(at) < _commentTtl &&
-        _commentCache.containsKey(episodeId)) {
-      return _commentCache[episodeId]!;
-    }
-    final uri = Uri.parse('$host/v2/comment/$episodeId')
-        .replace(queryParameters: {'withRelated': 'true', 'format': 'json'});
-    final res = await http.get(uri).timeout(const Duration(seconds: 15));
-    if (res.statusCode != 200) return const <DanmuItem>[];
-    final body = jsonDecode(utf8.decode(res.bodyBytes));
-    final list = (body is Map ? body['comments'] : null) as List?;
-    final out = <DanmuItem>[];
-    for (final c in (list ?? const [])) {
-      final m = Map<String, dynamic>.from(c as Map);
-      final p = '${m['p'] ?? ''}';
-      if (p.isEmpty) continue;
-      final parts = p.split(',');
-      if (parts.length < 2) continue;
-      final time = double.tryParse(parts[0]) ?? 0;
-      final mode = int.tryParse(parts[1]) ?? 1;
-      final color = parts.length > 2 ? (int.tryParse(parts[2]) ?? 0xFFFFFF) : 0xFFFFFF;
-      final text = '${m['m'] ?? ''}'.trim();
-      if (text.isEmpty) continue;
-      out.add(DanmuItem(
-        time: Duration(milliseconds: (time * 1000).round()),
-        text: text,
-        mode: mode,
-        color: color,
-      ));
-    }
-    out.sort((a, b) => a.time.compareTo(b.time));
-    _commentCache[episodeId] = out;
-    _commentAt[episodeId] = DateTime.now();
-    return out;
-  }
-
-  static int _asInt(Object? v) {
-    if (v is int) return v;
-    return int.tryParse('$v') ?? 0;
   }
 }
 
@@ -145,6 +106,39 @@ class DanmuItem {
     this.color = 0xFFFFFF,
   });
 
+  /// 从服务端条目解析：`{t: 秒, text: '…', color: '#ffffff' | int, mode: 1}`。
+  ///
+  /// 四种来源（本地片库 / 弹弹play / danmu-api / 用户自建）字段类型不完全一致，
+  /// 单条解析失败就跳过这一条，不让整集弹幕挂掉。
+  static DanmuItem? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final text = '${raw['text'] ?? ''}'.trim();
+    if (text.isEmpty) return null;
+    final t = raw['t'];
+    final seconds = t is num ? t.toDouble() : (double.tryParse('$t') ?? 0);
+    final m = raw['mode'];
+    final mode = m is num ? m.toInt() : (int.tryParse('$m') ?? 1);
+    return DanmuItem(
+      time: Duration(milliseconds: (seconds * 1000).round()),
+      text: text,
+      mode: mode,
+      color: _parseColor(raw['color']),
+    );
+  }
+
+  /// 颜色：服务端可能给 `#ffffff` 字符串，也可能给 0xFFFFFF 整数。
+  static int _parseColor(Object? v) {
+    if (v is int) return v & 0xFFFFFF;
+    final s = '${v ?? ''}'.trim();
+    if (s.isEmpty) return 0xFFFFFF;
+    final hex = s.startsWith('#') ? s.substring(1) : s;
+    if (hex.length == 6) return int.tryParse(hex, radix: 16) ?? 0xFFFFFF;
+    if (hex.length == 8) {
+      return int.tryParse(hex.substring(2), radix: 16) ?? 0xFFFFFF;
+    }
+    return int.tryParse(s) ?? 0xFFFFFF;
+  }
+
   /// 出现时间（相对片头）。
   final Duration time;
 
@@ -155,34 +149,4 @@ class DanmuItem {
 
   /// RGB 整数（0xFFFFFF = 白）。
   final int color;
-}
-
-class _SearchEp {
-  const _SearchEp({required this.id, required this.title});
-  final int id;
-  final String title;
-}
-
-class _SearchHit {
-  const _SearchHit({required this.title, required this.episodes});
-  final String title;
-  final List<_SearchEp> episodes;
-
-  /// 按集号取 episodeId：优先按标题里的「第N集」匹配，退化为数组下标。
-  int? episodeIdFor(int ep, String epName) {
-    if (episodes.isEmpty) return null;
-    // 1) 标题里带「第N集」
-    for (final e in episodes) {
-      final m = RegExp(r'第\s*(\d+)\s*集').firstMatch(e.title);
-      if (m != null && int.tryParse(m.group(1)!) == ep) return e.id;
-    }
-    // 2) 标题里带裸数字（「xxx 02」这种）
-    for (final e in episodes) {
-      final m = RegExp(r'(?:^|\s)(\d{1,4})(?:\s|$)').firstMatch(e.title);
-      if (m != null && int.tryParse(m.group(1)!) == ep) return e.id;
-    }
-    // 3) 退化为下标
-    if (ep >= 1 && ep <= episodes.length) return episodes[ep - 1].id;
-    return episodes.first.id;
-  }
 }
