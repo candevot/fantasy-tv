@@ -1262,8 +1262,26 @@ class _DetailPageState extends State<DetailPage>
                         count: line.epNames.isNotEmpty
                             ? line.epNames.length
                             : total,
-                        // 电影不显示「共 N 集」，标「正片」
-                        subtitle: _isMovie ? '正片' : null,
+                        // LINE_SUBTITLE_DYNAMIC（2026-11-14）：副标题按**这条线路
+                        // 自己**的集数决定，不再用全局 _isMovie 写死。
+                        //
+                        // 之前 41 集的剧，每条线路卡片都挂「正片」，明明是多集。
+                        // 现在：
+                        //   · 该线路 ≤ 3 集 → 显示它自己的版本名（正片/粤语/国语）
+                        //   · 该线路 > 3 集 → 显示「共 N 集」
+                        subtitle: (() {
+                          final names = line.epNames;
+                          final n = names.isNotEmpty
+                              ? names.length
+                              : (line.episodeCount > 0
+                                  ? line.episodeCount
+                                  : total);
+                          if (n > 0 && n <= 3 && names.isNotEmpty) {
+                            final first = names.first.trim();
+                            if (first.isNotEmpty) return first;
+                          }
+                          return n > 0 ? '共 $n 集' : null;
+                        })(),
                         active: line.id == _lineId,
                         // degraded 线路照常展示并可点，只在卡片名后补灰色小字。
                         unstable: line.degraded,
