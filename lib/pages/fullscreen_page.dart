@@ -2125,7 +2125,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         dim: _frozenFrame == null,
       );
     }
-    if (!v.isBuffering) return const SizedBox.shrink();
+    // 已在播放（声音出来、位置在走）就不显示缓冲层
+    if (!v.isBuffering || v.isPlaying) return const SizedBox.shrink();
     final percent = v.bufferingPercent;
     // BUFFER_FULL（2026-11-14）：缓存已满就别再挂「缓冲中 100%」，
     // 截图里画面正常在播、中间却一直顶着一个 100% 圆环就是这个。

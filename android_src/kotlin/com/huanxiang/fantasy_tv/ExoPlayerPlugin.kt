@@ -154,7 +154,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             .setBackBuffer(30_000, true)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
-        player = ExoPlayer.Builder(context)
+        // DECODER_FALLBACK（2026-11-14，用户报「声音出来了、画面还是黑屏卡缓冲」）：
+        // 画面解不出来但音频正常，是视频轨硬解失败 —— 4K/HEVC 在某些机型上
+        // MediaCodec 不支持或初始化失败，播放器不断重试，状态一直卡在
+        // BUFFERING，Dart 侧就永远显示「缓冲中」。
+        // 打开解码器回退后，硬解失败会自动切到软解，画面才能出来。
+        val renderers = androidx.media3.exoplayer.DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+        player = ExoPlayer.Builder(context, renderers)
             .setLoadControl(loadControl)
             .build()
         // ALIGN_EXO（2026-11-14，参考 FongMi/TV 的 ExoUtil.buildPlayer）：

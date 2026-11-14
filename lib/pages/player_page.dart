@@ -1659,7 +1659,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   animation: c,
                   builder: (context, _) {
                     final v = c.value;
-                    if (!v.isInitialized || !v.isBuffering) {
+                    // 真的在播就别挂「缓冲中」：音频已经出来、位置在走，
+                    // 说明管线是通的，此时盖一层缓冲圆环只是骗用户。
+                    if (!v.isInitialized || !v.isBuffering || v.isPlaying) {
                       return const SizedBox.shrink();
                     }
                     final percent = v.bufferingPercent;
