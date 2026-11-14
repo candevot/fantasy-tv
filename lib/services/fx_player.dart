@@ -475,6 +475,17 @@ class FxPlayer implements Listenable {
     if (_disposed) {
       return Future<void>.error(const FxPlayerException('播放器已释放'));
     }
+    // OPEN_RESET（2026-11-14）：每次打开都先把上一次的救援状态清干净。
+    //
+    // 用户报「默认线路加载不出来，手动切其它线路就开始卡」。根因是
+    // 上一次 open 失败时 _rescueHold / _rescueBusy 停在 true：
+    //   · play() 里 `if (_rescueHold) return` 直接吞掉起播
+    //   · 救援链看到 _rescueBusy 也直接返回
+    // 于是之后无论手动还是自动切线路，都只是「一直加载」。
+    _rescueHold = false;
+    _rescueBusy = false;
+    _rescueRounds = 0;
+    _lastHandledError = '';
     // 记下服务端声明的类型，供 _openMedia / 救援重开使用。
     _typeHint = isHls;
     final key = _openKey(url, headers, direct);

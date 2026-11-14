@@ -259,6 +259,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } else {
                 ProgressiveMediaSource.Factory(cachedFactory).createMediaSource(item)
             }
+            // OPEN_RESET（2026-11-14）：换源前先把上一个源停掉并清空。
+            // 之前某条线路失败后，播放器会停在错误/未就绪状态，
+            // 之后无论手动还是自动切线路，setMediaSource 都会被旧状态拖住，
+            // 表现就是「一旦某条线路失败，切什么都一直加载」。
+            player!!.stop()
+            player!!.clearMediaItems()
+            lastError = null
             player!!.setMediaSource(source)
             player!!.prepare()
             result.success(true)
