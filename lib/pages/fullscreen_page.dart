@@ -18,6 +18,7 @@ import '../widgets/cast_sheet.dart';
 import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
+import '../widgets/playback_diagnostics_panel.dart';
 import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
 import 'history_page.dart' show FxStore;
@@ -309,6 +310,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   String? _seekHint;
   Timer? _seekHintTimer;
 
+  // 播放诊断浮层（默认关，持久化在 AppSettings.playbackDiagnostics）。
+  //
+  // DIAG（2026-11-15）：用户要自己看「起播慢在哪一段」。入口做成顶栏分辨率
+  // 胶囊**长按**：不新增按钮、不挡正常点击，关掉之后画面上什么都没有。
+  bool _showDiagnostics = false;
+
   bool _exiting = false;
 
   bool get _panelOpen => _showSpeed || _showSleep || _showJump;
@@ -472,6 +479,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     // 持久化的分钟定时：退出全屏/杀进程再进来按剩余时间续上。
     unawaited(_restoreSleepTimer());
+    // 诊断浮层开关：上次开着就继续开着，用户不用每次重进再长按。
+    unawaited(_restoreDiagnostics());
     _startHideTimer();
   }
 
@@ -1755,9 +1764,34 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (picked != null) await _switchEp(picked);
   }
 
+  /// 读持久化的诊断开关（默认关；AppSettings 没 ready 时保持当前值）。
+  Future<void> _restoreDiagnostics() async {
+    final settings = AppSettings.instance;
+    await settings.init();
+    if (!mounted) return;
+    if (settings.playbackDiagnostics == _showDiagnostics) return;
+    setState(() => _showDiagnostics = settings.playbackDiagnostics);
+  }
+
+  /// 切换诊断浮层：长按顶栏分辨率胶囊 / 播放设置里的「播放诊断」行。
+  ///
+  /// 改成这个值之后写回 AppSettings，两个页面（竖屏 / 全屏）读同一份。
+  void _toggleDiagnostics() {
+    _setDiagnostics(!_showDiagnostics);
+    _wake();
+  }
+
+  void _setDiagnostics(bool value) {
+    if (_showDiagnostics == value) return;
+    setState(() => _showDiagnostics = value);
+    unawaited(AppSettings.instance.setPlaybackDiagnostics(value));
+  }
+
   Future<void> _openMorePanel() async {
     _hideTimer?.cancel();
     if (mounted) setState(() => _controls = true);
+    // 面板开着的时候用户可能改了「播放诊断」：关掉面板后按实际情况补一句提示。
+    final diagnosticsBefore = _showDiagnostics;
     await showFxMorePanel(
       context,
       loopMode: _loopMode,
@@ -1780,8 +1814,20 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       onSpeed: _isLive ? null : _toggleSpeed,
       onBackground: () {},
       onFeedback: () {},
+      // 播放诊断：面板里点一下即时翻转，关掉面板后补一句 SnackBar
+      // （面板本身是模态层，提示放它下面会被挡住）。
+      diagnosticsOn: _showDiagnostics,
+      onDiagnosticsChanged: _setDiagnostics,
     );
     if (!mounted) return;
+    if (diagnosticsBefore != _showDiagnostics) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_showDiagnostics ? '播放诊断已开启' : '播放诊断已关闭'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
     _wake();
   }
 
@@ -2286,6 +2332,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               onMore: () => unawaited(_openMorePanel()),
               // 手动转屏：点过之后本次播放内不再自动跟着分辨率切。
               onRotate: _toggleOrientationByUser,
+              // 诊断浮层入口：长按分辨率胶囊（点按语义不变，不新增按钮）。
+              onLongPressQuality: _toggleDiagnostics,
             ),
           ),
         ),
@@ -2380,6 +2428,25 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             ],
           ),
         ),
+        // 播放诊断浮层：顶栏下方右上角一小块，只在用户打开时存在。
+        //
+        // IgnorePointer 必须包住：浮层压在全屏手势层之上，不忽略指针的话
+        // 「双击暂停 / 左右滑调进度」在卡片范围内会失效。放在栈尾是为了让
+        // 它在控件层之上也不会被加载层盖住（诊断往往正是起播阶段要看）。
+        if (_showDiagnostics && c != null)
+          Positioned(
+            top: 8 + safe.top + 46,
+            right: 16 + safe.right,
+            child: IgnorePointer(
+              child: AnimatedBuilder(
+                // 跟着播放器重建：首帧耗时 / 缓冲 / 丢帧都是它通知的。
+                animation: c,
+                builder: (context, _) => PlaybackDiagnosticsPanel(
+                  data: PlaybackDiagnosticsData.fromPlayer(c.value),
+                ),
+              ),
+            ),
+          ),
       ],
     );
   }

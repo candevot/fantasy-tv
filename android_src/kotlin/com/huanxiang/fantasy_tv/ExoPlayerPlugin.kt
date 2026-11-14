@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
+import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -25,7 +26,10 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
@@ -295,6 +299,32 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     @Volatile
     private var firstFrameRendered = false
 
+    // ------------------------------------------------ 播放诊断（DIAGNOSTICS 2026-11-15）
+
+    /**
+     * 累计丢帧数（[AnalyticsListener.onDroppedVideoFrames]）。
+     *
+     * 用户「看着卡」和「解码跟不上」是两件事：前者是缓冲，后者是丢帧。
+     * 诊断浮层把丢帧数摆出来，才能区分「网慢」和「机器解码不动」。
+     */
+    @Volatile
+    private var droppedFrameCount = 0L
+
+    /**
+     * 播放器自己那次「清单加载完成」花了多少毫秒（-1 = 还没到）。
+     *
+     * 和 [FxTiming] 的 `manifest_merged` 是两个不同的点：
+     *   · manifest_merged = 我们（代理 / 预归并）已经拿到清单；
+     *   · 这个值 = media3 解析完清单、可以往外选分片的耗时。
+     * 两个都摆出来，才能看出「是我们慢还是播放器解析慢」。
+     */
+    @Volatile
+    private var playerManifestLoadMs = -1L
+
+    /** 当前 open 是否走了本地清单代理（诊断 / 日志用）。 */
+    @Volatile
+    private var manifestProxied = false
+
     fun attach(messenger: BinaryMessenger) {
         MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler(this)
         EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(this)
@@ -392,7 +422,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 val isHls = call.argument<Boolean>("isHls") ?: true
                 // RESUME_START：续播 / 跟进度打开时带起始位置，prepare 之前就落位。
                 val startMs = call.argument<Number>("startPositionMs")?.toLong() ?: 0L
-                open(url, headers, isHls, startMs, result)
+                // TIMING_PROBE（2026-11-15）：Dart 解析播放地址（hxparse 302 /
+                // 换签名）花掉的时间。它发生在 open 之前，但属于用户等待，
+                // 必须并进同一条时间线，否则首帧那 1.x 秒会被低估。
+                val resolveMs = call.argument<Number>("resolveMs")?.toLong() ?: 0L
+                open(url, headers, isHls, startMs, result, resolveMs = resolveMs)
             }
             "play" -> { player?.play(); result.success(true) }
             "pause" -> { player?.pause(); result.success(true) }
@@ -516,6 +550,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // 对齐到最近关键帧是各视频 App 的常规做法，拖动手感快很多。
         player!!.setSeekParameters(SeekParameters.CLOSEST_SYNC)
         bindListener(player!!)
+        bindAnalytics(player!!)
         // PRELOADER（改动 ②）：线程池在这里随播放器一起建好 ——
         // 「预取随播放器创建即启动」，拿到源地址（open）后立刻开始灌分片，
         // 不等 prepare 完成、不等用户点播放。
@@ -745,6 +780,51 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         player?.volume = volumeBeforeSeekGate
     }
 
+    /**
+     * 播放诊断用的分析器（DIAGNOSTICS 2026-11-15）。
+     *
+     * 只**读**播放器状态，不改变任何播放行为：
+     *   · 丢帧数 → 区分「网慢」和「解码跟不上」；
+     *   · 播放器自己那次清单加载的耗时 → 和代理的 manifest_merged 对比；
+     *   · 音频轨真正起来的时刻 → 打 `audio_started` 计时点
+     *     （有些片子首帧和声音不是一起到的）。
+     */
+    private fun bindAnalytics(p: ExoPlayer) {
+        p.addAnalyticsListener(object : AnalyticsListener {
+            override fun onDroppedVideoFrames(
+                eventTime: AnalyticsListener.EventTime,
+                droppedFrames: Int,
+                elapsedMs: Long,
+            ) {
+                if (droppedFrames > 0) droppedFrameCount += droppedFrames
+            }
+
+            override fun onLoadCompleted(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+            ) {
+                if (mediaLoadData.dataType != C.DATA_TYPE_MANIFEST) return
+                if (playerManifestLoadMs >= 0) return
+                playerManifestLoadMs = loadEventInfo.loadDurationMs
+                FxTiming.mark("manifest_loaded")
+                Log.i(
+                    LOG_TAG,
+                    "MANIFEST_LOADED ${loadEventInfo.loadDurationMs}ms（播放器侧清单加载完成）",
+                )
+            }
+
+            override fun onAudioInputFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                format: androidx.media3.common.Format,
+                decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+            ) {
+                // 音频轨配置完成 = 用户第一次听到声音的时刻。
+                FxTiming.mark("audio_started")
+            }
+        })
+    }
+
     private fun bindListener(p: ExoPlayer) {
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
@@ -772,11 +852,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                     retryReason = ""
                 }
                 Log.i(LOG_TAG, "FIRST_FRAME 已渲染，pos=${player?.currentPosition}ms")
+                // TIMING_PROBE：首帧 = 用户真正「看到画面」的时刻，起播计时到这里收尾。
+                FxTiming.mark("first_frame")
                 // CONNECTS（TRANSPORT_OKHTTP，2026-11-15）：起播这一段一共建了
                 // 几条连接（EventListener.connectStart 计数）。同一个源、同一个
                 // 连接池，改造后应该是 1 —— 清单一条，variant 和后面的分片全部
                 // 复用；改造前每次 302 换域都要重新 TCP + TLS，这个数会往上爬。
                 Log.i(LOG_TAG, "connects=${PlayerHttp.connectCount()}（起播连接建立次数）")
+                FxTiming.finish(PlayerHttp.connectCount())
                 // 首帧到了：拖动闸放开（对方确证的结束条件之一）。
                 endSeekAudioGate()
                 // PRELOAD_AFTER_FIRST_FRAME（ALIGN_FONGMI）：首帧上屏之后
@@ -816,7 +899,16 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 「真的失败了」，以及是否该去重新 resolve 播放地址。
             "retryAttempt" to retryCount,
             "retryReason" to retryReason,
-            "retryResolveToken" to retryResolveToken
+            "retryResolveToken" to retryResolveToken,
+            "connectCount" to 0,
+            "bufferedAheadMs" to 0L,
+            "droppedFrames" to 0L,
+            "bitrateKbps" to 0,
+            "measuredKbps" to 0,
+            "playerManifestMs" to -1L,
+            "manifestProxied" to false,
+            "timing" to FxTiming.summary(),
+            "transportInfo" to "",
             )
         }
         // 画面尺寸：FxPlayer 的 value.width/height 和分辨率胶囊都靠它，
@@ -858,7 +950,21 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 播放地址（地址过期这条只有 Dart 能修）。
             "retryAttempt" to retryCount,
             "retryReason" to retryReason,
-            "retryResolveToken" to retryResolveToken
+            "retryResolveToken" to retryResolveToken,
+            // DIAGNOSTICS（2026-11-15）：播放诊断浮层的全部数据来源。
+            // 都是「这一段（本次 open）」的统计，换源会归零。
+            "connectCount" to PlayerHttp.connectCount(),
+            "bufferedAheadMs" to (p.bufferedPosition - p.currentPosition).coerceAtLeast(0L),
+            "droppedFrames" to droppedFrameCount,
+            // Format.bitrate 单位 bit/s，未声明时是 C.RATE_UNSET_INT（-1）。
+            "bitrateKbps" to ((fmt?.bitrate ?: -1) / 1000).coerceAtLeast(0),
+            "measuredKbps" to PlayerHttp.measuredKbps(),
+            "playerManifestMs" to playerManifestLoadMs,
+            "manifestProxied" to manifestProxied,
+            // TIMING_PROBE：分段耗时（相对「用户点播放」）。
+            "timing" to FxTiming.summary(),
+            // 传输层诊断摘要：DNS 命中 / 本地清单代理统计，方便用户截图反馈。
+            "transportInfo" to (FxDns.stats() + " " + ManifestProxy.stats()),
         )
     }
 
@@ -875,26 +981,53 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         /// true = 这次 open 来自原生分级重试（改动 ⑤）：不取消下一集预载、
         /// 也不重置重试计数，其余流程与用户触发的 open 完全一致。
         fromRetry: Boolean = false,
+        /// Dart 侧解析播放地址的耗时（TIMING_PROBE，2026-11-15）。
+        resolveMs: Long = 0L,
     ) {
         ensurePlayer()
         lastError = null
-        // TRANSPORT_OKHTTP + MANIFEST_MERGE（2026-11-15）：HLS 的 http(s) 源先在
-        // 独立线程上做一次「清单预归并」（master → 第一个 variant）。
-        //
-        // 为什么值得多一次请求：master 本身不可播，播放器必须先拉 master、解析、
-        // 再拉 variant，两跳串行。这一步用**同一个 OkHttpClient** 提前把 DNS /
-        // TCP / TLS 付掉，播放器接手 variant 时连接已经在池子里，直接 GET。
-        // 失败 / 超时（800ms）/ 不是 master：原样播，行为与改造前一致。
-        //
-        // 归并在 FxManifest 线程跑完再 post 回主线程 —— 播放器 API（stop /
-        // setMediaSource / prepare）只能在主线程调，但网络不能在主线程等。
+        // TIMING_PROBE：开一条新时间线。t=0 = 用户点播放（含 Dart 解析段）。
+        FxTiming.begin(url, resolveMs)
+        // CONNECTS：清零连接计数 / 吞吐统计，首帧回来时打 connects=N。
+        PlayerHttp.resetConnectCount()
+        // 播放诊断里「解析」段的落点：Dart 侧已经算好，这里只记日志。
+        if (resolveMs > 0) {
+            Log.i(LOG_TAG, "TIMING resolve=${resolveMs}ms（hxparse 302 → 最终地址）")
+        }
         val generation = ++openGeneration
         if (!isHls || !PlayerHttp.isHttpUrl(url)) {
             // 本地文件 / 非 HLS：没有清单可归并，直接开。
+            manifestProxied = false
             logTransport(url, url, headers, "raw")
             startPlayback(url, url, headers, isHls, startPositionMs, result, fromRetry = fromRetry)
             return
         }
+        // MANIFEST_PROXY（2026-11-15）：**起播前置动作清零**。
+        //
+        // 旧路径是「先在 FxManifest 线程上把 master 抓回来（最多 800ms），
+        // 拿到 variant 再 prepare」—— 用户在起播最前面白等一段串行网络。
+        // 现在交给本地清单代理：proxyUrl() 只绑端口 + 建会话（微秒级），
+        // 清单在代理自己的线程里抓，播放器随后 GET 127.0.0.1 就能命中。
+        // 抓不到时代理回 302 到原始地址，播放行为与改造前完全一致。
+        val proxied = ManifestProxy.proxyUrl(url, headers)
+        if (proxied.isNotEmpty() && PlayerHttp.isPlayableUrl(proxied)) {
+            manifestProxied = true
+            ManifestProxy.prefetch(url, headers)
+            logTransport(url, proxied, headers, "proxy")
+            startPlayback(
+                proxied,
+                url,
+                headers,
+                isHls,
+                startPositionMs,
+                result,
+                fromRetry = fromRetry,
+                // 请求头按上游地址推导：Referer 不能变成 127.0.0.1。
+                headerUrl = url,
+            )
+            return
+        }
+        manifestProxied = false
         try {
             manifestQueue.execute {
                 // 归并对调用方的承诺是「不抛异常、永远返回地址」；这里再兜一层，
@@ -908,6 +1041,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                     Log.w(LOG_TAG, "清单预归并异常 ${error.javaClass.simpleName}，用原始地址")
                     url
                 }
+                // TIMING_PROBE：清单就绪（这条是代理不可用时的兜底路径）。
+                FxTiming.mark("manifest_merged")
                 mainHandler.post {
                     if (generation != openGeneration) {
                         // 期间已经开了别的地址（换线路 / 换集）：这次结果作废。
@@ -965,6 +1100,12 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         /// true = 这次 open 来自原生分级重试（改动 ⑤）：不取消下一集预载、
         /// 也不重置重试计数，其余流程与用户触发的 open 完全一致。
         fromRetry: Boolean = false,
+        /// 请求头按哪个地址推导（Referer 取该站点根）。
+        ///
+        /// MANIFEST_PROXY：走本地清单代理时，交给播放器的是
+        /// `127.0.0.1:PORT/m3u8?…`，但 Referer **必须**还是上游站点的 ——
+        /// 否则带防盗链的源直接 403。所以这里单独一个参数。
+        headerUrl: String = playUrl,
     ) {
         ensurePlayer()
         lastError = null
@@ -996,7 +1137,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             //
             // 也不再有 setAllowCrossProtocolRedirects / setConnectTimeoutMs /
             // setReadTimeoutMs —— 这三项在 OkHttp 里都是 client 级配置。
-            val httpFactory = PlayerHttp.httpFactory(playUrl, headers)
+            val httpFactory = PlayerHttp.httpFactory(playUrl, headers, headerUrl)
 
             // 本地文件（离线播放页）走 DefaultDataSource：它能识别 file:// 和
             // 绝对路径，直接套 HttpDataSource 会失败。
@@ -1040,6 +1181,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 也不解绑渲染器和纹理视图 —— 只按壳的 switchEpisode 同款序列
             // 换源。细节见 [switchToSource]。
             switchToSource(source, startPositionMs, playWhenReady = fromRetry)
+            // TIMING_PROBE：prepare 已经下发给播放器（这一刻起等首帧）。
+            FxTiming.mark("prepare_called")
             // RESUME（2026-11-14）：真机 logcat -s FxExo 核对续播是否真的带上了。
             // 「首个分片索引 N」由 SegmentPreloader.start 打出，两条一起看。
             Log.i(
@@ -1118,6 +1261,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         lastError = null
         // FIRST_FRAME：换源 / 切集后旧画面作废，加载层重新压住。
         firstFrameRendered = false
+        // DIAGNOSTICS：丢帧 / 清单耗时是「这一段」的统计，换源就归零。
+        droppedFrameCount = 0
+        playerManifestLoadMs = -1
         p.setMediaSource(source)
         // RESUME_FIRST_SEG（2026-11-14）：带续播位置打开。
         //

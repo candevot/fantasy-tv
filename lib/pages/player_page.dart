@@ -17,6 +17,7 @@ import '../services/video_marks.dart';
 import '../theme.dart';
 import '../widgets/cast_sheet.dart';
 import '../widgets/fs_panels.dart';
+import '../widgets/playback_diagnostics_panel.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_more_panel.dart';
 import '../widgets/player_theme.dart';
@@ -148,6 +149,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   bool _controls = true;
   Timer? _hideTimer;
+
+  /// 播放诊断浮层（默认关，持久化在 AppSettings.playbackDiagnostics）。
+  ///
+  /// DIAG（2026-11-15）：竖屏内嵌播放器里长按「片名」那一行切换；
+  /// 只是展示，不参与播放逻辑，也不拦手势（浮层外层包 IgnorePointer）。
+  bool _showDiagnostics = false;
 
   /// 正在切换线路（防止重复点击并发 open）。
   bool _switchingLine = false;
@@ -347,6 +354,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _requestEp = widget.ep;
     _requestLine = widget.line;
     WidgetsBinding.instance.addObserver(this);
+    // 诊断浮层开关：上次开着就继续开着（两个播放页读同一份设置）。
+    unawaited(_restoreDiagnostics());
     _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       // 全屏期间由全屏页保存，避免把全屏切换后的位置记到旧集。
       if (!mounted || _fullscreenActive) return;
@@ -1869,6 +1878,25 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             // 控件层压在 loading / 缓冲之上：切集 8s 窗口里也能退出全屏。
             // 只按控件显隐禁用指针，不因 loading 整层失效。
             if (_controls && !_error) _buildControls(c),
+            // 播放诊断浮层：播放器区域内右上角，只在用户打开时存在。
+            //
+            // 放在栈尾：起播阶段正要看它，不能被加载层盖住。
+            // IgnorePointer 包住：它是纯展示，不能吃掉单击显隐 / 双击暂停
+            // 这些画面手势（诊断层的存在不能改变任何播放交互）。
+            if (_showDiagnostics && c != null)
+              Positioned(
+                top: 44,
+                right: 8,
+                child: IgnorePointer(
+                  child: AnimatedBuilder(
+                    // 跟着播放器重建：首帧耗时 / 缓冲 / 丢帧都由它通知。
+                    animation: c,
+                    builder: (context, _) => PlaybackDiagnosticsPanel(
+                      data: PlaybackDiagnosticsData.fromPlayer(c.value),
+                    ),
+                  ),
+                ),
+              ),
             if (_error) _buildError(),
           ],
         ),
@@ -1993,6 +2021,31 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     widget.onSourceFailed?.call();
   }
 
+  /* ---------------------------------------------------------- 播放诊断浮层 */
+
+  /// 读持久化的诊断开关（默认关）。
+  Future<void> _restoreDiagnostics() async {
+    final settings = AppSettings.instance;
+    await settings.init();
+    if (!mounted) return;
+    if (settings.playbackDiagnostics == _showDiagnostics) return;
+    setState(() => _showDiagnostics = settings.playbackDiagnostics);
+  }
+
+  /// 给外层（[PlayerPage] 的片名行）用的开关：长按片名切换诊断浮层。
+  ///
+  /// 状态在播放器这一层（它有 controller / 有分段耗时），外层只管调一下。
+  void togglePlaybackDiagnostics() {
+    _setDiagnostics(!_showDiagnostics);
+  }
+
+  void _setDiagnostics(bool value) {
+    if (_showDiagnostics == value) return;
+    setState(() => _showDiagnostics = value);
+    // 写回设置：exit 再进、竖屏 ↔ 全屏都保持用户的选择。
+    unawaited(AppSettings.instance.setPlaybackDiagnostics(value));
+  }
+
   /* ---------------------------------------------------------- 播放设置面板 */
 
   /// 竖屏顶栏「⋯」：与全屏共用同一个「播放设置」面板。
@@ -2000,6 +2053,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Future<void> _openMorePanel() async {
     _hideTimer?.cancel();
     if (mounted) setState(() => _controls = true);
+    // 面板里可能改了「播放诊断」：关掉面板后按实际情况补一句提示
+    // （SnackBar 放面板下面会被模态层挡住）。
+    final diagnosticsBefore = _showDiagnostics;
     await showFxMorePanel(
       context,
       loopMode: _loopMode,
@@ -2011,8 +2067,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       onSpeed: () => unawaited(_openSpeedPicker()),
       onBackground: () {},
       onFeedback: () {},
+      diagnosticsOn: _showDiagnostics,
+      onDiagnosticsChanged: _setDiagnostics,
     );
     if (!mounted) return;
+    if (diagnosticsBefore != _showDiagnostics) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(_showDiagnostics ? '播放诊断已开启' : '播放诊断已关闭'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
     _showControls();
   }
 
@@ -2361,6 +2427,13 @@ class _PlayerPageState extends State<PlayerPage> {
   String? _error;
   late int _ep;
 
+  /// 内嵌播放器的句柄：片名行长按要切它的诊断浮层。
+  ///
+  /// 为什么用 GlobalKey：诊断数据（分段耗时 / 丢帧 / 缓冲）全在
+  /// [PlayerViewState] 里，页面这一层没有播放器，只能通过它转一手 ——
+  /// 比把 controller 提到页面再往下传改动小得多。
+  final GlobalKey<PlayerViewState> _playerKey = GlobalKey<PlayerViewState>();
+
   @override
   void initState() {
     super.initState();
@@ -2436,6 +2509,7 @@ class _PlayerPageState extends State<PlayerPage> {
             AspectRatio(
               aspectRatio: 16 / 9,
               child: PlayerView(
+                key: _playerKey,
                 videoId: widget.videoId,
                 ep: _ep,
                 line: widget.line,
@@ -2474,20 +2548,35 @@ class _PlayerPageState extends State<PlayerPage> {
                 child: ListView(
                   padding: const EdgeInsets.fromLTRB(16, 14, 16, 30),
                   children: [
-                    Text(
-                      _detail!.title,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 5),
-                    Text(
-                      _metaLine(),
-                      style: const TextStyle(
-                        color: Colors.white54,
-                        fontSize: 11,
+                    // 片名 + 元信息整行可长按：切换播放诊断浮层。
+                    //
+                    // 为什么挂这里：竖屏画面里没有空位再加按钮，而「片名」
+                    // 是用户本来就会看的位置；长按不抢点击语义（这一行本来
+                    // 也没有点击行为）。
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onLongPress: () =>
+                          _playerKey.currentState?.togglePlaybackDiagnostics(),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _detail!.title,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            _metaLine(),
+                            style: const TextStyle(
+                              color: Colors.white54,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                     const SizedBox(height: 14),

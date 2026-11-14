@@ -142,6 +142,11 @@ class ExoPlayerEngine {
     /// 起始播放位置（毫秒）：原生在 `prepare()` 之前 seekTo，
     /// ExoPlayer 直接从目标分片开始选片，不先请求第 0 片。
     int startPositionMs = 0,
+    /// Dart 侧「解析播放地址」花掉的毫秒数（hxparse 302 → 最终地址）。
+    ///
+    /// 为什么由 Dart 传进来：这一步发生在 `open` 之前，原生根本看不到，
+    /// 不并进原生时间线的话界面上的「解析 + 首帧」永远对不上「起播总」。
+    int resolveMs = 0,
   }) async {
     if (_disposed || !isSupported) return false;
     _error = null;
@@ -151,6 +156,8 @@ class ExoPlayerEngine {
         'headers': headers,
         'isHls': isHls,
         'startPositionMs': startPositionMs < 0 ? 0 : startPositionMs,
+        // 负数按 0 处理：原生那边把它当「本段耗时」直接累加进时间线。
+        'resolveMs': resolveMs < 0 ? 0 : resolveMs,
       });
       return r ?? false;
     } on PlatformException catch (e) {
@@ -219,6 +226,88 @@ class ExoPlayerEngine {
   }
 }
 
+/// 一次起播的分段耗时（全部是**毫秒**）。
+///
+/// 计时口径：**从「用户点播放」算起的累计值**，不是分段增量 ——
+/// 「清单 240ms」表示「到清单就绪为止一共等了 240ms」，其中前 180ms 是
+/// Dart 侧解析地址（[resolveMs]）。这样和壳（OK影视/FongMi）报的
+/// 「首帧 1 秒」是同一个口径，可以直接比。
+///
+/// 为什么单独一个类：原生把这条时间线当成一个扁平 map 推上来
+/// （`snapshot()['timing']`），Dart 侧到处传 map 容易读错 key，
+/// 而且界面只想拿「哪一段慢」。这里解析一次，之后全是强类型字段。
+///
+/// -1 = 这一步还没到（原生约定），0 是合法值（真的只用 0ms）。
+@immutable
+class PlaybackTiming {
+  const PlaybackTiming({
+    this.session = 0,
+    this.resolveMs = -1,
+    this.manifestMs = -1,
+    this.prepareMs = -1,
+    this.firstFrameMs = -1,
+    this.audioMs = -1,
+    this.totalMs = -1,
+  });
+
+  /// 空快照：还没 open 过，所有分段都是「未到」。
+  const PlaybackTiming.empty() : this(session: 0);
+
+  /// open 序号：换集 / 换线路会 +1，界面据此判断时间线换了一轮。
+  final int session;
+
+  /// Dart 侧解析（hxparse 302 → 最终地址）耗时。
+  final int resolveMs;
+
+  /// 到清单就绪为止的累计耗时（含 [resolveMs]）。
+  final int manifestMs;
+
+  /// 到 `prepare()` 下发为止的累计耗时（含 [resolveMs]）。
+  final int prepareMs;
+
+  /// 到首帧真正渲染上屏为止的累计耗时（含 [resolveMs]）—— 这就是用户
+/// 感知的「起播多久出画面」。
+  final int firstFrameMs;
+
+  /// 到音频轨起来为止的累计耗时（含 [resolveMs]）。
+  final int audioMs;
+
+  /// 起播总耗时：首帧到了 = [firstFrameMs]；没到 = 现在的累计值（会一直涨）。
+  final int totalMs;
+
+  /// 首帧是否已经到了（到了才有意义拿它当「起播快慢」的判据）。
+  bool get hasFirstFrame => firstFrameMs >= 0;
+
+  /// 解析段 + 首帧段之和；原生给的 totalMs 缺失时用这个兜底。
+  int get incrementalTotalMs {
+    final resolve = resolveMs > 0 ? resolveMs : 0;
+    final frame = firstFrameMs > 0 ? firstFrameMs : 0;
+    return resolve + frame;
+  }
+
+  factory PlaybackTiming.fromMap(Map<String, dynamic>? m) {
+    if (m == null) return const PlaybackTiming.empty();
+    // 全部走 `as num?`：原生可能给 Int / Long，也可能这一版还没加这个 key。
+    int read(String key) => (m[key] as num?)?.toInt() ?? -1;
+    return PlaybackTiming(
+      session: (m['session'] as num?)?.toInt() ?? 0,
+      resolveMs: read('resolveMs'),
+      manifestMs: read('manifestMs'),
+      prepareMs: read('prepareMs'),
+      firstFrameMs: read('firstFrameMs'),
+      audioMs: read('audioMs'),
+      totalMs: read('totalMs'),
+    );
+  }
+
+  /// 只留最关键的几段，别让日志刷屏。
+  @override
+  String toString() =>
+      'PlaybackTiming(s$session resolve=$resolveMs manifest=$manifestMs '
+      'prepare=$prepareMs firstFrame=$firstFrameMs audio=$audioMs '
+      'total=$totalMs)';
+}
+
 /// 内核上报的播放状态快照。
 @immutable
 class ExoPlayerState {
@@ -238,6 +327,12 @@ class ExoPlayerState {
     this.retryAttempt = 0,
     this.retryReason = '',
     this.retryResolveToken = 0,
+    this.timing = const PlaybackTiming.empty(),
+    this.connectCount = 0,
+    this.bufferedAhead = Duration.zero,
+    this.droppedFrames = 0,
+    this.bitrateKbps = 0,
+    this.measuredKbps = 0,
   });
 
   final Duration position;
@@ -293,12 +388,42 @@ class ExoPlayerState {
   /// 会把它 +1；Dart 侧看到变化就 refreshPlay 并把新地址交给原生。
   final int retryResolveToken;
 
+  /// 本次 open 的分段耗时时间线（见 [PlaybackTiming]）。
+  ///
+  /// DIAG（2026-11-15）：用户报「起播比影视壳慢」，只靠感觉猜是哪一段慢
+  /// 没有意义 —— 解析、清单、首帧各自花了多少，原生都算好了推上来，
+  /// 这里原样带着，界面按需展示。
+  final PlaybackTiming timing;
+
+  /// 起播至今 OkHttp `connectStart` 的次数：越接近 1 说明连接池复用越好。
+  final int connectCount;
+
+  /// 距播放位置还有多少内容（`bufferedPosition - currentPosition`，>=0）。
+  final Duration bufferedAhead;
+
+  /// 累计丢帧。
+  final int droppedFrames;
+
+  /// 视频轨道声明的码率（kbps）；拿不到为 0。
+  final int bitrateKbps;
+
+  /// OkHttp 实测吞吐（kbps）；0 = 还没测到。
+  final int measuredKbps;
+
   factory ExoPlayerState.fromMap(Map<String, dynamic> m) {
     Duration d(String k) =>
         Duration(milliseconds: (m[k] as num?)?.toInt() ?? 0);
     final exoBuffered = d('bufferedMs');
     // 原生侧预取器报的「从现在起连续已落盘的时长」。
     final diskBuffered = d('preloadedMs');
+    // 嵌套的 timing 可能是 Map<Object?, Object?>（StandardMessageCodec 不解类型），
+    // 先转成 Map<String, dynamic> 再交给 PlaybackTiming 解析。
+    final rawTiming = m['timing'];
+    final timing = PlaybackTiming.fromMap(
+      rawTiming is Map ? Map<String, dynamic>.from(rawTiming) : null,
+    );
+    // 负值不该让界面出现「-1.2s」：原生保证 >= 0，这里再兜一次。
+    final aheadMs = (m['bufferedAheadMs'] as num?)?.toInt() ?? 0;
     return ExoPlayerState(
       position: d('positionMs'),
       duration: d('durationMs'),
@@ -315,6 +440,15 @@ class ExoPlayerState {
       retryAttempt: (m['retryAttempt'] as num?)?.toInt() ?? 0,
       retryReason: (m['retryReason'] as String?) ?? '',
       retryResolveToken: (m['retryResolveToken'] as num?)?.toInt() ?? 0,
+      timing: timing,
+      connectCount: (m['connectCount'] as num?)?.toInt() ?? 0,
+      // 原生已经保证 >= 0，这里再夹一次：旧的负值不该让界面出现「-1.2s」。
+      bufferedAhead: Duration(
+        milliseconds: aheadMs < 0 ? 0 : aheadMs,
+      ),
+      droppedFrames: (m['droppedFrames'] as num?)?.toInt() ?? 0,
+      bitrateKbps: (m['bitrateKbps'] as num?)?.toInt() ?? 0,
+      measuredKbps: (m['measuredKbps'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -338,6 +472,9 @@ class ExoPlayerState {
       'firstFrame=$hasRenderedFirstFrame, ${width}x$height, '
       'ended=$ended, state=$state, '
       'retry=$retryAttempt/${retryReason.isEmpty ? '-' : retryReason}, '
+      // 诊断字段只挑最关键的：首帧段 + 丢帧，够定位「起播慢 / 掉帧」。
+      'frame=${timing.firstFrameMs}ms, drops=$droppedFrames, '
+      'kbps=${bitrateKbps > 0 ? bitrateKbps : measuredKbps}, '
       'err=$error)';
 }
 

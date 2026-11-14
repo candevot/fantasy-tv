@@ -42,6 +42,12 @@ Future<void> showFxMorePanel(
   VoidCallback? onSpeed,
   required VoidCallback onBackground,
   required VoidCallback onFeedback,
+  /// 播放诊断开关的当前值（默认关）。
+  bool diagnosticsOn = false,
+  /// 点「播放诊断」行时回调新值；null = 不显示这一行。
+  /// 走回调而不是面板自己写 AppSettings：页面要保持同一个 state 才能
+  /// 立刻抬起 / 收起浮层，面板只负责把「用户点了」这件事交回去。
+  ValueChanged<bool>? onDiagnosticsChanged,
 }) {
   // 兜底：面板比播放画面先开时也把已保存档位读出来（幂等）。
   unawaited(FxDisplaySettings.instance.ensureLoaded());
@@ -55,6 +61,9 @@ Future<void> showFxMorePanel(
       // FxDisplaySettings 通知所有播放画面重建（立即生效，不重载视频）。
       var aspect = FxDisplaySettings.instance.aspect;
       var mirror = FxDisplaySettings.instance.mirror;
+      // 诊断开关在面板里就地翻转，用户点一下马上看到「开 / 关」的变化。
+      var diagnostics = diagnosticsOn;
+      final diagnosticsChanged = onDiagnosticsChanged;
       // 直播等场景缺省的行为：局部变量判空后可安全地在闭包里使用。
       final loopChanged = onLoopChanged;
       final jumpPanel = onJumpPanel;
@@ -194,6 +203,19 @@ Future<void> showFxMorePanel(
                     unawaited(FxDisplaySettings.instance.setMirror(mode));
                   },
                 ),
+                if (diagnosticsChanged != null)
+                  _MoreRow(
+                    icon: Icons.monitor_heart_outlined,
+                    title: '播放诊断',
+                    // 值右对齐显示「开 / 关」，点一下翻转（面板不关，
+                    // 用户可以马上看到浮层在画面上出现 / 消失）。
+                    value: diagnostics ? '开' : '关',
+                    onTap: () {
+                      diagnostics = !diagnostics;
+                      setSheetState(() {});
+                      diagnosticsChanged(diagnostics);
+                    },
+                  ),
                 _MoreRow(
                   icon: Icons.feedback_outlined,
                   title: '问题反馈',

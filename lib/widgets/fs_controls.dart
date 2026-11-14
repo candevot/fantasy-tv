@@ -189,6 +189,7 @@ class FsTopBar extends StatelessWidget {
     this.showCast = true,
     this.onRotate,
     this.rotatedToPortrait = false,
+    this.onLongPressQuality,
   });
 
   final String title;
@@ -220,6 +221,12 @@ class FsTopBar extends StatelessWidget {
 
   /// 当前是否竖屏布局：只决定转屏按钮的图标语义（点了会切到另一边）。
   final bool rotatedToPortrait;
+
+  /// 长按分辨率胶囊的回调：播放诊断浮层的入口。
+  ///
+  /// 为什么挂在胶囊上：顶栏已经没有空位再加按钮，而胶囊本身就是「画面参数」
+  /// 的语义位；长按不抢点按，不改变任何现有交互。null = 不响应长按。
+  final VoidCallback? onLongPressQuality;
 
   @override
   Widget build(BuildContext context) {
@@ -312,7 +319,18 @@ class FsTopBar extends StatelessWidget {
                 _TopChip(text: speedText, size: s),
                 const SizedBox(width: 6),
               ],
-              FsQualityPill(label: qualityLabel, size: s),
+              // 胶囊固定宽度、分辨率未就绪时只占位不画内容 —— 那样就没有可
+              // 长按的区域。这里固定一个最小高度把它撑起来，长按才不会落空。
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onLongPress: onLongPressQuality,
+                child: SizedBox(
+                  height: 26 * s,
+                  child: Center(
+                    child: FsQualityPill(label: qualityLabel, size: s),
+                  ),
+                ),
+              ),
               const SizedBox(width: 6),
               // 电量：和手机状态栏同款语义，充电时变绿
               _BatteryChip(size: s),

@@ -43,6 +43,11 @@ class AppSettings extends ChangeNotifier {
   static const String _kSleepMinutes = 'fx_settings_sleep_timer_minutes';
   static const String _kSleepEndsAt = 'fx_settings_sleep_timer_ends_at';
 
+  /// 播放诊断浮层开关（默认关）：用户自己打开才显示分段耗时，
+  /// 平时不往画面上加任何东西。
+  static const String _kPlaybackDiagnostics =
+      'fx_settings_playback_diagnostics';
+
   static const String _kWifiOnlyDownload = 'fx_settings_wifi_only_download';
   static const String _kDownloadLocation = 'fx_settings_download_location';
   static const String _kDownloadCustomRoot = 'fx_settings_download_custom_root';
@@ -57,6 +62,8 @@ class AppSettings extends ChangeNotifier {
   static const List<int> sleepTimerOptions = <int>[30, 60, 90];
 
   static const bool defaultWifiOnlyDownload = false;
+
+  static const bool defaultPlaybackDiagnostics = false;
 
   /// 下载并发数：HLS 分片 / MP4 Range 分块同时下载的路数。
   /// 产品范围 2–8，默认 6；多集之间仍然是串行队列，避免把源站打满。
@@ -78,6 +85,7 @@ class AppSettings extends ChangeNotifier {
   int _sleepMinutes = sleepTimerOptions.first;
   int _sleepEndsAt = 0;
   bool _wifiOnlyDownload = defaultWifiOnlyDownload;
+  bool _playbackDiagnostics = defaultPlaybackDiagnostics;
   DownloadLocation _downloadLocation = DownloadLocation.phone;
 
   /// 用户自选的下载基目录（真正写入 `<它>/幻想影视`）；null = 用默认 Download。
@@ -99,6 +107,9 @@ class AppSettings extends ChangeNotifier {
   /// 定时关闭（分钟模式）的结束时间戳，毫秒；0 = 未设置。
   int get sleepEndsAt => _sleepEndsAt;
   bool get wifiOnlyDownload => _wifiOnlyDownload;
+
+  /// 播放诊断浮层是否打开（默认关，见 [_kPlaybackDiagnostics]）。
+  bool get playbackDiagnostics => _playbackDiagnostics;
   DownloadLocation get downloadLocation => _downloadLocation;
   int get downloadConcurrency => _downloadConcurrency;
 
@@ -129,6 +140,8 @@ class AppSettings extends ChangeNotifier {
       }
       _wifiOnlyDownload =
           sp.getBool(_kWifiOnlyDownload) ?? defaultWifiOnlyDownload;
+      _playbackDiagnostics =
+          sp.getBool(_kPlaybackDiagnostics) ?? defaultPlaybackDiagnostics;
       _downloadLocation = downloadLocationFromKey(
         sp.getString(_kDownloadLocation),
       );
@@ -223,6 +236,13 @@ class AppSettings extends ChangeNotifier {
     _wifiOnlyDownload = value;
     notifyListeners();
     await _saveBool(_kWifiOnlyDownload, value);
+  }
+
+  Future<void> setPlaybackDiagnostics(bool value) async {
+    if (_playbackDiagnostics == value) return;
+    _playbackDiagnostics = value;
+    notifyListeners();
+    await _saveBool(_kPlaybackDiagnostics, value);
   }
 
   Future<void> setDownloadCustomRoot(String? value) async {

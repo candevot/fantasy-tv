@@ -18,8 +18,11 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.io.IOException
+import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
@@ -60,6 +63,12 @@ object PlayerHttp {
     /** 连接建立次数（EventListener.connectStart 计数），每次 open 前清零。 */
     private val connectCount = AtomicInteger(0)
 
+    /** 本次 open 至今实际收到的正文字节数（EventListener.responseBodyEnd）。 */
+    private val totalBytes = AtomicLong(0)
+
+    /** 实测吞吐的时间原点（[resetConnectCount] 时重置）。 */
+    private val windowStartNanos = AtomicLong(System.nanoTime())
+
     private val trustManagerRef: X509TrustManager by lazy { createTrustAllManager() }
 
     private val socketFactoryRef: SSLSocketFactory by lazy {
@@ -84,7 +93,44 @@ object PlayerHttp {
                 inetSocketAddress: InetSocketAddress,
                 proxy: Proxy,
             ) {
+                // MANIFEST_PROXY：本地清单代理（127.0.0.1）的连接是环回，
+                // 毫秒级且不产生流量。把它算进「起播建了几条连接」会让诊断
+                // 里的 connects 恒 +1，反而看不出真实复用情况，所以排除。
+                val address: InetAddress? = inetSocketAddress.address
+                if (address != null && address.isLoopbackAddress) return
                 connectCount.incrementAndGet()
+            }
+
+            // CUSTOM_DNS（2026-11-15）：把「真的连上了哪个 IP」记给 [FxDns]，
+            // 下次同一个 host 直接用它 —— 这就是壳那种 hosts 映射的自动版。
+            // 同时：连不上的 IP 拉黑 5 分钟，避免系统 DNS 反复把它喂回来。
+            override fun connectEnd(
+                call: Call,
+                inetSocketAddress: InetSocketAddress,
+                proxy: Proxy,
+                protocol: okhttp3.Protocol?,
+            ) {
+                val host = call.request().url.host
+                val address: InetAddress? = inetSocketAddress.address
+                if (address != null) FxDns.noteConnected(host, address)
+            }
+
+            override fun connectFailed(
+                call: Call,
+                inetSocketAddress: InetSocketAddress,
+                proxy: Proxy,
+                protocol: okhttp3.Protocol?,
+                ioe: IOException,
+            ) {
+                val host = call.request().url.host
+                val address: InetAddress? = inetSocketAddress.address
+                if (address != null) FxDns.noteConnectFailed(host, address)
+            }
+
+            // 实测吞吐（诊断浮层「码率（实测）」那一行）：分片的字节数是
+            // 真实下载量，比 media3 的 BandwidthMeter 更贴近用户看到的网速。
+            override fun responseBodyEnd(call: Call, byteCount: Long) {
+                if (byteCount > 0) totalBytes.addAndGet(byteCount)
             }
         }
     }
@@ -112,6 +158,12 @@ object PlayerHttp {
             // 影视源里自签 / 域名不符 / 过期证书是常态，壳也是 trust-all
             .sslSocketFactory(trustAllFactory(), trustAllManager())
             .hostnameVerifier { _, _ -> true }
+            // CUSTOM_DNS（2026-11-15）：壳带 hosts 映射 + DoH，我们原来纯走
+            // 系统 DNS —— 多个 A 记录里撞到一条劣质 IP 就整段慢，而且操作
+            // 系统缓存会把它继续喂给后面几十个分片请求。[FxDns] 做三件事：
+            // 缓存、IPv4 优先、记住真实连通过的 IP（= 自动 hosts），
+            // 失败才退系统 DNS / DoH。**不阻塞**播放主路径。
+            .dns(FxDns)
             .eventListenerFactory(connectCounter)
             .build()
     }
@@ -207,11 +259,20 @@ object PlayerHttp {
      * 每次调用新建 factory（无状态、便宜），**client 始终是 [client]** ——
      * 连接池因此跨越所有 open / 所有分片。
      *
+     * [headerUrl]：请求头按哪个地址推导（Referer 取该地址的站根）。
+     * 平时等于 [url]；走本地清单代理时，交给播放器的是 `127.0.0.1:PORT/...`，
+     * 但 Referer **必须**还是上游站点的 —— 否则盗链校验直接 403，
+     * 所以那时把上游地址传进来。
+     *
      * 不再设 allowCrossProtocolRedirects / connectTimeout / readTimeout：
      * 这三项在 OkHttp 里都是 client 级配置，factory 上设了也没用。
      */
-    fun httpFactory(url: String, headers: Map<String, String>): OkHttpDataSource.Factory {
-        val merged = requestHeaders(url, headers)
+    fun httpFactory(
+        url: String,
+        headers: Map<String, String>,
+        headerUrl: String = url,
+    ): OkHttpDataSource.Factory {
+        val merged = requestHeaders(headerUrl, headers)
         return OkHttpDataSource.Factory(client)
             .setUserAgent(merged["User-Agent"] ?: defaultUa())
             .setDefaultRequestProperties(merged)
@@ -221,9 +282,27 @@ object PlayerHttp {
 
     fun resetConnectCount() {
         connectCount.set(0)
+        totalBytes.set(0)
+        windowStartNanos.set(System.nanoTime())
     }
 
     fun connectCount(): Int = connectCount.get()
+
+    /**
+     * 本次 open 至今的实测吞吐（kbps，按已收到的正文字节 ÷ 经过时间）。
+     *
+     * 换集那一下会归零，所以前 200ms 不报数（否则数字会跳一下没意义的值）。
+     * 诊断浮层用它当「实测码率」—— 和 [FxTiming] 的首帧耗时一起看，
+     * 就能判断慢在「连不上 / 带宽不够」还是「清单跳转」。
+     */
+    fun measuredKbps(): Int {
+        val bytes = totalBytes.get()
+        if (bytes <= 0) return 0
+        val seconds = (System.nanoTime() - windowStartNanos.get()) / 1_000_000_000.0
+        if (seconds < 0.2) return 0
+        val kbps = bytes * 8.0 / seconds / 1000.0
+        return if (kbps > Int.MAX_VALUE) Int.MAX_VALUE else kbps.toInt()
+    }
 
     // ------------------------------------------------------------ 清单预归并
 

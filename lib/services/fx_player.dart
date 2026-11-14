@@ -65,6 +65,12 @@ class FxPlayerValue {
     this.videoHeight,
     this.aspectRatio = 16 / 9,
     this.bytesPerSecond = 0,
+    this.timing = const PlaybackTiming.empty(),
+    this.connectCount = 0,
+    this.droppedFrames = 0,
+    this.bufferedAhead = Duration.zero,
+    this.bitrateKbps = 0,
+    this.measuredKbps = 0,
   });
 
   /// 是否已经拿到视频参数/时长，可以开始渲染与 seek。
@@ -123,6 +129,30 @@ class FxPlayerValue {
   /// 显示宽高比。
   final double aspectRatio;
 
+  /// 本次 open 的分段耗时时间线（解析 / 清单 / 首帧 / 起播总）。
+  ///
+  /// DIAG（2026-11-15）：「起播诊断」浮层读这一份。默认 [PlaybackTiming.empty]
+  /// 表示还没 open 过，界面据此显示「--」而不是 0ms。
+  final PlaybackTiming timing;
+
+  /// 起播至今 OkHttp connectStart 次数（连接池复用程度，越接近 1 越好）。
+  final int connectCount;
+
+  /// 累计丢帧。
+  final int droppedFrames;
+
+  /// 距当前播放位置还有多少内容可播（原生 `bufferedPosition - position`）。
+  ///
+  /// 注意与 [buffered] 的区别：[buffered] 是「已缓冲到的绝对位置」（喂进度条
+  /// 灰条用），这个是「前面还压着多少秒」—— 诊断时看它才知道会不会卡。
+  final Duration bufferedAhead;
+
+  /// 视频轨道声明码率（kbps）；0 = 拿不到。
+  final int bitrateKbps;
+
+  /// OkHttp 实测吞吐（kbps）；0 = 还没测到。
+  final int measuredKbps;
+
   /// 画面尺寸，未就绪时宽高为 0。
   Size get size => Size((width ?? 0).toDouble(), (height ?? 0).toDouble());
 
@@ -178,6 +208,12 @@ class FxPlayerValue {
     int? videoWidth,
     int? videoHeight,
     double? aspectRatio,
+    PlaybackTiming? timing,
+    int? connectCount,
+    int? droppedFrames,
+    Duration? bufferedAhead,
+    int? bitrateKbps,
+    int? measuredKbps,
   }) {
     return FxPlayerValue(
       isInitialized: isInitialized ?? this.isInitialized,
@@ -197,6 +233,12 @@ class FxPlayerValue {
       videoWidth: videoWidth ?? this.videoWidth,
       videoHeight: videoHeight ?? this.videoHeight,
       aspectRatio: aspectRatio ?? this.aspectRatio,
+      timing: timing ?? this.timing,
+      connectCount: connectCount ?? this.connectCount,
+      droppedFrames: droppedFrames ?? this.droppedFrames,
+      bufferedAhead: bufferedAhead ?? this.bufferedAhead,
+      bitrateKbps: bitrateKbps ?? this.bitrateKbps,
+      measuredKbps: measuredKbps ?? this.measuredKbps,
     );
   }
 }
@@ -565,12 +607,21 @@ class FxPlayer implements Listenable {
     unawaited(ready.future.catchError((Object _) {}));
     _PlaybackSource? opened;
     try {
+      // DIAG（2026-11-15）：解析段单独计时。
+      //
+      // 这一段（hxparse 302 跳转 → 最终播放地址）发生在原生 open 之前，
+      // ExoPlayer 侧完全看不到；不测出来，「起播 1.8 秒」里到底多少是解析、
+      // 多少是清单 + 首帧就永远说不清 —— 而这正是「比影视壳慢」最可能的
+      // 一处：壳（FongMi）解析一次就缓存住，我们每集都可能重新走一遍。
+      // 计时范围只包住 _resolvePlaybackSource，别把首帧等待算进去。
+      final resolveWatch = Stopwatch()..start();
       final source = await _resolvePlaybackSource(
         url,
         headers,
         direct: direct,
         token: token,
       );
+      resolveWatch.stop();
       if (source == null) {
         if (identical(_ready, ready)) _ready = null;
         return;
@@ -581,6 +632,8 @@ class FxPlayer implements Listenable {
         play: play,
         token: token,
         startPositionMs: startPositionMs,
+        // 毫秒数交给原生，并进同一条时间线（原生时间线的起点就是 open）。
+        resolveMs: resolveWatch.elapsedMilliseconds,
       ).timeout(_openHardCap);
     } catch (error) {
       if (_disposed || token != _openToken) {
@@ -740,6 +793,8 @@ class FxPlayer implements Listenable {
     required bool play,
     required int token,
     int startPositionMs = 0,
+    /// Dart 侧解析地址花掉的毫秒数；透传给原生并进它的起播时间线。
+    int resolveMs = 0,
   }) async {
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
@@ -760,6 +815,8 @@ class FxPlayer implements Listenable {
       // RESUME_FIRST_SEG：起始位置交给原生，在 prepare 之前落位，
       // 首个分片请求就是目标片。
       startPositionMs: startPositionMs,
+      // 解析段并进原生时间线，界面上的「起播总」才是用户真正等的时间。
+      resolveMs: resolveMs,
     );
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
@@ -1047,6 +1104,13 @@ class FxPlayer implements Listenable {
       videoHeight: hasSize ? st.height : _value.videoHeight,
       aspectRatio: aspect,
       bytesPerSecond: speed > 0 ? speed : null,
+      // 诊断字段原样透传：这里不做任何加工，界面看到的就是原生算出来的。
+      timing: st.timing,
+      connectCount: st.connectCount,
+      droppedFrames: st.droppedFrames,
+      bufferedAhead: st.bufferedAhead,
+      bitrateKbps: st.bitrateKbps,
+      measuredKbps: st.measuredKbps,
     );
 
     final secondChanged = shown.inSeconds != _value.position.inSeconds;
@@ -1057,7 +1121,10 @@ class FxPlayer implements Listenable {
         next.hasRenderedFirstFrame != _value.hasRenderedFirstFrame ||
         next.isCompleted != _value.isCompleted ||
         next.duration != _value.duration ||
-        next.width != _value.width;
+        next.width != _value.width ||
+        // DIAG（2026-11-15）：首帧耗时是逐毫秒变的（原生每轮快照都重算），
+        // 不并进通知判据的话诊断浮层要等别的状态变化才刷新，看起来像卡住。
+        next.timing.firstFrameMs != _value.timing.firstFrameMs;
     _value = next;
     // 首帧 / 时长就绪就立刻放行 open，不能等 _setValue ——
     // 这条路径不走 _setValue，之前漏了这一步，结果每次 open 都要
@@ -1593,12 +1660,16 @@ class FxPlayer implements Listenable {
     final token = ++_openToken;
     final errorSerial = _decodeErrorSerial;
     try {
+      // 救援链同样把解析段测出来（虽然不弹界面，但并进时间线后，
+      // 事后看「救援那一次为什么慢」也能分出是解析还是首帧）。
+      final resolveWatch = Stopwatch()..start();
       final source = await _resolvePlaybackSource(
         url,
         headers,
         direct: direct,
         token: token,
       );
+      resolveWatch.stop();
       if (source == null || _disposed || token != _openToken) {
         _logFx('RESCUE 地址解析被取代或失败');
         return false;
@@ -1615,6 +1686,7 @@ class FxPlayer implements Listenable {
           startPositionMs: live || resume <= Duration.zero
               ? 0
               : resume.inMilliseconds,
+          resolveMs: resolveWatch.elapsedMilliseconds,
         ).timeout(_rescueOpenTimeout);
         if (_disposed || token != _openToken) return false;
         await mediaReady.future.timeout(_rescueOpenTimeout);
