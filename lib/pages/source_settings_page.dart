@@ -617,7 +617,8 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
   }
 
   Future<void> _importTvBox() async {
-    final ctrl = TextEditingController();
+    // 默认就填好肥猫的配置地址：多数人点「导入」就够了，不用自己去找地址。
+    final ctrl = TextEditingController(text: SourceHub.defaultTvBoxUrl);
     final saved = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -633,7 +634,8 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                '粘贴含 sites 数组的 JSON，或填配置地址（http 开头）。'
+                '粘贴含 sites 数组的 JSON，或填配置地址（http 开头，默认是肥猫）。'
+                '加密配置（\$#key#\$ + AES）会自动解密。'
                 '只导入 type 1 / type 0，type 3 / 4 会标「暂不支持」后跳过。',
                 style: TextStyle(fontSize: 11, height: 1.5, color: Fx.sub),
               ),

@@ -36,6 +36,10 @@ dependencies:
   # DLNA/UPnP 投屏：SSDP 发现 + AVTransport / RenderingControl SOAP。
   # 纯 Dart 实现，SDK >=3.8，与 Flutter 3.32.8 / Dart 3.8.1 匹配。
   dlna_dart: ^0.1.2
+  # TVBox 加密配置（肥猫 `$#<key>#$` + AES-128-CBC）解密：纯 Dart 的 AES 实现，
+  # 不碰 Android 原生也不加 JNI。这里只用 AESEngine / CBCBlockCipher，
+  # 所以直接依赖 pointycastle 本体，不再套一层 encrypt 包装。
+  pointycastle: ^3.9.1
 dev_dependencies:
   flutter_test:
     sdk: flutter

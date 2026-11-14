@@ -10,6 +10,7 @@ import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
 import 'jar_spider.dart';
+import 'tvbox_crypto.dart';
 
 /// 片源的种类。
 enum KSourceKind {
@@ -219,6 +220,27 @@ class SourceHub extends ChangeNotifier {
     defaultValue: '',
   );
 
+  /// 播放器 UA：猫源那类站按 UA 分流 —— 浏览器 UA 拿到的是一张介绍页
+  /// （HTML），只有播放器 UA 才回配置本身。肥猫回的配置还是加密的。
+  static const String tvBoxUserAgent = 'okhttp/3.12.12';
+
+  /// 默认 TVBox 配置地址（肥猫）。设置页的「配置地址」预填它，
+  /// 首次启动也自动拉一次导入 —— 装完就有源，不用用户自己去别处找。
+  static const String defaultTvBoxUrl = 'http://肥猫.net/';
+
+  /// 首次自动导入的超时：失败静默，绝不拦首屏。
+  static const Duration autoImportTimeout = Duration(seconds: 3);
+
+  /// 中文域名 → punycode。
+  ///
+  /// Dart 的 `Uri` / `HttpClient` 不认非 ASCII 主机：`Uri.parse` 会把主机
+  /// 百分号编码（`%E8%82%A5%E7%8C%AB.net`），`HttpClient.getUrl` 随即抛
+  /// `FormatException`。所以展示可以用 `http://肥猫.net/`，发请求前换成
+  /// punycode。表里没有的域名就按原样试，报错照常抛给调用方。
+  static const Map<String, String> asciiHosts = <String, String>{
+    '肥猫.net': 'xn--z7x900a.net',
+  };
+
   /// 配置缓存有效期：6 小时内不重复拉取（手动刷新不受限）。
   static const Duration cacheTtl = Duration(hours: 6);
 
@@ -229,6 +251,22 @@ class SourceHub extends ChangeNotifier {
   static const String _kRemoved = 'fx_sources_removed_v1';
   static const String _kUser = 'fx_sources_user_v1';
   static const String _kFetchedAt = 'fx_sources_fetched_at_v1';
+  static const String _kAutoImported = 'fx_sources_auto_tvbox_v1';
+
+  /// 配置地址 → 能真正发出去的 [Uri]（顺手把中文域名换成 punycode）。
+  static Uri requestUri(String raw) {
+    var url = raw.trim();
+    for (final entry in asciiHosts.entries) {
+      if (url.contains(entry.key)) {
+        url = url.replaceFirst(entry.key, entry.value);
+      }
+    }
+    try {
+      return Uri.parse(url);
+    } on FormatException {
+      throw ApiException('配置地址不合法：$raw');
+    }
+  }
 
   /// 外部源 id 前缀。主站 id 不带这个前缀，两套编号互不干扰。
   static const String idMark = '@src:';
@@ -324,6 +362,8 @@ class SourceHub extends ChangeNotifier {
 
   Future<void> _boot() async {
     await _loadCache();
+    // 首次启动：后台把默认 TVBox 配置（肥猫）导一次，不挡首屏。
+    unawaited(_importDefaultTvBoxOnce());
     // 缓存过期或从来没拉过：后台补一次，不挡首屏。
     final age = _fetchedAt <= 0
         ? null
@@ -331,6 +371,31 @@ class SourceHub extends ChangeNotifier {
             DateTime.fromMillisecondsSinceEpoch(_fetchedAt),
           );
     if (age == null || age > cacheTtl) unawaited(refresh());
+  }
+
+  /// 首次启动自动导入默认配置（[defaultTvBoxUrl]）。
+  ///
+  /// 触发条件：没成功导过、且用户手上还没有自加源（老用户升级上来不该被
+  /// 突然塞一堆源，删过源的也不重灌）。3 秒超时、失败静默并且**不写标记**，
+  /// 下次启动再试 —— 首屏不等它，网络差也就是没有这些源而已。
+  Future<void> _importDefaultTvBoxOnce() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      if (sp.getBool(_kAutoImported) == true) return;
+      if (_user.isNotEmpty) {
+        await sp.setBool(_kAutoImported, true);
+        return;
+      }
+      final result = await importTvBox(
+        defaultTvBoxUrl,
+        timeout: autoImportTimeout,
+      );
+      if (result.added > 0) {
+        await sp.setBool(_kAutoImported, true);
+      }
+    } catch (_) {
+      // 静默：没网 / 超时 / 配置换了格式，都当没这回事。
+    }
   }
 
   /* ------------------------------------------------------------ 云端配置 */
@@ -456,7 +521,7 @@ class SourceHub extends ChangeNotifier {
       builtin: m['builtin'] != false,
       enabled: m['enabled'] != false,
       reason: _reasonOf(m['type'], kind),
-      ext: _text(m['ext']),
+      ext: _textOfExt(m['ext']),
     );
   }
 
@@ -614,18 +679,22 @@ class SourceHub extends ChangeNotifier {
         u.contains('api.php/provide/vod');
   }
 
-  Future<TvBoxImport> importTvBox(String input) async {
+  Future<TvBoxImport> importTvBox(String input, {Duration? timeout}) async {
     final text = input.trim();
     if (text.isEmpty) throw ApiException('先粘贴 TVBox 配置或填一个地址');
     String body = text;
     if (text.startsWith('http://') || text.startsWith('https://')) {
       try {
         final r = await http
-            .get(Uri.parse(text), headers: const <String, String>{
+            .get(requestUri(text), headers: const <String, String>{
               'accept': '*/*',
+              // 猫源那类站按 UA 分流：浏览器 UA 给的是介绍页（HTML），
+              // 播放器 UA 才给配置（肥猫给的就是加密配置）。
+              'user-agent': tvBoxUserAgent,
             })
-            .timeout(const Duration(seconds: 12));
+            .timeout(timeout ?? const Duration(seconds: 12));
         if (r.statusCode >= 400) throw ApiException.server(r.statusCode);
+        // 加密配置是纯 ASCII 的 hex，用 bodyBytes 兜住乱码更稳。
         body = utf8.decode(r.bodyBytes, allowMalformed: true);
       } on TimeoutException {
         throw ApiException.timeout();
@@ -633,8 +702,17 @@ class SourceHub extends ChangeNotifier {
         throw ApiException.network();
       }
     }
-    final rawSites = _sitesOf(body);
-    if (rawSites.isEmpty) throw ApiException('没解析到 sites 数组，检查一下配置内容');
+    // 加密配置（`$#key#$` + AES-CBC）：先解出明文 JSON，再走下面同一套解析。
+    final plain = decodeTvBoxConfig(body);
+    final config = plain ?? body;
+    final rawSites = _sitesOf(config);
+    if (rawSites.isEmpty) {
+      throw ApiException(
+        plain == null && isTvBoxEncrypted(body)
+            ? '这份配置是加密的，但解不开（密文被截断或换了加密方式），换个地址试试'
+            : '没解析到 sites 数组，检查一下配置内容',
+      );
+    }
     // 排除指向本站接口的源：那是 App 内置的七个源（幻想腾讯/全部线路/4K/1080P/
     // 爱奇艺/量子/红牛），导入云端配置时再进来一份只会让源列表重复。
     var selfSkipped = 0;
@@ -667,7 +745,7 @@ class SourceHub extends ChangeNotifier {
           ? _text(site['key'])
           : _text(site['name']);
       final api = _text(site['api']);
-      final ext = _text(site['ext']);
+      final ext = _textOfExt(site['ext']);
       final kind = kindOf(site['type']);
       if (api.isEmpty) {
         skipped++;
@@ -1042,6 +1120,9 @@ class SourceHub extends ChangeNotifier {
   }
 
   /// 调试用：清掉本地片源缓存（不动云端配置）。
+  ///
+  /// 顺带清掉「默认配置已自动导入」的标记：恢复默认就该把肥猫那份重新导回来
+  /// （下次启动时生效）。
   Future<void> resetLocal() async {
     _removed = <String>{};
     _user = const <KSource>[];
@@ -1054,6 +1135,7 @@ class SourceHub extends ChangeNotifier {
       await sp.remove(_kRemoved);
       await sp.remove(_kLiveUrl);
       await sp.remove(_kFetchedAt);
+      await sp.remove(_kAutoImported);
     } catch (_) {}
     notifyListeners();
   }
@@ -1063,4 +1145,15 @@ class SourceHub extends ChangeNotifier {
 String _text(Object? raw) {
   if (raw == null) return '';
   return raw.toString().trim();
+}
+
+/// TVBox 的 `ext` → 交给 jar 源的原样文本。
+///
+/// `ext` 有时是字符串（一个地址、一个标记），有时是一整段对象
+/// （`{"site_urls":[…],"url_key":"…"}`）。后者必须按 JSON 编码，
+/// 直接 `toString()` 得到的是 `{site_urls: [...]}` —— 不是合法 JSON，
+/// jar 那边 `JSON.parse` 一挂，这个源就永远空列表。
+String _textOfExt(Object? raw) {
+  if (raw is Map || raw is List) return jsonEncode(raw);
+  return _text(raw);
 }
