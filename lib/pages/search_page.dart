@@ -254,7 +254,8 @@ class _SearchPageState extends State<SearchPage> {
         _done = batch.done;
         _total = batch.total;
       }
-      _skeleton = false;
+      // 骨架卡只由「我们自己那批」收尾：外部源先回来也不代表我们的源查完了。
+      if (!batch.external || batch.finished) _skeleton = false;
       if (batch.finished) {
         _loading = false;
         _loadingMore = false;
