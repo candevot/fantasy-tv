@@ -420,7 +420,17 @@ class _DetailPageState extends State<DetailPage>
   List<EpisodeGroup> get _episodeGroups {
     final d = _detail;
     if (d == null) return const <EpisodeGroup>[];
-    if (d.groups.isNotEmpty) return d.groups;
+    if (d.groups.isNotEmpty) {
+      // 接口自带分组时也要过一遍电影版本名，否则电影会显示「第01集」。
+      if (!_isMovie) return d.groups;
+      return <EpisodeGroup>[
+        for (final g in d.groups)
+          EpisodeGroup(
+            g.title,
+            _movieVersions(g.episodes),
+          ),
+      ];
+    }
     final all = _episodes;
     return all.isEmpty
         ? const <EpisodeGroup>[]
