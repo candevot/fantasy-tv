@@ -233,17 +233,9 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               child: _buildVideo(context),
             ),
             if (!keyboard) _buildInfo(context),
-            // 聊天改成悬浮层（右下角小标志 + 透明气泡），不再占屏幕。
-            // 观看时画面不被挤压，消息又不丢：未读数标在标志上。
-            Expanded(
-              child: Stack(
-                children: [
-                  // 键盘弹起时旧消息列表让位（气泡里能看到最新几条），
-                  // 避免「列表 + 气泡 + 键盘」三份内容挤在一起。
-                  if (!keyboard) _buildChat(context),
-                ],
-                  ),
-                ),
+            // CHAT_ONLY_FULLSCREEN（2026-11-14）：竖屏播放详情不放聊天列表，
+            // 空间还给画面；聊天只在全屏的透明悬浮气泡里。
+            const Spacer(),
               ],
             ),
             // 悬浮聊天叠在整页最上层：不受视频区 / 键盘压缩影响。
@@ -823,20 +815,6 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
 
   /* ------------------------------------------------------------ 聊天 */
 
-  Widget _buildChat(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-      child: Container(
-        decoration: togetherGlass(radius: 18, opacity: .60),
-        clipBehavior: Clip.antiAlias,
-        child: ValueListenableBuilder<List<TogetherChatMessage>>(
-          valueListenable: widget.chat,
-          builder: (context, messages, _) =>
-              TogetherChatList(messages: messages),
-        ),
-      ),
-    );
-  }
 }
 
 /* ========================================================================== */

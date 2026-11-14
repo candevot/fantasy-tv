@@ -1663,6 +1663,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                       return const SizedBox.shrink();
                     }
                     final percent = v.bufferingPercent;
+                    // BUFFER_FULL（2026-11-14）：缓存已经满了就别再挂
+                    // 「缓冲中 100%」——用户在截图里看到的就是画面正常在播、
+                    // 中间却一直顶着一个 100% 的圆环。
+                    // 画面在走的时候，缓冲到 99.5% 以上视为已就绪。
+                    if (percent != null && percent >= 99.5) {
+                      return const SizedBox.shrink();
+                    }
                     return FxLoadingOverlay(
                       title:
                           percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
