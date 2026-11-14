@@ -444,18 +444,29 @@ class _DetailPageState extends State<DetailPage>
   bool get _isMovie {
     final d = _detail;
     if (d == null) return false;
-    // MOVIE_BY_COUNT（2026-11-14）：不能只靠分类。
-    // 服务端把不少电影归到了「动漫」「动作」这类分类里（例：《蜘蛛侠》被
-    // 归成动漫、65 集），只看 category 会把电影当成剧集显示集数。
-    // 集数 ≤ 1 的记录一律按电影处理：不显示「共N集 / 更新至N集」。
-    if (d.category.contains('电影')) return true;
-    final n = d.episodes;
-    if (n <= 1) return true;
-    // 各线路自己都只有 1 条（正片/国语/粤语这种版本）也算电影
-    final allOne = d.lines.isNotEmpty &&
-        d.lines.every((l) => l.epNames.isEmpty || l.epNames.length <= 1);
-    return allOne;
+
+    // MOVIE_DYNAMIC（2026-11-14）：按**当前线路实际集数**动态判断，
+    // 不再写死分类。
+    //
+    // 之前只要 category 含「电影」就当电影，结果《尚公主》标着电影却有
+    // 41 集，界面上出现「正片 · 41 个版本」下面又排「第01集」——自相矛盾。
+    //
+    // 现在的规则：
+    //   · 当前线路集数 ≤ 3  → 电影，显示「正片」「N 个版本」
+    //   · 当前线路集数 > 3  → 剧集，显示「第NN集」「更新至 N 集」
+    // 判断对象是这条线路自己的集数，所以同一部片不同线路可以各自表现。
+    final own = () {
+      final id = _lineId.trim();
+      if (id.isNotEmpty) {
+        for (final l in d.lines) {
+          if (l.id == id && l.epNames.isNotEmpty) return l.epNames.length;
+        }
+      }
+      return d.episodes;
+    }();
+    return own > 0 && own <= 3;
   }
+
 
   String get _statusText {
     final d = _detail;
