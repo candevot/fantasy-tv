@@ -734,13 +734,22 @@ bool fxUrlNeedsClientProxy(String url) {
 /// 现在凡是 http(s) 的 m3u8 都交给代理：mpv 拿到的仍是本地地址，
 /// 代理负责下载、缓存、预取，分片仍然是直连 CDN（不额外消耗服务器带宽）。
 bool fxShouldUseHlsProxy(String url, {required bool isHls}) {
-  if (!isHls) return false;
-  final raw = url.trim().toLowerCase();
-  if (raw.isEmpty) return false;
-  if (!raw.startsWith('http://') && !raw.startsWith('https://')) return false;
-  // 非 m3u8 扩展名也可能是 HLS（平台包装地址），由 isHls 决定；
-  // 这里只排除明显不是 HLS 的情况（mp4 直链等），由调用方的 isHls 把关。
-  return true;
+  // PROXY_OFF_FINAL（2026-11-14）
+  //
+  // LocalHlsProxy 的实现是「整片下载完再交给播放器」，并且对播放器声明
+  // acceptRanges: none（见 _servePlaylist）。后果：
+  //   · 4K 分片 5.5MB，播放器要等整片下完才有画面 → 一直缓冲、黑屏
+  //   · seek 到片内任意位置同样要等整片
+  //   · 声音先出来（音频轨小、先到），画面还没到 → 「有声音、黑屏」
+  //
+  // 腾讯/爱奇艺这一层从不自己代理分片：播放器直接向 CDN 发 Range 请求，
+  // 收到前几百 KB 就能出首帧，所以是秒开。
+  //
+  // ExoPlayer 原生支持 Range 与边下边播；服务端也已把播放列表里的分片
+  // 地址改写成绝对地址，不存在相对路径解析问题。
+  //
+  // 因此一律直连，不再走本地代理。
+  return false;
 }
 
 bool fxIsPlatformLine(LineInfo line) {
