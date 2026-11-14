@@ -66,11 +66,22 @@ int fxMainEpisodeCount(Iterable<Episode> episodes) =>
 String fxEpisodeLabel(int ep, [String? name]) {
   final s = (name ?? '').trim();
   if (s.isEmpty) return '第${fxPad2(ep)}集';
+
+  // EPNAME_KEEP（2026-11-14）：线路自带的集名是「正片 / 国语 / 粤语 /
+  // 普通话版 / 1080P」这类**版本名**时，原样显示，不要再套「第01集」。
+  // 用户明确要求：电影只有正片、国语、粤语，没有「第几集」这种说法。
+  //
+  // 只有当名字本身就是编号（「第12集」「12」「第3期」）时，才统一成
+  // 「第XX集」格式，避免出现「第12集」和「12」两种写法混排。
+  final looksLikeIndex = RegExp(r'^第?\s*\d+\s*[集话期]?$').hasMatch(s);
+  if (looksLikeIndex) return '第${fxPad2(ep)}集';
+
+  // 花絮 / 预告这类附集沿用原逻辑（截断后带序号）
   if (fxIsExtraEpisode(s)) {
     final head = s.characters.take(8).toString().trim();
     return '$head $ep';
   }
-  return '第${fxPad2(ep)}集';
+  return s;
 }
 
 String fxTime(Duration d) {
