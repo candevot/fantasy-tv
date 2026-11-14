@@ -36,6 +36,14 @@ class SegmentPreloader(
     private val context: Context,
     private val cache: SimpleCache,
     private val log: (String) -> Unit = {},
+    /**
+     * 让路判据（PRIORITY，ALIGN_FONGMI）：返回 true 时预取线程原地等待。
+     *
+     * 壳用 media3 的 `PriorityTaskManager` 保证「播放的请求永远先于预载」；
+     * 我们这条单线程预取没有任务队列优先级，就用一条回调表达同一件事：
+     * 播放器在 BUFFERING（正等数据）时预取不发起新请求。
+     */
+    private val pauseGate: () -> Boolean = { false },
 ) {
 
     companion object {
@@ -88,14 +96,16 @@ class SegmentPreloader(
     }
 
     /**
-     * 拿到播放地址后立刻开始灌缓存。
+     * 开始灌缓存（ALIGN_FONGMI 2026-11-15：由播放器在**首帧之后**调用）。
      *
-     * 播放器一创建本类就存在，这里只是把「源」交进来：线程池在构造时就建好了，
-     * 所以预取随播放器创建即启动，不等 prepare 完成（对应 START_DELAY_MS = 0）。
+     * 线程池在构造时就建好了；什么时候真正开灌由调用方决定 ——
+     * [ExoPlayerPlugin] 只在 `onRenderedFirstFrame` 之后才调进来，
+     * 起播阶段那一片不抢（壳的 DiskPreloadManager 也只服务预载，不掺和
+     * 当前这一集的取流，并给播放挂 PriorityTaskManager）。
      *
-     * [startPositionMs] 是本次 open 的起始播放位置（续播 / 跟房主进度）：
-     * 预取也从这一片开始，而不是从第 0 片 —— 否则「续播」时预取会先把前
-     * 几片拉一遍，服务端 `/api/seg` 的首片中转名额就被它们用掉了。
+     * [startPositionMs] 是本次 open 的起始播放位置（续播 / 跟房主进度）。
+     * 起点=**当前位置的下一片**：当前这一片播放器马上要，预取再拉一遍只会
+     * 和它抢连接 / 抢中转名额（以前从头播时预取就正好撞在第 0 片上）。
      */
     fun start(playlistUrl: String, headers: Map<String, String>, startPositionMs: Long = 0L) {
         if (released || playlistUrl.isEmpty()) return
@@ -113,7 +123,8 @@ class SegmentPreloader(
                 segments = list
                 cachedFlags = BooleanArray(list.size)
             }
-            val startIndex = if (startPositionMs > 0) findIndex(startPositionMs) else 0
+            // 跳过播放器马上要取的那一片（当前位置所在片），从下一片开始。
+            val startIndex = (findIndex(startPositionMs) + 1) % list.size
             // RESUME（2026-11-14）：和 ExoPlayerPlugin 的「RESUME 起始位置 Xms」
             // 配对，真机 logcat -s FxExo 能直接看出续播起点有没有到分片级。
             log(
@@ -133,7 +144,8 @@ class SegmentPreloader(
     fun seekTo(positionMs: Long) {
         if (released || segments.isEmpty()) return
         val generationAtSeek = nextGeneration()
-        val startIndex = findIndex(positionMs)
+        // 目标位置那一片播放器自己会取，预取从它的下一片开始。
+        val startIndex = (findIndex(positionMs) + 1) % segments.size
         val headers = requestHeaders
         executor.execute {
             log("预取: seek 改道到 ${positionMs}ms（第 $startIndex 片）")
@@ -190,6 +202,8 @@ class SegmentPreloader(
         for (step in 0 until list.size) {
             // 每片之前检查代际：旧任务立刻退出（对方 generation++ 的语义）。
             if (generationAtStart != generation) return
+            // PRIORITY：播放器正在缓冲就让路（等价于壳的 PriorityTaskManager）。
+            if (!awaitPlaybackIdle(generationAtStart)) return
             val index = (startIndex + step) % list.size
             val flags = cachedFlags
             if (index < flags.size && flags[index]) continue
@@ -198,6 +212,26 @@ class SegmentPreloader(
                 if (index < target.size) target[index] = true
             }
         }
+    }
+
+    /**
+     * 播放器在缓冲时等待，直到它不缺数据（或这一轮预取被作废）。
+     *
+     * 返回 false 表示这一轮已经过期（换了源 / seek 过 / 已释放），调用方直接退出。
+     * 轮询间隔 150ms：比一次分片请求便宜几个数量级，不会成为负担。
+     */
+    private fun awaitPlaybackIdle(generationAtStart: Int): Boolean {
+        if (!pauseGate()) return true
+        log("预取: 播放器正在缓冲，让路")
+        while (pauseGate()) {
+            if (released || generationAtStart != generation) return false
+            try {
+                Thread.sleep(150)
+            } catch (_: InterruptedException) {
+                return false
+            }
+        }
+        return !released && generationAtStart == generation
     }
 
     private fun downloadSegment(
@@ -254,8 +288,8 @@ class SegmentPreloader(
         return DefaultHttpDataSource.Factory()
             .setUserAgent(headers["User-Agent"] ?: "Mozilla/5.0")
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(20_000)
+            .setConnectTimeoutMs(30_000)
+            .setReadTimeoutMs(30_000)
             .setDefaultRequestProperties(headers)
     }
 

@@ -930,7 +930,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 有旧画面快照时连 loading 浮层都跳过。
     final cacheHit =
         !forcePlayInfo && FxPlayCache.peek(widget.videoId, ep, line) != null;
-    final waitForWarm = !cacheHit;
+    // WARMUP_NONBLOCK（ALIGN_FONGMI 2026-11-15）：不再有「首次打开等预热」
+    // 这回事 —— 预热只剩 DNS 解析，且永远 fire-and-forget。
     setState(() {
       _loading = true;
       _suppressLoading = cacheHit && _frozenFrame != null;
@@ -1043,7 +1044,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               url,
               headers: info.headers,
               play: shouldPlay,
-              waitForWarm: waitForWarm,
               // 续播：起始位置直接交给 open（原生 prepare 之前 seekTo），
               // 首个分片请求就是目标片。以前先拉第 0 片再 seek，第 0 片会
               // 把服务端 /api/seg 的首片中转名额用掉，续播反而更慢。

@@ -11,7 +11,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -20,7 +19,6 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
@@ -31,8 +29,6 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
-import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.ui.PlayerView
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
@@ -43,57 +39,21 @@ import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
 
 /**
- * 播放数据源的「快速失败」策略（FAST_FAIL_HTTP 2026-11-14）。
+ * 重试策略（ALIGN_FONGMI 2026-11-15）：**不再自定义**，用 media3 默认
+ * [androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy]。
  *
- * 问题：一个死掉的分片 / 过期地址，media3 默认按 0/1000/2000ms 重试 3 次，
- * 每次都可能先等满 connect+read 超时，原生最长 143 秒才把错误交给 Dart；
- * 而 Dart 层 30 秒就放弃了 —— 中间这一百多秒旧实例还在对废地址发请求抢带宽，
- * 用户看到的就是「一直转圈加载不出来」。
+ * 为什么不自己写（原来的 FAST_FAIL_HTTP 已删除）：
+ *   · FongMi/TV 的 `ExoMediaSourceFactory.setLoadErrorHandlingPolicy()` 是
+ *     空实现（`return this;`），也就是说壳里跑的就是 media3 默认策略；
+ *   · 默认策略：任意错误重试 3 次，退避 0 / 1s / 2s（上限 5s），不按状态码
+ *     区别对待 —— 5xx / 403 这种 CDN 抖动是常态，壳靠重试吃掉，一次就判死
+ *     反而把「等一下就能播」的分片变成「整条线路失败」；
+ *   · 我们之前的自定义策略把它们判死，Dart 救援链随即换线路重来 ——
+ *     这就是「壳秒开、我们卡」的一部分：同一片我们多花一整轮重开。
  *
- * 做法（对齐逆向报告的容错实现）：
- *   · 传输层 401/403/404/410/416/500/503 → 返回 C.TIME_UNSET，一次都不重试，
- *     立刻把错误抛给媒体源，交给 Dart 的救援链；
- *   · 其它错误保留重试，但最多 2 次、间隔 0 / 1 秒，第 3 次失败直接判死。
- *
- * 注意：`setLoadErrorHandlingPolicy` 在 Media3 1.4.1 是 @UnstableApi，
- * 本类和调用点都要带 opt-in 注解（之前有人删过这行就是因为漏了注解）。
+ * 死地址不再是威胁：连接 / 读超时已经抬到 30s（对齐壳的 OkHttp），
+ * 真正的死地址会在 3 次重试后由 `onPlayerError` 回到 Dart，最多一个超时周期。
  */
-@OptIn(UnstableApi::class)
-private class FxLoadErrorHandlingPolicy : DefaultLoadErrorHandlingPolicy() {
-
-    override fun getRetryDelayMsFor(
-        loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo
-    ): Long {
-        val error = loadErrorInfo.exception
-        if (error is HttpDataSource.InvalidResponseCodeException &&
-            error.responseCode in TERMINAL_HTTP_CODES
-        ) {
-            Log.w(
-                ExoPlayerPlugin.LOG_TAG,
-                "FAST_FAIL HTTP ${error.responseCode} 判死，不重试 " +
-                    "(attempt=${loadErrorInfo.errorCount})"
-            )
-            return C.TIME_UNSET
-        }
-        return when (loadErrorInfo.errorCount) {
-            1 -> 0L      // 第一次失败：立刻重试
-            2 -> 1_000L  // 第二次失败：等 1 秒再试最后一次
-            else -> {
-                Log.w(
-                    ExoPlayerPlugin.LOG_TAG,
-                    "FAST_FAIL 重试 ${loadErrorInfo.errorCount - 1} 次仍失败，判死: " +
-                        (error.message ?: error.javaClass.simpleName)
-                )
-                C.TIME_UNSET
-            }
-        }
-    }
-
-    private companion object {
-        /** 传输层「死刑」状态码：这些地址已经没救了，重试纯粹浪费带宽。 */
-        val TERMINAL_HTTP_CODES = setOf(401, 403, 404, 410, 416, 500, 503)
-    }
-}
 
 /**
  * ExoPlayer（Media3）内核桥接。
@@ -103,10 +63,12 @@ private class FxLoadErrorHandlingPolicy : DefaultLoadErrorHandlingPolicy() {
  *   一起看同步会打架。这里只做「最小内核」—— 只管播放，画面用 PlatformView
  *   交给 Flutter 叠控制层，控制权完全在 FxPlayer 手里。
  *
- * 关键配置（对齐腾讯/阿里播放器策略，取值见逆向报告 §10）：
- *   · allowCrossProtocolRedirects = true  → 福盈 4K 分片 302 到移动云能跟
- *   · LoadControl 15s/60s/1s/2s + backBuffer 0 → 首帧只要 1 秒缓冲
- *   · 分片预取单线程 + seek 代际作废，缓存 LRU 1.5GiB
+ * 关键配置（ALIGN_FONGMI 2026-11-15：逐项对齐 FongMi/TV 的 ExoPlayer 取值）：
+ *   · LoadControl 50s/50s/1s/2s + backBuffer 0（壳 media3 fork 的默认值）
+ *   · connect / read 超时 30s，allowCrossProtocolRedirects = true
+ *   · 不自定义 LoadErrorHandlingPolicy（壳跑 media3 默认 3 次重试）
+ *   · 播放路径只读缓存，落盘交给预取线程（壳 setCacheWriteDataSinkFactory(null)）
+ *   · 预取在首帧之后才开灌、并从下一片起，播放缓冲时让路
  *   · seek 静音闸 1200ms，首帧回来恢复音量
  *   · DefaultHlsPlaylistParser 原生认 #EXT-X-ENDLIST，不会误判成直播
  *   · MediaCodecSelector 自动选硬解，4K HEVC 走硬件解码
@@ -148,17 +110,19 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         const val PREFETCH_BUFFER_SIZE = 64 * 1024
 
         /**
-         * 播放数据源的连接 / 读超时（FAST_FAIL_HTTP 2026-11-14）。
+         * 播放数据源的连接 / 读超时（ALIGN_FONGMI 2026-11-15：30s / 30s）。
          *
-         * 原来 15s / 20s：一个「连得上但不给数据」的分片，叠上 3 次重试和退避，
-         * 原生最长要 143 秒才把错误交给 Dart，而 Dart 层早就放弃了 —— 这中间
-         * 旧实例还在对废地址发请求抢带宽，用户看到的就是「一直转圈」。
-         * 压到 6s / 8s（对方 6~8 秒的取值），配合
-         * [FxLoadErrorHandlingPolicy] 的「传输层错误立刻判死」，
-         * 死地址最多十几秒就一定回到 Dart。
+         * 壳的取值就是 30 秒：`catvod/net/OkHttp.java` 里
+         * `TIMEOUT = TimeUnit.SECONDS.toMillis(30)`，player 用的那个 OkHttpClient
+         * 是 connectTimeout / readTimeout / writeTimeout 全 30s。
+         *
+         * 我们原来压到 6s / 8s（FAST_FAIL_HTTP 那版）：移动网络下 CDN 边缘
+         * 抖一下、首片要等回源，8 秒就断，断掉之后 Dart 救援链换线路重来，
+         * 用户看到的就是「明明能播却一直转圈」。死地址不再靠短超时兜，
+         * 靠 media3 默认的 3 次重试 + onPlayerError 把错误交回 Dart。
          */
-        const val HTTP_CONNECT_TIMEOUT_MS = 6_000
-        const val HTTP_READ_TIMEOUT_MS = 8_000
+        const val HTTP_CONNECT_TIMEOUT_MS = 30_000
+        const val HTTP_READ_TIMEOUT_MS = 30_000
     }
 
     private var player: ExoPlayer? = null
@@ -177,6 +141,19 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     /// 分片预取器：和播放器共用同一份 [mediaCache]（同一个 cacheKey），
     /// 所以预取过的分片对播放器来说就是缓存命中（改动 ②）。
     private var preloader: SegmentPreloader? = null
+
+    /// 等首帧再开灌的预取请求（PRELOAD_AFTER_FIRST_FRAME，ALIGN_FONGMI 2026-11-15）。
+    ///
+    /// `open` 只记录，不下载；[Player.Listener.onRenderedFirstFrame] 里才真正交给
+    /// [SegmentPreloader] —— 起播阶段那一片只留给播放器自己。
+    private var pendingPreload: PreloadRequest? = null
+
+    /** 一次待执行的预取：源地址 + 请求头 + 本次 open 的起始位置。 */
+    private class PreloadRequest(
+        val url: String,
+        val headers: Map<String, String>,
+        val startPositionMs: Long,
+    )
 
     private var lastError: String? = null
 
@@ -217,6 +194,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     fun dispose() {
         mainHandler.removeCallbacks(seekGateTimeout)
         seekGateActive = false
+        pendingPreload = null
         preloader?.release()
         preloader = null
         player?.clearVideoSurface()
@@ -304,29 +282,34 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun ensurePlayer() {
         if (player != null) return
-        // LOAD_CONTROL（2026-11-14，按逆向报告 §10 改动 1 落地）。
+        // LOAD_CONTROL（ALIGN_FONGMI 2026-11-15）。
         //
-        // 对方 MemoryLimitedLoadControl 的确证取值：
-        //   setBufferDurationsMs(15000, 60000, 1000, 2000).setBackBuffer(0, false)
-        //   · minBufferMs 15s / maxBufferMs 60s：比 media3 默认（50s/50s）低，
-        //     停止继续吃带宽的阈值更低，播放器不会为了「多缓冲」把链路占满；
-        //   · bufferForPlaybackMs 1s：**首帧只需要 1 秒缓冲**，这是起播快的
-        //     直接原因（我们之前是 1s，但 max 120s 会在弱网下无限等）；
-        //   · bufferForPlaybackAfterRebufferMs 2s：卡一下补 2 秒就续上；
-        //   · backBuffer 0 / 不保留关键帧：ExoPlayer 不往回缓存，
-        //     「往回拖」全靠分片磁盘缓存命中（配合改动 ② 的预取）。
+        // 壳的确切取值来自 FongMi 的 media3 fork（`FongMi/media` 分支 release，
+        // `libraries/exoplayer/.../DefaultLoadControl.java`）：
+        //   DEFAULT_MIN_BUFFER_MS              = 50_000
+        //   DEFAULT_MAX_BUFFER_MS              = 50_000
+        //   DEFAULT_BUFFER_FOR_PLAYBACK_MS     = 1_000
+        //   DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 2_000
+        //   DEFAULT_BACK_BUFFER_DURATION_MS    = 0
+        //   DEFAULT_PRIORITIZE_TIME_OVER_SIZE_THRESHOLDS = false
+        // 而 `ExoUtil.buildLoadControl()` 只把 min/max 乘一个「缓冲档位」倍数
+        // （`PlayerSetting.getBuffer()`，默认 1，范围 1~10），
+        // bufferForPlayback / afterRebuffer 原样透传，优先级开关根本不碰。
         //
-        // 注意我们之前是 30s/120s + backBuffer 30s：120s 上限让弱网下的
-        // 缓冲等得没完，30s 回看缓冲又和磁盘缓存重复占内存。
+        // 所以我们按「档位 1」对齐：50s / 50s / 1s / 2s + backBuffer 0，
+        // 并且**删掉** setPrioritizeTimeOverSizeThresholds(true) ——
+        // 壳用的是默认 false（按字节阈值优先），我们之前那行是自己的发明。
+        //
+        // 和原来的 15s / 60s 比：min=max=50s 表示「一直往 50 秒灌」，
+        // 不留 60s 那种「灌满就停、掉到 15s 才续」的空档，弱网下更不容易断粮。
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                15_000,   // minBufferMs
-                60_000,   // maxBufferMs
+                50_000,   // minBufferMs
+                50_000,   // maxBufferMs
                 1_000,    // bufferForPlaybackMs
                 2_000     // bufferForPlaybackAfterRebufferMs
             )
             .setBackBuffer(0, false)
-            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         // DECODER_FALLBACK（2026-11-14，用户报「声音出来了、画面还是黑屏卡缓冲」）：
         // 画面解不出来但音频正常，是视频轨硬解失败 —— 4K/HEVC 在某些机型上
@@ -372,9 +355,30 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             context = context,
             cache = cache,
             log = { message -> android.util.Log.d("FxExo", message) },
+            // PRIORITY（ALIGN_FONGMI）：播放器处于 BUFFERING 时预取让路。
+            //
+            // 壳用 media3 的 `PriorityTaskManager`（ExoDiskPreload 里
+            // `player.setPriorityTaskManager(priorityTaskManager)`）保证
+            // 「播放的请求永远先于预载的请求」。我们这边单线程预取，
+            // 用一条「播放器在缓冲就暂停」的判据达到同样效果：播放器缺数据时
+            // 预取线程不占连接、不占带宽，缓冲结束再接着灌。
+            pauseGate = {
+                val p = player
+                p != null && p.playbackState == Player.STATE_BUFFERING
+            },
         )
         preloader = created
         return created
+    }
+
+    /// 首帧之后才真正开灌（PRELOAD_AFTER_FIRST_FRAME）。
+    ///
+    /// 幂等：`open` 之后可能多次触发（首帧、seek、重开），只有还挂着请求时才动。
+    private fun startPendingPreload() {
+        val request = pendingPreload ?: return
+        pendingPreload = null
+        if (!firstFrameRendered) return
+        ensurePreloader()?.start(request.url, request.headers, request.startPositionMs)
     }
 
     private fun ensureMediaCache(): SimpleCache? {
@@ -438,6 +442,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 Log.i(LOG_TAG, "FIRST_FRAME 已渲染，pos=${player?.currentPosition}ms")
                 // 首帧到了：拖动闸放开（对方确证的结束条件之一）。
                 endSeekAudioGate()
+                // PRELOAD_AFTER_FIRST_FRAME（ALIGN_FONGMI）：首帧上屏之后
+                // 才开始往后预取 —— 起播那一片只留给播放器，不和它抢。
+                startPendingPreload()
                 emit()
             }
             override fun onPlayerError(error: PlaybackException) {
@@ -502,7 +509,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             val httpFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent(headers["User-Agent"] ?: "Mozilla/5.0")
                 .setAllowCrossProtocolRedirects(true)   // 福盈分片 302 必须开
-                // FAST_FAIL_HTTP：原来 15s / 20s，死地址要等满三轮才上报。
+                // ALIGN_FONGMI：30s / 30s，和壳的 OkHttp TIMEOUT 一致。
                 .setConnectTimeoutMs(HTTP_CONNECT_TIMEOUT_MS)
                 .setReadTimeoutMs(HTTP_READ_TIMEOUT_MS)
                 .setDefaultRequestProperties(headers)
@@ -518,24 +525,28 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // SHARED_CACHE（改动 ②）：播放器和预取器共用同一份 SimpleCache，
             // 所以预取过的分片，播放器读的时候就是缓存命中，不产生网络等待。
             // 缓存初始化失败 / 本地文件 / 非 HLS 时退回纯直连。
+            //
+            // PLAYBACK_NO_WRITE（ALIGN_FONGMI 2026-11-15）：播放路径**只读**缓存，
+            // 不写盘。壳的写法是
+            // `new CacheDataSource.Factory().setCache(...).setUpstreamDataSourceFactory(...)
+            //  .setCacheWriteDataSinkFactory(null)` —— 播放时读缓存、miss 就直连回源，
+            // 落盘交给预载线程（DiskPreloadManager）去做。
+            // 我们之前播放器自己也写缓存：每个没命中缓存的分片都要在**读线程**上
+            // 追加一次磁盘写（SimpleCache 还要抢 span 锁），而预取线程同时在写
+            // 同一片 —— 首屏这一片等于被写盘和锁拖了一道。
             val cachedFactory = if (isLocal || !isHls) {
                 dataSource
             } else {
-                cacheDataSourceFactory(dataSource)
+                cacheDataSourceFactory(dataSource, writeToCache = false)
             }
             val item = MediaItem.fromUri(url)
-            // FAST_FAIL_HTTP（2026-11-14）：给媒体源挂上快速失败策略。
-            // `setLoadErrorHandlingPolicy` 是 @UnstableApi —— 类级
-            // `@OptIn(UnstableApi::class)` 已覆盖这里；策略类自身也标了注解。
-            val errorPolicy = FxLoadErrorHandlingPolicy()
+            // ALIGN_FONGMI：不挂自定义 LoadErrorHandlingPolicy（壳是空实现，
+            // 跑 media3 默认：3 次重试 + 0/1s/2s 退避），死地址交给
+            // onPlayerError → Dart 救援链。
             val source: MediaSource = if (isHls) {
-                HlsMediaSource.Factory(cachedFactory)
-                    .setLoadErrorHandlingPolicy(errorPolicy)
-                    .createMediaSource(item)
+                HlsMediaSource.Factory(cachedFactory).createMediaSource(item)
             } else {
-                ProgressiveMediaSource.Factory(cachedFactory)
-                    .setLoadErrorHandlingPolicy(errorPolicy)
-                    .createMediaSource(item)
+                ProgressiveMediaSource.Factory(cachedFactory).createMediaSource(item)
             }
             // OPEN_RESET（2026-11-14）：换源前先把上一个源停掉并清空。
             // 之前某条线路失败后，播放器会停在错误/未就绪状态，
@@ -566,11 +577,22 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 "RESUME 起始位置 ${startPositionMs}ms（prepare 前 seek）；" +
                     "isHls=$isHls url=$url",
             )
-            // 预取随 open 立刻开灌（改动 ②）：HLS 才需要分片级预取，
-            // 本地文件 / 渐进式源跳过。起点同样是这个起始位置，
-            // 不然预取会先把前几片拉一遍，继续占用中转槽位。
+            // PRELOAD_AFTER_FIRST_FRAME（ALIGN_FONGMI 2026-11-15）：
+            // **不再在 open 时立刻开灌分片**，只把请求记下来，等首帧渲染出来
+            // 再交给 [SegmentPreloader]。
+            //
+            // 壳的做法就是这个：它的 media3 `DiskPreloadManager` 只服务
+            // 「预载下一集」，当前这一集的取流完全交给播放器自己；要预载时
+            // 也是把 `PriorityTaskManager` 挂到 player 上，播放永远优先。
+            //
+            // 我们之前 open 即开灌，起点还是当前片（从头播就是第 0 片）——
+            // 播放器要的那一片和预取线程要的那一片是同一个地址：两路请求同时
+            // 打到 CDN / 中转，首片等于是和自己的预取抢带宽和连接名额。
+            // 现在预取从「当前位置的下一片」开始，并且只在首帧之后跑。
             if (!isLocal && isHls) {
-                ensurePreloader()?.start(url, headers, startPositionMs)
+                pendingPreload = PreloadRequest(url, headers, startPositionMs)
+            } else {
+                pendingPreload = null
             }
             result.success(true)
         } catch (e: Throwable) {
@@ -590,10 +612,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     ///
     /// 缓存实例由 [ensureMediaCache] 统一持有，和预取器是同一个对象
     /// （改动 ② 的前提：缓存只能有一个主人，否则等于两份缓存两份下载）。
-    private fun cacheDataSourceFactory(upstream: DataSource.Factory): DataSource.Factory {
+    private fun cacheDataSourceFactory(
+        upstream: DataSource.Factory,
+        writeToCache: Boolean = false,
+    ): DataSource.Factory {
         val cache = ensureMediaCache() ?: return upstream
         return try {
-            CacheDataSource.Factory()
+            val factory = CacheDataSource.Factory()
                 .setCache(cache)
                 .setUpstreamDataSourceFactory(upstream)
                 // CACHE_KEY：播放器 / 预取器 / 首页续播预取共用同一套 key
@@ -602,6 +627,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 .setCacheKeyFactory(FxCacheKeyFactory)
                 // 缓存坏了就忽略、直接回源，别让播放卡死
                 .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+            // PLAYBACK_NO_WRITE（ALIGN_FONGMI 2026-11-15）：只有预取线程
+            // （writeToCache = true）才落盘；播放路径设 null = 只读。
+            // 壳就是这么写的：`setCacheWriteDataSinkFactory(null)`。
+            if (!writeToCache) factory.setCacheWriteDataSinkFactory(null)
+            factory
         } catch (e: Throwable) {
             upstream
         }
@@ -644,13 +674,17 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 val httpFactory = DefaultHttpDataSource.Factory()
                     .setUserAgent(headers["User-Agent"] ?: "Mozilla/5.0")
                     .setAllowCrossProtocolRedirects(true)
-                    .setConnectTimeoutMs(15_000)
-                    .setReadTimeoutMs(20_000)
+                    // ALIGN_FONGMI：和播放路径同一档超时（壳的 OkHttp 30s）。
+                    .setConnectTimeoutMs(HTTP_CONNECT_TIMEOUT_MS)
+                    .setReadTimeoutMs(HTTP_READ_TIMEOUT_MS)
                     .setDefaultRequestProperties(headers)
                 // 关键：同一个 cacheDataSourceFactory —— 同一份 SimpleCache、
                 // 同一个 cacheKey 规则，播放器读的时候才是本地命中。
+                // 这条路径是**写盘**的（writeToCache = true）：播放路径已经
+                // 不写缓存了（PLAYBACK_NO_WRITE），落盘只剩预取这一条路。
                 val factory = cacheDataSourceFactory(
-                    DefaultDataSource.Factory(context, httpFactory)
+                    DefaultDataSource.Factory(context, httpFactory),
+                    writeToCache = true,
                 )
                 val stream = factory.createDataSource()
                 source = stream

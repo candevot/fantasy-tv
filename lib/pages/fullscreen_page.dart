@@ -734,7 +734,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 缓存命中时不等接口与 playlist，直接用上一帧快照垫着 open。
     final cacheHit =
         !forcePlayInfo && FxPlayCache.peek(widget.videoId, _ep, _line) != null;
-    final waitForWarm = !cacheHit;
+    // WARMUP_NONBLOCK（ALIGN_FONGMI 2026-11-15）：预热不再参与 open 时延。
     setState(() {
       _loading = true;
       _suppressLoadingOverlay = cacheHit && _frozenFrame != null;
@@ -807,7 +807,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               url,
               headers: source.headers,
               play: continuePlayback,
-              waitForWarm: waitForWarm,
               isHls: source.isHls,
               // 续播：起始位置交给 open，首个分片请求就是目标片，
               // 不会先拉第 0 片把服务端首片中转名额用掉。

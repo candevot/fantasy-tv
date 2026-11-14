@@ -16,16 +16,22 @@ Duration recoveryVisiblePosition({
 
 /// 起播阶段的卡住门槛（首帧还没渲染出来）。
 ///
-/// STARTUP_FAST_FAIL（2026-11-14）：原生层已经把「死地址」的最长等待压到
-/// 十几秒（401/403/404/410/416/500/503 立刻判死 + 连接 6s / 读 8s + 最多
-/// 2 次重试），Dart 侧再等 30 秒只是白等 —— 这 30 秒里旧实例还在对废地址
-/// 发请求抢带宽，用户看到的就是「一直转圈加载不出来」。
-/// 起播只给 6 秒：正常起播 < 2 秒，超过 6 秒还没出帧就换一套动作。
-const Duration startupStallTimeout = Duration(seconds: 6);
+/// ALIGN_FONGMI（2026-11-15）：门槛从 6 秒抬到 15 秒。
+///
+/// 原生层已经改成「和壳一致」的传输参数（连接 / 读超时都是 30s、错误交给
+/// media3 默认的 3 次重试、不再按状态码一次判死）。6 秒的门槛比传输层
+/// 短得多，正常但有波动的线路（解析 302 冷启动 3s + 清单 + 首片）会被它
+/// 误判成死线路，然后走救援链换线路重开 —— 用户看到的就是「壳秒开、
+/// 我们一直在转圈/换线」。
+/// 15 秒仍然比「一个完整读超时」短一半：真死了的地址照样会被放弃，
+/// 不会拖到 30 秒以上。
+const Duration startupStallTimeout = Duration(seconds: 15);
 
-/// 首帧已经渲染之后的停摆门槛：回到原来的宽松值，避免把「大分片加载慢」
-/// 误判成「线路不可用」。
-const Duration playbackStallTimeout = Duration(seconds: 8);
+/// 首帧已经渲染之后的停摆门槛（12 秒）。
+///
+/// 首帧之后播放器已经在出画面，卡顿多半是某一片在重试：media3 默认
+/// 0 / 1s / 2s 三次退避最多约 3 秒，12 秒足够吃掉两轮，不会误杀。
+const Duration playbackStallTimeout = Duration(seconds: 12);
 
 /// 按「首帧是否已渲染」选停摆门槛。
 Duration stallTimeoutFor({required bool hasRenderedFirstFrame}) =>

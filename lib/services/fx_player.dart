@@ -1,10 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 
 import '../models.dart';
 import 'cms_bridge.dart';
@@ -256,13 +254,12 @@ class FxPlayer implements Listenable {
 
   /// 停摆判定门槛：连续这么久完全没有进度 / 缓冲推进才算失败候选。
   ///
-  /// STARTUP_FAST_FAIL（2026-11-14）：门槛分两档，见
-  /// `playback_recovery.dart` 的 [stallTimeoutFor]：
-  ///   · 起播（首帧未渲染）[startupStallTimeout] = 6 秒；
-  ///   · 首帧出来后 [playbackStallTimeout] = 8 秒（原来的宽松值）。
-  /// 原来起播也是 30 秒：死分片原生最长 143 秒才报错，Dart 先等 30 秒，
-  /// 中间这段时间旧实例还在对废地址发请求抢带宽 —— 用户看到的就是
-  /// 「一直转圈加载不出来」。
+  /// ALIGN_FONGMI（2026-11-15）：两档门槛都抬高了（见
+  /// `playback_recovery.dart` 的 [stallTimeoutFor]）：
+  ///   · 起播（首帧未渲染）[startupStallTimeout] = 15 秒；
+  ///   · 首帧出来后 [playbackStallTimeout] = 12 秒。
+  /// 原生传输参数已经和壳对齐（连接 / 读超时 30s、默认 3 次重试），
+  /// 原来的 6 秒比传输层还紧，正常波动会被判成死线路。
 
   /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
   static const int _rescueTries = 2;
@@ -453,7 +450,6 @@ class FxPlayer implements Listenable {
     String url, {
     Map<String, String> headers = const <String, String>{},
     bool play = false,
-    bool waitForWarm = false,
     bool direct = false,
     /// 服务端给的类型（PlayInfo.isHls）。给了就以它为准，不再靠地址后缀猜。
     ///
@@ -499,7 +495,6 @@ class FxPlayer implements Listenable {
       url,
       headers,
       play,
-      waitForWarm,
       direct,
       startMs,
       refreshPlay,
@@ -534,7 +529,6 @@ class FxPlayer implements Listenable {
     String url,
     Map<String, String> headers,
     bool play,
-    bool waitForWarm,
     bool direct,
     int startPositionMs,
     PlayUrlRefresher? refreshPlay,
@@ -566,21 +560,19 @@ class FxPlayer implements Listenable {
     final ready = Completer<void>();
     _ready = ready;
     unawaited(ready.future.catchError((Object _) {}));
+    _PlaybackSource? opened;
     try {
       final source = await _resolvePlaybackSource(
         url,
         headers,
         direct: direct,
         token: token,
-        waitForWarm: waitForWarm,
       );
       if (source == null) {
         if (identical(_ready, ready)) _ready = null;
         return;
       }
-      // 清单索引（§10 改动 4）：后台建一份「分片 ↔ 时间」的本地索引，
-      // 不占 open 的预算，建不出来也只是少一层拖动优化。
-      unawaited(_primeSegmentIndex(source.url, headers, token));
+      opened = source;
       await _openMedia(
         source,
         play: play,
@@ -605,6 +597,15 @@ class FxPlayer implements Listenable {
     } finally {
       if (identical(_ready, ready)) _ready = null;
     }
+    // 清单索引（§10 改动 4）：首帧之后才建。
+    //
+    // ALIGN_FONGMI（2026-11-15）：原来是在 open 之前就 `unawaited` 拉一遍
+    // m3u8 —— 起播那一瞬间等于同时有「播放器 + 预热 + 预取 + 这份索引」
+    // 四条路径去要同一个清单，白白多一次回源。索引只是给拖动用的，
+    // 首帧更重要，所以挪到首帧之后（后台建，失败也不影响播放）。
+    if (opened != null && !_disposed && token == _openToken) {
+      unawaited(_primeSegmentIndex(opened.url, opened.headers, token));
+    }
   }
 
   /// 等首帧，但把「还在下载」和「卡死」区分开。
@@ -612,10 +613,10 @@ class FxPlayer implements Listenable {
   /// 判据是 ExoPlayer 上报的缓冲位置 / 播放位置：在动就说明线路活着，
   /// 继续等；停摆超过门槛才算这次 open 失败。
   ///
-  /// STARTUP_FAST_FAIL（2026-11-14）：门槛按「首帧是否已渲染」分两档
-  /// （[stallTimeoutFor]）—— 起播 6 秒，首帧出来后 8 秒。另外起播阶段
-  /// 即使缓冲还在慢慢涨，只要 6 秒内没把首帧送上屏，同样算卡住：
-  /// 用户看到的就是转圈，等下去只有旧实例继续占带宽。
+  /// 门槛按「首帧是否已渲染」分两档（[stallTimeoutFor]）—— 起播 15 秒，
+  /// 首帧出来后 12 秒。另外起播阶段即使缓冲还在慢慢涨，只要门槛内没把
+  /// 首帧送上屏，同样算卡住：用户看到的就是转圈，等下去只有旧实例继续
+  /// 占带宽。（ALIGN_FONGMI 2026-11-15：原值为 6 / 8 秒，比传输层还紧。）
   Future<void> _awaitReadyOrProgress(Future<void> ready, int token) async {
     final startedAt = DateTime.now();
     var lastMs = -1;
@@ -668,7 +669,6 @@ class FxPlayer implements Listenable {
     Map<String, String> headers, {
     required bool direct,
     required int token,
-    required bool waitForWarm,
   }) async {
     var playbackUrl = url;
     var playbackHeaders = headers;
@@ -707,12 +707,14 @@ class FxPlayer implements Listenable {
     if (_disposed || token != _openToken) return null;
 
     if (!proxied) {
-      final warmup = _FxHlsWarmup.prepare(url, headers);
-      if (waitForWarm) {
-        await warmup;
-      } else {
-        unawaited(warmup);
-      }
+      // ALIGN_FONGMI（2026-11-15）：预热**永远不阻塞 open**，也永远不拉分片。
+      //
+      // 壳（FongMi/TV）没有这一步：拿到直链就 setMediaSource + prepare，
+      // 起播链路里只有播放器自己那一次请求。我们以前在首次打开时
+      // `await` 预热（预算 1.6s），等于在「开播」前面白插一段串行等待，
+      // 正好和「秒开」相反 —— 现在只做 DNS 预热（几毫秒、不产生 HTTP 请求），
+      // 且 fire-and-forget，open 一步都不等它。
+      unawaited(_FxHlsWarmup.prepare(url));
     }
     if (_disposed || token != _openToken) return null;
     return _PlaybackSource(playbackUrl, playbackHeaders);
@@ -1521,7 +1523,6 @@ class FxPlayer implements Listenable {
         headers,
         direct: direct,
         token: token,
-        waitForWarm: false,
       );
       if (source == null || _disposed || token != _openToken) {
         _logFx('RESCUE 地址解析被取代或失败');
@@ -1782,7 +1783,7 @@ class FxPlayCache {
         (info) async {
           final url = info.url.trim();
           if (url.isEmpty) return;
-          await _FxHlsWarmup.prepare(url, info.headers);
+          await _FxHlsWarmup.prepare(url);
         },
         onError: (Object error, StackTrace stack) {
           // 预解析失败无需打扰用户，切集时还会正常重试。
@@ -1821,31 +1822,32 @@ class _CachedPlayInfo {
   final DateTime at;
 }
 
-/// m3u8 起播预热：用 HTTP GET 拿 master playlist，再并行预热 1–2 个子
-/// playlist（等价于 HEAD 的连通性预热，还能让 CDN / DNS 提前命中）。
+/// 起播预热（ALIGN_FONGMI 2026-11-15：**只做 DNS，绝不阻塞 open**）。
 ///
-/// 整个预热有 2.2 秒硬预算，失败 / 超时静默返回，open 不会被拖慢。
+/// 历史：这里以前会在 open 之前 GET master playlist、再 GET 第一个子
+/// playlist、再整片拉前 3 个分片并直接丢弃（最多 24MB）。问题有三层：
+///   1. `open` 等它（首次打开 waitForWarm = true，预算 1.6s）——
+///      起播前面白插一段串行等待；
+///   2. 那 3 个分片和播放器要的第 0 片是**同一个地址**，两路请求一起打
+///      CDN，首片等于和自己的预热抢带宽；
+///   3. 清单被要了三遍（预热 + 分片索引 + 播放器），每次都是一次回源。
+///
+/// 壳（FongMi/TV）压根没有这一步：解析出直链就 `setMediaSource` + `prepare`。
+/// 所以这里只保留「系统 DNS 预热」——几毫秒、不产生 HTTP 请求、不占连接，
+/// 而且对 ExoPlayer 的 HttpURLConnection 也有效（同一个系统解析缓存）。
 class _FxHlsWarmup {
-  static const Duration _budget = Duration(milliseconds: 1600);
   static const Duration _ttl = Duration(minutes: 8);
-  /// 预热时真正预取的分片数。
-  ///
-  /// 直连模式下没有客户端代理的整集缓存，起播和 seek 都直接打 CDN。
-  /// 之前只暖首片 256KB，等于只做了 DNS/连接预热 —— 首帧仍要等第一个
-  /// 完整分片下完。这里改成预取前 3 片（4K 单片 10~40MB 时按字节上限
-  /// 截断），让 mpv 一起播就有货可解，起播不再空等。
-  static const int _segmentPrefetchCount = 3;
-
-  /// 预取总字节上限：4K 分片很大，不能无限预取。
-  static const int _prefetchBudgetBytes = 24 * 1024 * 1024;
   static final Map<String, DateTime> _warmed = <String, DateTime>{};
   static final Map<String, Future<void>> _inflight = <String, Future<void>>{};
 
-  static Future<void> prepare(String url, Map<String, String> headers) {
-    if (url.isEmpty || !_looksLikeHls(url)) return Future<void>.value();
+  static Future<void> prepare(String url) {
+    if (url.isEmpty) return Future<void>.value();
+    final uri = Uri.tryParse(url);
+    if (uri == null) return Future<void>.value();
     // 离线缓存播的是本地 index.m3u8，不需要联网预热。
-    final scheme = Uri.tryParse(url)?.scheme ?? '';
-    if (scheme != 'http' && scheme != 'https') return Future<void>.value();
+    if (!uri.isScheme('http') && !uri.isScheme('https')) {
+      return Future<void>.value();
+    }
     final now = DateTime.now();
     final warmedAt = _warmed[url];
     if (warmedAt != null && now.difference(warmedAt) < _ttl) {
@@ -1853,7 +1855,7 @@ class _FxHlsWarmup {
     }
     final pending = _inflight[url];
     if (pending != null) return pending;
-    final future = _warm(url, headers).timeout(_budget, onTimeout: () {});
+    final future = _dnsPrefetch(uri);
     _inflight[url] = future;
     return future.whenComplete(() {
       if (identical(_inflight[url], future)) _inflight.remove(url);
@@ -1862,126 +1864,9 @@ class _FxHlsWarmup {
     });
   }
 
-  /// 代理地址 / 带 query 的地址要解码后再判断，避免漏掉 .m3u8。
-  static bool _looksLikeHls(String url) {
-    final lower = Uri.decodeFull(url).toLowerCase();
-    return lower.contains('.m3u8');
-  }
-
-  static Future<void> _warm(String url, Map<String, String> headers) async {
-    final playlistUri = Uri.parse(url);
-    final client = http.Client();
-    try {
-      // 先做 DNS 预解析，再拿 playlist；HTTP 连接也会复用这次解析结果。
-      unawaited(_dnsPrefetch(playlistUri));
-      final response = await client
-          .get(playlistUri, headers: headers)
-          .timeout(const Duration(milliseconds: 1200));
-      if (response.statusCode < 200 || response.statusCode >= 400) return;
-      final body = utf8.decode(response.bodyBytes, allowMalformed: true);
-      if (!body.contains('#EXTM3U')) return;
-      final variants = _variants(body, playlistUri);
-      if (variants.isEmpty) {
-        // 已经是媒体 playlist：直接取第一个分片的前 256KB 暖 CDN。
-        // 直连没有代理层的整集缓存，开头多备几片，起播/小 seek 不用等。
-        final leading = _leadingSegments(
-          body,
-          playlistUri,
-          _segmentPrefetchCount,
-        );
-        for (final seg in leading) {
-          unawaited(_prefetchFirstSegment(seg, headers));
-        }
-        return;
-      }
-      // master playlist：只等第一个子 playlist（拿到真实分片地址），
-      // 第二个子 playlist 后台暖连接，不占用起播预算。
-      final firstVariant = variants.first;
-      final firstBody = await _fetchPlaylistText(client, firstVariant, headers);
-      if (firstBody != null) {
-        final leading = _leadingSegments(
-          firstBody,
-          firstVariant,
-          _segmentPrefetchCount,
-        );
-        for (final seg in leading) {
-          unawaited(_prefetchFirstSegment(seg, headers));
-        }
-      }
-      if (variants.length > 1) {
-        unawaited(_warmVariant(variants[1], headers));
-      }
-    } catch (_) {
-      // 预热失败不影响正常 open。
-    } finally {
-      client.close();
-    }
-  }
-
-  static Future<String?> _fetchPlaylistText(
-    http.Client client,
-    Uri uri,
-    Map<String, String> headers,
-  ) async {
-    try {
-      unawaited(_dnsPrefetch(uri));
-      final response = await client
-          .get(uri, headers: headers)
-          .timeout(const Duration(milliseconds: 800));
-      if (response.statusCode < 200 || response.statusCode >= 400) return null;
-      return utf8.decode(response.bodyBytes, allowMalformed: true);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// 第二个码率只在后台暖连接，不占用等待时间。
-  static Future<void> _warmVariant(Uri uri, Map<String, String> headers) async {
-    final client = http.Client();
-    try {
-      await _fetchPlaylistText(client, uri, headers);
-    } finally {
-      client.close();
-    }
-  }
-
-  /// 直连模式下的预热：把开头几个分片整片拉一遍。
-  ///
-  /// 不保留数据（mpv 自己会再拉一次并缓存），目的是：
-  ///   1. 暖 DNS / TCP / TLS，起播省掉握手；
-  ///   2. 让 CDN 边缘节点预热这几个对象，mpv 再拉时直接命中；
-  ///   3. 提前暴露「首片就 404/403」的坏线路，交给上层快速换线。
-  ///
-  /// 4K 单片 10~40MB，因此按 [_prefetchBudgetBytes] 截断，不会把带宽吃光。
-  static Future<void> _prefetchFirstSegment(
-    Uri uri,
-    Map<String, String> headers,
-  ) async {
-    unawaited(_dnsPrefetch(uri));
-    final client = http.Client();
-    var budget = _prefetchBudgetBytes;
-    try {
-      final request = http.Request('GET', uri)..headers.addAll(headers);
-      final response = await client
-          .send(request)
-          .timeout(const Duration(seconds: 3));
-      if (response.statusCode >= 400) return;
-      await for (final chunk in response.stream.timeout(
-        const Duration(seconds: 3),
-      )) {
-        budget -= chunk.length;
-        if (budget <= 0) break;
-      }
-    } catch (_) {
-      // 预取失败不影响播放。
-    } finally {
-      client.close();
-    }
-  }
-
+  /// 让系统解析一次域名：真实请求时省掉 DNS 往返（移动网络下常见 50~300ms）。
   static Future<void> _dnsPrefetch(Uri uri) async {
-    final https = uri.isScheme('https');
-    if (uri.host.isEmpty || !(https || uri.isScheme('http'))) return;
+    if (uri.host.isEmpty) return;
     try {
       await InternetAddress.lookup(
         uri.host,
@@ -1989,39 +1874,6 @@ class _FxHlsWarmup {
     } catch (_) {
       // DNS 失败交给真正请求时的系统解析。
     }
-  }
-
-  /// 从媒体 playlist 里取第一个分片地址，相对路径按 playlist 地址解析。
-  /// 取 playlist 里前 [count] 个分片地址（用于直连预热）。
-  static List<Uri> _leadingSegments(String playlist, Uri base, int count) {
-    if (playlist.contains('#EXT-X-STREAM-INF')) return const <Uri>[];
-    final out = <Uri>[];
-    for (final raw in const LineSplitter().convert(playlist)) {
-      final line = raw.trim();
-      if (line.isEmpty || line.startsWith('#')) continue;
-      final uri = Uri.tryParse(base.resolve(line).toString());
-      if (uri == null) continue;
-      out.add(uri);
-      if (out.length >= count) break;
-    }
-    return out;
-  }
-
-  /// 从 master playlist 里取前两个变体地址（相对路径按 playlist 地址解析）。
-  static List<Uri> _variants(String playlist, Uri base) {
-    final lines = const LineSplitter().convert(playlist);
-    final variants = <Uri>[];
-    for (var i = 0; i < lines.length; i++) {
-      if (!lines[i].trimLeft().startsWith('#EXT-X-STREAM-INF')) continue;
-      for (var j = i + 1; j < lines.length; j++) {
-        final line = lines[j].trim();
-        if (line.isEmpty || line.startsWith('#')) continue;
-        final uri = Uri.tryParse(base.resolve(line).toString());
-        if (uri != null) variants.add(uri);
-        break;
-      }
-    }
-    return variants;
   }
 
   static void _trimWarmed() {
