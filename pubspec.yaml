@@ -5,6 +5,13 @@ version: 1.0.0+1
 environment:
   sdk: '>=3.8.0 <4.0.0'
 dependencies:
+  # media_kit（libmpv）播放内核。回退原因见 commit：ExoPlayer 拿不到
+  # cache-on-disk / demuxer-max-bytes 这类控制，播放体验做不到「秒播不卡」。
+  # libs_video 1.0.7 起自带 16KB 对齐，满足 Play 的页对齐要求。
+  media_kit: ^1.2.6
+  media_kit_video: '>=1.3.1 <2.0.0'
+  media_kit_libs_video: ^1.0.7
+
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.6
@@ -15,14 +22,6 @@ dependencies:
   # 由 tools/patch_exoplayer.py 在 CI 构建时注入 Android 工程，不在 Dart 依赖里。
   # 控件仍然全部自绘，只是内核从 libmpv 换成 Android 原生 ExoPlayer。
   #
-  # 为什么不用 media_kit/libmpv：demuxer-readahead-secs / cache-buffering-state
-  # / cache-pause-wait 那套属性在大分片 4K 源上极难调好，反复出现
-  # 「加载慢 / 出画黑屏 / 缓冲卡 99」。ExoPlayer 的 DefaultLoadControl
-  # 按**时长**缓冲、自己调度分片，原生认 #EXT-X-ENDLIST，也能跟 302。
-  #
-  # 为什么不用 better_player / video_player：它们自带 widget 层和生命周期，
-  # 会自己 dispose controller，跟我们「竖屏/全屏共用同一实例 + 内部救援链」
-  # 的用法冲突。这里只要最小内核，控制权留在 FxPlayer 手里。
   web_socket_channel: '>=2.4.0 <3.0.0'
   shared_preferences: '>=2.2.2 <3.0.0'
   # 直播详情「分享」调系统分享面板；10.x 兼容 Flutter 3.32 / compileSdk 36。
