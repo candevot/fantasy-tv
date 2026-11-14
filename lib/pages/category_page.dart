@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../theme.dart';
 import '../widgets/fx_cards.dart';
 import 'detail_page.dart';
@@ -485,12 +486,16 @@ class CategoryPage extends StatefulWidget {
 }
 
 class _CategoryPageState extends State<CategoryPage> {
+  /// 类型选项跟 CMS 的一级栏目对齐（键同时兼容旧接口的
+  /// juji / movie / manhua / zongyi，CmsBridge 里统一翻译成 type_id）。
   static const List<_Opt> _types = [
     _Opt('', '全部'),
-    _Opt('juji', '剧集'),
     _Opt('movie', '电影'),
+    _Opt('tv', '电视剧'),
+    _Opt('anime', '动漫'),
     _Opt('zongyi', '综艺'),
-    _Opt('manhua', '动漫'),
+    _Opt('duanju', '短剧'),
+    _Opt('kids', '少儿'),
     _Opt('live', '直播'),
   ];
   static const List<_Opt> _areas = [
@@ -573,7 +578,7 @@ class _CategoryPageState extends State<CategoryPage> {
         if (clear) _items.clear();
       });
       try {
-        final list = await Api.category(
+        final list = await CmsBridge.category(
             type: _type, area: _area, year: _year, sort: _sort, page: 1);
         if (!mounted || req != _req) return;
         setState(() {
@@ -613,7 +618,7 @@ class _CategoryPageState extends State<CategoryPage> {
       _moreError = false;
     });
     try {
-      final list = await Api.category(
+      final list = await CmsBridge.category(
           type: _type, area: _area, year: _year, sort: _sort, page: next);
       if (!mounted || req != _req) return;
       setState(() {

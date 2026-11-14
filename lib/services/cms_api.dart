@@ -182,6 +182,13 @@ class CmsApi {
     }
   }
 
+  /// 分类列表（首页横向卡片行 / 分类页用的入口）：`categoryList(typeId, page)`。
+  ///
+  /// 等价于 [list]，只是把「分类 id + 页码」的调用形态固定下来 ——
+  /// 首页每一行、分类页每一页都只传这两个参数，排序统一按更新时间。
+  static Future<List<VideoCard>> categoryList(int typeId, int page) =>
+      list(type: typeId, page: page);
+
   /// 搜索：`ac=detail&wd=<关键词>&pg=<页>`。
   ///
   /// 用 detail 而不是 list：搜索面板要显示简介 / 集数，list 给不全这些字段。

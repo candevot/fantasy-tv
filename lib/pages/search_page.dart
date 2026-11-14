@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
@@ -94,9 +95,10 @@ class _SearchPageState extends State<SearchPage> {
         _hotError = false;
       });
     }
-    List<VideoCard> items = const [];
+    // 热搜词也走 CMS（按点击量排的片名），拿不到再回落旧接口榜单。
+    List<String> words = const <String>[];
     try {
-      items = await Api.rank('hot');
+      words = await CmsBridge.hotWords();
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -106,14 +108,6 @@ class _SearchPageState extends State<SearchPage> {
       return;
     }
     if (!mounted) return;
-    final seen = <String>{};
-    final words = <String>[];
-    for (final item in items) {
-      final title = item.title.trim();
-      if (title.isEmpty || !seen.add(title)) continue;
-      words.add(title);
-      if (words.length >= 12) break;
-    }
     setState(() {
       _hotWords = words;
       _hotLoading = false;
@@ -179,7 +173,7 @@ class _SearchPageState extends State<SearchPage> {
       _moreError = false;
     });
     try {
-      final list = await Api.search(text, 1);
+      final list = await CmsBridge.search(text, 1);
       if (!mounted || req != _req) return;
       setState(() {
         _results = list;
@@ -207,7 +201,7 @@ class _SearchPageState extends State<SearchPage> {
       _moreError = false;
     });
     try {
-      final list = await Api.search(q, next);
+      final list = await CmsBridge.search(q, next);
       if (!mounted || _mode != 'search' || _lastQuery != q) return;
       setState(() {
         _results.addAll(list);

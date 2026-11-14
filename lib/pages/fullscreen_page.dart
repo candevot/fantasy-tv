@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/danmu_local.dart';
@@ -577,7 +578,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   Future<void> _loadEpisodeMeta() async {
     try {
-      final detail = await Api.detail(widget.videoId);
+      final detail = await CmsBridge.detail(widget.videoId);
       if (!mounted) return;
       setState(() {
         _episodes = detail.allEpisodes;
@@ -935,7 +936,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       final next = _lines[(index + k) % _lines.length];
       if (next.id == _line || next.id.trim().isEmpty) continue;
       try {
-        final fresh = await Api.play(widget.videoId, _ep, next.id);
+        final fresh = await CmsBridge.play(widget.videoId, _ep, next.id);
         // 救援换线也要补成绝对地址：站内相对路径补全后 mpv 才能直连，
         // 否则这条新线路又退化成「走代理、整片下完才播」。
         final freshUrl = fxAbsolutePlayUrl(fresh.url);
@@ -1150,7 +1151,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<String?> _refreshPlatformUrl() async {
     if (_isLive || widget.videoId.isEmpty || _line.isEmpty) return null;
     try {
-      final info = await Api.play(widget.videoId, _ep, _line, fresh: true);
+      final info =
+          await CmsBridge.play(widget.videoId, _ep, _line, fresh: true);
       final url = info.url.trim();
       if (url.isEmpty) return null;
       FxPlayCache.invalidate(widget.videoId, _ep, _line);

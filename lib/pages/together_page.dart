@@ -5,10 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
-import '../api.dart';
 import '../auth.dart';
 import '../fx_globals.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
 import '../widgets/player_theme.dart';
@@ -2394,7 +2394,7 @@ class _TogetherPageState extends State<TogetherPage>
   /// 选片弹层用：拿详情补真实集数；失败时退回卡片自带的集数。
   Future<VideoDetail?> _fetchDetailForPicker(String videoId) async {
     try {
-      return await Api.detail(videoId);
+      return await CmsBridge.detail(videoId);
     } catch (_) {
       return null;
     }
@@ -2708,7 +2708,7 @@ class _TogetherPageState extends State<TogetherPage>
 
   Future<void> _fetchDetail(String videoId) async {
     try {
-      final detail = await Api.detail(videoId);
+      final detail = await CmsBridge.detail(videoId);
       if (!mounted || _videoId != videoId) return;
       setState(() {
         _lines = detail.lines;
@@ -3123,7 +3123,7 @@ class _TogetherPageState extends State<TogetherPage>
       if (!mounted || seq != _videoSeq) return;
       PlayInfo play;
       try {
-        play = await Api.play(videoId, ep, lineInfo.id);
+        play = await CmsBridge.play(videoId, ep, lineInfo.id);
       } catch (_) {
         continue;
       }
@@ -3322,7 +3322,7 @@ class _TogetherPageState extends State<TogetherPage>
   ) async {
     if (!mounted || seq != _videoSeq) return null;
     try {
-      final play = await Api.play(videoId, ep, line, fresh: true);
+      final play = await CmsBridge.play(videoId, ep, line, fresh: true);
       if (!mounted ||
           seq != _videoSeq ||
           play.type.trim().toLowerCase() == 'parse') {
@@ -3364,7 +3364,7 @@ class _TogetherPageState extends State<TogetherPage>
       final next = lines[(index + k) % lines.length];
       if (next.id == current.id || next.id.trim().isEmpty) continue;
       try {
-        final play = await Api.play(videoId, ep, next.id);
+        final play = await CmsBridge.play(videoId, ep, next.id);
         if (!mounted || seq != _videoSeq) return null;
         if (play.type.trim().toLowerCase() == 'parse') continue;
         final url = fxAbsolutePlayUrl(_qualityUrlFor(play, qualityKey));

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/fx_player.dart';
@@ -959,14 +960,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         line,
         force: forcePlayInfo,
       );
-    } catch (_) {
+    } catch (e) {
       if (!mounted || token != _loadToken) return false;
+      // CMS 需要解析的线路：解析服务失败时把真实原因透出来
+      // （「该线路解析失败」），别一律说成「检查网络」。
+      final message = e is ApiException && e.message.trim().isNotEmpty
+          ? e.message.trim()
+          : '获取播放地址失败，请检查网络后重试';
       setState(() {
         _loading = false;
         _suppressLoading = false;
         if (reportFailure) {
           _error = true;
-          _errorText = '获取播放地址失败，请检查网络后重试';
+          _errorText = message;
         }
       });
       if (reportFailure) {
@@ -1078,7 +1084,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   if (next.id == line || next.id.trim().isEmpty) continue;
                   try {
                     final fresh =
-                        await Api.play(widget.videoId, ep, next.id);
+                        await CmsBridge.play(widget.videoId, ep, next.id);
                     // 救援换线同样补成绝对地址，避免新线路退化成走代理。
                     final freshUrl = fxAbsolutePlayUrl(fresh.url);
                     if (freshUrl.isEmpty) continue;
@@ -1209,7 +1215,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Future<String?> _refreshPlatformUrl(String line, int ep) async {
     if (widget.videoId.isEmpty || line.isEmpty) return null;
     try {
-      final info = await Api.play(widget.videoId, ep, line, fresh: true);
+      final info =
+          await CmsBridge.play(widget.videoId, ep, line, fresh: true);
       final url = info.url.trim();
       if (url.isEmpty) return null;
       // 旧签名已失效，清掉缓存，避免稍后切回本线路又命中过期地址。
@@ -2275,7 +2282,7 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _load() async {
     setState(() => _error = null);
     try {
-      final detail = await Api.detail(widget.videoId);
+      final detail = await CmsBridge.detail(widget.videoId);
       if (!mounted) return;
       // 传进来的集数可能超出详情实际集数（历史脏数据 / 集数变化），按详情收敛。
       final eps = detail.allEpisodes.isNotEmpty

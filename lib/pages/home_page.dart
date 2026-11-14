@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
@@ -12,12 +13,6 @@ import 'search_page.dart';
 import 'together_page.dart';
 import '../utils/fx_route.dart';
 import '../widgets/fx_resume_bar.dart' show FxResumeBarHost;
-
-class _Channel {
-  const _Channel(this.key, this.label);
-  final String key;
-  final String label;
-}
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -27,13 +22,9 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
-  static const List<_Channel> _channels = [
-    _Channel('recommend', '推荐'),
-    _Channel('juji', '剧集'),
-    _Channel('movie', '电影'),
-    _Channel('zongyi', '综艺'),
-    _Channel('manhua', '动漫'),
-  ];
+  /// 顶部频道栏 = CMS 的一级栏目（推荐 + 电影 / 电视剧 / 动漫 / 综艺 /
+  /// 短剧 / 少儿，共七项）。直播是底部导航的独立入口，这一轮不接。
+  static const List<CmsChannel> _channels = CmsBridge.channels;
 
   final PageController _bannerCtrl = PageController(viewportFraction: .88);
   final Map<String, HomeData> _cache = {};
@@ -120,13 +111,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  String get _channelLabel {
-    for (final c in _channels) {
-      if (c.key == _channel) return c.label;
-    }
-    return '推荐';
-  }
-
   Future<void> _load({bool force = false}) async {
     final channel = _channel;
     final req = ++_req;
@@ -138,7 +122,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       });
     }
     try {
-      final data = await Api.home(channel);
+      final data = await CmsBridge.home(channel);
       if (!mounted || req != _req || channel != _channel) return;
       setState(() {
         _cache[channel] = data;
@@ -282,23 +266,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  /// 分区「更多」→ 分类页：标题直接对应 CMS 的一级栏目
+  /// （剧集 = 电视剧），认不出来的分区回落到当前频道。
   void _openSectionMore(HomeSection s) {
-    var type = _channel == 'recommend' ? '' : _channel;
-    var title = type.isEmpty ? '全部片库' : _channelLabel;
-    if (s.title.contains('电影')) {
-      type = 'movie';
-      title = '电影';
-    } else if (s.title.contains('动漫')) {
-      type = 'manhua';
-      title = '动漫';
-    } else if (s.title.contains('综艺')) {
-      type = 'zongyi';
-      title = '综艺';
-    } else if (s.title.contains('直播')) {
-      type = 'live';
-      title = '直播';
+    final target = CmsBridge.channelOfLabel(s.title) ??
+        CmsBridge.channelOf(_channel);
+    if (target == null || target.typeId <= 0) {
+      _openCategory('', '全部片库');
+      return;
     }
-    _openCategory(type, title);
+    _openCategory(target.key, target.label);
   }
 
   /// 服务端分区名较长，首页统一成短标题，保持分区节奏一致。
@@ -325,13 +302,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   ///
   /// 用户要求「去掉分类入口，各区域优先显示热门」，所以：
   /// 今日热播 / 最新更新放最前，然后电影 / 剧集 / 综艺 / 动漫。
+  /// 首页分区顺序：CMS 的六个一级栏目在前（电影 → 电视剧 → 动漫 →
+  /// 综艺 → 短剧 → 少儿），旧接口的热播 / 高分分区排在后面兜底。
   static const List<String> _sectionOrder = <String>[
-    '今日热播',
-    '最新更新',
     '电影',
     '剧集',
-    '综艺',
     '动漫',
+    '综艺',
+    '短剧',
+    '少儿',
+    '今日热播',
+    '最新更新',
     '高分好剧',
     '直播',
   ];
@@ -344,7 +325,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   List<HomeSection> _arrangeSections(List<HomeSection> raw) {
     final list = <HomeSection>[
       for (final s in raw)
-        if (s.items.isNotEmpty && !s.title.contains('短剧'))
+        if (s.items.isNotEmpty)
           HomeSection(_sectionLabel(s.title), s.items.take(10).toList()),
     ];
     // 排序：已知分区按 _sectionOrder 排前面，未知分区按原顺序跟后面。
@@ -642,6 +623,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  /// 顶部频道栏：七个频道放不进一行，改成横向滚动（视觉仍是同一块胶囊底）。
+  ///
+  /// 之前是 5 个 `Expanded` 平分一行；CMS 换成「推荐 + 六个分类」后
+  /// 用固定宽度 + 横滑，字号和胶囊高度都不变。
   Widget _channelTabs() {
     return Container(
       height: 42,
@@ -651,45 +636,52 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         borderRadius: BorderRadius.circular(21),
         border: Border.all(color: Colors.white.withValues(alpha: .92)),
       ),
-      child: Row(
-        children: [
-          for (final c in _channels)
-            Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => _selectChannel(c.key),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 220),
-                  curve: Curves.easeOutCubic,
-                  decoration: BoxDecoration(
-                    gradient: c.key == _channel ? Fx.brand : null,
-                    borderRadius: BorderRadius.circular(17),
-                    boxShadow: c.key == _channel
-                        ? [
-                            BoxShadow(
-                              color: Fx.accent.withValues(alpha: .22),
-                              blurRadius: 10,
-                              offset: const Offset(0, 3),
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: Center(
-                    child: Text(
-                      c.label,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: c.key == _channel
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                        color: c.key == _channel ? Colors.white : Fx.sub,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
+        child: Row(
+          children: [
+            for (final c in _channels)
+              SizedBox(
+                width: 72,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _selectChannel(c.key),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    decoration: BoxDecoration(
+                      gradient: c.key == _channel ? Fx.brand : null,
+                      borderRadius: BorderRadius.circular(17),
+                      boxShadow: c.key == _channel
+                          ? [
+                              BoxShadow(
+                                color: Fx.accent.withValues(alpha: .22),
+                                blurRadius: 10,
+                                offset: const Offset(0, 3),
+                              ),
+                            ]
+                          : null,
+                    ),
+                    child: Center(
+                      child: Text(
+                        c.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: c.key == _channel
+                              ? FontWeight.w600
+                              : FontWeight.w400,
+                          color: c.key == _channel ? Colors.white : Fx.sub,
+                        ),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }

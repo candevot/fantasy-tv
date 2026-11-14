@@ -77,6 +77,13 @@ class FxCover extends StatelessWidget {
           final cacheWidth = width.isFinite && width > 0
               ? (width * dpr).round().clamp(64, 4096).toInt()
               : null;
+          // COVER_EMPTY（2026-11-14）：CMS 后台的 `vod_pic` 还是空的，
+          // 列表 / 详情 / 收藏 / 历史全都会拿到空封面。空封面不再显示灰块 +
+          // 小图标，改成「片名首字 + 渐变底」的占位块：一眼能看出是哪部片，
+          // 也不引入任何第三方图床（后端补上 `vod_pic` 后自动换成真图）。
+          final placeholder = title.trim().isEmpty
+              ? null
+              : _FxCoverInitial(title: title, big: big);
           return ColoredBox(
             color: const Color(0xFFE6E9EF),
             child: FxNetworkImage(
@@ -84,6 +91,7 @@ class FxCover extends StatelessWidget {
               fit: fit,
               cacheWidth: cacheWidth,
               filterQuality: big ? FilterQuality.medium : FilterQuality.low,
+              fallback: placeholder,
               fallbackIconSize: big ? 44 : 30,
               semanticLabel: title.trim().isEmpty ? null : title,
             ),
@@ -944,6 +952,66 @@ class FxRankListSkeleton extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 空封面占位块（COVER_EMPTY）：片名首字 + 按片名生成的渐变底。
+///
+/// 只服务于「后端 `vod_pic` 为空 / 图挂了」这一种情况：
+///   · 不请求任何外部图床（不引入不可靠的第三方封面源）；
+///   · 同一个片名永远得到同一组颜色，翻页 / 刷新都不会变色；
+///   · 外层 FxCover 已经做过 ClipRRect，这里只负责填满 + 居中首字。
+class _FxCoverInitial extends StatelessWidget {
+  const _FxCoverInitial({required this.title, required this.big});
+
+  final String title;
+  final bool big;
+
+  /// 片名 → 稳定色相（0-359）：同一部片在任何页面都是同一个颜色。
+  static int _hueOf(String seed) {
+    var hash = 0;
+    for (final unit in seed.codeUnits) {
+      hash = (hash * 31 + unit) & 0x7fffffff;
+    }
+    return hash % 360;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final text = title.trim();
+    if (text.isEmpty) return const SizedBox.shrink();
+    final base =
+        HSLColor.fromAHSL(1, _hueOf(text).toDouble(), .52, .63).toColor();
+    final initial = text.characters.first;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final side = constraints.biggest.shortestSide;
+        final size = (side.isFinite ? side : 64) * (big ? .30 : .42);
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: <Color>[
+                base,
+                Color.lerp(base, Fx.accent2, .55) ?? base,
+              ],
+            ),
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            initial,
+            maxLines: 1,
+            style: TextStyle(
+              fontSize: size.clamp(16.0, 96.0).toDouble(),
+              fontWeight: FontWeight.w700,
+              color: Colors.white.withValues(alpha: .92),
+              height: 1,
+            ),
+          ),
+        );
+      },
     );
   }
 }

@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../api.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../theme.dart';
 import 'fx_cards.dart';
 import 'player_theme.dart';
@@ -90,14 +90,14 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
       });
     }
     try {
-      final home = await Api.home('recommend');
+      final home = await CmsBridge.home('recommend');
       var items = _sanitize(<VideoCard>[
         for (final section in home.sections) ...section.items,
       ]);
       if (items.isEmpty) {
         try {
           items = _sanitize(
-            await Api.category(type: 'juji', sort: 'latest', page: 1),
+            await CmsBridge.category(type: 'tv', sort: 'latest', page: 1),
           );
         } catch (_) {
           // 推荐为空、兜底接口也不可用时按空结果处理。
@@ -136,7 +136,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
       });
     }
     try {
-      final items = _sanitize(await Api.search(keyword, 1));
+      final items = _sanitize(await CmsBridge.search(keyword, 1));
       if (!mounted ||
           request != _requestId ||
           _query.text.trim() != keyword) {

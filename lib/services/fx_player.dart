@@ -6,8 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-import '../api.dart';
 import '../models.dart';
+import 'cms_bridge.dart';
 import 'exo_player.dart';
 import 'hls_segment_index.dart';
 import 'local_hls_proxy.dart';
@@ -1746,7 +1746,9 @@ class FxPlayCache {
     }
     final pending = _inflight[key];
     if (pending != null) return pending;
-    final future = Api.play(id, ep, line).then((info) {
+    // 播放地址统一走 CmsBridge：CMS 影片按 vod_id 现解析，旧接口的影片
+    // 照旧走 /api/play —— 两套编号不能互换（见 cms_bridge 的说明）。
+    final future = CmsBridge.play(id, ep, line).then((info) {
       _cache[key] = _CachedPlayInfo(info, DateTime.now());
       _trim();
       return info;

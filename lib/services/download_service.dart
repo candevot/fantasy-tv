@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api.dart';
 import 'app_settings.dart';
+import 'cms_bridge.dart';
 import 'download_storage.dart';
 import 'network_status.dart';
 
@@ -1035,7 +1036,7 @@ class DownloadService extends ChangeNotifier {
     try {
       await _ensureNetworkAllowed();
       final play = await _withRetry(
-        () => Api.play(task.id, task.ep, task.line),
+        () => CmsBridge.play(task.id, task.ep, task.line),
       );
       if (_shouldStop(task)) throw const _AbortDownload();
 

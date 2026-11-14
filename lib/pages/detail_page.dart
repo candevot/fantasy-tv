@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api.dart';
 import '../main.dart' show Nav;
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../services/danmu_service.dart';
 import '../services/download_service.dart';
 import '../services/fx_player.dart';
@@ -74,6 +75,13 @@ class _DetailPageState extends State<DetailPage>
 
   /// 本轮自动切线路已经失败过的线路，避免 A/B 反复乒乓。
   final Set<String> _failedLines = <String>{};
+
+  /// 这部片是 CMS（`vod_id`）还是旧接口的 id。
+  ///
+  /// CMS 的内容没有「服务端异步补算的平台线路」，也不该再去调旧接口的
+  /// `resolveLine` / 反复重拉详情，所以平台线路那一整套逻辑按这个开关跳过；
+  /// 采集线路的解析改由 [_ensureParsed] 现场做（hxparse）。
+  bool _cmsBacked = false;
 
   /// 已经在原线路上重试过的线路 id：第一次失败先原线重试一次
   /// （带缓冲态），重试单独计数、不占 _autoLineTries 的换线预算；
@@ -179,8 +187,9 @@ class _DetailPageState extends State<DetailPage>
   Future<void> _loadDetail({bool silent = false}) async {
     if (!silent && mounted) setState(() => _error = null);
     try {
-      final d = await Api.detail(widget.id);
+      final d = await CmsBridge.detail(widget.id);
       if (!mounted) return;
+      _cmsBacked = CmsBridge.isCms(widget.id);
 
       final lines = d.lines;
       var lineId = _lineId;
@@ -274,6 +283,8 @@ class _DetailPageState extends State<DetailPage>
   /// 把服务端异步补上的平台线路显示出来；最多补 2 次。服务端确实还没算完
   /// 也会把结果写进缓存，下次进入详情页就能直接带上。
   void _scheduleLineRefresh() {
+    // CMS 线路一次给全，没有「服务端稍后补平台线」这回事。
+    if (_cmsBacked) return;
     if (_lineRefreshTimer != null || _lineRefreshTries >= _lineRefreshMax) {
       return;
     }
@@ -292,13 +303,13 @@ class _DetailPageState extends State<DetailPage>
   /// [force] = true 用于「强制拿到最新线路状态」：平台线解析完成后即使
   /// 线路条数没变，也要把 status / 集名更新进来（PLATFORM_PENDING）。
   Future<void> _refreshLines({bool force = false}) async {
-    if (!mounted) return;
+    if (!mounted || _cmsBacked) return;
     final current = _detail;
     if (current == null) return;
     if (!force && current.lines.any(fxIsPlatformLine)) return;
     VideoDetail fresh;
     try {
-      fresh = await Api.detail(widget.id);
+      fresh = await CmsBridge.detail(widget.id);
     } catch (_) {
       // 这次没取到（服务端还在算 / 网络抖动）：还有重试额度就继续排。
       if (mounted) _scheduleLineRefresh();
@@ -346,6 +357,7 @@ class _DetailPageState extends State<DetailPage>
   /// PLATFORM_PENDING：详情页进入时，对还在解析的平台线自动触发一次后台解析
   /// （fire-and-forget，不阻塞 UI、不切当前线路）。
   void _autoResolvePlatformLines() {
+    if (_cmsBacked) return;
     final d = _detail;
     if (d == null) return;
     for (final line in d.lines) {
@@ -435,7 +447,7 @@ class _DetailPageState extends State<DetailPage>
     final cards = <VideoCard>[];
     Future<VideoDetail?> fetch(String id) async {
       try {
-        return await Api.detail(id);
+        return await CmsBridge.detail(id);
       } catch (_) {
         return null;
       }
@@ -751,6 +763,48 @@ class _DetailPageState extends State<DetailPage>
       unawaited(_resolveThenPlay(line));
       return;
     }
+    // CMS 采集线路（幻想4K / 量子 / 幻想爱奇艺 …）：地址是令牌或平台页面，
+    // 播之前要先找 hxparse 换直链。这里先显示「解析中」，解析成功才真正切线路；
+    // 失败只提示「该线路解析失败」，_lineId 不动 —— 用户留在原线路继续看。
+    if (_cmsBacked && line.needsParse) {
+      unawaited(_parseThenSelect(line));
+      return;
+    }
+    _selectLineReady(line);
+  }
+
+  /// CMS 线路预解析：把这一集交给 FxPlayCache 换直链（结果同时进缓存，
+  /// 播放器随后 open 就是秒开），期间播放器上显示「正在解析 X」。
+  ///
+  /// 已经在缓存里（详情页预热 / 之前播过）就直接放行，不重复解析。
+  Future<bool> _ensureParsed(LineInfo line, int ep) async {
+    if (!_cmsBacked || !line.needsParse) return true;
+    if (FxPlayCache.peek(widget.id, ep, line.id) != null) return true;
+    if (!_resolvingLines.add(line.id)) return false;
+    final player = _playerKey.currentState;
+    player?.showResolving('正在解析 ${line.displayName}');
+    try {
+      await FxPlayCache.resolve(widget.id, ep, line.id);
+      if (!mounted) return false;
+      player?.clearResolving();
+      return true;
+    } catch (_) {
+      player?.clearResolving();
+      if (mounted) fxToast(context, '该线路解析失败');
+      return false;
+    } finally {
+      _resolvingLines.remove(line.id);
+    }
+  }
+
+  Future<void> _parseThenSelect(LineInfo line) async {
+    if (!await _ensureParsed(line, _ep)) return;
+    if (!mounted) return;
+    _selectLineReady(line);
+  }
+
+  /// 解析就绪后的正常切线路（原来的 _selectLine 主体，行为不变）。
+  void _selectLineReady(LineInfo line) {
     _stableTimer?.cancel();
     // 用户手动选线路视为重新开始，允许重试这一条。
     _failedLines.remove(line.id);
@@ -910,10 +964,21 @@ class _DetailPageState extends State<DetailPage>
     _selectOnlineEpisode(n);
   }
 
-  void _selectOnlineEpisode(int n) {
+  void _selectOnlineEpisode(int n, {bool parsed = false}) {
     if (n == _ep) {
       _scrollToPlayer();
       return;
+    }
+    // 需要 hxparse 的线路：这一集还没解析过就先解析（「解析中」提示），
+    // 解析失败留在当前这一集，不切到播不出来的集数。
+    if (!parsed && _cmsBacked) {
+      final line = _currentLine;
+      if (line != null &&
+          line.needsParse &&
+          FxPlayCache.peek(widget.id, n, line.id) == null) {
+        unawaited(_parseEpThenSelect(line, n));
+        return;
+      }
     }
     setState(() {
       _ep = n;
@@ -922,6 +987,20 @@ class _DetailPageState extends State<DetailPage>
     _saveHistory();
     _warmDanmu(n);
     _scrollToPlayer();
+  }
+
+  /// 当前选中的线路（选集时判断要不要先解析）。
+  LineInfo? get _currentLine {
+    for (final l in _detail?.lines ?? const <LineInfo>[]) {
+      if (l.id == _lineId) return l;
+    }
+    return null;
+  }
+
+  Future<void> _parseEpThenSelect(LineInfo line, int n) async {
+    if (!await _ensureParsed(line, n)) return;
+    if (!mounted) return;
+    _selectOnlineEpisode(n, parsed: true);
   }
 
   /// [ep] 所在分组下标：让选集条停在能看到这一集的分组（默认正片组）。

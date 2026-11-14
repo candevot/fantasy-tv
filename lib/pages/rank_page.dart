@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../api.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../theme.dart';
 import '../widgets/player_theme.dart' show fxToast;
 import 'category_page.dart';
@@ -93,7 +93,7 @@ class _RankPageState extends State<RankPage> {
       _error = null;
     });
     try {
-      final list = await Api.rank(_type);
+      final list = await CmsBridge.rank(_type);
       if (!mounted || req != _req) return;
       setState(() {
         _raw = list;
@@ -159,7 +159,7 @@ class _RankPageState extends State<RankPage> {
 
   Future<void> _fetchDesc(String id) async {
     try {
-      final detail = await Api.detail(id);
+      final detail = await CmsBridge.detail(id);
       if (!mounted) return;
       setState(() {
         _desc[id] = detail.desc;
