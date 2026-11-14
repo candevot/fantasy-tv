@@ -1004,34 +1004,31 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         children: [
           Expanded(
             child: DetailActionButton(
-              icon: _fav ? Icons.star_rounded : Icons.star_border_rounded,
+              icon: Icons.star_border,
+              activeIcon: Icons.star,
               label: _fav ? '已收藏' : '收藏',
-              color: Fx.gold,
               active: _fav,
               onTap: () => unawaited(_toggleFav()),
             ),
           ),
           Expanded(
             child: DetailActionButton(
-              icon: Icons.share_rounded,
+              icon: Icons.share_outlined,
               label: '分享',
-              color: const Color(0xFF39B7B0),
               onTap: () => unawaited(_share()),
             ),
           ),
           Expanded(
             child: DetailActionButton(
-              icon: Icons.tv_rounded,
+              icon: Icons.cast,
               label: '投屏',
-              color: const Color(0xFF5B8DEF),
               onTap: _cast,
             ),
           ),
           Expanded(
             child: DetailActionButton(
-              icon: Icons.live_tv_rounded,
+              icon: Icons.tv_outlined,
               label: '一起看',
-              color: const Color(0xFFF08A5D),
               onTap: () => unawaited(_together()),
             ),
           ),

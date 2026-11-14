@@ -10,12 +10,12 @@ import '../services/cms_bridge.dart';
 import '../services/danmu_service.dart';
 import '../services/download_service.dart';
 import '../services/fx_player.dart';
-import '../theme.dart';
 import '../widgets/detail_widgets.dart';
 import '../widgets/download_sheet.dart';
 import '../widgets/player_theme.dart';
 import 'category_page.dart'
     show FxEmptyView, FxErrorView, FxPosterCard, fxErrorText, fxInt;
+import 'feedback_page.dart' show FeedbackPage;
 import 'history_page.dart' show FxStore;
 import 'offline_player_page.dart';
 import 'player_page.dart';
@@ -1217,13 +1217,16 @@ class _DetailPageState extends State<DetailPage>
   @override
   Widget build(BuildContext context) {
     final d = _detail;
+    // 白底 + 黑色线框：浅色纯白，深色自动反成深底（见 FxDetailSkin）。
+    final skin = FxDetailSkin.of(context);
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F8FC),
+      backgroundColor: skin.page,
       resizeToAvoidBottomInset: false,
       bottomNavigationBar: d != null && _tab == 1
           ? DetailCommentInput(onTap: _onCommentTap)
           : null,
-      body: FxBackground(
+      body: ColoredBox(
+        color: skin.page,
         child: SafeArea(
           bottom: false,
           child: d == null ? _buildEntryState() : _buildPage(d),
@@ -1300,11 +1303,11 @@ class _DetailPageState extends State<DetailPage>
             ),
           ),
         ),
-        const Expanded(
+        Expanded(
           child: Center(
             child: CircularProgressIndicator(
               strokeWidth: 2.4,
-              color: Fx.accent,
+              color: FxDetailSkin.of(context).body,
             ),
           ),
         ),
@@ -1313,10 +1316,11 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Widget _buildPage(VideoDetail d) {
+    final skin = FxDetailSkin.of(context);
     return RefreshIndicator(
       onRefresh: _refresh,
-      color: Fx.accent,
-      backgroundColor: Colors.white,
+      color: skin.body,
+      backgroundColor: skin.surface,
       edgeOffset: 0,
       child: CustomScrollView(
         controller: _scroll,
@@ -1343,15 +1347,15 @@ class _DetailPageState extends State<DetailPage>
         children: [
           IconButton(
             onPressed: () => Navigator.of(context).maybePop(),
-            icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                size: 20, color: Fx.ink),
+            icon: Icon(Icons.arrow_back_ios_new_rounded,
+                size: 20, color: FxDetailSkin.of(context).icon),
           ),
           Text(
             title,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 17,
               fontWeight: FontWeight.w700,
-              color: Fx.ink,
+              color: FxDetailSkin.of(context).ink,
             ),
           ),
         ],
@@ -1387,23 +1391,51 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Widget _topArea() {
+    final skin = FxDetailSkin.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 12, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Row(
         children: [
           // 用户要求：详情页下面这两行公告不再显示
           // （「欢迎使用幻想影视…」和「温馨提示：本站不存储任何视频资源…」）
-          Row(
-            children: [
-              DetailTabs(
-                index: _tab,
-                onChanged: _switchTab,
-                commentCount: _commentsLoaded
-                    ? '${_comments.length}${_commentsHasMore ? '+' : ''}'
-                    : null,
+          // Flexible：大字号 / 窄屏时先让 tab 行占位，胶囊固定宽度不出框。
+          Expanded(
+            child: DetailTabs(
+              index: _tab,
+              onChanged: _switchTab,
+              commentCount: _commentsLoaded
+                  ? '${_comments.length}${_commentsHasMore ? '+' : ''}'
+                  : null,
+            ),
+          ),
+          const SizedBox(width: 10),
+          // 参考图右侧那枚圆角胶囊：浅灰底 + 黑色线框搜索图标。
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => unawaited(Nav.search(context)),
+            child: Container(
+              width: 120,
+              height: 32,
+              padding: const EdgeInsets.symmetric(horizontal: 11),
+              decoration: BoxDecoration(
+                color: skin.chip,
+                borderRadius: BorderRadius.circular(16),
               ),
-            ],
+              child: Row(
+                children: [
+                  Icon(Icons.search_rounded, size: 15, color: skin.hint),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      '搜索影视',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11.5, color: skin.hint),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -1441,9 +1473,10 @@ class _DetailPageState extends State<DetailPage>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // 顺序照参考图：提示小字 → 标题 / 简介 → 5 圆钮 → 线路 → 选集。
+        _sourceHint(),
         _titleBlock(d),
         _actionRow(),
-        _sourceHint(),
         const SizedBox(height: 16),
         // 线路区固定 60px：平台线后到时原地填充，标题 / 选集不整体下移。
         SizedBox(
@@ -1542,12 +1575,15 @@ class _DetailPageState extends State<DetailPage>
               trailing: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: () => setState(() => _relatedOffset += 3),
-                child: const Row(
+                child: Row(
                   children: [
-                    Icon(Icons.autorenew_rounded, size: 14, color: Fx.accent),
-                    SizedBox(width: 4),
+                    Icon(Icons.autorenew_rounded,
+                        size: 14, color: FxDetailSkin.of(context).hint),
+                    const SizedBox(width: 4),
                     Text('换一换',
-                        style: TextStyle(fontSize: 11.5, color: Fx.sub)),
+                        style: TextStyle(
+                            fontSize: 11.5,
+                            color: FxDetailSkin.of(context).hint)),
                   ],
                 ),
               ),
@@ -1571,8 +1607,9 @@ class _DetailPageState extends State<DetailPage>
 
   Widget _titleBlock(VideoDetail d) {
     final status = _statusText;
+    final skin = FxDetailSkin.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 15, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1587,11 +1624,11 @@ class _DetailPageState extends State<DetailPage>
                         d.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 20.5,
+                        style: TextStyle(
+                          fontSize: 21,
                           height: 1.2,
                           fontWeight: FontWeight.w800,
-                          color: Fx.ink,
+                          color: skin.ink,
                         ),
                       ),
                     ),
@@ -1612,14 +1649,14 @@ class _DetailPageState extends State<DetailPage>
                 onTap: _toggleDesc,
                 child: Row(
                   children: [
-                    const Text('简介',
-                        style: TextStyle(fontSize: 11.5, color: Fx.sub)),
+                    Text('简介',
+                        style: TextStyle(fontSize: 11.5, color: skin.hint)),
                     Icon(
                       _descOpen
                           ? Icons.keyboard_arrow_up_rounded
                           : Icons.chevron_right_rounded,
                       size: 17,
-                      color: Fx.sub,
+                      color: skin.hint,
                     ),
                   ],
                 ),
@@ -1639,10 +1676,10 @@ class _DetailPageState extends State<DetailPage>
                 maxLines: _descOpen ? null : 2,
                 overflow:
                     _descOpen ? TextOverflow.visible : TextOverflow.ellipsis,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 12.5,
                   height: 1.55,
-                  color: Fx.sub,
+                  color: skin.body,
                 ),
               ),
             ),
@@ -1652,27 +1689,27 @@ class _DetailPageState extends State<DetailPage>
     );
   }
 
+  /// 评分小标签：浅灰底圆角 + 深灰字（跟「高清」标签同一套）。
   Widget _scoreTag(num score) {
+    final skin = FxDetailSkin.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFFFFB74D), Color(0xFFFF8A3D)],
-        ),
+        color: skin.chip,
         borderRadius: BorderRadius.circular(7),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.star_rounded, size: 11, color: Colors.white),
+          Icon(Icons.star_border_rounded, size: 11, color: skin.chipText),
           const SizedBox(width: 2),
           Text(
             score.toStringAsFixed(1),
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 10,
               height: 1.1,
-              fontWeight: FontWeight.w800,
-              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              color: skin.chipText,
             ),
           ),
         ],
@@ -1680,72 +1717,72 @@ class _DetailPageState extends State<DetailPage>
     );
   }
 
+  /// 「高清 / 更新至 N 集」这类标签：浅灰底圆角小标签，文字深灰。
   Widget _statusTag(String text) {
+    final skin = FxDetailSkin.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: BoxDecoration(
-        color: Fx.accent.withValues(alpha: .10),
-        borderRadius: BorderRadius.circular(7),
-        border: Border.all(color: Fx.accent.withValues(alpha: .20)),
+        color: skin.chip,
+        borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
         text,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(
+        style: TextStyle(
           fontSize: 9.5,
           height: 1.1,
           fontWeight: FontWeight.w600,
-          color: Fx.accent,
+          color: skin.chipText,
         ),
       ),
     );
   }
 
   Widget _actionRow() {
+    // 统一规格（参考图）：5 个直径 56 的白圆钮 + 黑色线框图标 + 12px 深灰标签。
+    // 投屏不占这一行的槽位（参考图的第 4 格是「反馈」），投屏入口仍在播放器
+    // 浮层里（player_page.dart 的 openCastSheet），能力没有丢。
     return Padding(
       padding: const EdgeInsets.fromLTRB(6, 16, 6, 0),
       child: Row(
         children: [
           Expanded(
             child: DetailActionButton(
-              icon: _fav ? Icons.star_rounded : Icons.star_border_rounded,
+              icon: Icons.star_border,
+              activeIcon: Icons.star,
               label: _fav ? '已收藏' : '收藏',
-              color: Fx.gold,
               active: _fav,
               onTap: _toggleFav,
             ),
           ),
           Expanded(
             child: DetailActionButton(
-              icon: Icons.download_rounded,
+              icon: Icons.file_download_outlined,
               label: '下载',
-              color: const Color(0xFFF5A623),
               onTap: _download,
             ),
           ),
           Expanded(
             child: DetailActionButton(
-              icon: Icons.tv_rounded,
-              label: '投屏',
-              color: const Color(0xFF5B8DEF),
-              onTap: _cast,
-            ),
-          ),
-          Expanded(
-            child: DetailActionButton(
-              icon: Icons.live_tv_rounded,
-              label: '一起看',
-              color: const Color(0xFF39B7B0),
-              onTap: _together,
-            ),
-          ),
-          Expanded(
-            child: DetailActionButton(
-              icon: Icons.sync_rounded,
+              icon: Icons.refresh,
               label: '刷新',
-              color: const Color(0xFFFF6B6B),
               onTap: _refreshPlayer,
+            ),
+          ),
+          Expanded(
+            child: DetailActionButton(
+              icon: Icons.edit_outlined,
+              label: '反馈',
+              onTap: _feedback,
+            ),
+          ),
+          Expanded(
+            child: DetailActionButton(
+              icon: Icons.tv_outlined,
+              label: '一起看',
+              onTap: _together,
             ),
           ),
         ],
@@ -1753,39 +1790,29 @@ class _DetailPageState extends State<DetailPage>
     );
   }
 
-  void _cast() {
-    final player = _playerKey.currentState;
-    if (player == null) {
-      fxToast(context, '播放器还没准备好');
-      return;
-    }
-    unawaited(player.openCastSheet());
+  /// 反馈：进现有的意见反馈页（`POST /api/feedback`），不带任何剧集上下文，
+  /// 和设置页里的「意见反馈」是同一个入口。
+  void _feedback() {
+    unawaited(Navigator.of(context).push(
+      FxPageRoute(builder: (_) => const FeedbackPage()),
+    ));
   }
 
   Widget _sourceHint() {
+    final skin = FxDetailSkin.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 15, 16, 0),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: .56),
-          borderRadius: BorderRadius.circular(13),
-          border: Border.all(color: Colors.white.withValues(alpha: .9)),
-        ),
-        child: const Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.swap_horiz_rounded, size: 15, color: Fx.accent),
-            SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                '无法观看换播放器🔄或更换下方线路👇',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 11, color: Fx.sub),
-              ),
+      padding: const EdgeInsets.fromLTRB(16, 11, 16, 0),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline_rounded, size: 13, color: skin.hint),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              '线路对手机性能和网络要求高，卡顿请更换线路',
+              style: TextStyle(fontSize: 11, height: 1.3, color: skin.hint),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -1793,6 +1820,7 @@ class _DetailPageState extends State<DetailPage>
   /// 补线中的占位骨架：与线路卡片同尺寸、同起点，平台线补到时直接原地
   /// 替换成真实卡片，页面不会先空一块再撑开。
   Widget _linePlaceholder() {
+    final skin = FxDetailSkin.of(context);
     return ListView.separated(
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -1802,32 +1830,33 @@ class _DetailPageState extends State<DetailPage>
         width: 102,
         height: 60,
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: .72),
+          color: skin.surface,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.white),
+          border: Border.all(color: skin.hairline),
         ),
       ),
     );
   }
 
   Widget _noLinesHint() {
+    final skin = FxDetailSkin.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: .72),
+          color: skin.surface,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: Colors.white),
+          border: Border.all(color: skin.hairline),
         ),
-        child: const Row(
+        child: Row(
           children: [
-            Icon(Icons.wifi_off_rounded, size: 16, color: Fx.sub),
-            SizedBox(width: 8),
+            Icon(Icons.wifi_off_outlined, size: 16, color: skin.hint),
+            const SizedBox(width: 8),
             Expanded(
               child: Text(
                 '暂无线路，请稍后刷新重试',
-                style: TextStyle(fontSize: 11.5, color: Fx.sub),
+                style: TextStyle(fontSize: 11.5, color: skin.hint),
               ),
             ),
           ],
@@ -1837,6 +1866,7 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Widget _episodeGroupTabs(List<EpisodeGroup> groups, int current) {
+    final skin = FxDetailSkin.of(context);
     return SizedBox(
       height: 32,
       child: ListView.separated(
@@ -1855,12 +1885,10 @@ class _DetailPageState extends State<DetailPage>
               duration: const Duration(milliseconds: 160),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               decoration: BoxDecoration(
-                color: active
-                    ? Fx.accent.withValues(alpha: .12)
-                    : Colors.white.withValues(alpha: .72),
+                color: active ? skin.chip : skin.surface,
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(
-                  color: active ? Fx.accent : Colors.white,
+                  color: active ? skin.ink : skin.hairline,
                 ),
               ),
               child: Text(
@@ -1868,7 +1896,7 @@ class _DetailPageState extends State<DetailPage>
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                  color: active ? Fx.accent : Fx.sub,
+                  color: active ? skin.ink : skin.body,
                 ),
               ),
             ),
@@ -1879,6 +1907,7 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Widget _episodeHeader(int total, {int available = 0}) {
+    final skin = FxDetailSkin.of(context);
     final avail = available > 0 ? available : total;
     // 电影没有集数概念：一条是「正片」，多条是「国语 / 粤语」这类版本
     final title = _isMovie
@@ -1893,22 +1922,24 @@ class _DetailPageState extends State<DetailPage>
               title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 16.5,
+              style: TextStyle(
+                fontSize: 17,
                 fontWeight: FontWeight.w800,
-                color: Fx.ink,
+                color: skin.ink,
               ),
             ),
           ),
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: _openEpisodes,
-            child: const Padding(
-              padding: EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
               child: Row(
                 children: [
-                  Text('查看全部', style: TextStyle(fontSize: 11.5, color: Fx.sub)),
-                  Icon(Icons.chevron_right_rounded, size: 16, color: Fx.sub),
+                  Text('查看全部',
+                      style: TextStyle(fontSize: 11.5, color: skin.hint)),
+                  Icon(Icons.chevron_right_rounded,
+                      size: 16, color: skin.hint),
                 ],
               ),
             ),
@@ -1922,18 +1953,18 @@ class _DetailPageState extends State<DetailPage>
               children: [
                 Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: .78),
+                    color: skin.surface,
                     borderRadius: BorderRadius.circular(11),
-                    border: Border.all(color: Colors.white),
+                    border: Border.all(color: skin.hairline),
                   ),
-                  child: const Text(
+                  child: Text(
                     '选集',
                     style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w700,
-                      color: Fx.ink,
+                      color: skin.ink,
                     ),
                   ),
                 ),
@@ -1947,16 +1978,16 @@ class _DetailPageState extends State<DetailPage>
                       padding: const EdgeInsets.symmetric(horizontal: 3),
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        gradient: Fx.brand,
+                        color: skin.chip,
                         borderRadius: BorderRadius.circular(9),
-                        border: Border.all(color: Colors.white, width: 1.2),
+                        border: Border.all(color: skin.page, width: 1.2),
                       ),
                       child: Text(
                         '$total',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 8.5,
                           height: 1.1,
-                          color: Colors.white,
+                          color: skin.chipText,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -2035,29 +2066,31 @@ class _DetailPageState extends State<DetailPage>
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
       child: Row(
         children: [
-          const Text(
+          Text(
             '全部评论',
             style: TextStyle(
-              fontSize: 16.5,
+              fontSize: 17,
               fontWeight: FontWeight.w800,
-              color: Fx.ink,
+              color: FxDetailSkin.of(context).ink,
             ),
           ),
           const SizedBox(width: 6),
           if (list.isNotEmpty)
             Text(
               '${list.length}',
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 10.5,
                 fontWeight: FontWeight.w600,
-                color: Fx.accent,
+                color: FxDetailSkin.of(context).body,
               ),
             ),
           const Spacer(),
-          const Icon(Icons.local_fire_department_rounded,
-              size: 13, color: Fx.gold),
+          Icon(Icons.local_fire_department_outlined,
+              size: 13, color: FxDetailSkin.of(context).hint),
           const SizedBox(width: 2),
-          const Text('按热度', style: TextStyle(fontSize: 10.5, color: Fx.sub)),
+          Text('按热度',
+              style: TextStyle(
+                  fontSize: 10.5, color: FxDetailSkin.of(context).hint)),
         ],
       ),
     );
@@ -2112,15 +2145,15 @@ class _DetailPageState extends State<DetailPage>
 
   Widget _commentsEmptyView() {
     if (_commentsLoading) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 34),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 34),
         child: Center(
           child: SizedBox(
             width: 24,
             height: 24,
             child: CircularProgressIndicator(
               strokeWidth: 2.3,
-              color: Fx.accent,
+              color: FxDetailSkin.of(context).body,
             ),
           ),
         ),
@@ -2141,16 +2174,17 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Widget _commentsFooter() {
+    final skin = FxDetailSkin.of(context);
     if (_commentsLoading) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 14),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 14),
         child: Center(
           child: SizedBox(
             width: 20,
             height: 20,
             child: CircularProgressIndicator(
               strokeWidth: 2,
-              color: Fx.accent,
+              color: skin.body,
             ),
           ),
         ),
@@ -2160,19 +2194,19 @@ class _DetailPageState extends State<DetailPage>
       return Center(
         child: TextButton(
           onPressed: () => _loadComments(reset: false),
-          child: const Text(
+          child: Text(
             '加载更多评论',
-            style: TextStyle(fontSize: 12, color: Fx.accent),
+            style: TextStyle(fontSize: 12, color: skin.body),
           ),
         ),
       );
     }
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 14),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
       child: Center(
         child: Text(
           '— 已经到底啦 —',
-          style: TextStyle(fontSize: 10.5, color: Fx.sub),
+          style: TextStyle(fontSize: 10.5, color: skin.hint),
         ),
       ),
     );

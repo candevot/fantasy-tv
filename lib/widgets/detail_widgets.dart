@@ -5,8 +5,75 @@ import '../theme.dart';
 import 'player_theme.dart';
 
 /* ========================================================================== */
-/*  详情页专用白玻璃组件（只被 detail_page.dart 使用）                        */
+/*  详情页专用「白底 + 黑色线框」组件                                          */
 /* ========================================================================== */
+
+/// 详情页视觉令牌（白底 + 黑色线框 + 红色选集）。
+///
+/// 全部颜色都从 [Theme.of] 的 brightness 推出来，不在组件里写死
+/// [Colors.white]：浅色下是纯白底 + black87 线框，深色下自动反成深底 +
+/// 白色线框。现在 App 还是 `ThemeMode.light`（见 main.dart），但以后上深色
+/// 时这一页不需要再改一遍。
+class FxDetailSkin {
+  const FxDetailSkin({required this.dark});
+
+  /// 是否深色主题。
+  final bool dark;
+
+  static FxDetailSkin of(BuildContext context) =>
+      FxDetailSkin(dark: Theme.of(context).brightness == Brightness.dark);
+
+  /// 页面底色：纯白 / 近黑。
+  Color get page => dark ? const Color(0xFF0E1014) : Colors.white;
+
+  /// 卡片、圆钮、胶囊的底色。
+  Color get surface => dark ? const Color(0xFF1A1D22) : Colors.white;
+
+  /// 1px 浅灰描边（未选中）。
+  Color get hairline =>
+      dark ? Colors.white.withValues(alpha: .16) : const Color(0xFFEAEDF2);
+
+  /// 极淡投影。
+  Color get shadow => dark
+      ? Colors.black.withValues(alpha: .55)
+      : const Color(0xFF1B2430).withValues(alpha: .07);
+
+  /// 标题 / 主文字：black87。
+  Color get ink => dark ? Colors.white : Colors.black87;
+
+  /// 正文 / 简介 / 按钮下标签：black54。
+  Color get body => dark ? Colors.white70 : Colors.black54;
+
+  /// 辅助小字（提示、时间、查看全部）：black38。
+  Color get hint => dark ? Colors.white38 : Colors.black38;
+
+  /// 线框图标本色。
+  Color get icon => dark ? Colors.white : Colors.black87;
+
+  /// 图标反色（压在 [ink] 实心圆上）。
+  Color get onInk => dark ? Colors.black87 : Colors.white;
+
+  /// 浅灰胶囊底。
+  Color get chip => dark ? Colors.white.withValues(alpha: .08) : const Color(0xFFF3F5F8);
+
+  /// 浅灰胶囊里的文字。
+  Color get chipText => dark ? Colors.white70 : Colors.black54;
+
+  /// 选集红：未选中描边 + 红字，选中红底。
+  Color get red => dark ? const Color(0xFFFF6B62) : const Color(0xFFE5342C);
+
+  /// 红底上的文字。
+  Color get onRed => Colors.white;
+
+  /// 圆钮统一的极淡阴影。
+  List<BoxShadow> get softShadow => <BoxShadow>[
+        BoxShadow(
+          color: shadow,
+          blurRadius: 10,
+          offset: const Offset(0, 3),
+        ),
+      ];
+}
 
 /// 跑马灯：文字超宽时两段循环左移，收窄时静止。
 class DetailMarqueeText extends StatefulWidget {
@@ -242,6 +309,7 @@ class DetailTabs extends StatelessWidget {
   }
 
   Widget _tab(BuildContext context, int value, String label, String? count) {
+    final skin = FxDetailSkin.of(context);
     final active = index == value;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -257,10 +325,10 @@ class DetailTabs extends StatelessWidget {
                 AnimatedDefaultTextStyle(
                   duration: const Duration(milliseconds: 180),
                   style: TextStyle(
-                    fontSize: active ? 19.5 : 17,
+                    fontSize: active ? 18.5 : 16,
                     height: 1.15,
                     fontWeight: active ? FontWeight.w800 : FontWeight.w500,
-                    color: active ? Fx.ink : Fx.sub,
+                    color: active ? skin.ink : skin.body,
                   ),
                   child: Text(label),
                 ),
@@ -272,7 +340,7 @@ class DetailTabs extends StatelessWidget {
                       count,
                       style: TextStyle(
                         fontSize: 10.5,
-                        color: active ? Fx.accent : Fx.sub,
+                        color: active ? skin.body : skin.hint,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -281,13 +349,14 @@ class DetailTabs extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 5),
+            // 选中态：加粗 + 黑色下划线（不再用蓝色渐变）。
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               curve: Curves.easeOut,
               width: active ? 22 : 0,
-              height: 3,
+              height: 2.5,
               decoration: BoxDecoration(
-                gradient: Fx.brand,
+                color: skin.ink,
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -299,24 +368,39 @@ class DetailTabs extends StatelessWidget {
 }
 
 /// 5 个圆钮之一（收藏 / 下载 / 刷新 / 反馈 / 一起看）。
+///
+/// 统一规格：直径 [circleSize] 的圆形按钮，底色 [FxDetailSkin.surface]
+/// （浅色纯白）+ 1px 浅灰描边 + 极淡投影；图标一律黑色线框
+/// [FxDetailSkin.icon] / size [iconSize]，下方 12px 深灰标签。
+/// [active] 只切换「实心图标 + 加粗标签」，换色交给图标形状本身。
 class DetailActionButton extends StatelessWidget {
   const DetailActionButton({
     super.key,
     required this.icon,
     required this.label,
-    required this.color,
+    this.activeIcon,
     this.onTap,
     this.active = false,
   });
 
+  /// 圆钮直径。
+  static const double circleSize = 56;
+
+  /// 图标尺寸。
+  static const double iconSize = 24;
+
+  /// 线框图标（`Icons.*_outlined` 系列）。
   final IconData icon;
+
+  /// 选中态用的实心图标；不传就沿用 [icon]。
+  final IconData? activeIcon;
   final String label;
-  final Color color;
   final VoidCallback? onTap;
   final bool active;
 
   @override
   Widget build(BuildContext context) {
+    final skin = FxDetailSkin.of(context);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
@@ -325,36 +409,34 @@ class DetailActionButton extends StatelessWidget {
         children: [
           AnimatedContainer(
             duration: const Duration(milliseconds: 200),
-            width: 47,
-            height: 47,
+            width: circleSize,
+            height: circleSize,
+            alignment: Alignment.center,
             decoration: BoxDecoration(
-              color: active
-                  ? color.withValues(alpha: .15)
-                  : Colors.white.withValues(alpha: .88),
+              color: skin.surface,
               shape: BoxShape.circle,
               border: Border.all(
-                color: active ? color.withValues(alpha: .60) : Colors.white,
-                width: active ? 1.4 : 1,
+                color: active ? skin.ink : skin.hairline,
+                width: 1,
               ),
-              boxShadow: [
-                BoxShadow(
-                  color: color.withValues(alpha: active ? .18 : .08),
-                  blurRadius: 16,
-                  offset: const Offset(0, 5),
-                ),
-              ],
+              boxShadow: skin.softShadow,
             ),
-            child: Icon(icon, size: 23, color: color),
+            child: Icon(
+              active ? (activeIcon ?? icon) : icon,
+              size: iconSize,
+              color: skin.icon,
+            ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 7),
           Text(
             label,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              fontSize: 10.5,
-              fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-              color: active ? color : Fx.sub,
+              fontSize: 12,
+              height: 1.15,
+              fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+              color: skin.body,
             ),
           ),
         ],
@@ -405,6 +487,7 @@ class DetailLineCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final skin = FxDetailSkin.of(context);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
@@ -413,23 +496,13 @@ class DetailLineCard extends StatelessWidget {
         width: width,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
         decoration: BoxDecoration(
-          color: active
-              ? Fx.accent.withValues(alpha: .09)
-              : Colors.white.withValues(alpha: .72),
+          color: skin.surface,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: active
-                ? Fx.accent.withValues(alpha: .85)
-                : Colors.white.withValues(alpha: .92),
+            color: active ? skin.ink : skin.hairline,
             width: active ? 1.4 : 1,
           ),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF50729F).withValues(alpha: .08),
-              blurRadius: 14,
-              offset: const Offset(0, 5),
-            ),
-          ],
+          boxShadow: skin.softShadow,
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -445,7 +518,7 @@ class DetailLineCard extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 9.5,
                         fontWeight: FontWeight.w500,
-                        color: Fx.sub.withValues(alpha: .85),
+                        color: skin.hint,
                       ),
                     ),
                   if (ads)
@@ -454,7 +527,7 @@ class DetailLineCard extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 9,
                         fontWeight: FontWeight.w700,
-                        color: const Color(0xFFE0703A),
+                        color: skin.red,
                       ),
                     ),
                 ],
@@ -463,8 +536,8 @@ class DetailLineCard extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 12,
-                fontWeight: FontWeight.w700,
-                color: active ? Fx.accent : Fx.ink,
+                fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+                color: skin.ink,
               ),
             ),
             const SizedBox(height: 4),
@@ -475,7 +548,7 @@ class DetailLineCard extends StatelessWidget {
               style: TextStyle(
                 fontSize: 10.5,
                 fontWeight: active ? FontWeight.w700 : FontWeight.w400,
-                color: active ? Fx.accent : Fx.sub,
+                color: active ? skin.ink : skin.body,
               ),
             ),
           ],
@@ -486,6 +559,9 @@ class DetailLineCard extends StatelessWidget {
 }
 
 /// 单集小胶囊。
+///
+/// 规格（参考图）：未选中 = 白底 + 1px 红边 + 红字；
+/// 选中 = 红底 + 白字（播放中等号图标也是白色）。
 class DetailEpisodeChip extends StatelessWidget {
   const DetailEpisodeChip({
     super.key,
@@ -504,6 +580,7 @@ class DetailEpisodeChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final skin = FxDetailSkin.of(context);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
@@ -514,13 +591,11 @@ class DetailEpisodeChip extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 6),
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: active
-              ? Fx.accent.withValues(alpha: .09)
-              : Colors.white.withValues(alpha: .72),
+          color: active ? skin.red : skin.surface,
           borderRadius: BorderRadius.circular(11),
           border: Border.all(
-            color: active ? Fx.accent : Colors.white.withValues(alpha: .92),
-            width: active ? 1.4 : 1,
+            color: active ? skin.red : skin.red.withValues(alpha: .62),
+            width: 1,
           ),
         ),
         child: Column(
@@ -530,8 +605,8 @@ class DetailEpisodeChip extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 if (active) ...[
-                  const Icon(Icons.graphic_eq_rounded,
-                      size: 13, color: Fx.accent),
+                  Icon(Icons.graphic_eq_rounded,
+                      size: 13, color: skin.onRed),
                   const SizedBox(width: 3),
                 ],
                 Flexible(
@@ -542,7 +617,7 @@ class DetailEpisodeChip extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                      color: active ? Fx.accent : Fx.sub,
+                      color: active ? skin.onRed : skin.red,
                     ),
                   ),
                 ),
@@ -556,7 +631,9 @@ class DetailEpisodeChip extends StatelessWidget {
                   fontSize: 8,
                   height: 1.15,
                   fontWeight: FontWeight.w600,
-                  color: const Color(0xFF2FA985).withValues(alpha: .92),
+                  color: active
+                      ? skin.onRed.withValues(alpha: .86)
+                      : skin.hint,
                 ),
               ),
           ],
@@ -663,23 +740,24 @@ class DetailSectionTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final skin = FxDetailSkin.of(context);
     return Row(
       children: [
         Container(
-          width: 4,
-          height: 16,
+          width: 3,
+          height: 15,
           decoration: BoxDecoration(
-            gradient: Fx.brand,
+            color: skin.ink,
             borderRadius: BorderRadius.circular(2),
           ),
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 7),
         Text(
           title,
-          style: const TextStyle(
+          style: TextStyle(
             fontSize: 16.5,
             fontWeight: FontWeight.w800,
-            color: Fx.ink,
+            color: skin.ink,
           ),
         ),
         const Spacer(),
@@ -704,20 +782,15 @@ class DetailCommentTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final skin = FxDetailSkin.of(context);
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.fromLTRB(12, 11, 12, 9),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .62),
+        color: skin.surface,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withValues(alpha: .92)),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF50729F).withValues(alpha: .07),
-            blurRadius: 18,
-            offset: const Offset(0, 5),
-          ),
-        ],
+        border: Border.all(color: skin.hairline),
+        boxShadow: skin.softShadow,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -735,31 +808,31 @@ class DetailCommentTile extends StatelessWidget {
                       item.user.isEmpty ? '影迷' : item.user,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w700,
-                        color: Fx.ink,
+                        color: skin.ink,
                       ),
                     ),
                     const SizedBox(height: 3),
-                    _stars(item.score),
+                    _stars(item.score, skin),
                   ],
                 ),
               ),
               const SizedBox(width: 6),
               Text(
                 _timeText(item.time),
-                style: const TextStyle(fontSize: 9.5, color: Color(0xFFA6B1C2)),
+                style: TextStyle(fontSize: 9.5, color: skin.hint),
               ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
             item.content,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 12.5,
               height: 1.55,
-              color: Fx.ink,
+              color: skin.ink,
             ),
           ),
           const SizedBox(height: 7),
@@ -775,31 +848,31 @@ class DetailCommentTile extends StatelessWidget {
                           ? Icons.favorite_rounded
                           : Icons.favorite_border_rounded,
                       size: 14,
-                      color: liked ? const Color(0xFFFF6B8A) : Fx.sub,
+                      color: liked ? skin.red : skin.body,
                     ),
                     const SizedBox(width: 3),
                     Text(
                       '${item.likes + (liked ? 1 : 0)}',
                       style: TextStyle(
                         fontSize: 10.5,
-                        color: liked ? const Color(0xFFFF6B8A) : Fx.sub,
+                        color: liked ? skin.red : skin.body,
                       ),
                     ),
                   ],
                 ),
               ),
               const SizedBox(width: 16),
-              const Icon(Icons.chat_bubble_outline_rounded,
-                  size: 13, color: Fx.sub),
+              Icon(Icons.chat_bubble_outline_rounded,
+                  size: 13, color: skin.body),
               const SizedBox(width: 3),
               Text(
                 '${item.replies}',
-                style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+                style: TextStyle(fontSize: 10.5, color: skin.body),
               ),
               const Spacer(),
-              const Text(
+              Text(
                 '举报',
-                style: TextStyle(fontSize: 10, color: Color(0xFFA6B1C2)),
+                style: TextStyle(fontSize: 10, color: skin.hint),
               ),
             ],
           ),
@@ -854,7 +927,7 @@ class DetailCommentTile extends StatelessWidget {
     );
   }
 
-  Widget _stars(num score) {
+  Widget _stars(num score, FxDetailSkin skin) {
     var stars = score <= 0
         ? 0
         : (score <= 5 ? score.round() : (score / 2).round()).clamp(0, 5);
@@ -865,16 +938,16 @@ class DetailCommentTile extends StatelessWidget {
           Icon(
             i < stars ? Icons.star_rounded : Icons.star_border_rounded,
             size: 12,
-            color: i < stars ? Fx.gold : const Color(0xFFC9D2E0),
+            color: i < stars ? skin.ink : skin.hairline,
           ),
         if (score > 0) ...[
           const SizedBox(width: 4),
           Text(
             score.toStringAsFixed(1),
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 10,
               fontWeight: FontWeight.w600,
-              color: Fx.gold,
+              color: skin.body,
             ),
           ),
         ],
@@ -891,17 +964,12 @@ class DetailCommentInput extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final skin = FxDetailSkin.of(context);
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .92),
-        border: const Border(top: BorderSide(color: Colors.white, width: 1)),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF50729F).withValues(alpha: .10),
-            blurRadius: 22,
-            offset: const Offset(0, -4),
-          ),
-        ],
+        color: skin.surface,
+        border: Border(top: BorderSide(color: skin.hairline, width: 1)),
+        boxShadow: skin.softShadow,
       ),
       child: SafeArea(
         top: false,
@@ -913,15 +981,15 @@ class DetailCommentInput extends StatelessWidget {
                 width: 30,
                 height: 30,
                 alignment: Alignment.center,
-                decoration: const BoxDecoration(
-                  gradient: Fx.brand,
+                decoration: BoxDecoration(
+                  color: skin.chip,
                   shape: BoxShape.circle,
                 ),
-                child: const Text('幻',
+                child: Text('幻',
                     style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w700,
-                        color: Colors.white)),
+                        color: skin.ink)),
               ),
               const SizedBox(width: 9),
               Expanded(
@@ -932,26 +1000,25 @@ class DetailCommentInput extends StatelessWidget {
                     height: 36,
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: .80),
+                      color: skin.chip,
                       borderRadius: BorderRadius.circular(18),
-                      border: Border.all(color: Colors.white),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.edit_rounded, size: 13, color: Fx.sub),
+                        Icon(Icons.edit_outlined, size: 14, color: skin.hint),
                         const SizedBox(width: 6),
                         Expanded(
                           child: TextField(
                             readOnly: true,
                             showCursor: false,
                             onTap: onTap,
-                            style: const TextStyle(fontSize: 12),
-                            decoration: const InputDecoration(
+                            style: TextStyle(fontSize: 12, color: skin.ink),
+                            decoration: InputDecoration(
                               isDense: true,
                               border: InputBorder.none,
                               hintText: '说点什么… 登录后参与评论',
                               hintStyle:
-                                  TextStyle(fontSize: 11.5, color: Fx.sub),
+                                  TextStyle(fontSize: 11.5, color: skin.hint),
                             ),
                           ),
                         ),
@@ -969,18 +1036,11 @@ class DetailCommentInput extends StatelessWidget {
                   height: 36,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    gradient: Fx.brand,
+                    color: skin.ink,
                     shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Fx.accent.withValues(alpha: .30),
-                        blurRadius: 12,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
                   ),
-                  child: const Icon(Icons.send_rounded,
-                      size: 17, color: Colors.white),
+                  child: Icon(Icons.send_rounded,
+                      size: 17, color: skin.onInk),
                 ),
               ),
             ],
@@ -1023,12 +1083,13 @@ Future<String?> showDetailFeedbackSheet(BuildContext context) {
     backgroundColor: Colors.transparent,
     barrierColor: Colors.black.withValues(alpha: .32),
     builder: (sheetContext) {
+      final skin = FxDetailSkin.of(sheetContext);
       return Container(
         padding: EdgeInsets.fromLTRB(
             20, 16, 20, 20 + MediaQuery.of(sheetContext).padding.bottom),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        decoration: BoxDecoration(
+          color: skin.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1039,18 +1100,18 @@ Future<String?> showDetailFeedbackSheet(BuildContext context) {
                 width: 38,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: const Color(0xFFE3E9F3),
+                  color: skin.hairline,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
             ),
             const SizedBox(height: 14),
-            const Text('反馈问题',
+            Text('反馈问题',
                 style: TextStyle(
-                    fontSize: 17, fontWeight: FontWeight.w800, color: Fx.ink)),
+                    fontSize: 17, fontWeight: FontWeight.w800, color: skin.ink)),
             const SizedBox(height: 4),
-            const Text('选择最接近的问题，我们会尽快处理',
-                style: TextStyle(fontSize: 11.5, color: Fx.sub)),
+            Text('选择最接近的问题，我们会尽快处理',
+                style: TextStyle(fontSize: 11.5, color: skin.hint)),
             const SizedBox(height: 14),
             Wrap(
               spacing: 8,
@@ -1117,12 +1178,13 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final skin = FxDetailSkin.of(context);
     final screenH = MediaQuery.of(context).size.height;
     return Container(
       height: screenH * .66,
-      decoration: const BoxDecoration(
-        color: Color(0xFFF7FAFF),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
+      decoration: BoxDecoration(
+        color: skin.page,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(26)),
       ),
       child: Column(
         children: [
@@ -1131,7 +1193,7 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
             width: 38,
             height: 4,
             decoration: BoxDecoration(
-              color: const Color(0xFFE3E9F3),
+              color: skin.hairline,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -1139,15 +1201,15 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
             padding: const EdgeInsets.fromLTRB(18, 12, 10, 4),
             child: Row(
               children: [
-                const Text('选集',
+                Text('选集',
                     style: TextStyle(
                         fontSize: 17,
                         fontWeight: FontWeight.w800,
-                        color: Fx.ink)),
+                        color: skin.ink)),
                 const SizedBox(width: 8),
                 Text(
                   '共 ${fxMainEpisodeCount(widget.episodes)} 集',
-                  style: const TextStyle(fontSize: 11, color: Fx.sub),
+                  style: TextStyle(fontSize: 11, color: skin.hint),
                 ),
                 const Spacer(),
                 GestureDetector(
@@ -1158,12 +1220,11 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                     height: 30,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: .85),
+                      color: skin.chip,
                       shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white),
                     ),
-                    child: const Icon(Icons.close_rounded,
-                        size: 18, color: Fx.sub),
+                    child: Icon(Icons.close_rounded,
+                        size: 18, color: skin.body),
                   ),
                 ),
               ],
@@ -1199,24 +1260,18 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 160),
                         alignment: Alignment.center,
+                        // 同一套选集规格：未选中白底 + 红边 + 红字，
+                        // 选中红底白字。弹层一屏 30 格，未选中的红边
+                        // 降一档透明度，避免整页红框。
                         decoration: BoxDecoration(
-                          gradient: active ? Fx.brand : null,
-                          color: active ? null : Colors.white.withValues(alpha: .82),
+                          color: active ? skin.red : skin.surface,
                           borderRadius: BorderRadius.circular(11),
                           border: Border.all(
                             color: active
-                                ? Fx.accent
-                                : Colors.white.withValues(alpha: .95),
+                                ? skin.red
+                                : skin.red.withValues(alpha: .45),
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color:
-                                  (active ? Fx.accent : const Color(0xFF50729F))
-                                      .withValues(alpha: active ? .22 : .06),
-                              blurRadius: 10,
-                              offset: const Offset(0, 3),
-                            ),
-                          ],
+                          boxShadow: active ? null : skin.softShadow,
                         ),
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -1230,7 +1285,7 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                                 fontSize: 11,
                                 fontWeight:
                                     active ? FontWeight.w700 : FontWeight.w500,
-                                color: active ? Colors.white : Fx.ink,
+                                color: active ? skin.onRed : skin.red,
                               ),
                             ),
                             if (cached) ...[
@@ -1243,8 +1298,8 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                                   height: 1.1,
                                   fontWeight: FontWeight.w600,
                                   color: active
-                                      ? Colors.white.withValues(alpha: .86)
-                                      : const Color(0xFF2FA985),
+                                      ? skin.onRed.withValues(alpha: .86)
+                                      : skin.hint,
                                 ),
                               ),
                             ],
@@ -1276,10 +1331,10 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
                 const SizedBox(width: 14),
                 Text(
                   '第 ${_page + 1} / $_pages 页',
-                  style: const TextStyle(
+                  style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w600,
-                      color: Fx.sub),
+                      color: skin.body),
                 ),
                 const SizedBox(width: 14),
                 _pageButton(
@@ -1306,26 +1361,26 @@ class _DetailEpisodeSheetState extends State<_DetailEpisodeSheet> {
     required bool enabled,
     required VoidCallback onTap,
   }) {
+    final skin = FxDetailSkin.of(context);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: enabled ? onTap : null,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: enabled ? .85 : .35),
+          color: skin.surface,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.white),
+          border: Border.all(color: skin.hairline),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon,
-                size: 16, color: enabled ? Fx.ink : const Color(0xFFC4CDDA)),
+            Icon(icon, size: 16, color: enabled ? skin.ink : skin.hairline),
             Text(
               label,
               style: TextStyle(
                 fontSize: 11,
-                color: enabled ? Fx.ink : const Color(0xFFC4CDDA),
+                color: enabled ? skin.ink : skin.hint,
               ),
             ),
           ],
