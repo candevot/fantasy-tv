@@ -1,9 +1,12 @@
 package com.huanxiang.fantasy_tv
 
 import android.app.Activity
+import android.net.Uri
 import android.util.Log
 import android.content.Context
 import java.io.File
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -13,6 +16,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
@@ -77,6 +81,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
          * 漏洞）；这里用 LRU，缓存满了自动淘汰最久未用的分片。
          */
         const val CACHE_MAX_BYTES = 1536L * 1024 * 1024
+
+        /**
+         * 首页续播预取的读缓冲：64KB（和 [SegmentPreloader.BUFFER_SIZE] 一致）。
+         *
+         * 预取只是「把播放器马上要的那一片提前落盘」，读得比播放器快没有意义，
+         * 反而会和首屏请求抢带宽，所以按同一档大小串行读。
+         */
+        const val PREFETCH_BUFFER_SIZE = 64 * 1024
     }
 
     private var player: ExoPlayer? = null
@@ -97,6 +109,16 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private var preloader: SegmentPreloader? = null
 
     private var lastError: String? = null
+
+    /// 首页续播预取的单线程队列（并发 = 1，和 [SegmentPreloader] 同一策略）。
+    ///
+    /// 为什么不由 [SegmentPreloader] 代劳：那个预取器属于「当前播放的那个源」，
+    /// 首页可能还没创建过播放器，而且它的代际号会被播放页的 seek 作废。
+    /// 首页预取只做「把一个已知分片写进同一份缓存」，独立队列最简单，
+    /// 也绝不打断播放器自己的预取。
+    private val prefetchQueue: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "FxPrefetch").also { it.isDaemon = true }
+    }
 
     // ---- seek 音频闸（改动 ③）：拖动时静音，首帧回来再恢复 ----
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -194,6 +216,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                     v.scaleY = if (fy) -1f else 1f
                 }
                 result.success(true)
+            }
+            // 首页「继续观看」预取：把一个分片写进播放器同一份 SimpleCache。
+            // 入队即返回 true（下载在自己的线程里跑），Dart 侧不等结果。
+            "prefetchSegment" -> {
+                val url = call.argument<String>("url") ?: ""
+                val headers = call.argument<Map<String, String>>("headers") ?: emptyMap()
+                val maxBytes = call.argument<Number>("maxBytes")?.toLong() ?: 0L
+                prefetchSegment(url, headers, maxBytes, result)
             }
             "state" -> result.success(snapshot())
             "release" -> { dispose(); result.success(true) }
@@ -487,11 +517,86 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             CacheDataSource.Factory()
                 .setCache(cache)
                 .setUpstreamDataSourceFactory(upstream)
+                // CACHE_KEY：播放器 / 预取器 / 首页续播预取共用同一套 key
+                // （FxCacheKeyFactory）。默认的 uri.toString() 无法表达
+                // 「/api/seg?u=…&i=…&s=…&ln=…」这种同路径分片，见该文件注释。
+                .setCacheKeyFactory(FxCacheKeyFactory)
                 // 缓存坏了就忽略、直接回源，别让播放卡死
                 .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
         } catch (e: Throwable) {
             upstream
         }
+    }
+
+    // ------------------------------------------------ 首页续播预取（2026-11-14）
+
+    /**
+     * 把一个 HLS 分片写进播放器同一份 SimpleCache。
+     *
+     * 为什么必须走原生 CacheDataSource：SimpleCache 是原生磁盘缓存，
+     * 播放器的 CacheDataSource 按 cacheKey 查它，而 cacheKey 是
+     * [FxCacheKeyFactory] 算出来的。Dart 侧自己 http 拉下来的字节只会进
+     * 内存 / 临时文件，播放入口一个字节都命中不到。
+     *
+     * [maxBytes] > 0 时读到这么多字节就停（移动网络的单次预算），
+     * 停止的位置 media3 会按「部分缓存」记着，播放器接着往下读即可。
+     * 失败只留一行 logcat，不给 Dart 任何异常。
+     */
+    private fun prefetchSegment(
+        url: String,
+        headers: Map<String, String>,
+        maxBytes: Long,
+        result: MethodChannel.Result,
+    ) {
+        if (url.isEmpty()) {
+            result.success(false)
+            return
+        }
+        // 先确认缓存能建起来：建不起来就别排任务（cacheDataSourceFactory
+        // 会退化成直连，那样下完也不落盘，纯属白跑）。
+        if (ensureMediaCache() == null) {
+            Log.d(LOG_TAG, "PREFETCH 跳过（磁盘缓存不可用）$url")
+            result.success(false)
+            return
+        }
+        prefetchQueue.execute {
+            var source: DataSource? = null
+            try {
+                val httpFactory = DefaultHttpDataSource.Factory()
+                    .setUserAgent(headers["User-Agent"] ?: "Mozilla/5.0")
+                    .setAllowCrossProtocolRedirects(true)
+                    .setConnectTimeoutMs(15_000)
+                    .setReadTimeoutMs(20_000)
+                    .setDefaultRequestProperties(headers)
+                // 关键：同一个 cacheDataSourceFactory —— 同一份 SimpleCache、
+                // 同一个 cacheKey 规则，播放器读的时候才是本地命中。
+                val factory = cacheDataSourceFactory(
+                    DefaultDataSource.Factory(context, httpFactory)
+                )
+                val stream = factory.createDataSource()
+                source = stream
+                stream.open(DataSpec(Uri.parse(url)))
+                val buffer = ByteArray(PREFETCH_BUFFER_SIZE)
+                var total = 0L
+                while (true) {
+                    val read = stream.read(buffer, 0, buffer.size)
+                    if (read == -1) break
+                    total += read
+                    if (maxBytes > 0 && total >= maxBytes) break
+                }
+                Log.d(LOG_TAG, "PREFETCH 落盘 ${total}B（上限 ${maxBytes}B）$url")
+            } catch (error: Throwable) {
+                // 预取失败不影响播放：播放器那头回源兜底。
+                Log.d(LOG_TAG, "PREFETCH 失败 ${error.javaClass.simpleName} $url")
+            } finally {
+                try {
+                    source?.close()
+                } catch (_: Throwable) {
+                    // 关闭失败不影响结果
+                }
+            }
+        }
+        result.success(true)
     }
 
     /** 供 PlatformViewFactory 创建画面视图 */

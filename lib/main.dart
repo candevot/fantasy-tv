@@ -523,10 +523,13 @@ class _RootShellState extends State<RootShell> {
         ),
       ),
       bottomNavigationBar: Padding(
+        // 高度 / 底距都走 theme.dart 的常量：首页「继续观看」悬浮条
+        // 靠 fxBottomBarInset 贴在标签栏正上方，两边必须是同一个几何。
         padding: EdgeInsets.only(
             left: 14,
             right: 14,
-            bottom: 10 + MediaQuery.of(context).padding.bottom * .4),
+            bottom:
+                fxBottomBarGap + MediaQuery.of(context).padding.bottom * .4),
         child: _FxBottomBar(
           index: _i,
           items: _tabs,
@@ -633,7 +636,7 @@ class _FxBottomBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 62,
+      height: fxBottomBarHeight,
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: .80),
         borderRadius: BorderRadius.circular(26),
@@ -689,7 +692,7 @@ class _FxBottomBar extends StatelessWidget {
                     onTap: () => onTap(i),
                     child: SizedBox(
                       width: itemW,
-                      height: 62,
+                      height: fxBottomBarHeight,
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [

@@ -38,6 +38,42 @@ class ExoPlayerEngine {
   static bool get isSupported =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
+  /// 预取通道单独一条 [MethodChannel]：`prefetchSegment` 是**静态**方法，
+  /// 首页还没创建过 [ExoPlayerEngine] 实例时也要能调（没播放器 = 没 _method）。
+  /// 原生侧和播放用的是同一个 `ExoPlayerPlugin` 实例（同一个 SimpleCache），
+  /// 所以用同一个 channel 名即可。
+  static const MethodChannel _prefetchChannel =
+      MethodChannel('fantasy_tv/exo_player');
+
+  /// 把**一个** HLS 分片下载进播放器同一份 SimpleCache（首页续播预取用）。
+  ///
+  /// 为什么不在这里用 Dart 的 http 自己拉：SimpleCache 是原生磁盘缓存，
+  /// 播放器的 CacheDataSource 按原生 `FxCacheKeyFactory` 算出的 key 查它
+  /// （`stripQuery(url) + "||" + url`）。Dart 拉下来的字节只能落进内存或临时
+  /// 文件，播放器照样查不到、照样回源 —— 只有原生走 CacheDataSource 写进去，
+  /// 播放器请求同一 URL 时才是本地命中。
+  ///
+  /// 原生侧入队后立刻返回（下载在独立单线程里跑），失败静默只留 logcat；
+  /// [maxBytes] > 0 时下到这么多字节就停（移动网络的单次上限）。
+  static Future<bool> prefetchSegment(
+    String url, {
+    Map<String, String> headers = const {},
+    int maxBytes = 0,
+  }) async {
+    if (url.isEmpty || !isSupported) return false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('prefetchSegment', {
+        'url': url,
+        'headers': headers,
+        'maxBytes': maxBytes < 0 ? 0 : maxBytes,
+      });
+      return r ?? false;
+    } catch (_) {
+      // 预取失败不影响播放：播放页那份预取和回源都会兜底。
+      return false;
+    }
+  }
+
   final MethodChannel _method;
   final EventChannel _event;
   StreamSubscription<dynamic>? _sub;

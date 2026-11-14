@@ -12,6 +12,19 @@ import 'utils/fx_route.dart';
 TextScaler fxClampTextScaler(TextScaler scaler) =>
     scaler.clamp(maxScaleFactor: 1.3);
 
+/// 底部悬浮标签栏的几何（首页「继续观看」悬浮条靠它算底距）。
+///
+/// [RootShell] 的 bottomNavigationBar 就是按这两个常量排的，别在别处写死
+/// 62 / 10 —— 标签栏一改高度，悬浮条就会压在它身上或者飘到半空。
+const double fxBottomBarHeight = 62;
+const double fxBottomBarGap = 10;
+
+/// 屏幕底边到标签栏顶边的高度（含安全区 40%，和标签栏自身的内边距同源）。
+double fxBottomBarInset(BuildContext context) =>
+    fxBottomBarHeight +
+    fxBottomBarGap +
+    MediaQuery.of(context).padding.bottom * .4;
+
 /// 幻想影视 · 白色液态玻璃主题
 class Fx {
   static const Color ink = Color(0xFF1B2430);
@@ -19,6 +32,17 @@ class Fx {
   static const Color accent = Color(0xFF5B8CFF);
   static const Color accent2 = Color(0xFF8E6BFF);
   static const Color gold = Color(0xFFFFB020);
+
+  /// 深色主题下卡片底色（深紫黑）。
+  ///
+  /// 浅色主题用 `Theme.of(context).colorScheme.surface`（纯白），
+  /// 这个常量只负责深色那一支 —— 全站暂时只有浅色主题，
+  /// 但悬浮条这类「玻璃卡片」必须能跟着 brightness 走，
+  /// 否则以后上深色主题时它是唯一一块刺眼的白。
+  static const Color cardInk = Color(0xFF1C1728);
+
+  /// 关闭 / 清除类操作的警示红（悬浮条的圆形 × 用它）。
+  static const Color danger = Color(0xFFE5484D);
   static const LinearGradient brand = LinearGradient(
     colors: [Color(0xFF5B8CFF), Color(0xFF8E6BFF)],
     begin: Alignment.topLeft,

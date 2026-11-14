@@ -11,6 +11,7 @@ import 'detail_page.dart';
 import 'search_page.dart';
 import 'together_page.dart';
 import '../utils/fx_route.dart';
+import '../widgets/fx_resume_bar.dart' show FxResumeBarHost;
 
 class _Channel {
   const _Channel(this.key, this.label);
@@ -369,21 +370,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // 现在只剩「推荐」一个频道，淡入动画没有存在意义。
     return SafeArea(
       bottom: false,
-      child: RefreshIndicator(
-        color: Fx.accent,
-        backgroundColor: Colors.white,
-        onRefresh: () => _load(force: true),
-        child: CustomScrollView(
-          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-          physics: const AlwaysScrollableScrollPhysics(
-            parent: BouncingScrollPhysics(),
+      // HOME_STACK（2026-11-14）：首页内容之外再叠一层「继续观看」悬浮条。
+      //
+      // 为什么必须是 Stack：悬浮条要固定在底部标签栏正上方，不能跟着
+      // CustomScrollView 一起滚。它挂在 Stack 的最后一层（内容之上），
+      // 自己算底距（theme.dart 的 fxBottomBarInset + 8），
+      // 于是既不会和首页滚动打架，也不会被标签栏盖住。
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          RefreshIndicator(
+            color: Fx.accent,
+            backgroundColor: Colors.white,
+            onRefresh: () => _load(force: true),
+            child: CustomScrollView(
+              keyboardDismissBehavior:
+                  ScrollViewKeyboardDismissBehavior.onDrag,
+              physics: const AlwaysScrollableScrollPhysics(
+                parent: BouncingScrollPhysics(),
+              ),
+              slivers: [
+                SliverToBoxAdapter(child: _header()),
+                ..._body(data),
+                const SliverToBoxAdapter(child: SizedBox(height: 104)),
+              ],
+            ),
           ),
-          slivers: [
-            SliverToBoxAdapter(child: _header()),
-            ..._body(data),
-            const SliverToBoxAdapter(child: SizedBox(height: 104)),
-          ],
-        ),
+          // 没有历史记录 / 用户已关掉时它自己返回 SizedBox.shrink()，
+          // 不占位、不拦手势；数据与预取都在它内部完成。
+          const FxResumeBarHost(),
+        ],
       ),
     );
   }

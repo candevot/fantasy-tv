@@ -243,6 +243,9 @@ class SegmentPreloader(
         return CacheDataSource.Factory()
             .setCache(cache)
             .setUpstreamDataSourceFactory(upstream)
+            // CACHE_KEY：和播放器同一套 key（见 FxCacheKeyFactory）——
+            // 预取写进去的分片，播放器请求同一地址时才是缓存命中。
+            .setCacheKeyFactory(FxCacheKeyFactory)
             // 缓存坏了就忽略、直接回源，别让预取卡死
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     }
