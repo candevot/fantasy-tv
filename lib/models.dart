@@ -734,19 +734,10 @@ bool fxUrlNeedsClientProxy(String url) {
 /// 现在凡是 http(s) 的 m3u8 都交给代理：mpv 拿到的仍是本地地址，
 /// 代理负责下载、缓存、预取，分片仍然是直连 CDN（不额外消耗服务器带宽）。
 bool fxShouldUseHlsProxy(String url, {required bool isHls}) {
-  // PROXY_ON（2026-11-14 修正）
-  //
-  // 上一版我把它关掉，方向是错的。按逆向结论（咕噜咕噜 = Flutter + libmpv
-  // + libtcpdownloadproxy，秒拖来自 setInfinitePreload + 动态加深预取 +
-  // 分片缓存共享），这一层必须保留；我们的 LocalHlsProxy 也已经实现了
-  // 流式快路径（大分片边下边发）与预取让位。
-  //
-  // 关掉它只会丢掉预取和缓存，起播反而更慢。
-  if (!isHls) return false;
-  final raw = url.trim().toLowerCase();
-  if (raw.isEmpty) return false;
-  if (!raw.startsWith('http://') && !raw.startsWith('https://')) return false;
-  return true;
+  // PROXY_OFF（2026-11-14 第三轮结论，恢复为此前已定案的决策）
+  // 一律直连：ExoPlayer 原生支持 Range 与边下边播，服务端已把分片地址
+  // 改写成绝对地址；本地代理只在 mpv 时代服务于「整集预热/落盘/提前换签」。
+  return false;
 }
 
 bool fxIsPlatformLine(LineInfo line) {
