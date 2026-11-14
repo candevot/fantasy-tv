@@ -4,7 +4,6 @@
 // 覆盖：master → 媒体 playlist 解析、#EXTINF 累加建索引、#EXT-X-BYTERANGE、
 // 二分定位当前分片、分片大小不符 → 回源直连、源站 500 → 判失败、
 // 本地代理地址还原成源站地址。
-import 'dart:convert';
 import 'dart:io';
 
 import '../lib/services/hls_segment_index.dart';
