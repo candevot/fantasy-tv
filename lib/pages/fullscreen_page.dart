@@ -730,6 +730,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               headers: source.headers,
               play: continuePlayback,
               waitForWarm: waitForWarm,
+              isHls: source.isHls,
               // 采集线路直连（mpv 边下边播）；只有平台签名线路走代理。
               // 按实际地址判断：腾讯直连是 CDN 绝对地址，不需要代理；
               // 只有爱奇艺 /api/iqiyi.m3u8 这类站内包装地址才需要。
@@ -820,6 +821,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             url,
             headers: headers,
             play: wasPlaying,
+            // 重开同一条流，类型沿用服务端声明
+            isHls: _info?.isHls,
             direct: fxShouldUseHlsProxy(url, isHls: true),
             refreshPlay: _refreshPlatformUrl,
             onPlayExpired: _onPlatformExpired,

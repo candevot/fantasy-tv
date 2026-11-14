@@ -1034,6 +1034,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               headers: info.headers,
               play: shouldPlay,
               waitForWarm: waitForWarm,
+              // 用服务端声明的类型：幻想自建的地址没有 .m3u8 后缀，
+              // 按后缀猜会被当成普通视频，直接解析失败。
+              isHls: info.isHls,
               // 只有「平台签名线路」才走本地代理（需要代理改写签名、
               // 定时换新地址）。普通采集线路直接交给 mpv 边下边播。
               //

@@ -229,8 +229,12 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } else {
                 DefaultDataSource.Factory(context, httpFactory)
             }
-            // 分片缓存：同一集里来回拖、切集再回来，都先看本地。
-            val cachedFactory = cacheDataSourceFactory(dataSource)
+            // PERF_SAFE（2026-11-14）：先不用磁盘缓存。
+            // 它是优化项，但一旦 SimpleCache 初始化失败（NoClassDefFoundError
+            // 之类的 Error 不是 Exception，catch 不住），会让**所有**线路
+            // 都打不开 —— 表现就是「什么线路都一直加载」。
+            // 播放正确性优先，缓存等这一版稳定后再单独加回来。
+            val cachedFactory = dataSource
             val item = MediaItem.fromUri(url)
             val source: MediaSource = if (isHls) {
                 HlsMediaSource.Factory(cachedFactory).createMediaSource(item)
@@ -240,9 +244,12 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             player!!.setMediaSource(source)
             player!!.prepare()
             result.success(true)
-        } catch (e: Exception) {
-            lastError = e.message
-            result.error("open_failed", e.message, null)
+        } catch (e: Throwable) {
+            // 这里必须兜 Throwable：NoClassDefFoundError / OutOfMemoryError
+            // 这类 Error 不是 Exception，漏出去会让 MethodChannel 调用悬挂，
+            // Dart 侧就一直等，UI 永远转圈。
+            lastError = (e.message ?: e.javaClass.simpleName)
+            result.error("open_failed", lastError, null)
         }
     }
 

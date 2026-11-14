@@ -336,6 +336,9 @@ class FxPlayer implements Listenable {
 
   /// 内核状态轮询（事件通道的兜底）。
   Timer? _pollTimer;
+
+  /// 本次 open 的类型提示（来自服务端的 type 字段）。
+  bool? _typeHint;
   DateTime _lastFlowAt = DateTime.now();
   int _rescueRounds = 0;
   Duration _lastFlowPos = Duration.zero;
@@ -448,6 +451,13 @@ class FxPlayer implements Listenable {
     bool play = false,
     bool waitForWarm = false,
     bool direct = false,
+    /// 服务端给的类型（PlayInfo.isHls）。给了就以它为准，不再靠地址后缀猜。
+    ///
+    /// 幻想自建（pt_zijian）返回的是 `.../cloud/flv/xxx` 这种没有 .m3u8 的
+    /// 地址，但 302 之后就是 m3u8 列表。按后缀猜会当成普通视频交给
+    /// ProgressiveMediaSource，直接解析失败 —— 表现就是「自建线路播不出来」。
+    /// libmpv 时代能播是因为 ffmpeg 会自己嗅探格式，ExoPlayer 不会。
+    bool? isHls,
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
     FxLineRescue? rescueLines,
@@ -455,6 +465,8 @@ class FxPlayer implements Listenable {
     if (_disposed) {
       return Future<void>.error(const FxPlayerException('播放器已释放'));
     }
+    // 记下服务端声明的类型，供 _openMedia / 救援重开使用。
+    _typeHint = isHls;
     final key = _openKey(url, headers, direct);
     final pending = _opening;
     if (pending != null && pending.key == key) return pending.future;
@@ -659,7 +671,8 @@ class FxPlayer implements Listenable {
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
     }
-    final isHls = _looksLikeHls(source.url);
+    // 优先用服务端声明的类型；没有才退回按地址猜。
+    final isHls = _typeHint ?? _looksLikeHls(source.url);
     final ok = await _engine.open(
       source.url,
       headers: source.headers,
@@ -1115,7 +1128,12 @@ class FxPlayer implements Listenable {
         if (trimmed.startsWith('http')) url = trimmed;
       }
       if (_disposed || gen != _rescueGen) return;
-      await _engine.open(url, headers: headers, isHls: _looksLikeHls(url));
+      await _engine.open(
+        url,
+        headers: headers,
+        // 救援重开也要沿用服务端给的类型，否则自建线路永远打不开
+        isHls: _typeHint ?? _looksLikeHls(url),
+      );
       if (_disposed || gen != _rescueGen) return;
       if (target > Duration.zero) {
         await _engine.seek(target);

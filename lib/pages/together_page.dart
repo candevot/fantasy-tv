@@ -3050,6 +3050,7 @@ class _TogetherPageState extends State<TogetherPage>
           await controller.open(
             url,
             headers: play.headers,
+            isHls: play.isHls,
             // 采集线路直连（让 mpv 边下边播），只有平台签名线路才走代理。
             // 一起看卡顿的主因就是这里：4K/大分片走代理要整片下完才播。
             // 按实际地址判断（腾讯直连是 CDN 绝对地址，不需要代理）。
