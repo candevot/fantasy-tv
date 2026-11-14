@@ -148,6 +148,14 @@ python3 tools/patch_manifest.py
 echo "[build] patch: edge-to-edge + 存储权限 + DLNA MulticastLock（patch_edge_to_edge.py）"
 python3 tools/patch_edge_to_edge.py
 
+# PLAYER_CORE（2026-11-14 二次切换）：内核是定制 ExoPlayer(Media3)。
+# android/ 不入库，原生桥（ExoPlayerPlugin.kt + SegmentPreloader.kt）必须在
+# 构建前注入，否则 Dart 侧的 fantasy_tv/exo_player 通道找不到实现 ——
+# 表现出来就是「一开播就黑屏、没有任何错误」。CI 里同名步骤是
+# 「Inject ExoPlayer (Media3) kernel」。
+echo "[build] patch: 注入 ExoPlayer(Media3) 内核（patch_exoplayer.py）"
+python3 tools/patch_exoplayer.py
+
 echo "[build] check: Android 8+ / 16KB 兼容（check_android_compat.py）"
 python3 tools/check_android_compat.py
 
@@ -155,10 +163,15 @@ python3 tools/check_android_compat.py
 if grep -q '^dependency_overrides:' pubspec.yaml; then
   die "dependency_overrides must be removed（与 CI「Verify dependency overrides removed」一致）"
 fi
-if ! grep -qE 'media_kit(_video|_libs_video)?:' pubspec.yaml; then
-  die "pubspec.yaml 缺少 media_kit(_video|_libs_video) 依赖"
+# PLAYER_CORE（2026-11-14 二次切换）：内核是定制 ExoPlayer(Media3)，
+# media_kit(libmpv) 必须已经移除，且 lib/ 里不许再有引用（与 CI 同款校验）。
+if grep -qE '^  media_kit(_video|_libs_video|_libs_android_video)?:' pubspec.yaml; then
+  die "pubspec.yaml 仍有 media_kit 依赖（ExoPlayer 内核不需要 libmpv）"
 fi
-grep -E 'media_kit(_video|_libs_video)?:' pubspec.yaml
+if grep -rnE "package:media_kit" lib/ ; then
+  die "lib/ 里仍有 package:media_kit 引用"
+fi
+echo "[build] 内核：ExoPlayer(Media3)，media_kit 已移除"
 # 仓库没有单独的 pubspec 补丁脚本：assets/logo.png 必须由 pubspec 声明，
 # 否则构建出来的 APK 会缺 assets/flutter_assets/assets/logo.png。
 if ! grep -q -- '- assets/logo.png' pubspec.yaml; then

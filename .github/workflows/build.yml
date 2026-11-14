@@ -81,24 +81,34 @@ jobs:
           python3 tools/patch_edge_to_edge.py
       - name: Inject ExoPlayer (Media3) kernel
         run: |
-          # 把 android_src/ 里的 ExoPlayer 桥接插件注入 CI 生成的工程，
-          # 并注册到 MainActivity + 加 media3 依赖。
-          # 这是换内核的第一步：先让插件能编译进包，Dart 侧还没切过去。
+          # 把 android_src/ 里的 ExoPlayer 桥接插件（ExoPlayerPlugin + SegmentPreloader）
+          # 注入 CI 生成的工程，注册到 MainActivity + 加 media3 依赖。
+          # 内核就是它：少了这一步 Dart 侧的 fantasy_tv/exo_player 通道没有实现，
+          # 一开播就黑屏且没有任何错误。
           python3 tools/patch_exoplayer.py
       - name: Check Android 8+ / 16KB compatibility
         run: |
           python3 tools/check_android_compat.py
-      - name: Verify dependency overrides removed
+      - name: Verify dependency overrides removed and media_kit gone
         run: |
           if grep -q '^dependency_overrides:' pubspec.yaml; then
             echo 'dependency_overrides must be removed' >&2
             exit 1
           fi
-          # PLAYER_CORE（2026-11-14 回退 libmpv）：内核回到 media_kit，
-          # 这里只保留「覆盖项必须清空」的校验，不再要求移除 media_kit。
-          if grep -qE '^  media_kit(_video|_libs_video)?:' pubspec.yaml; then
-            echo 'media_kit 依赖已恢复（libmpv 内核）'
+          # PLAYER_CORE（2026-11-14 二次切换）：内核回到定制 ExoPlayer(Media3)，
+          # media_kit(libmpv) 三件套必须不存在 —— 残留会让 APK 多带 4 个架构的
+          # libmpv.so（25MB → 62MB），16KB 页对齐还要额外兜。
+          if grep -qE '^  media_kit(_video|_libs_video|_libs_android_video)?:' pubspec.yaml; then
+            echo 'media_kit 依赖必须移除（ExoPlayer 内核不需要 libmpv）' >&2
+            exit 1
           fi
+          # Dart 侧也不许再 import media_kit：lib/ 有引用时即使 pubspec 干净，
+          # `flutter analyze` 也会因为找不到包而失败，这里提前给出明确报错。
+          if grep -rnE "package:media_kit" lib/ ; then
+            echo 'lib/ 里仍有 package:media_kit 引用（ExoPlayer 内核不该有）' >&2
+            exit 1
+          fi
+          echo 'media_kit 已完全移除，内核走 android_src/ 的 ExoPlayer 桥'
       - run: flutter pub get
       - run: flutter analyze
       - name: Playback recovery regressions
@@ -109,8 +119,8 @@ jobs:
           # SPEED（2026-11-12）：只出 arm64。
           #
           # 必须同时用 --split-per-abi 和 --target-platform：
-          #   · 只写 --target-platform=android-arm64 → 生成 fat APK，
-          #     media_kit 会把 4 个架构的 libmpv 全塞进去（25MB → 62MB）
+          #   · 只写 --target-platform=android-arm64 → 生成 fat APK
+          #     （libmpv 时代的教训：4 个架构的 .so 全塞进去，25MB → 62MB）
           #   · 只写 --split-per-abi → 出 3 个包（arm64/v7a/x86_64）
           #   · 两个一起用 → 只出 arm64 一个包，且只含 arm64 的 .so
           flutter build apk --release \
