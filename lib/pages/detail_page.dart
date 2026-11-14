@@ -1200,9 +1200,22 @@ class _DetailPageState extends State<DetailPage>
         groups.isEmpty ? 0 : _groupIndex.clamp(0, groups.length - 1);
     final visibleEpisodes =
         groups.isEmpty ? episodes : groups[groupIndex].episodes;
-    final totalAll = d.episodes > 0
-        ? d.episodes
-        : (episodes.isNotEmpty ? fxMainEpisodeCount(episodes) : 0);
+    // LINE_OWN_COUNT（2026-11-14）：集数按**当前线路自己**的算。
+    // 我们只把线路合并到一条记录里，剧集始终归属各线路自己，
+    // 不能用合并后的总数（否则蓝光只有 6 集也显示 12 集）。
+    final lineEpNames = () {
+      final id = _lineId.trim();
+      if (id.isEmpty) return const <String>[];
+      for (final l in d.lines) {
+        if (l.id == id && l.epNames.isNotEmpty) return l.epNames;
+      }
+      return const <String>[];
+    }();
+    final totalAll = lineEpNames.isNotEmpty
+        ? lineEpNames.length
+        : (d.episodes > 0
+            ? d.episodes
+            : (episodes.isNotEmpty ? fxMainEpisodeCount(episodes) : 0));
     final total =
         episodes.isNotEmpty ? fxMainEpisodeCount(episodes) : d.episodes;
     final related = _relatedList;
