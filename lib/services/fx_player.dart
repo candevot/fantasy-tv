@@ -206,14 +206,14 @@ class FxPlayerValue {
 /// 基于 ExoPlayer（Android Media3）的播放内核封装。
 ///
 /// PLAYER_CORE（2026-11-13）：内核从 libmpv 换成 ExoPlayer，控件完全不变 ——
-/// 页面只拿到一个画面视图，进度条 / 弹幕 / 选集 / 手势全部还是我们自绘的。
+/// 页面只拿到一个画面视图，进度条 / 选集 / 手势全部还是我们自绘的。
 /// 参考 FongMi/TV：它也是 ExoPlayer 内核 + 自绘控件。
 ///
 /// 保留的东西（这些是稳定性的来源，跟内核无关）：
 ///   · 无感救援链：①换签名 ②同地址重开 ③换下一条线路，全程静默
 ///   · 无字节流动看门狗：连续 30 秒没进展才进救援，缓冲中不算失败
 ///   · HLS 起播预热：DNS + playlist + 前几片
-///   · 高频位置通道：进度条 / 弹幕独立订阅，不跟着整对象重建
+///   · 高频位置通道：进度条独立订阅，不跟着整对象重建
 ///
 /// 去掉的东西（ExoPlayer 原生就解决了，不需要我们再管）：
 ///   · demuxer-readahead-secs / cache-pause-wait / cache-buffering-state
@@ -226,7 +226,7 @@ class FxPlayer implements Listenable {
     unawaited(_engine.init());
     // STATE_POLL（2026-11-14）：不能只等 EventChannel 的事件。
     //
-    // 250ms：弹幕已经改成按帧间隔推进，但进度条还是吃这个位置回调，
+    // 250ms：进度条吃这个位置回调，
     // 500ms 会让进度条一跳一跳，250ms 看起来就顺了。
     //
     // 实测症状：画面已经出来了（ExoPlayer 在播），但 Dart 侧状态一直是
@@ -383,7 +383,7 @@ class FxPlayer implements Listenable {
   final ValueNotifier<Duration> _positionNotifier =
       ValueNotifier<Duration>(Duration.zero);
 
-  /// 高频位置（供进度条 / 弹幕订阅）。
+  /// 高频位置（供进度条订阅）。
   ValueListenable<Duration> get positionListenable => _positionNotifier;
 
   /// 是否启用本地 HLS 代理。默认 false —— 让播放器直连，
@@ -994,7 +994,7 @@ class FxPlayer implements Listenable {
   /// 内核状态回调：把 ExoPlayerState 同步成 FxPlayerValue。
   ///
   /// 高频位置单独走 _positionNotifier，整对象只在「整秒 / 关键状态变化」
-  /// 时才通知，避免顶栏、底栏、弹幕层跟着每帧重建。
+  /// 时才通知，避免顶栏、底栏跟着每帧重建。
   void _onEngineState() {
     if (_disposed) return;
     final st = _engine.state.value;

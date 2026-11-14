@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -9,7 +8,6 @@ import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
-import '../services/danmu_local.dart';
 import '../services/device_status.dart';
 import '../services/fx_player.dart';
 import '../services/play_orientation.dart';
@@ -21,8 +19,6 @@ import '../widgets/fs_controls.dart';
 import '../widgets/fs_panels.dart';
 import '../widgets/player_gestures.dart';
 import '../widgets/player_more_panel.dart';
-import '../widgets/danmu_layer.dart';
-import '../widgets/danmu_send.dart';
 import '../widgets/player_theme.dart';
 import 'history_page.dart' show FxStore;
 
@@ -228,14 +224,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   // 控件显隐 / 锁屏
   bool _controls = true;
 
-  /// 当前这集的弹幕条数（给弹幕设置面板显示）。
-  int _danmuCount = 0;
-
-  /// 自增触发弹幕层重新拉取（发完自己的弹幕后用）。
-  int _danmuReload = 0;
-
-  /// 底栏内嵌弹幕输入框（对齐 B站/腾讯，不弹窗）。
-  final TextEditingController _danmuCtrl = TextEditingController();
   Timer? _hideTimer;
   Timer? _progressTimer;
 
@@ -493,7 +481,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _resetHold2x(notify: false);
     WidgetsBinding.instance.removeObserver(this);
     DeviceStatus.instance.detach();
-    _danmuCtrl.dispose();
     _hideTimer?.cancel();
     _seekHintTimer?.cancel();
     _unlockTimer?.cancel();
@@ -1547,80 +1534,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _startHideTimer();
   }
 
-  /// 底栏弹幕按钮：直接切开关。
-  void _toggleDanmu() {
-    final s = AppSettings.instance;
-    s.danmuEnabled = !s.danmuEnabled;
-    setState(() {});
-    _wake();
-  }
-
-  /// 打开弹幕设置面板。
-  Future<void> _openDanmuPanel() async {
-    _hideTimer?.cancel();
-    await showFsDanmuPanel(
-      context,
-      count: _danmuCount,
-      onToggle: (v) {
-        AppSettings.instance.danmuEnabled = v;
-        if (mounted) setState(() {});
-      },
-      onOpacity: (v) {
-        AppSettings.instance.danmuOpacity = v;
-        if (mounted) setState(() {});
-      },
-      onFontSize: (v) {
-        AppSettings.instance.danmuFontSize = v;
-        if (mounted) setState(() {});
-      },
-      onSpeed: (v) {
-        AppSettings.instance.danmuSpeed = v;
-        if (mounted) setState(() {});
-      },
-      onArea: (v) {
-        AppSettings.instance.danmuArea = v;
-        if (mounted) setState(() {});
-      },
-    );
-  }
-
-  /// 底栏气泡里发弹幕：存本地 + 立刻上屏。
-  Future<void> _submitDanmu(String text) async {
-    final t = text.trim();
-    if (t.isEmpty) return;
-    await DanmuLocal.instance.send(
-      videoId: widget.videoId,
-      ep: _ep,
-      at: widget.player.value.position,
-      text: t,
-    );
-    if (!mounted) return;
-    setState(() => _danmuReload++);
-    _wake();
-  }
-
-  /// 打开发送弹幕输入条（旧式弹层，保留给竖屏页用）。
-  Future<void> _openDanmuSend() async {
-    _hideTimer?.cancel();
-    final at = widget.player.value.position;
-    await showDanmuSendSheet(
-      context,
-      onSend: (text) async {
-        await DanmuLocal.instance.send(
-          videoId: widget.videoId,
-          ep: _ep,
-          at: at,
-          text: text,
-        );
-        if (!mounted) return;
-        _wake();
-        // 重新拉一次，让刚发的弹幕立刻出现
-        setState(() => _danmuReload++);
-      },
-    );
-    if (mounted) _wake();
-  }
-
   void _hideControls() {
     _hideTimer?.cancel();
     if (!mounted) return;
@@ -2071,34 +1984,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             fit: StackFit.expand,
             children: [
               Positioned.fill(child: _buildVideoSurface(c)),
-              // 弹幕层：画面之上、手势层之下（不挡点击）。
-              if (!_isLive && c != null)
-                Positioned.fill(
-                  // 不再包 AnimatedBuilder(animation: c)：
-                  // 弹幕层自己用 positionListenable 逐帧推进，
-                  // 外面再套一层会让整棵弹幕树随播放器每次通知重建，
-                  // CustomPaint 的优化就白做了（实测帧率差一倍）。
-                  child: DanmuLayer(
-                    title: _title,
-                    ep: _ep,
-                    epName: _epLabelFor(_ep),
-                    position: c.value.position,
-                    positionListenable: c.positionListenable,
-                    playing: c.value.isPlaying,
-                    enabled: AppSettings.instance.danmuEnabled,
-                    opacity: AppSettings.instance.danmuOpacity,
-                    fontSize: AppSettings.instance.danmuFontSize,
-                    speed: AppSettings.instance.danmuSpeed,
-                    areaRatio: AppSettings.instance.danmuArea,
-                    reloadKey: _danmuReload,
-                    videoId: widget.videoId,
-                    onCount: (n) {
-                      if (mounted && n != _danmuCount) {
-                        setState(() => _danmuCount = n);
-                      }
-                    },
-                  ),
-                ),
               // 手势层：单击显隐控件 / 双击暂停 / 横扫调进度 / 竖扫亮度音量 /
               // 长按 3.0x。加载与切换时仍保留手势（按钮的 no-op 由页面自己判）。
               if (!_locked && c != null)
@@ -2489,12 +2374,6 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       onEpisodes:
                           _isLive ? null : () => unawaited(_openEpisodeSheet()),
                       onMore: () => unawaited(_openMorePanel()),
-                      danmuOn: _isLive ? null : AppSettings.instance.danmuEnabled,
-                      onDanmu: _isLive ? null : _toggleDanmu,
-                      onDanmuSettings: _isLive ? null : _openDanmuPanel,
-                      onDanmuSend: _isLive ? null : _openDanmuSend,
-                      danmuInput: _isLive ? null : _danmuCtrl,
-                      onDanmuSubmit: _isLive ? null : _submitDanmu,
                       onExit: () => unawaited(_exit()),
                     );
                   },

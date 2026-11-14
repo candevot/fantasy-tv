@@ -7,7 +7,6 @@ import '../api.dart';
 import '../main.dart' show Nav;
 import '../models.dart';
 import '../services/cms_bridge.dart';
-import '../services/danmu_service.dart';
 import '../services/download_service.dart';
 import '../services/fx_player.dart';
 import '../widgets/detail_widgets.dart';
@@ -226,9 +225,6 @@ class _DetailPageState extends State<DetailPage>
       if (lineId.isNotEmpty) {
         FxPlayCache.warm(widget.id, ep, lineId);
       }
-      // 弹幕一起预热：冷搜一次要 3~4 秒，详情页先把这一集交给服务端拉，
-      // 用户点播放时 /api/danmu 直接命中缓存（fire-and-forget，失败静默）。
-      _warmDanmu(ep);
 
       if (d.related.isEmpty && d.relatedIds.isNotEmpty) {
         unawaited(_loadRelatedCards(d.relatedIds));
@@ -346,7 +342,6 @@ class _DetailPageState extends State<DetailPage>
         _lineId = lineId;
       });
       if (lineId.isNotEmpty) FxPlayCache.warm(widget.id, _ep, lineId);
-      _warmDanmu(_ep);
     }
     // 还是没有平台线：排下一轮重试（最多 2 次）。
     _scheduleLineRefresh();
@@ -661,19 +656,6 @@ class _DetailPageState extends State<DetailPage>
     } catch (_) {}
   }
 
-  /// 弹幕预热（DANMU_WARM）。详情页打开、切线路、选集时都发一次：
-  ///
-  /// `/api/danmu?title=&ep=` 冷搜一次要 3~4 秒，而对外预算只有 1.2 秒，
-  /// 所以点播放那一刻才开始拉必然先拿到空。详情页到点播放之间通常有 3~8 秒，
-  /// 正好让服务端在后台把这一集拉好写缓存。
-  ///
-  /// 纯尽力而为：不 await、失败静默，不影响详情页任何加载流程。
-  void _warmDanmu(int ep) {
-    final title = _detail?.title ?? '';
-    if (title.isEmpty || ep <= 0) return;
-    unawaited(DanmuService.instance.warm(title: title, ep: ep));
-  }
-
   Future<void> _toggleFav() async {
     final d = _detail;
     if (d == null) return;
@@ -821,7 +803,6 @@ class _DetailPageState extends State<DetailPage>
       _groupIndex = _groupIndexOf(_episodeGroups, _ep);
     });
     _saveHistory();
-    _warmDanmu(_ep);
     fxToast(context, '正在切换播放源…');
   }
 
@@ -952,7 +933,6 @@ class _DetailPageState extends State<DetailPage>
     if (n == _ep) return;
     setState(() => _ep = n);
     _saveHistory();
-    _warmDanmu(n);
   }
 
   void _selectEpisode(int n) {
@@ -985,7 +965,6 @@ class _DetailPageState extends State<DetailPage>
       _groupIndex = _groupIndexOf(_episodeGroups, n);
     });
     _saveHistory();
-    _warmDanmu(n);
     _scrollToPlayer();
   }
 
