@@ -73,9 +73,6 @@ class FxPlayOrientationDebouncer {
   /// 每次值变化 +1；定时器回调按 token 丢弃过期结果。
   int _token = 0;
 
-  int _width = 0;
-  int _height = 0;
-
   /// 上一次真正生效的「尺寸」组合：同样的值再进来直接返回，
   /// 不因为播放器每秒通知一次就反复开定时器。
   String _settledKey = '';
@@ -110,8 +107,6 @@ class FxPlayOrientationDebouncer {
     // 这个尺寸已经生效过：不用再排一次（播放器状态每秒都在通知）。
     if (key == _settledKey) return;
     _pendingKey = key;
-    _width = w;
-    _height = h;
     final token = ++_token;
     _timer?.cancel();
     _timer = Timer(stable, () {
@@ -133,8 +128,6 @@ class FxPlayOrientationDebouncer {
     _timer?.cancel();
     _timer = null;
     _pendingKey = '${w}x$h';
-    _width = w;
-    _height = h;
     _token++;
     _emit(fxResolvePlayOrientation(width: w, height: h));
   }
