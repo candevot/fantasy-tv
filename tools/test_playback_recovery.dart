@@ -70,5 +70,34 @@ void main() {
     ),
     'new playback target zero',
   );
+
+  // STARTUP_FAST_FAIL（2026-11-14）：起播门槛 6 秒，首帧出来后回到 8 秒。
+  check(
+    stallTimeoutFor(hasRenderedFirstFrame: false) ==
+        const Duration(seconds: 6),
+    'startup stall threshold is 6s',
+  );
+  check(
+    stallTimeoutFor(hasRenderedFirstFrame: true) ==
+        const Duration(seconds: 8),
+    'playback stall threshold stays 8s',
+  );
+
+  // 坏地址账本：同址 2 次判死，解析类失败 1 次判死，成功一次就销账。
+  final ledger = BadAddressLedger();
+  const bad = 'http://cdn.example/dead.m3u8';
+  check(!ledger.isDead(bad), 'fresh address is alive');
+  ledger.noteFailure(bad);
+  check(!ledger.isDead(bad), 'one failure is not fatal');
+  ledger.noteFailure(bad);
+  check(ledger.isDead(bad), 'two failures kill the address');
+  ledger.clear(bad);
+  check(!ledger.isDead(bad), 'success clears the debt');
+  ledger.noteFailure(bad, resolveFailure: true);
+  check(ledger.isDead(bad), 'manifest failure kills at once');
+  check(ledger.countOf(bad) == ledger.failThreshold, 'resolve failure capped');
+  ledger.noteFailure('');
+  check(ledger.countOf('') == 0, 'empty url is ignored');
+
   print('ALL PASS ($checks checks)');
 }

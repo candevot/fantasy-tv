@@ -11,6 +11,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.annotation.OptIn
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -19,6 +20,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
@@ -29,6 +31,8 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.media3.ui.PlayerView
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
@@ -37,6 +41,59 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMessageCodec
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
+
+/**
+ * 播放数据源的「快速失败」策略（FAST_FAIL_HTTP 2026-11-14）。
+ *
+ * 问题：一个死掉的分片 / 过期地址，media3 默认按 0/1000/2000ms 重试 3 次，
+ * 每次都可能先等满 connect+read 超时，原生最长 143 秒才把错误交给 Dart；
+ * 而 Dart 层 30 秒就放弃了 —— 中间这一百多秒旧实例还在对废地址发请求抢带宽，
+ * 用户看到的就是「一直转圈加载不出来」。
+ *
+ * 做法（对齐逆向报告的容错实现）：
+ *   · 传输层 401/403/404/410/416/500/503 → 返回 C.TIME_UNSET，一次都不重试，
+ *     立刻把错误抛给媒体源，交给 Dart 的救援链；
+ *   · 其它错误保留重试，但最多 2 次、间隔 0 / 1 秒，第 3 次失败直接判死。
+ *
+ * 注意：`setLoadErrorHandlingPolicy` 在 Media3 1.4.1 是 @UnstableApi，
+ * 本类和调用点都要带 opt-in 注解（之前有人删过这行就是因为漏了注解）。
+ */
+@OptIn(UnstableApi::class)
+private class FxLoadErrorHandlingPolicy : DefaultLoadErrorHandlingPolicy() {
+
+    override fun getRetryDelayMsFor(
+        loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo
+    ): Long {
+        val error = loadErrorInfo.exception
+        if (error is HttpDataSource.InvalidResponseCodeException &&
+            error.responseCode in TERMINAL_HTTP_CODES
+        ) {
+            Log.w(
+                ExoPlayerPlugin.LOG_TAG,
+                "FAST_FAIL HTTP ${error.responseCode} 判死，不重试 " +
+                    "(attempt=${loadErrorInfo.errorCount})"
+            )
+            return C.TIME_UNSET
+        }
+        return when (loadErrorInfo.errorCount) {
+            1 -> 0L      // 第一次失败：立刻重试
+            2 -> 1_000L  // 第二次失败：等 1 秒再试最后一次
+            else -> {
+                Log.w(
+                    ExoPlayerPlugin.LOG_TAG,
+                    "FAST_FAIL 重试 ${loadErrorInfo.errorCount - 1} 次仍失败，判死: " +
+                        (error.message ?: error.javaClass.simpleName)
+                )
+                C.TIME_UNSET
+            }
+        }
+    }
+
+    private companion object {
+        /** 传输层「死刑」状态码：这些地址已经没救了，重试纯粹浪费带宽。 */
+        val TERMINAL_HTTP_CODES = setOf(401, 403, 404, 410, 416, 500, 503)
+    }
+}
 
 /**
  * ExoPlayer（Media3）内核桥接。
@@ -89,6 +146,19 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
          * 反而会和首屏请求抢带宽，所以按同一档大小串行读。
          */
         const val PREFETCH_BUFFER_SIZE = 64 * 1024
+
+        /**
+         * 播放数据源的连接 / 读超时（FAST_FAIL_HTTP 2026-11-14）。
+         *
+         * 原来 15s / 20s：一个「连得上但不给数据」的分片，叠上 3 次重试和退避，
+         * 原生最长要 143 秒才把错误交给 Dart，而 Dart 层早就放弃了 —— 这中间
+         * 旧实例还在对废地址发请求抢带宽，用户看到的就是「一直转圈」。
+         * 压到 6s / 8s（对方 6~8 秒的取值），配合
+         * [FxLoadErrorHandlingPolicy] 的「传输层错误立刻判死」，
+         * 死地址最多十几秒就一定回到 Dart。
+         */
+        const val HTTP_CONNECT_TIMEOUT_MS = 6_000
+        const val HTTP_READ_TIMEOUT_MS = 8_000
     }
 
     private var player: ExoPlayer? = null
@@ -432,8 +502,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             val httpFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent(headers["User-Agent"] ?: "Mozilla/5.0")
                 .setAllowCrossProtocolRedirects(true)   // 福盈分片 302 必须开
-                .setConnectTimeoutMs(15_000)
-                .setReadTimeoutMs(20_000)
+                // FAST_FAIL_HTTP：原来 15s / 20s，死地址要等满三轮才上报。
+                .setConnectTimeoutMs(HTTP_CONNECT_TIMEOUT_MS)
+                .setReadTimeoutMs(HTTP_READ_TIMEOUT_MS)
                 .setDefaultRequestProperties(headers)
 
             // 本地文件（离线播放页）走 DefaultDataSource：它能识别 file:// 和
@@ -453,10 +524,18 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 cacheDataSourceFactory(dataSource)
             }
             val item = MediaItem.fromUri(url)
+            // FAST_FAIL_HTTP（2026-11-14）：给媒体源挂上快速失败策略。
+            // `setLoadErrorHandlingPolicy` 是 @UnstableApi —— 类级
+            // `@OptIn(UnstableApi::class)` 已覆盖这里；策略类自身也标了注解。
+            val errorPolicy = FxLoadErrorHandlingPolicy()
             val source: MediaSource = if (isHls) {
-                HlsMediaSource.Factory(cachedFactory).createMediaSource(item)
+                HlsMediaSource.Factory(cachedFactory)
+                    .setLoadErrorHandlingPolicy(errorPolicy)
+                    .createMediaSource(item)
             } else {
-                ProgressiveMediaSource.Factory(cachedFactory).createMediaSource(item)
+                ProgressiveMediaSource.Factory(cachedFactory)
+                    .setLoadErrorHandlingPolicy(errorPolicy)
+                    .createMediaSource(item)
             }
             // OPEN_RESET（2026-11-14）：换源前先把上一个源停掉并清空。
             // 之前某条线路失败后，播放器会停在错误/未就绪状态，

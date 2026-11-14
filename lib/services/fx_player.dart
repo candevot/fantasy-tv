@@ -255,12 +255,14 @@ class FxPlayer implements Listenable {
   static const Duration _watchdogTick = Duration(seconds: 4);
 
   /// 停摆判定门槛：连续这么久完全没有进度 / 缓冲推进才算失败候选。
-  /// 卡住多久判定这条线路不行。
   ///
-  /// FAST_FAIL（2026-11-14）：原来 30 秒。分片地址拿不到的时候，
-  /// 用户看到的就是「转圈转到放弃」——30 秒才轮到自动换线。
-  /// 压到 8 秒：坏的立刻换走，好的根本不受影响（正常起播 < 2 秒）。
-  static const Duration _stallTimeout = Duration(seconds: 8);
+  /// STARTUP_FAST_FAIL（2026-11-14）：门槛分两档，见
+  /// `playback_recovery.dart` 的 [stallTimeoutFor]：
+  ///   · 起播（首帧未渲染）[startupStallTimeout] = 6 秒；
+  ///   · 首帧出来后 [playbackStallTimeout] = 8 秒（原来的宽松值）。
+  /// 原来起播也是 30 秒：死分片原生最长 143 秒才报错，Dart 先等 30 秒，
+  /// 中间这段时间旧实例还在对废地址发请求抢带宽 —— 用户看到的就是
+  /// 「一直转圈加载不出来」。
 
   /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
   static const int _rescueTries = 2;
@@ -345,6 +347,13 @@ class FxPlayer implements Listenable {
 
   /// 停摆期间我们主动点亮的「缓冲中」，恢复后要自己熄灭。
   bool _stallIndicated = false;
+
+  /// 坏地址账本（STARTUP_FAST_FAIL 2026-11-14）：同一个播放地址失败 2 次
+  /// 就不再在救援链里重试它，解析类失败（列表拿不到 / 不是 m3u8）1 次判死。
+  final BadAddressLedger _badAddresses = BadAddressLedger();
+
+  /// 上一次已经记过账的 open 代际（同一次 open 的多个错误只算一次）。
+  int _lastCountedOpen = -1;
 
   /// 救援重开时等待新流就绪的信号。
   Completer<void>? _mediaReady;
@@ -584,6 +593,9 @@ class FxPlayer implements Listenable {
         return;
       }
       if (identical(_ready, ready)) _ready = null;
+      _noteStartupFailure(
+        error is TimeoutException ? 'hard_cap' : _startupCodeFor('$error'),
+      );
       _fail('$error');
       throw FxPlayerException('$error');
     }
@@ -598,7 +610,12 @@ class FxPlayer implements Listenable {
   /// 等首帧，但把「还在下载」和「卡死」区分开。
   ///
   /// 判据是 ExoPlayer 上报的缓冲位置 / 播放位置：在动就说明线路活着，
-  /// 继续等；连续 [_stallTimeout] 纹丝不动才算这次 open 失败。
+  /// 继续等；停摆超过门槛才算这次 open 失败。
+  ///
+  /// STARTUP_FAST_FAIL（2026-11-14）：门槛按「首帧是否已渲染」分两档
+  /// （[stallTimeoutFor]）—— 起播 6 秒，首帧出来后 8 秒。另外起播阶段
+  /// 即使缓冲还在慢慢涨，只要 6 秒内没把首帧送上屏，同样算卡住：
+  /// 用户看到的就是转圈，等下去只有旧实例继续占带宽。
   Future<void> _awaitReadyOrProgress(Future<void> ready, int token) async {
     final startedAt = DateTime.now();
     var lastMs = -1;
@@ -614,19 +631,30 @@ class FxPlayer implements Listenable {
       if (_disposed || token != _openToken) return;
 
       final st = _engine.state.value;
+      final firstFrame =
+          st.hasRenderedFirstFrame || _value.hasRenderedFirstFrame;
       final ms = st.buffered.inMilliseconds + st.position.inMilliseconds;
       final now = DateTime.now();
       if (ms > lastMs) {
         lastMs = ms;
         lastProgressAt = now;
       }
-      if (now.difference(lastProgressAt) >= _stallTimeout) {
-        _logFx('OPEN 放弃：${_stallTimeout.inSeconds}s 无进展');
+      final stallLimit = stallTimeoutFor(hasRenderedFirstFrame: firstFrame);
+      if (now.difference(lastProgressAt) >= stallLimit) {
+        _logFx('OPEN 放弃：${stallLimit.inSeconds}s 无进展');
+        _noteStartupFailure(firstFrame ? 'stall' : 'no_progress');
+        _fail('播放超时，线路可能不可用');
+        throw const FxPlayerException('播放超时');
+      }
+      if (!firstFrame && now.difference(startedAt) >= stallLimit) {
+        _logFx('OPEN 放弃：${stallLimit.inSeconds}s 首帧未渲染');
+        _noteStartupFailure('first_frame_timeout');
         _fail('播放超时，线路可能不可用');
         throw const FxPlayerException('播放超时');
       }
       if (now.difference(startedAt) >= _openHardCap) {
         _logFx('OPEN 放弃：超过硬上限 ${_openHardCap.inSeconds}');
+        _noteStartupFailure('hard_cap');
         _fail('播放超时，线路可能不可用');
         throw const FxPlayerException('播放超时');
       }
@@ -1106,8 +1134,60 @@ class FxPlayer implements Listenable {
     }
     _setValue(_value.copyWith(hasError: true, errorText: message));
     if (ready != null && !ready.isCompleted) {
+      // 起播阶段原生把错误交回来了（快速失败生效）：记一次账本。
+      // 清单类（拿不到列表 / 不是 m3u8 / 解析不了）一次即判死。
+      _noteStartupFailure(_startupCodeFor(message));
       ready.completeError(FxPlayerException(message));
     }
+  }
+
+  /// 起播失败统一出口：打日志 + 记账（不动 UI）。
+  ///
+  /// 日志格式固定为 `[startup] fail <code> <url 前 80 字符>`，
+  /// 真机 `adb logcat | grep '\[startup\] fail'` 就能看到失败原因和时间点。
+  ///
+  /// 同一次 open 只记一次账：原生错误事件和「等首帧超时」经常同时出现，
+  /// 各记一遍会让一个只是运气不好的地址立刻被判死。
+  void _noteStartupFailure(
+    String code, {
+    String? url,
+    bool resolveFailure = false,
+  }) {
+    final target = url ?? _sourceUrl;
+    _logStartupFail(code, target);
+    if (target.trim().isEmpty) return;
+    if (_openToken == _lastCountedOpen) return;
+    _lastCountedOpen = _openToken;
+    final resolve = resolveFailure || code == 'manifest_invalid';
+    final count = _badAddresses.noteFailure(target, resolveFailure: resolve);
+    if (_badAddresses.isDead(target)) {
+      _logFx('BADURL 账本判死($code) 已失败 $count 次：${_shortUrl(target)}');
+    }
+  }
+
+  /// 起播失败日志（固定格式，便于 logcat 抓时间线）。
+  static void _logStartupFail(String code, String url) {
+    final short = url.length <= 80 ? url : url.substring(0, 80);
+    debugPrint('[startup] fail $code $short');
+  }
+
+  /// 原生错误文案 → 起播失败码。
+  static String _startupCodeFor(String message) =>
+      _looksManifestFailure(message) ? 'manifest_invalid' : 'native_error';
+
+  /// 清单类失败：列表拿不到 / 不是 m3u8 / 解析不了。
+  ///
+  /// 原生快照里的 `error` 是 `ERROR_CODE_xxx: message` 的拼接
+  /// （`ExoPlayerPlugin.onPlayerError`），HLS 的清单坏掉会落到
+  /// PARSING_CONTAINER_MALFORMED / PARSING_MANIFEST_MALFORMED /
+  /// IO_INVALID_HTTP_CONTENT_TYPE 这几个码上。
+  static bool _looksManifestFailure(String message) {
+    final lower = message.toLowerCase();
+    return lower.contains('parsing_') ||
+        lower.contains('manifest') ||
+        lower.contains('parser') ||
+        lower.contains('container_malformed') ||
+        lower.contains('invalid_http_content_type');
   }
 
   void _fail(String message) {
@@ -1142,7 +1222,13 @@ class FxPlayer implements Listenable {
       _setValue(_value.copyWith(isBuffering: true));
     }
     final stalled = DateTime.now().difference(_lastFlowAt);
-    if (stalled < _stallTimeout) return;
+    // STARTUP_FAST_FAIL：首帧还没渲染（起播 / seek 后重新出画）时门槛 6 秒，
+    // 首帧出来后回到宽松值。见 [stallTimeoutFor]。
+    final stallLimit = stallTimeoutFor(
+      hasRenderedFirstFrame: v.hasRenderedFirstFrame,
+    );
+    if (stalled < stallLimit) return;
+    _logStartupFail('stall', _sourceUrl);
     unawaited(_runRescue('连续 ${stalled.inSeconds}s 无进展'));
   }
 
@@ -1304,6 +1390,15 @@ class FxPlayer implements Listenable {
             _logFx('RESCUE ①-refresh#$i 未拿到新地址');
             continue;
           }
+          if (_badAddresses.isDead(fresh)) {
+            // 账本判死：这个地址已经证明不行，别再把 6~8 秒花在它身上。
+            _logFx(
+              'RESCUE ①-refresh#$i 跳过：账本已判死 '
+              '(${_badAddresses.countOf(fresh)} 次) ${_shortUrl(fresh)}',
+            );
+            _logStartupFail('bad_url_skip', fresh);
+            continue;
+          }
           _logFx('RESCUE ①-refresh#$i 换地址重开 ${_shortUrl(fresh)}');
           final ok = await _rescueOpen(
             fresh,
@@ -1319,19 +1414,34 @@ class FxPlayer implements Listenable {
       }
 
       // ② 同地址重新 open（最多 2 次；直播走这里直接重开直播地址）
-      for (var i = 1; i <= _rescueTries; i++) {
-        if (_disposed || gen != _rescueGen) return;
-        _logFx('RESCUE ②-reopen#$i ${_shortUrl(_sourceUrl)}');
-        final ok = await _rescueOpen(
-          _sourceUrl,
-          _sourceHeaders,
-          direct: _sourceDirect,
-          resume: resume,
-          live: live,
-          gen: gen,
+      //
+      // 账本判死的地址直接跳过：同一个死地址再打一遍只是多等 6~8 秒，
+      // 而且这期间旧实例还在抢带宽（用户看到的就是一直转圈）。
+      if (_badAddresses.isDead(_sourceUrl)) {
+        _logFx(
+          'RESCUE ②-reopen 跳过：账本已判死 '
+          '(${_badAddresses.countOf(_sourceUrl)} 次) ${_shortUrl(_sourceUrl)}',
         );
-        _logFx('RESCUE ②-reopen#$i ${ok ? '成功' : '失败'}');
-        if (ok) return;
+        _logStartupFail('bad_url_skip', _sourceUrl);
+      } else {
+        for (var i = 1; i <= _rescueTries; i++) {
+          if (_disposed || gen != _rescueGen) return;
+          _logFx('RESCUE ②-reopen#$i ${_shortUrl(_sourceUrl)}');
+          final ok = await _rescueOpen(
+            _sourceUrl,
+            _sourceHeaders,
+            direct: _sourceDirect,
+            resume: resume,
+            live: live,
+            gen: gen,
+          );
+          _logFx('RESCUE ②-reopen#$i ${ok ? '成功' : '失败'}');
+          if (ok) return;
+          if (_badAddresses.isDead(_sourceUrl)) {
+            _logFx('RESCUE ②-reopen 提前收手：账本已判死 ${_shortUrl(_sourceUrl)}');
+            break;
+          }
+        }
       }
 
       // ③ 换下一条线路 —— AUTO_SWITCH_OFF（2026-11-14）：默认关闭。
@@ -1370,6 +1480,7 @@ class FxPlayer implements Listenable {
 
       if (_disposed || gen != _rescueGen) return;
       _logFx('RESCUE 三步全部失败 → 播放中断');
+      _logStartupFail('rescue_all_failed', _sourceUrl);
       _stallIndicated = false;
       _fail('播放中断，自动恢复失败，请重试或切换线路');
     } finally {
@@ -1433,9 +1544,11 @@ class FxPlayer implements Listenable {
         await mediaReady.future.timeout(_rescueOpenTimeout);
       } on TimeoutException {
         _logFx('RESCUE 等新流首帧超时(${_rescueOpenTimeout.inSeconds}s)');
+        _noteStartupFailure('rescue_timeout', url: url);
         return false;
       } catch (error) {
         _logFx('RESCUE 重开失败: $error');
+        _noteStartupFailure(_startupCodeFor('$error'), url: url);
         return false;
       } finally {
         if (identical(_mediaReady, mediaReady)) _mediaReady = null;
@@ -1447,6 +1560,7 @@ class FxPlayer implements Listenable {
           _logFx('RESCUE 已 seek 回 ${resume.inSeconds}s');
         } catch (error) {
           _logFx('RESCUE seek 回原进度失败: $error');
+          _noteStartupFailure('rescue_seek_failed', url: url);
           return false;
         }
       }
@@ -1478,6 +1592,7 @@ class FxPlayer implements Listenable {
           gen != _rescueGen ||
           errorSerial != _decodeErrorSerial) {
         _logFx('RESCUE 未确认画面或 seek 落点，继续恢复链');
+        _noteStartupFailure('rescue_verify_failed', url: url);
         return false;
       }
       if (_playIntent) await _engine.play();
@@ -1485,6 +1600,8 @@ class FxPlayer implements Listenable {
       _sourceUrl = url;
       _sourceHeaders = headers;
       _sourceDirect = direct;
+      // 这个地址救回来了：销掉账本里的欠账（刚才只是运气不好）。
+      _badAddresses.clear(url);
       _rescueHold = false;
       _stallIndicated = false;
       final st = _engine.state.value;
@@ -1500,6 +1617,7 @@ class FxPlayer implements Listenable {
       return true;
     } catch (error) {
       _logFx('RESCUE 重开异常: $error');
+      _noteStartupFailure('rescue_error', url: url);
       return false;
     }
   }
