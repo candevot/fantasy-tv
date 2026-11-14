@@ -134,6 +134,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         }
     }
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun ensurePlayer() {
         if (player != null) return
         // PERF（2026-11-14）：这几项直接决定「拖几次就卡」。
@@ -156,6 +157,16 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         player = ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
             .build()
+        // ALIGN_EXO（2026-11-14，参考 FongMi/TV 的 ExoUtil.buildPlayer）：
+        //   · setAudioAttributes(..., true)：申请音频焦点，来电/其它 App 播放时
+        //     自动压低或暂停，而不是两边一起响
+        //   · setHandleAudioBecomingNoisy(true)：拔耳机自动暂停
+        // 这两条是各家播放器的默认行为，我们之前没设。
+        player!!.setAudioAttributes(
+            androidx.media3.common.AudioAttributes.DEFAULT,
+            true
+        )
+        player!!.setHandleAudioBecomingNoisy(true)
         // 精确 seek 要从前一个关键帧开始解码，大分片 4K 上很慢；
         // 对齐到最近关键帧是各视频 App 的常规做法，拖动手感快很多。
         player!!.setSeekParameters(SeekParameters.CLOSEST_SYNC)
