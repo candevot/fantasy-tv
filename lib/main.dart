@@ -524,56 +524,16 @@ class _RootShellState extends State<RootShell> {
             left: 14,
             right: 14,
             bottom: 10 + MediaQuery.of(context).padding.bottom * .4),
-        child: Container(
-          height: 62,
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: .78),
-            borderRadius: BorderRadius.circular(26),
-            border: Border.all(color: Colors.white.withValues(alpha: .95)),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFF5B7BAF).withValues(alpha: .16),
-                blurRadius: 26,
-                offset: const Offset(0, 8),
-              ),
-            ],
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: List.generate(_tabs.length, (i) {
-              final on = i == _i;
-              final tab = _tabs[i];
-              return GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () {
-                  if (i == _i) return;
-                  setState(() {
-                    _i = i;
-                    _visited.add(i);
-                  });
-                },
-                child: SizedBox(
-                  width: 68,
-                  height: 62,
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(tab.icon,
-                          size: 23,
-                          color: on ? Fx.accent : const Color(0xFF9AA6B8)),
-                      const SizedBox(height: 2),
-                      Text(tab.label,
-                          style: TextStyle(
-                            fontSize: 10.5,
-                            color: on ? Fx.accent : const Color(0xFF9AA6B8),
-                            fontWeight: on ? FontWeight.w700 : FontWeight.w400,
-                          )),
-                    ],
-                  ),
-                ),
-              );
-            }),
-          ),
+        child: _FxBottomBar(
+          index: _i,
+          items: _tabs,
+          onTap: (i) {
+            if (i == _i) return;
+            setState(() {
+              _i = i;
+              _visited.add(i);
+            });
+          },
         ),
       ),
     );
@@ -640,4 +600,138 @@ class Nav {
           {required String id, int ep = 1, String line = ''}) =>
       Navigator.of(c).push(FxPageRoute(
           builder: (_) => PlayerPage(videoId: id, ep: ep, line: line)));
+}
+
+/// 底部导航：胶囊式悬浮栏 + 会滑动的选中高亮。
+///
+/// NAV_SLIDE（2026-11-14 用户给了参考录屏）：
+///   之前选中项只是变个颜色，切换时没有任何过渡，看着是「跳」的。
+///   参考 App 的做法是：一整块圆角高亮在图标之间滑过去，
+///   同时带一点柔和的光晕，图标 / 文字颜色跟着渐变。
+///
+/// 实现要点：
+///   · 用等宽布局算位置，AnimatedPositioned 只做 left 的补间 —— 
+///     比「每个 item 各自动画」省事，也不会出现两块高亮重叠。
+///   · 高亮本身用渐变 + accent 光晕，不用图片，跟着主题色走。
+///   · 图标做 0.92 → 1 的轻微放大，跟滑动同时收尾。
+class _FxBottomBar extends StatelessWidget {
+  const _FxBottomBar({
+    required this.index,
+    required this.items,
+    required this.onTap,
+  });
+
+  final int index;
+  final List<({IconData icon, String label})> items;
+  final ValueChanged<int> onTap;
+
+  static const Duration _dur = Duration(milliseconds: 320);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 62,
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .80),
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: Colors.white.withValues(alpha: .95)),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF5B7BAF).withValues(alpha: .16),
+            blurRadius: 26,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: LayoutBuilder(
+        builder: (ctx, cons) {
+          final itemW = cons.maxWidth / items.length;
+          return Stack(
+            children: [
+              // 滑动高亮：整块圆角在图标之间平移
+              AnimatedPositioned(
+                duration: _dur,
+                curve: Curves.easeOutCubic,
+                left: itemW * index + 7,
+                width: itemW - 14,
+                top: 6,
+                bottom: 6,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(20),
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        Fx.accent.withValues(alpha: .18),
+                        Fx.accent.withValues(alpha: .07),
+                      ],
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Fx.accent.withValues(alpha: .20),
+                        blurRadius: 14,
+                        spreadRadius: 1,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Row(
+                children: List.generate(items.length, (i) {
+                  final on = i == index;
+                  final item = items[i];
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => onTap(i),
+                    child: SizedBox(
+                      width: itemW,
+                      height: 62,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          // 颜色渐变 + 轻微放大：和高亮滑动同一个时长收尾
+                          TweenAnimationBuilder<double>(
+                            // end 变化时才补间：选中 1、未选中 0
+                            tween: Tween<double>(begin: 0, end: on ? 1 : 0),
+                            duration: _dur,
+                            curve: Curves.easeOutCubic,
+                            builder: (ctx, t, _) {
+                              return Transform.scale(
+                                scale: .92 + .08 * t,
+                                child: Icon(
+                                  item.icon,
+                                  size: 23,
+                                  color: Color.lerp(
+                                    const Color(0xFF9AA6B8),
+                                    Fx.accent,
+                                    t,
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                          const SizedBox(height: 2),
+                          AnimatedDefaultTextStyle(
+                            duration: _dur,
+                            curve: Curves.easeOutCubic,
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              color: on ? Fx.accent : const Color(0xFF9AA6B8),
+                              fontWeight: on ? FontWeight.w700 : FontWeight.w400,
+                            ),
+                            child: Text(item.label),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
 }
