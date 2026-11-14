@@ -248,7 +248,8 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
       padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
       decoration: BoxDecoration(
         // 很淡的底色：文字仍清晰，但几乎不挡画面。
-        color: Colors.black.withValues(alpha: .30),
+        // 更透：全屏时要能看清底下的画面
+        color: Colors.black.withValues(alpha: .16),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: Colors.white.withValues(alpha: .14)),
       ),

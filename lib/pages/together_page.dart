@@ -2227,7 +2227,11 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     final qualities = _playInfo?.quality ?? const <QualityItem>[];
-    final playableLines = _lines.where((line) => !line.needsParse).toList();
+    // TOGETHER_ALL_LINES（2026-11-14）：不再剔除 needsParse 线路。
+    // 幻想4K / 幻想自建 都属于「需要解析」，之前一起看把它们全过滤了，
+    // 用户看到的就是「一起看没有 4K、线路比播放页少」。
+    // 普通播放页并不做这个过滤，两边保持一致。
+    final playableLines = _lines.toList();
     final action = await showTogetherRoomMenu(
       context,
       epLabel: _epLabel,
@@ -2526,7 +2530,7 @@ class _TogetherPageState extends State<TogetherPage>
       await _ensureDetail(_videoId);
       if (!mounted) return;
     }
-    final playable = _lines.where((line) => !line.needsParse).toList();
+    final playable = _lines.toList();
     if (playable.length < 2) {
       return;
     }
@@ -2999,7 +3003,7 @@ class _TogetherPageState extends State<TogetherPage>
     await _ensureDetail(videoId);
     if (!mounted || seq != _videoSeq) return;
 
-    var playable = _lines.where((item) => !item.needsParse).toList();
+    var playable = _lines.toList();
     if (playable.isEmpty) {
       // 详情拿不到时仍尝试一次默认线路，避免房间完全不可看。
       // 详情拿不到时仍尝试一次当前线路，避免房间完全不可看。

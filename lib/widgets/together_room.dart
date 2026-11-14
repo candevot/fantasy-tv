@@ -208,6 +208,10 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   @override
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
+    // CHAT_FULLSCREEN（2026-11-14）：横屏（全屏播放）时不再渲染竖屏那块
+    // 聊天列表 —— 它是一张浅色卡片，横屏时会压住画面，用户看到的就是
+    // 「全屏那个聊天框不透明、挡住视频」。全屏只用下面那层透明悬浮气泡。
+    final isLandscape = media.size.width > media.size.height;
     final keyboard = widget.keyboardVisible;
     final fixedVideoHeight = math.max(
       togetherRoomVideoMin,
@@ -233,9 +237,17 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               child: _buildVideo(context),
             ),
             if (!keyboard) _buildInfo(context),
-            // CHAT_ONLY_FULLSCREEN（2026-11-14）：竖屏播放详情不放聊天列表，
-            // 空间还给画面；聊天只在全屏的透明悬浮气泡里。
-            const Spacer(),
+            // 聊天改成悬浮层（右下角小标志 + 透明气泡），不再占屏幕。
+            // 观看时画面不被挤压，消息又不丢：未读数标在标志上。
+            Expanded(
+              child: Stack(
+                children: [
+                  // 键盘弹起时旧消息列表让位（气泡里能看到最新几条），
+                  // 避免「列表 + 气泡 + 键盘」三份内容挤在一起。
+                  if (!keyboard && !isLandscape) _buildChat(context),
+                ],
+                  ),
+                ),
               ],
             ),
             // 悬浮聊天叠在整页最上层：不受视频区 / 键盘压缩影响。
@@ -328,12 +340,25 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           ),
           // 手动对齐房主进度：成员侧才显示。偏差 >1 秒才高亮，
           // 平时保持低调，不抢「邀请 / 换源」的视觉位置。
-          if (!widget.isHost && !widget.isLive && widget.onSyncToHost != null) ...[
+          // SYNC_ALWAYS（2026-11-14）：同步状态对房主也要显示。
+          // 之前只有成员（!isHost）才渲染，房主进全屏后什么都看不到，
+          // 用户报「竖屏有同步、全屏没有同步」就是这条判断。
+          // 房主显示「房主」，成员显示「已同步 / 落后 x s」。
+          if (!widget.isLive) ...[
             const SizedBox(width: 6),
-            _SyncToHostPill(
-              offsetSeconds: widget.syncOffsetSeconds,
-              onTap: widget.onSyncToHost!,
-            ),
+            if (widget.onSyncToHost != null && !widget.isHost)
+              _SyncToHostPill(
+                offsetSeconds: widget.syncOffsetSeconds,
+                onTap: widget.onSyncToHost!,
+              )
+            else
+              TogetherPill(
+                text: widget.isHost ? '房主' : '已同步',
+                icon: widget.isHost
+                    ? Icons.star_outline_rounded
+                    : Icons.check_circle_outline_rounded,
+                height: 30,
+              ),
           ],
           const SizedBox(width: 6),
           TogetherPill(
@@ -815,6 +840,20 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
 
   /* ------------------------------------------------------------ 聊天 */
 
+  Widget _buildChat(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+      child: Container(
+        decoration: togetherGlass(radius: 18, opacity: .60),
+        clipBehavior: Clip.antiAlias,
+        child: ValueListenableBuilder<List<TogetherChatMessage>>(
+          valueListenable: widget.chat,
+          builder: (context, messages, _) =>
+              TogetherChatList(messages: messages),
+        ),
+      ),
+    );
+  }
 }
 
 /* ========================================================================== */
