@@ -9,11 +9,12 @@ import 'category_page.dart' show FxPageScaffold;
 /// 片源管理（设置 → 片源管理）。
 ///
 /// 三块：
-///   1. **云端配置**：后台 `/api/config` 下发的片源与直播接口地址，
-///      这里能看同步状态、手动重拉；
-///   2. **云端源**：内置源可删，删完点「恢复默认」一键回来（黑名单清空，
-///      不用重新拉配置）；
-///   3. **我的源**：用户自加的 CMS / 直连源，可增删改；也能直接粘贴
+///   1. **云端配置**：后台 `/api/config` 的同步状态与手动重拉；直播接口地址
+///      只在后台真的配了下发时显示，没配就整行不出现；
+///   2. **云端源**：只有两条内置项 —— `幻想`（我们自己的 7 条线路）和
+///      `肥猫`（TVBox 配置带进来的 41 个 jar 源，内部再多也只是一条）。
+///      两条都不可删、不显示任何 api 地址；
+///   3. **我的源**：只放用户自己加的 CMS / 直连源，可增删改；也能直接粘贴
 ///      TVBox / 猫源配置（JSON 或地址）批量导入，`type: 3`（jar 插件）现在
 ///      能直接用，`type: 4`（python 脚本）仍标成「暂不支持」并跳过。
 class SourceSettingsPage extends StatefulWidget {
@@ -102,7 +103,7 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
           _sectionTitle('云端配置'),
           _cloudCard(),
           _sectionTitle('云端源'),
-          _cloudList(),
+          _builtinList(),
           _sectionTitle('我的源'),
           _userList(),
           _sectionTitle('jar 插件'),
@@ -153,29 +154,33 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          const Text(
-            '直播接口地址',
-            style: TextStyle(fontSize: 11, color: Fx.sub),
-          ),
-          const SizedBox(height: 4),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF4F7FC),
-              borderRadius: BorderRadius.circular(10),
+          // 直播接口地址：没配就整行不显示 —— 原来那句「未配置（后台填写
+          // live_url 后下发）」对用户只是噪音，他现在也填不了这一项。
+          if (liveUrl.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            const Text(
+              '直播接口地址',
+              style: TextStyle(fontSize: 11, color: Fx.sub),
             ),
-            child: SelectableText(
-              liveUrl.isEmpty ? '未配置（后台填写 live_url 后下发）' : liveUrl,
-              maxLines: 3,
-              style: TextStyle(
-                fontSize: 10.5,
-                height: 1.45,
-                color: liveUrl.isEmpty ? const Color(0xFFA6B1C2) : Fx.accent,
+            const SizedBox(height: 4),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF4F7FC),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: SelectableText(
+                liveUrl,
+                maxLines: 3,
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  height: 1.45,
+                  color: Fx.accent,
+                ),
               ),
             ),
-          ),
+          ],
           const SizedBox(height: 10),
           Row(
             children: [
@@ -184,10 +189,17 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
                 height: 34,
                 onTap: _refreshing ? null : _refresh,
               ),
-              const Spacer(),
-              Text(
-                '${_hub.querySources.length} 个源参与检索',
-                style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  // 统计不再只说「48 个源」，而是把 48 拆开：
+                  // 幻想 7 + 肥猫 41，和上面两条内置项对得上。
+                  '${_hub.retrievalLabel} 个源参与检索',
+                  textAlign: TextAlign.right,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+                ),
               ),
             ],
           ),
@@ -196,29 +208,44 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
     );
   }
 
-  Widget _cloudList() {
-    final cloud = _hub.cloudSources;
-    if (cloud.isEmpty) {
-      return GlassCard(
-        padding: const EdgeInsets.all(14),
-        radius: 18,
-        child: Text(
-          _hub.loaded && _hub.lastError.isEmpty
-              ? '后台配置里没有 cloud_sources。在后台「系统 → 配置」里加上 cloud_sources 数组即可，字段见交付说明。'
-              : '还没拿到云端片源，点上面的「重新拉取配置」再试一次。',
-          style: const TextStyle(fontSize: 11.5, height: 1.55, color: Fx.sub),
-        ),
-      );
-    }
-    final removed = cloud.where((s) => _hub.isRemoved(s.key)).length;
+  /// 云端源：只有两条内置项。
+  ///
+  /// 之前把「云端源」下的 7 条和「我的源」下的 41 条 jar 源全部逐个列出来，
+  /// 每条还带完整 api 地址和删除按钮 —— 用户既看不懂那些地址，也分不清哪条
+  /// 是内置的、哪条是自己加的。现在：
+  ///   · `幻想`：我们自己的 7 条线路，只显示名字，行尾「内置」；
+  ///   · `肥猫`：TVBox 配置带进来的 41 个 jar 源，界面只算一条，副标题写
+  ///     「41 个源」。
+  /// 两条都不可删；以前删过内置源的，这里还给一个「恢复默认」。
+  Widget _builtinList() {
+    final bundled = _hub.bundledSources.length;
+    final removed =
+        _hub.cloudSources.where((s) => _hub.isRemoved(s.key)).length;
     return GlassCard(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       radius: 18,
       child: Column(
         children: [
-          for (var i = 0; i < cloud.length; i++) ...[
-            if (i > 0) _divider(),
-            _cloudRow(cloud[i]),
+          _builtinRow(
+            icon: Icons.auto_awesome_motion_rounded,
+            name: '幻想',
+            subtitle: '',
+          ),
+          _divider(),
+          _builtinRow(
+            icon: Icons.pets_rounded,
+            name: '肥猫',
+            subtitle: '$bundled 个源',
+          ),
+          if (_hub.cloudSources.isEmpty) ...[
+            _divider(),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 10),
+              child: Text(
+                '云端配置里还没有幻想线路，点右上角的刷新重新拉一次。',
+                style: TextStyle(fontSize: 11, height: 1.5, color: Fx.sub),
+              ),
+            ),
           ],
           if (removed > 0) ...[
             _divider(),
@@ -228,7 +255,7 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
                 children: [
                   Expanded(
                     child: Text(
-                      '已删除 $removed 个内置源',
+                      '已停用 $removed 条幻想线路',
                       style: const TextStyle(fontSize: 11, color: Fx.sub),
                     ),
                   ),
@@ -245,82 +272,44 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
     );
   }
 
-  Widget _cloudRow(KSource source) {
-    final removed = _hub.isRemoved(source.key);
-    final off = source.kind == KSourceKind.unsupported || !source.enabled;
+  /// 一条内置源：名字（+ 可选副标题）+ 行尾「内置」，不显示地址、不给删除。
+  Widget _builtinRow({
+    required IconData icon,
+    required String name,
+    required String subtitle,
+  }) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.symmetric(vertical: 11),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 2),
-            child: Icon(
-              source.isLive ? Icons.live_tv_rounded : Icons.cloud_rounded,
-              size: 17,
-              color: removed || off ? const Color(0xFFC3CDDA) : Fx.accent,
-            ),
-          ),
+          Icon(icon, size: 17, color: Fx.accent),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        source.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: removed ? const Color(0xFFA6B1C2) : Fx.ink,
-                          decoration:
-                              removed ? TextDecoration.lineThrough : null,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    _chip(source.kindLabel),
-                    if (removed) ...[
-                      const SizedBox(width: 6),
-                      _chip('已删除'),
-                    ],
-                    if (!removed && off) ...[
-                      const SizedBox(width: 6),
-                      _chip(source.reason.isEmpty ? '已停用' : source.reason),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 3),
                 Text(
-                  source.api,
+                  name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 10, color: Color(0xFFA6B1C2)),
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Fx.ink,
+                  ),
                 ),
+                if (subtitle.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+                  ),
+                ],
               ],
             ),
           ),
           const SizedBox(width: 6),
-          if (removed)
-            IconButton(
-              tooltip: '恢复',
-              visualDensity: VisualDensity.compact,
-              onPressed: () => _restore(),
-              icon: const Icon(Icons.restore_rounded,
-                  size: 18, color: Fx.accent),
-            )
-          else
-            IconButton(
-              tooltip: '删除',
-              visualDensity: VisualDensity.compact,
-              onPressed: () => _removeCloud(source),
-              icon: const Icon(Icons.delete_outline_rounded,
-                  size: 18, color: Color(0xFFE05252)),
-            ),
+          _chip('内置'),
         ],
       ),
     );
@@ -339,7 +328,8 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 12),
               child: Text(
-                '还没有自加片源。可以添加一个 CMS 接口，或粘贴 TVBox 配置批量导入。',
+                '还没有自己添加的片源。肥猫那 41 个源算在「云端源」那一条里，'
+                '这里只放你自己加的 CMS 接口，也可以粘贴 TVBox 配置批量导入。',
                 style: TextStyle(fontSize: 11.5, height: 1.5, color: Fx.sub),
               ),
             ),
@@ -413,13 +403,8 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
                     ],
                   ],
                 ),
-                const SizedBox(height: 3),
-                Text(
-                  source.api,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 10, color: Color(0xFFA6B1C2)),
-                ),
+                // 不显示地址：编辑弹窗里能看能改，列表里一串 URL
+                // 既撑破行宽也不提供任何信息（用户自己加的源自己清楚）。
                 if (broken) ...[
                   const SizedBox(height: 3),
                   Text(
@@ -456,28 +441,13 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
     final ok = await _hub.refresh();
     if (!mounted) return;
     setState(() => _refreshing = false);
-    _toast(ok
-        ? '云端配置已更新（${_hub.querySources.length} 个源）'
-        : '拉取失败：${_hub.lastError}');
+    _toast(ok ? '云端配置已更新（${_hub.retrievalLabel}）' : '拉取失败：${_hub.lastError}');
   }
 
   Future<void> _restore() async {
     await _hub.restoreDefaults();
     if (!mounted) return;
     _toast('已恢复默认：内置源全部回来');
-  }
-
-  Future<void> _removeCloud(KSource source) async {
-    final ok = await _confirm(
-      title: '删除「${source.name}」？',
-      body: '删除后搜索和分类不再查这个源。随时可以点「恢复默认」让它回来，'
-          '不用重新拉配置。',
-      confirm: '删除',
-    );
-    if (ok != true) return;
-    await _hub.removeCloud(source.key);
-    if (!mounted) return;
-    _toast('已删除「${source.name}」');
   }
 
   Future<void> _removeUser(KSource source) async {

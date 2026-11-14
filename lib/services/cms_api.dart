@@ -367,6 +367,7 @@ class CmsApi {
       'type': _str(vod['type_name']),
       'area': _str(vod['vod_area']),
       'heat': _heatOf(vod['vod_hits']),
+      'time': _str(vod['vod_time']),
       'desc': _descOf(vod),
       'tags': _tagsOf(vod),
       'sourceLabel': froms.isEmpty ? '' : froms.first,
@@ -737,6 +738,7 @@ Map<String, dynamic> _cardMap(VideoCard card) => <String, dynamic>{
       'area': card.area,
       'heat': card.heat,
       'desc': card.desc,
+      'time': card.time,
       'tags': card.tags,
       'sourceLabel': card.sourceLabel,
     };

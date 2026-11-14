@@ -43,7 +43,6 @@ class _RankPageState extends State<RankPage> {
 
   String _type = 'juji';
   String _period = 'week';
-  List<VideoCard> _raw = [];
   List<VideoCard> _items = [];
   bool _loading = true;
   String? _error;
@@ -72,18 +71,22 @@ class _RankPageState extends State<RankPage> {
     return '周榜';
   }
 
-  List<VideoCard> _order(List<VideoCard> src) {
-    if (_period == 'day' || _period == 'week') return List<VideoCard>.from(src);
-    final list = List<VideoCard>.from(src);
-    if (_period == 'month') {
-      list.sort((a, b) => b.rating.compareTo(a.rating));
-    } else {
-      list.sort((a, b) {
-        final r = b.rating.compareTo(a.rating);
-        return r != 0 ? r : b.year.compareTo(a.year);
-      });
+  /// 这个周期读几页样本：日榜 1 页、周榜 2 页、月榜 4 页、总榜 8 页。
+  ///
+  /// 服务端不认 `order=`（三种排序返回同一序列），榜单的「真实排序」是在
+  /// CmsBridge.rank 里按「热度 → 评分 → 更新时间」做的；周期在这里体现在
+  /// 样本窗口上 —— 总榜看得更远，日榜只看最近这一页。
+  int get _scanPages {
+    switch (_period) {
+      case 'day':
+        return 1;
+      case 'week':
+        return 2;
+      case 'month':
+        return 4;
+      default:
+        return 8;
     }
-    return list;
   }
 
   Future<void> _load() async {
@@ -93,12 +96,12 @@ class _RankPageState extends State<RankPage> {
       _error = null;
     });
     try {
-      final list = await CmsBridge.rank(_type);
+      final list = await CmsBridge.rank(_type, pages: _scanPages);
       if (!mounted || req != _req) return;
       setState(() {
-        _raw = list;
-        _items = _order(list);
+        _items = list;
         _loading = false;
+        _error = null;
       });
     } catch (e) {
       if (!mounted || req != _req) return;
@@ -116,7 +119,6 @@ class _RankPageState extends State<RankPage> {
     if (_type == key) return;
     setState(() {
       _type = key;
-      _raw = [];
       _items = [];
       _error = null;
       _loading = true;
@@ -126,10 +128,13 @@ class _RankPageState extends State<RankPage> {
 
   void _selectPeriod(String key) {
     if (_period == key) return;
+    // 周期换的是样本窗口（读几页），所以要重新拉一次；不是本地重排。
     setState(() {
       _period = key;
-      _items = _order(_raw);
+      _error = null;
+      _loading = _items.isEmpty;
     });
+    _load();
   }
 
   void _openDetail(String id) {

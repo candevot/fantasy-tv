@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -29,7 +31,27 @@ class _SearchPageState extends State<SearchPage> {
 
   List<String> _history = [];
   List<String> _hotWords = const [];
+
+  /// 我们自己那一批的结果（主站采集库 + 幻想 7 条线路），排在上面。
   List<VideoCard> _results = [];
+
+  /// 外部源（肥猫 41 个 jar 源 + 自加）陆续追加的结果，排在下面的
+  /// 「外部源结果」分区里。
+  List<VideoCard> _external = [];
+
+  /// 渐进检索的订阅：换关键词 / 离开页面时要取消，旧结果不许再回填。
+  StreamSubscription<SearchBatch>? _sub;
+
+  /// 我们的源 300ms 还没回来就先铺骨架卡片的定时器。
+  Timer? _skeletonTimer;
+
+  /// 进度：「已查 12/48 个源」。
+  int _done = 0;
+  int _total = 0;
+
+  /// 骨架卡片是否已经铺出来（300ms 阈值）。
+  bool _skeleton = false;
+
   String? _mode;
   String? _lastQuery;
   String? _error;
@@ -60,6 +82,8 @@ class _SearchPageState extends State<SearchPage> {
   void dispose() {
     _q.removeListener(_onQueryChanged);
     _scroll.removeListener(_onScroll);
+    _sub?.cancel();
+    _skeletonTimer?.cancel();
     _q.dispose();
     _ai.dispose();
     _focus.dispose();
@@ -147,6 +171,15 @@ class _SearchPageState extends State<SearchPage> {
     ));
   }
 
+  /// 搜索（渐进）：我们自己的源先渲染，外部源后台并行查、陆续追加。
+  ///
+  /// 实现要点：**不是一个 `await` 等 48 个源**，而是订阅
+  /// [CmsBridge.searchStream] —— 每回来一批就 setState 一次，谁的 Future
+  /// 先完成谁先出现在列表里：
+  ///   · 第一批是本地 CMS（主站采集库），几十毫秒；
+  ///   · 接着是幻想那 7 条线路（同一个接口）；
+  ///   · 肥猫的 41 个 jar 源在后台并行跑，回来一批追加一批到「外部源结果」。
+  /// 单源 8 秒超时，超时算这个源没结果，不阻塞别人。
   Future<void> _search(String raw) async {
     final text = raw.trim();
     if (text.isEmpty) {
@@ -161,34 +194,76 @@ class _SearchPageState extends State<SearchPage> {
     _saveHistory(text);
 
     final req = ++_req;
+    await _sub?.cancel();
+    _skeletonTimer?.cancel();
+    if (!mounted || req != _req) return;
     setState(() {
       _mode = 'search';
       _lastQuery = text;
       _results = [];
+      _external = [];
       _error = null;
       _loading = true;
       _page = 1;
       _hasMore = true;
       _loadingMore = false;
       _moreError = false;
+      _done = 0;
+      _total = 0;
+      _skeleton = false;
     });
-    try {
-      final list = await CmsBridge.search(text, 1);
+    _scrollTop();
+    // 我们自己的源 300ms 还没回来：先铺骨架卡片，让用户知道在动；
+    // 但绝不会为了等外部源而把骨架屏挂在这里。
+    _skeletonTimer = Timer(const Duration(milliseconds: 300), () {
       if (!mounted || req != _req) return;
-      setState(() {
-        _results = list;
+      if (_results.isNotEmpty || _external.isNotEmpty) return;
+      setState(() => _skeleton = true);
+    });
+    _sub = CmsBridge.searchStream(text, 1).listen(
+      (batch) => _onBatch(batch, req, first: true),
+      onError: (Object e) {
+        if (!mounted || req != _req) return;
+        _skeletonTimer?.cancel();
+        setState(() {
+          _loading = false;
+          _skeleton = false;
+          _error = fxErrorText(e);
+        });
+      },
+    );
+  }
+
+  /// 收到一批结果：立刻渲染，不等其它源。
+  void _onBatch(SearchBatch batch, int req, {required bool first}) {
+    if (!mounted || req != _req) return;
+    _skeletonTimer?.cancel();
+    // 我们自己的第一批结果刚落地：把列表拉回顶部，新搜索从第一屏开始看。
+    final pinTop = first &&
+        !batch.external &&
+        batch.items.isNotEmpty &&
+        _results.isEmpty;
+    setState(() {
+      if (batch.external) {
+        _external.addAll(batch.items);
+      } else {
+        _results.addAll(batch.items);
         _loading = false;
-        _page = 1;
-        _hasMore = list.length >= 20;
-      });
-      if (_scroll.hasClients) _scroll.jumpTo(0);
-    } catch (e) {
-      if (!mounted || req != _req) return;
-      setState(() {
+      }
+      if (first) {
+        _done = batch.done;
+        _total = batch.total;
+      }
+      _skeleton = false;
+      if (batch.finished) {
         _loading = false;
-        _error = fxErrorText(e);
-      });
-    }
+        _loadingMore = false;
+        if (first) {
+          _hasMore = (_results.length + _external.length) >= 20;
+        }
+      }
+    });
+    if (pinTop) _scrollTop();
   }
 
   Future<void> _loadMore() async {
@@ -196,21 +271,24 @@ class _SearchPageState extends State<SearchPage> {
     final q = _lastQuery;
     if (q == null) return;
     final next = _page + 1;
+    final req = _req;
     setState(() {
       _loadingMore = true;
       _moreError = false;
     });
     try {
-      final list = await CmsBridge.search(q, next);
-      if (!mounted || _mode != 'search' || _lastQuery != q) return;
+      // 翻页只续我们自己那一批：外部源的分页质量参差（不少 jar 源把第 1 页
+      // 原样再返回一遍），追加进来只会变成重复卡片。
+      final list = await CmsBridge.searchOwn(q, next);
+      if (!mounted || req != _req || _mode != 'search') return;
       setState(() {
         _results.addAll(list);
         _page = next;
         _loadingMore = false;
         _hasMore = list.length >= 20;
       });
-    } catch (e) {
-      if (!mounted || _lastQuery != q) return;
+    } catch (_) {
+      if (!mounted || req != _req) return;
       setState(() {
         _loadingMore = false;
         _moreError = true;
@@ -233,15 +311,22 @@ class _SearchPageState extends State<SearchPage> {
   Future<void> _runAi(String prompt) async {
     FocusScope.of(context).unfocus();
     final req = ++_req;
+    await _sub?.cancel();
+    _skeletonTimer?.cancel();
+    if (!mounted || req != _req) return;
     setState(() {
       _mode = 'ai';
       _lastQuery = prompt;
       _results = [];
+      _external = [];
       _error = null;
       _loading = true;
       _hasMore = false;
       _loadingMore = false;
       _moreError = false;
+      _done = 0;
+      _total = 0;
+      _skeleton = false;
     });
     try {
       final list = await Api.aiFind(prompt);
@@ -263,18 +348,32 @@ class _SearchPageState extends State<SearchPage> {
   void _reset() {
     // 作废在途请求：清空搜索后旧结果不许再回填（AI 搜索同样走 _req）。
     _req++;
+    _sub?.cancel();
+    _skeletonTimer?.cancel();
     _q.clear();
     setState(() {
       _mode = null;
       _lastQuery = null;
       _results = [];
+      _external = [];
       _error = null;
       _loading = false;
       _loadingMore = false;
       _moreError = false;
       _hasMore = true;
+      _done = 0;
+      _total = 0;
+      _skeleton = false;
     });
     _focus.requestFocus();
+  }
+
+  /// 回到列表顶部（等这一帧画完再跳，避免 jumpTo 打在没有位置的对象上）。
+  void _scrollTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_scroll.hasClients) _scroll.jumpTo(0);
+    });
   }
 
   void _retry() {
@@ -411,6 +510,18 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   Widget _body() {
+    if (_mode == 'search') {
+      // 渐进检索：自己的那批还没回来时，只在 300ms 之后铺骨架；
+      // 外部源永远不参与「要不要等」的判断。
+      final empty = _results.isEmpty && _external.isEmpty;
+      if (empty && _error != null) {
+        return FxErrorView(message: _error!, onRetry: _retry);
+      }
+      if (empty && _skeleton) return _loadingView();
+      if (empty && _loading) return _pendingView();
+      if (empty) return _emptyResults();
+      return _resultsView();
+    }
     if (_loading) return _loadingView();
     if (_error != null && _results.isEmpty) {
       return FxErrorView(message: _error!, onRetry: _retry);
@@ -418,6 +529,34 @@ class _SearchPageState extends State<SearchPage> {
     if (_results.isNotEmpty) return _resultsView();
     if (_mode != null) return _emptyResults();
     return _discover();
+  }
+
+  /// 发起搜索后 300ms 以内的空档：只放一个转圈，不铺骨架（避免闪一下
+  /// 又立刻被真结果顶掉），也不阻塞——自己的源一回来就直接进结果页。
+  Widget _pendingView() {
+    return ListView(
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
+      children: [
+        Center(
+          child: SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: const AlwaysStoppedAnimation<Color>(Fx.accent),
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Center(
+          child: Text(
+            '正在搜索「${_lastQuery ?? ''}」…',
+            style: const TextStyle(fontSize: 11.5, color: Color(0xFFA6B1C2)),
+          ),
+        ),
+      ],
+    );
   }
 
   /// 搜索中骨架屏：结果头 + 单列列表占位，避免一片空白。
@@ -440,7 +579,11 @@ class _SearchPageState extends State<SearchPage> {
           const SizedBox(height: 16),
           Center(
             child: Text(
-              _mode == 'ai' ? 'AI 正在为你找片…' : '正在搜索「${_lastQuery ?? ''}」…',
+              _mode == 'ai'
+                  ? 'AI 正在为你找片…'
+                  : (_total > 0
+                      ? '正在搜索「${_lastQuery ?? ''}」· 已查 $_done/$_total 个源'
+                      : '正在搜索「${_lastQuery ?? ''}」…'),
               style: const TextStyle(fontSize: 11.5, color: Color(0xFFA6B1C2)),
             ),
           ),
@@ -661,72 +804,160 @@ class _SearchPageState extends State<SearchPage> {
 
   Widget _resultsView() {
     final bottom = MediaQuery.of(context).viewInsets.bottom;
+    final ai = _mode == 'ai';
     return Column(
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
-          child: Row(
-            children: [
-              Text(_mode == 'ai' ? 'AI 推荐' : '搜索结果',
-                  style: const TextStyle(
-                      fontSize: 17,
-                      height: 1.2,
-                      fontWeight: FontWeight.w600,
-                      color: Fx.ink)),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  _mode == 'ai'
-                      ? '按「${_lastQuery ?? ''}」匹配到 ${_results.length} 部'
-                      : '「${_lastQuery ?? ''}」· ${_results.length} 部',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
-                ),
-              ),
-              if (_loading)
-                const SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(Fx.accent),
-                  ),
-                ),
-            ],
-          ),
-        ),
+        _resultsHeader(),
         Expanded(
           child: CustomScrollView(
             controller: _scroll,
             physics: const BouncingScrollPhysics(),
             slivers: [
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-                sliver: SliverList(
-                  delegate: SliverChildBuilderDelegate(
-                    (ctx, i) {
-                      final item = _results[i];
-                      return Padding(
-                        // 行间 10dp 间距；最后一行交给底部留白，不拖一条空缝。
-                        padding: EdgeInsets.only(
-                            bottom: i == _results.length - 1 ? 0 : 10),
-                        child: FxSearchResultTile(
-                          item: item,
-                          onTap: () => _openResult(item),
-                        ),
-                      );
-                    },
-                    childCount: _results.length,
+              // 我们自己那一批：主站采集库 + 幻想线路，永远排在最上面。
+              if (_results.isNotEmpty)
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+                  sliver: SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (ctx, i) {
+                        final item = _results[i];
+                        return Padding(
+                          // 行间 10dp 间距；最后一行交给底部留白，不拖一条空缝。
+                          padding: EdgeInsets.only(
+                              bottom: i == _results.length - 1 ? 0 : 10),
+                          child: FxSearchResultTile(
+                            item: item,
+                            onTap: () => _openResult(item),
+                          ),
+                        );
+                      },
+                      childCount: _results.length,
+                    ),
                   ),
                 ),
-              ),
+              // 自己的还没全回来：骨架补在下面，表示「还在查」。
+              if (_skeleton)
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                  sliver: const SliverToBoxAdapter(
+                    child: FxSkeletonPulse(
+                      child: FxResultListSkeleton(count: 3),
+                    ),
+                  ),
+                ),
+              // 外部源分区：通栏标题 + 陆续追加的结果（边到边）。
+              if (!ai && _external.isNotEmpty) ...[
+                SliverToBoxAdapter(child: _externalHeader()),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+                  sliver: SliverList(
+                    delegate: SliverChildBuilderDelegate(
+                      (ctx, i) {
+                        final item = _external[i];
+                        return Padding(
+                          padding: EdgeInsets.only(
+                              bottom: i == _external.length - 1 ? 0 : 10),
+                          child: FxSearchResultTile(
+                            item: item,
+                            onTap: () => _openResult(item),
+                          ),
+                        );
+                      },
+                      childCount: _external.length,
+                    ),
+                  ),
+                ),
+              ],
               SliverToBoxAdapter(child: _footer(bottom)),
             ],
           ),
         ),
       ],
+    );
+  }
+
+  /// 结果头：标题 + 总数 + 进度「已查 12/48 个源」。
+  Widget _resultsHeader() {
+    final ai = _mode == 'ai';
+    final count = _results.length + _external.length;
+    final progress = !ai && _total > 0 ? '已查 $_done/$_total 个源' : '';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+      child: Row(
+        children: [
+          Text(ai ? 'AI 推荐' : '搜索结果',
+              style: const TextStyle(
+                  fontSize: 17,
+                  height: 1.2,
+                  fontWeight: FontWeight.w600,
+                  color: Fx.ink)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              ai
+                  ? '按「${_lastQuery ?? ''}」匹配到 $count 部'
+                  : '「${_lastQuery ?? ''}」· $count 部',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
+            ),
+          ),
+          if (progress.isNotEmpty)
+            Text(
+              progress,
+              style: const TextStyle(fontSize: 11, color: Color(0xFFA6B1C2)),
+            ),
+          if (_loading || _skeleton)
+            const Padding(
+              padding: EdgeInsets.only(left: 6),
+              child: SizedBox(
+                width: 13,
+                height: 13,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Fx.accent),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 「外部源结果」分区头：整条通栏（边到边），和上面我们自己那批分开。
+  Widget _externalHeader() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 6, bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF1F4FA),
+        border: Border(
+          top: BorderSide(color: Color(0xFFE3E9F2), width: .5),
+          bottom: BorderSide(color: Color(0xFFE3E9F2), width: .5),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.hub_rounded, size: 14, color: Fx.accent2),
+          const SizedBox(width: 6),
+          const Text(
+            '外部源结果',
+            style: TextStyle(
+                fontSize: 12, fontWeight: FontWeight.w600, color: Fx.ink),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              '肥猫 / 自加 · ${_external.length} 部',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11, color: Fx.sub),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

@@ -196,6 +196,23 @@ class TvBoxImport {
   final List<String> notes;
 }
 
+/// 一轮检索的源分组：自己的先查先渲染，外部的并行后台查、陆续追加。
+///
+/// 两组的源数加起来就是进度文案里的分母（幻想 7 + 肥猫 41 = 48）。
+class SourceSearchPlan {
+  const SourceSearchPlan({required this.own, required this.external});
+
+  /// 我们自己的一批（云端下发的幻想线路 + 主站采集库）。
+  final List<KSource> own;
+
+  /// 外部那批（肥猫的 jar 源 + 用户自加）。
+  final List<KSource> external;
+
+  int get total => own.length + external.length;
+
+  bool get isEmpty => total == 0;
+}
+
 /// 片源中心：云端配置 + 本地增删 + 多源检索。
 ///
 /// 三件事：
@@ -205,7 +222,8 @@ class TvBoxImport {
 ///   2. **可删可恢复**：删掉的内置源只记一个 key 黑名单，云端的原始列表
 ///      一直留着，「恢复默认」= 清空黑名单，不需要重新拉配置。
 ///   3. **多源合并**：搜索 / 分类并行查所有启用的源，按「片名 + 年份」
-///      去重，结果带上来源标记（云端 / 自加 / 采集库）。
+///      去重，结果带上来源标记（云端 / 自加 / 采集库）；搜索分成
+///      「自己的」和「外部的」两组渐进返回，见 [searchPlan]。
 ///
 /// id 约定：外部源的影片 id 会编码成 `@src:<源key>::<vod_id>`，
 /// 详情 / 播放据此路由回原来的源；主站采集库的 id 保持原样不动。
@@ -271,6 +289,22 @@ class SourceHub extends ChangeNotifier {
   /// 外部源 id 前缀。主站 id 不带这个前缀，两套编号互不干扰。
   static const String idMark = '@src:';
 
+  /// 「肥猫」那份 TVBox 配置自动导入时打的标记。
+  ///
+  /// 片源管理页只把这一批算成一条「肥猫」，不逐个列出来 —— 41 个 jar 源
+  /// 一个个铺在设置页里，用户既看不清也管不过来。
+  static const String fatCatTag = '肥猫';
+
+  /// 手动「导入 TVBox」时打的标记（老版本自动导入也用它，一并归到肥猫那条）。
+  static const String tvBoxTag = 'TVBox';
+
+  /// 单源检索超时：超时按「这个源没结果」处理，不拖住其它源。
+  static const Duration sourceTimeout = Duration(seconds: 8);
+
+  /// 这个源是不是「肥猫」那批量导入的一批。
+  static bool isBundledSource(KSource source) =>
+      source.tag == fatCatTag || source.tag == tvBoxTag;
+
   List<KSource> _cloud = const <KSource>[];
   List<KSource> _user = const <KSource>[];
   Set<String> _removed = <String>{};
@@ -286,8 +320,26 @@ class SourceHub extends ChangeNotifier {
   /// 云端下发的全部源（含已被用户删掉的，UI 用 [isRemoved] 标注）。
   List<KSource> get cloudSources => List<KSource>.unmodifiable(_cloud);
 
-  /// 用户自加的源。
-  List<KSource> get userSources => List<KSource>.unmodifiable(_user);
+  /// 用户自加的源（不含「肥猫」那批量导入的一批）。
+  ///
+  /// 「我的源」区只列这些：肥猫那 41 个 jar 源在界面上归成一条内置项，
+  /// 混在这里会让用户以为是自己加的。
+  List<KSource> get userSources => List<KSource>.unmodifiable(<KSource>[
+        for (final s in _user)
+          if (!isBundledSource(s)) s,
+      ]);
+
+  /// 「肥猫」带来的源（TVBox 配置批量导入），界面只算一条。
+  List<KSource> get bundledSources => List<KSource>.unmodifiable(<KSource>[
+        for (final s in _user)
+          if (isBundledSource(s)) s,
+      ]);
+
+  /// 我们自己的一批源（云端下发的幻想线路）：检索时先查、先渲染。
+  List<KSource> get ownSources => List<KSource>.unmodifiable(<KSource>[
+        for (final s in visibleCloud)
+          if (s.searchable) s,
+      ]);
 
   /// 是否已被用户删掉（只对云端内置源有意义）。
   bool isRemoved(String key) => _removed.contains(key.trim());
@@ -342,6 +394,51 @@ class SourceHub extends ChangeNotifier {
   /// 云端配置里是不是显式配了直播地址（设置页用它提示）。
   bool get hasCloudLiveUrl => liveUrl.isNotEmpty;
 
+  /// 检索源统计文案：「幻想 7 + 肥猫 41」。
+  ///
+  /// 片源页原来写「48 个源参与检索」，用户看不出这 48 个是怎么来的 ——
+  /// 拆成我们自己那 7 条 + 肥猫那一条（内部 41 个 jar 源）才对得上界面。
+  String get retrievalLabel {
+    final parts = <String>[
+      '幻想 ${ownSources.length}',
+      '肥猫 ${bundledSources.length}',
+    ];
+    final mine = <KSource>[
+      for (final s in userSources)
+        if (s.searchable) s,
+    ];
+    if (mine.isNotEmpty) parts.add('自加 ${mine.length}');
+    return parts.join(' + ');
+  }
+
+  /// 一轮检索要查的源，按「自己的」/「外部的」分组。
+  ///
+  /// 自己的那批（云端下发的幻想线路）先查先渲染；外部那批（肥猫的 jar 源 +
+  /// 用户自加）并行在后台查，谁先回来谁先追加到列表下面。
+  SourceSearchPlan get searchPlan {
+    String keyOf(KSource s) => s.kind == KSourceKind.jar
+        ? '${s.api.trim()}|${s.ext}'
+        : s.api.trim();
+    final own = <KSource>[];
+    final external = <KSource>[];
+    final ownSeen = <String>{};
+    final extSeen = <String>{};
+    for (final s in visibleCloud) {
+      if (!s.searchable) continue;
+      if (!ownSeen.add(keyOf(s))) continue;
+      own.add(s);
+    }
+    for (final s in _user) {
+      if (!s.searchable) continue;
+      final key = keyOf(s);
+      // 已经在我们自己的那批里出现过的地址，不再查第二遍。
+      if (ownSeen.contains(key)) continue;
+      if (!extSeen.add(key)) continue;
+      external.add(s);
+    }
+    return SourceSearchPlan(own: own, external: external);
+  }
+
   DateTime? get fetchedAt =>
       _fetchedAt <= 0 ? null : DateTime.fromMillisecondsSinceEpoch(_fetchedAt);
 
@@ -389,6 +486,7 @@ class SourceHub extends ChangeNotifier {
       final result = await importTvBox(
         defaultTvBoxUrl,
         timeout: autoImportTimeout,
+        tag: fatCatTag,
       );
       if (result.added > 0) {
         await sp.setBool(_kAutoImported, true);
@@ -679,7 +777,11 @@ class SourceHub extends ChangeNotifier {
         u.contains('api.php/provide/vod');
   }
 
-  Future<TvBoxImport> importTvBox(String input, {Duration? timeout}) async {
+  Future<TvBoxImport> importTvBox(
+    String input, {
+    Duration? timeout,
+    String tag = tvBoxTag,
+  }) async {
     final text = input.trim();
     if (text.isEmpty) throw ApiException('先粘贴 TVBox 配置或填一个地址');
     String body = text;
@@ -776,7 +878,7 @@ class SourceHub extends ChangeNotifier {
         kind: kind,
         origin: KSourceOrigin.user,
         enabled: true,
-        tag: 'TVBox',
+        tag: tag,
         ext: ext,
       ));
     }
@@ -911,6 +1013,31 @@ class SourceHub extends ChangeNotifier {
     }
   }
 
+  /// 查单个源并加工成可直接上列表的样子：带来源标记、id 编码成
+  /// `@src:<key>::<vod_id>`。
+  ///
+  /// 渐进检索用这个：外部源一个比一个慢，谁先回来就先交给页面渲染。
+  /// 单源超过 [sourceTimeout] 一律当「这个源没结果」，不阻塞其它源。
+  Future<List<VideoCard>> searchPrepared(
+    KSource source,
+    String keyword,
+    int page,
+  ) async {
+    final cards = await _searchOne(source, keyword, page).timeout(
+      sourceTimeout,
+      onTimeout: () => const <VideoCard>[],
+    );
+    return <VideoCard>[
+      for (final card in cards)
+        if (!isLiveCard(card))
+          relabel(
+            card,
+            label: source.originLabel,
+            id: encodeId(source.key, card.id),
+          ),
+    ];
+  }
+
   Future<List<VideoCard>> _categoryOne(
     KSource source,
     String channelKey,
@@ -1039,6 +1166,7 @@ class SourceHub extends ChangeNotifier {
         area: card.area,
         heat: card.heat,
         desc: card.desc,
+        time: card.time,
         rank: card.rank,
         tags: card.tags,
         sourceLabel: label,

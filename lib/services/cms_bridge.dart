@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
@@ -132,32 +134,19 @@ class CmsBridge {
 
   /// 首页数据：推荐页按分类铺 6 行，单分类频道只铺这一行。
   ///
-  /// 先用第一行探一次接口：接口整体不通时立刻走旧接口兜底，
-  /// 不用等六个请求各自超时再失败（那样首屏要空十几秒）。
+  /// 六行**并行**取，某一行失败只当「这一行没有」，绝不让整页变成「加载
+  /// 失败」——这正是用户看到的「分类行空白 / 加载失败」的来源：以前先拿第一
+  /// 行探路，第一行一挂就整页抛错。只有六行**全部失败**才当接口不通，
+  /// 那时才回落旧接口或者把错误交给页面。
   static Future<HomeData> home(String channel) async {
     _boot();
     final ch = channelOf(channel);
     final rows = (ch == null || ch.typeId <= 0) ? _homeRows : <CmsChannel>[ch];
-    // 先用第一行探一次接口：整体不通时要么回落旧接口，要么把 CMS 的错误
-    // 原样抛给首页 —— 不能吞成「空首页」，那样用户只会看到一片白。
     Object? failure;
-    List<VideoCard>? first;
-    try {
-      first = await _row(rows.first.typeId);
-    } catch (e) {
-      failure = e;
-    }
-    if (first == null) {
-      if (!legacyEnabled) throw failure ?? ApiException.network();
-      return _legacyHome(ch);
-    }
-
-    final rest = rows.length <= 1
-        ? const <List<VideoCard>?>[]
-        : await Future.wait(<Future<List<VideoCard>?>>[
-            for (final row in rows.skip(1)) _tryRow(row.typeId),
-          ]);
-    final lists = <List<VideoCard>?>[first, ...rest];
+    final lists = await Future.wait(<Future<List<VideoCard>?>>[
+      for (final row in rows)
+        _tryRow(row.typeId, onError: (Object e) => failure ??= e),
+    ]);
 
     final sections = <HomeSection>[];
     for (var i = 0; i < rows.length; i++) {
@@ -167,7 +156,12 @@ class CmsBridge {
         HomeSection(rows[i].label, items.take(_rowCount).toList()),
       );
     }
+    final allFailed = lists.every((list) => list == null);
     if (sections.isEmpty) {
+      if (allFailed && failure != null) {
+        if (!legacyEnabled) throw failure!;
+        return _legacyHome(ch);
+      }
       if (!legacyEnabled) {
         return HomeData(const <BannerItem>[], const <HomeSection>[]);
       }
@@ -197,11 +191,16 @@ class CmsBridge {
     return list;
   }
 
-  /// 取一行；失败返回 null（首页按「这一行没有」处理，不影响其它行）。
-  static Future<List<VideoCard>?> _tryRow(int typeId) async {
+  /// 取一行；失败返回 null（首页按「这一行没有」处理，不影响其它行），
+  /// 同时把错误记给 [onError] —— 六行全挂时才知道是真不通。
+  static Future<List<VideoCard>?> _tryRow(
+    int typeId, {
+    void Function(Object error)? onError,
+  }) async {
     try {
       return await _row(typeId);
-    } catch (_) {
+    } catch (e) {
+      onError?.call(e);
       return null;
     }
   }
@@ -410,67 +409,192 @@ class CmsBridge {
 
   /* ------------------------------------------------------------ 搜索 */
 
+  /// 一次性拿到全部结果（老的调用方：一起看选片、外挂取片等）。
+  ///
+  /// 内部就是收 [searchStream] 的流：我们自己的结果在前，外部源的结果在后。
   static Future<List<VideoCard>> search(String keyword, int page) async {
+    final own = <VideoCard>[];
+    final external = <VideoCard>[];
+    await for (final batch in searchStream(keyword, page)) {
+      (batch.external ? external : own).addAll(batch.items);
+    }
+    return <VideoCard>[...own, ...external];
+  }
+
+  /// 只查我们自己那一批（主站采集库 + 幻想线路），一次拿全。
+  ///
+  /// 上拉「加载更多」用它：同一个词的第 2 页把 41 个 jar 源再全跑一遍没有意义
+  /// （外部源的分页质量参差，翻页常常把第 1 页原样再返回一遍），分页只续我们
+  /// 自己那批。
+  static Future<List<VideoCard>> searchOwn(String keyword, int page) async {
     _boot();
     final q = keyword.trim();
     if (q.isEmpty) return const <VideoCard>[];
-    // 主站采集库 + 所有启用的云端 / 自加源并行查，结果按「片名 + 年份」合并去重。
-    final extraFuture = SourceHub.instance.searchAll(q, page);
-    List<VideoCard> primary = const <VideoCard>[];
-    Object? failure;
-    try {
-      primary = _withoutLive(await CmsApi.search(q, page));
-      _markAll(primary, _Origin.cms);
-    } catch (e) {
-      failure = e;
+    final hub = SourceHub.instance;
+    await hub.ensureReady();
+    final plan = hub.searchPlan;
+    final lists = await Future.wait(<Future<List<VideoCard>>>[
+      _primarySearch(q, page),
+      for (final source in plan.own) hub.searchPrepared(source, q, page),
+    ]);
+    final dedupe = _Dedupe();
+    final out = <VideoCard>[];
+    for (final list in lists) {
+      for (final card in list) {
+        if (SourceHub.isLiveCard(card)) continue;
+        if (!dedupe.fresh(card)) continue;
+        out.add(card);
+      }
     }
-    final extra = await _safe(extraFuture);
-    if (extra.isNotEmpty) return _mergeWith(primary, extra);
-    // 请求成功就等于「有结果」，空列表也是结果。旧实现在这里把「空」当成
-    // 「这条路走不通」再去打一次旧接口 —— 搜一个库里没有的词要白等 16 秒
-    // （8 秒超时 ×2），最后还拿旧机的 404 `not found` 当错误文案。
-    if (failure == null) return primary;
-    if (!legacyEnabled) throw failure;
-    final legacy = _withoutLive(await Api.search(q, page));
-    _markAll(legacy, _Origin.legacy);
-    return legacy;
+    return out;
   }
 
-  /// 外部源检索的结果统一带 `云端 / 自加` 标记；只要有多源参与，
-  /// 主站采集库的卡片也统一标成 `采集库`，让「这条来自哪个源」一眼可辨。
+  /// 主站采集库（本地 CMS）：失败不抛，交给上层按「这个源没结果」处理。
+  static Future<List<VideoCard>> _primarySearch(String q, int page) async {
+    try {
+      final list = _withoutLive(await CmsApi.search(q, page));
+      _markAll(list, _Origin.cms);
+      return list;
+    } catch (_) {
+      return const <VideoCard>[];
+    }
+  }
+
+  /// 渐进检索：谁先回来谁先渲染，不再等 48 个源全部返回。
   ///
-  /// 去重不能只按「片名 + 年份」拼字符串：主站的卡片现在带年份（`ac=detail`），
-  /// 外部源走的是通用的 `ac=list`（第三方接口不一定给 `vod_year`），同一个片名
-  /// 一边是 `头号玩家|2018`、一边是 `头号玩家|0`，拼串比对会把同一部片留两条。
-  /// 所以这里按片名分桶，桶里记年份：年份未知的那条只要桶非空就算重复，
-  /// 年份已知的按年份比 —— 同名不同年（翻拍版）仍然各留一条。
+  /// 发车顺序（全部同时开跑，互不等待）：
+  ///   1. 主站采集库（本地 CMS）—— 通常几十毫秒，第一批就它；
+  ///   2. 我们自己的幻想线路（云端下发的 7 条）—— 同一个接口，也很快；
+  ///   3. 外部源（肥猫的 41 个 jar 源 + 用户自加）—— 慢，回来一批追加一批。
+  ///
+  /// 每个源单独 8 秒超时（[SourceHub.sourceTimeout]），超时按「没结果」算，
+  /// 不会阻塞别的源。每批都带 `done / total`，页面据此显示「已查 12/48 个源」。
+  ///
+  /// 所有源都空、而主站采集库是**报错**（不是空结果）时，最后补一个错误：
+  /// 页面就能给出「重新搜索」，而不是含糊的「没有找到」。
+  static Stream<SearchBatch> searchStream(String keyword, int page) {
+    _boot();
+    final q = keyword.trim();
+    if (q.isEmpty) {
+      return Stream<SearchBatch>.value(
+        const SearchBatch(
+          items: <VideoCard>[],
+          external: false,
+          done: 0,
+          total: 0,
+          finished: true,
+        ),
+      );
+    }
+    final hub = SourceHub.instance;
+    final dedupe = _Dedupe();
+    final ctrl = StreamController<SearchBatch>();
+    var done = 0;
+    var total = 0;
+    var emitted = 0;
+    var closed = false;
+    Object? primaryFailure;
+
+    void emit(List<VideoCard> cards, {required bool external}) {
+      if (closed) return;
+      final kept = <VideoCard>[];
+      for (final card in cards) {
+        if (SourceHub.isLiveCard(card)) continue;
+        if (!dedupe.fresh(card)) continue;
+        kept.add(card);
+      }
+      emitted += kept.length;
+      ctrl.add(
+        SearchBatch(
+          items: kept,
+          external: external,
+          done: done,
+          total: total,
+          finished: false,
+        ),
+      );
+    }
+
+    Future<void> run() async {
+      await hub.ensureReady();
+      if (closed) return;
+      final plan = hub.searchPlan;
+      total = plan.total;
+      final tasks = <Future<void>>[];
+
+      // 1. 本地 CMS：第一批发车，回来就渲染。
+      tasks.add(() async {
+        try {
+          final list = _withoutLive(await CmsApi.search(q, page));
+          _markAll(list, _Origin.cms);
+          emit(list, external: false);
+        } catch (e) {
+          primaryFailure = e;
+        }
+      }());
+
+      // 2. 我们自己的线路（幻想 7 条）。
+      for (final source in plan.own) {
+        tasks.add(() async {
+          final cards = await hub.searchPrepared(source, q, page);
+          done++;
+          emit(cards, external: false);
+        }());
+      }
+
+      // 3. 外部源（肥猫 41 个 jar 源 + 自加）：并行后台查，逐批追加。
+      for (final source in plan.external) {
+        tasks.add(() async {
+          final cards = await hub.searchPrepared(source, q, page);
+          done++;
+          emit(cards, external: true);
+        }());
+      }
+
+      await Future.wait(tasks);
+      if (closed) return;
+      if (emitted == 0 && primaryFailure != null) {
+        ctrl.addError(primaryFailure!);
+      } else {
+        ctrl.add(
+          SearchBatch(
+            items: const <VideoCard>[],
+            external: false,
+            done: total,
+            total: total,
+            finished: true,
+          ),
+        );
+      }
+      closed = true;
+      await ctrl.close();
+    }
+
+    ctrl.onCancel = () {
+      closed = true;
+    };
+    unawaited(run());
+    return ctrl.stream;
+  }
+
+  /// 合并主站 / 外部源两份结果（分类页还在用；搜索走 [searchStream]）。
+  ///
+  /// 去重按片名分桶记年份：主站的卡片带年份（`ac=detail`），外部源走通用的
+  /// `ac=list`（第三方接口不一定给 `vod_year`），同一个片名一边是
+  /// `头号玩家|2018`、一边是 `头号玩家|0`，拼串比对会把同一部片留两条。
   static List<VideoCard> _mergeWith(
     List<VideoCard> primary,
     List<VideoCard> extra,
   ) {
     if (extra.isEmpty) return primary;
-    final seen = <String, Set<int>>{};
-    bool fresh(VideoCard card) {
-      final key = SourceHub.normTitle(card.title);
-      if (key.isEmpty) return true;
-      final years = seen.putIfAbsent(key, () => <int>{});
-      if (card.year <= 0) {
-        if (years.isNotEmpty) return false;
-        years.add(0);
-        return true;
-      }
-      if (years.contains(card.year) || years.contains(0)) return false;
-      years.add(card.year);
-      return true;
-    }
-
+    final dedupe = _Dedupe();
     final out = <VideoCard>[];
     for (final card in primary) {
-      if (!fresh(card)) continue;
+      if (!dedupe.fresh(card)) continue;
       out.add(SourceHub.relabel(card, label: '采集库'));
     }
     for (final card in extra) {
-      if (!fresh(card)) continue;
+      if (!dedupe.fresh(card)) continue;
       out.add(card);
     }
     return out;
@@ -533,26 +657,78 @@ class CmsBridge {
 
   /* ------------------------------------------------------------ 排行榜 */
 
-  /// 榜单：CMS 按点击量排（`order=vod_hits`），失败回落旧的榜单接口。
+  /// 榜单：热度 → 评分 → 更新时间（见 [_sortRank]）。
   ///
-  /// 注意：本站 `order=` 被服务端忽略、`vod_hits` 也全站为 0，所以榜单目前
-  /// 实际就是「最新」序 —— 这是后台数据缺失，不是这里没传参（见 `_sortCards`）。
-  static Future<List<VideoCard>> rank(String type) async {
+  /// 服务端 `order=` 实测被忽略（`vod_hits` / `vod_score` / `vod_time` 传啥都
+  /// 返回同一个序列），所以真排序只能在客户端做；[pages] 决定一次读几页样本
+  /// —— 日榜读 1 页、总榜读 8 页，样本越大越像真榜。
+  ///
+  /// 「不要空」：指定分类里一条数据都没有时退到全站再读一次，不把空列表交给
+  /// 页面；两边都空、且是真报错，才把错误抛给页面（页面有重试）。
+  static Future<List<VideoCard>> rank(String type, {int pages = 1}) async {
     _boot();
     final typeId = CmsApi.typeIdOf(type);
+    final n = pages < 1 ? 1 : pages;
     Object? failure;
-    try {
-      final list = _withoutLive(await CmsApi.list(type: typeId, sort: 'hot'));
-      _markAll(list, _Origin.cms);
-      // 请求成功就是结果，空列表也是结果（旧接口已下线，不再拿空当失败）。
-      if (list.isNotEmpty || !legacyEnabled) return list;
-    } catch (e) {
-      failure = e;
+
+    Future<List<VideoCard>> scan(int t) async {
+      final lists = await Future.wait(<Future<List<VideoCard>>>[
+        for (var p = 1; p <= n; p++)
+          CmsApi.list(type: t, page: p, sort: 'hot').catchError(
+            (Object e) {
+              failure ??= e;
+              return const <VideoCard>[];
+            },
+          ),
+      ]);
+      final out = <VideoCard>[];
+      final seen = <String>{};
+      for (final list in lists) {
+        _markAll(list, _Origin.cms);
+        for (final card in list) {
+          if (SourceHub.isLiveCard(card)) continue;
+          if (!seen.add(card.id)) continue;
+          out.add(card);
+        }
+      }
+      return out;
     }
-    if (!legacyEnabled) throw failure ?? ApiException.network();
+
+    var list = await scan(typeId);
+    if (list.isEmpty && typeId != 0) list = await scan(0);
+    if (list.isNotEmpty) return _sortRank(list);
+    if (!legacyEnabled) {
+      throw failure ?? ApiException('榜单暂时没有数据，稍后刷新试试');
+    }
     final legacy = _withoutLive(await Api.rank(type));
     _markAll(legacy, _Origin.legacy);
-    return legacy;
+    return _sortRank(legacy);
+  }
+
+  /// 榜单排序：热度 → 评分 → 更新时间 → 年份。
+  ///
+  /// 稳定排序（同分保持服务端原序），所以刷新不会让顺序乱跳；任何时候都
+  /// **不按 id 排** —— id 是采集库的自增编号，按它排出来的是「谁先进库」，
+  /// 和热度、评分、更新一点关系都没有。
+  static List<VideoCard> _sortRank(List<VideoCard> src) {
+    if (src.length < 2) return src;
+    final indexed = <MapEntry<int, VideoCard>>[
+      for (var i = 0; i < src.length; i++) MapEntry<int, VideoCard>(i, src[i]),
+    ];
+    indexed.sort((x, y) {
+      final a = x.value;
+      final b = y.value;
+      var r = _heatValue(b.heat).compareTo(_heatValue(a.heat));
+      if (r != 0) return r;
+      r = b.rating.compareTo(a.rating);
+      if (r != 0) return r;
+      r = b.time.compareTo(a.time);
+      if (r != 0) return r;
+      r = b.year.compareTo(a.year);
+      if (r != 0) return r;
+      return x.key.compareTo(y.key);
+    });
+    return <VideoCard>[for (final entry in indexed) entry.value];
   }
 
   /* ------------------------------------------------------------ 详情 */
@@ -764,6 +940,36 @@ class CmsBridge {
   }
 }
 
+/// 渐进检索的一批结果。
+///
+/// [external] 为 false 表示「我们自己那一批」（主站采集库 + 幻想线路），
+/// 页面要把它排在上面；true 表示外部源（肥猫 / 自加），排在下面的
+/// 「外部源结果」分区里，边到边显示。
+class SearchBatch {
+  const SearchBatch({
+    required this.items,
+    required this.external,
+    required this.done,
+    required this.total,
+    required this.finished,
+  });
+
+  /// 这一批新增的结果（已去重、已带来源标记与 `@src:` id）。
+  final List<VideoCard> items;
+
+  /// 是否来自外部源。
+  final bool external;
+
+  /// 已经查完的源数（进度文案「已查 12/48 个源」的分子）。
+  final int done;
+
+  /// 这一轮要查的源总数（分子分母的分母）。
+  final int total;
+
+  /// 所有源都结束了（这一批的 items 一定是空的）。
+  final bool finished;
+}
+
 /// 一页分类列表：条目 + 还有没有下一页。
 class CmsPage {
   const CmsPage(this.items, {this.hasMore = false});
@@ -795,3 +1001,26 @@ class CmsChannel {
 }
 
 enum _Origin { unknown, cms, legacy }
+
+/// 跨源去重的记账本：片名分桶 + 年份比对。
+///
+/// 年份未知（0）的那条只要同名片已经出现过就算重复；年份已知的按年份比，
+/// 同名不同年（翻拍版）仍然各留一条。渐进检索要把这个账本一路带下去，
+/// 每批都过一遍，才能保证「外部源结果」里不会冒出上面已经有的片子。
+class _Dedupe {
+  final Map<String, Set<int>> _seen = <String, Set<int>>{};
+
+  bool fresh(VideoCard card) {
+    final key = SourceHub.normTitle(card.title);
+    if (key.isEmpty) return true;
+    final years = _seen.putIfAbsent(key, () => <int>{});
+    if (card.year <= 0) {
+      if (years.isNotEmpty) return false;
+      years.add(0);
+      return true;
+    }
+    if (years.contains(card.year) || years.contains(0)) return false;
+    years.add(card.year);
+    return true;
+  }
+}

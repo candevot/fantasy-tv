@@ -589,10 +589,17 @@ class Api {
     return '$root$url';
   }
 
-  /// 图片代理：远程封面统一走 `/api/img?u=<原始地址>`（绝对地址），
-  /// 由服务端补 Referer / UA 后回传，解决图床防盗链和跨域。
-  /// 已是本站（或本机 / 局域网）http 地址的图片直接返回，避免二次代理。
-  /// 空串 / data URI / 非 http(s) 地址返回空串，调用方显示灰底占位。
+  /// 封面 / 头像 / 直播图最终使用的地址。
+  ///
+  /// 空串 / data URI / 非 http(s) 地址返回空串，调用方显示灰底 + 首字占位。
+  ///
+  /// IMG_DIRECT（2026-11-15）：图片一律直连，不再过老接口的 `/api/img` 代理。
+  /// 老接口所在的 8787 端口在服务器迁移后已经整体下线（实测 TCP 直接超时），
+  /// 而 CMS 的 `vod_pic` 本来就是第三方图床的绝对地址、直接取得回来 —— 继续
+  /// 走代理的结果是**每一张海报都加载失败**，全站退回首字渐变占位块。
+  ///
+  /// 只有站内相对地址（没有 host 的那种）还需要 [abs] 补成完整地址，那种图
+  /// 没有别的地方可取。
   static String imgProxy(String url) {
     var u = url.trim();
     if (u.isEmpty || u.startsWith('data:')) return '';
@@ -607,24 +614,7 @@ class Api {
     final scheme = uri.scheme.toLowerCase();
     if (scheme != 'http' && scheme != 'https') return '';
     // 归一化协议 / 主机大小写并转义空格，ImageProvider 的缓存键才稳定。
-    final absolute = uri.toString();
-    if (_isLocalImageHost(uri)) return absolute;
-    var root = base.replaceFirst(RegExp(r'/api/?$'), '');
-    while (root.endsWith('/')) {
-      root = root.substring(0, root.length - 1);
-    }
-    return '$root/api/img?u=${Uri.encodeComponent(absolute)}';
-  }
-
-  /// 本站 / 本机 / 局域网地址：头像、上传图这类图片直连即可。
-  static bool _isLocalImageHost(Uri uri) {
-    final host = uri.host.toLowerCase();
-    if (host == 'localhost' || host == '::1' || host == '0.0.0.0') return true;
-    if (host.startsWith('127.') || host.startsWith('10.')) return true;
-    if (host.startsWith('192.168.')) return true;
-    if (RegExp(r'^172\.(1[6-9]|2\d|3[01])\.').hasMatch(host)) return true;
-    final api = Uri.tryParse(base);
-    return api != null && api.host.isNotEmpty && api.host.toLowerCase() == host;
+    return uri.toString();
   }
 }
 

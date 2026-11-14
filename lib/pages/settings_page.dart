@@ -442,9 +442,9 @@ class _SettingsPageState extends State<SettingsPage> {
   String _sourceHint() {
     final hub = SourceHub.instance;
     final parts = <String>[
-      '${hub.querySources.length} 个源参与检索',
-      if (hub.userSources.isNotEmpty) '自加 ${hub.userSources.length} 个',
-      hub.liveUrl.isEmpty ? '直播地址未配置' : '直播已配置',
+      // 统计拆成「幻想 7 + 肥猫 41」，和片源页那两条内置项对得上。
+      '${hub.retrievalLabel} 个源参与检索',
+      if (hub.liveUrl.isNotEmpty) '直播已配置',
     ];
     return parts.join(' · ');
   }

@@ -136,6 +136,12 @@ class VideoCard {
   /// 简介：短列表接口通常不带（空串），排行榜按需再拉详情补齐。
   final String desc;
 
+  /// 更新时间（CMS 的 `vod_time`，`2026-11-15 02:48:11` 这种）。
+  ///
+  /// 排行榜要按「热度 → 评分 → 更新时间」排，接口又不认 `order=`，
+  /// 只能把时间带到客户端来排。没有这个字段就是空串，排序时排最后。
+  final String time;
+
   /// 榜单排名（列表接口给 1 起的名次），非榜单数据为 0。
   final int rank;
   final List<String> tags;
@@ -158,6 +164,7 @@ class VideoCard {
     this.area = '',
     this.heat = '',
     this.desc = '',
+    this.time = '',
     this.rank = 0,
     this.tags = const [],
     this.sourceLabel = '',
@@ -176,6 +183,7 @@ class VideoCard {
         area: _asStr(j['area']),
         heat: _asStr(j['heat']),
         desc: _cleanDescription(j['desc']),
+        time: _asStr(j['time']),
         rank: _asInt(j['rank']),
         tags: _asStrList(j['tags']),
         sourceLabel: _cardSourceLabel(
