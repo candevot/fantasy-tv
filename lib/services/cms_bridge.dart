@@ -437,19 +437,39 @@ class CmsBridge {
 
   /// 外部源检索的结果统一带 `云端 / 自加` 标记；只要有多源参与，
   /// 主站采集库的卡片也统一标成 `采集库`，让「这条来自哪个源」一眼可辨。
+  ///
+  /// 去重不能只按「片名 + 年份」拼字符串：主站的卡片现在带年份（`ac=detail`），
+  /// 外部源走的是通用的 `ac=list`（第三方接口不一定给 `vod_year`），同一个片名
+  /// 一边是 `头号玩家|2018`、一边是 `头号玩家|0`，拼串比对会把同一部片留两条。
+  /// 所以这里按片名分桶，桶里记年份：年份未知的那条只要桶非空就算重复，
+  /// 年份已知的按年份比 —— 同名不同年（翻拍版）仍然各留一条。
   static List<VideoCard> _mergeWith(
     List<VideoCard> primary,
     List<VideoCard> extra,
   ) {
     if (extra.isEmpty) return primary;
-    final seen = <String>{};
+    final seen = <String, Set<int>>{};
+    bool fresh(VideoCard card) {
+      final key = SourceHub.normTitle(card.title);
+      if (key.isEmpty) return true;
+      final years = seen.putIfAbsent(key, () => <int>{});
+      if (card.year <= 0) {
+        if (years.isNotEmpty) return false;
+        years.add(0);
+        return true;
+      }
+      if (years.contains(card.year) || years.contains(0)) return false;
+      years.add(card.year);
+      return true;
+    }
+
     final out = <VideoCard>[];
     for (final card in primary) {
-      if (!seen.add(SourceHub.dedupeKey(card))) continue;
+      if (!fresh(card)) continue;
       out.add(SourceHub.relabel(card, label: '采集库'));
     }
     for (final card in extra) {
-      if (!seen.add(SourceHub.dedupeKey(card))) continue;
+      if (!fresh(card)) continue;
       out.add(card);
     }
     return out;
