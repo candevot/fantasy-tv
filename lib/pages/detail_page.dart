@@ -379,9 +379,36 @@ class _DetailPageState extends State<DetailPage>
     return <Episode>[for (var i = 1; i <= d.episodes; i++) Episode(i, '', 0)];
   }
 
+  /// 电影的多条是「版本」不是「集」。
+  ///
+  /// MOVIE_VERSION（2026-11-14 用户要求）：同剧合并、每条线路用自己
+  /// 的集名，但电影不能出现「第01集」这种叫法 —— 有些采集源对电影
+  /// 就是把两条版本命名成「第01集/第02集」，照搬出来用户看到的是
+  /// 「这是电影啊，怎么显示集」。
+  /// 这里只把**无意义的「第N集」**换成版本名：该线路本来就叫
+  /// 「普通话版 / 粤语版 / 正片」的，原样保留。
+  static final RegExp _epNumOnly = RegExp(r'^第\s*\d+\s*集$');
+
+  List<Episode> _movieVersions(List<Episode> list) {
+    return <Episode>[
+      for (final e in list)
+        Episode(e.n, _movieVersionName(e, list.length), e.duration),
+    ];
+  }
+
+  String _movieVersionName(Episode e, int total) {
+    final s = e.name.trim();
+    if (s.isEmpty || _epNumOnly.hasMatch(s)) {
+      return total <= 1 ? '正片' : '版本 ${e.n}';
+    }
+    return s;
+  }
+
   List<Episode> get _episodes {
     final d = _detail;
-    return d == null ? const <Episode>[] : _episodesOf(d);
+    if (d == null) return const <Episode>[];
+    final list = _episodesOf(d);
+    return _isMovie ? _movieVersions(list) : list;
   }
 
   /// 正片 / 花絮等分组；接口没给分组时整段当「正片」。
@@ -424,13 +451,14 @@ class _DetailPageState extends State<DetailPage>
   String get _statusText {
     final d = _detail;
     if (d == null) return '';
+    // 电影先判：服务端对电影也会给「更新至 N 集」这种串，
+    // 之前先返回 status 就把它漏过去了，电影详情页顶着「更新至2集」。
+    if (_isMovie) return '电影';
     final s = d.status.trim();
     if (s.isNotEmpty) {
       if (RegExp(r'^全\s*\d+\s*集$').hasMatch(s)) return '已完结';
       return s;
     }
-    // 电影没有「更新至 N 集」这一说
-    if (_isMovie) return '电影';
     final n = fxMainEpisodeCount(_episodes);
     return n > 0 ? '更新至$n集' : '';
   }

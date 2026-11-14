@@ -65,9 +65,17 @@ int fxMainEpisodeCount(Iterable<Episode> episodes) =>
 /// 集名规范化：
 /// - 空名或不是「第N集」形式 → 统一显示「第N集」；
 /// - 预告 / 花絮 / 拉片 / 解说 → 原名前 8 字 + 序号（如「拉片 2」）。
+/// 电影的多条是「正片 / 普通话版 / 粤语版」这类**版本**，不是集。
+/// 这些名字要原样显示，不能被改写成「第01集」。
+const List<String> _fxVersionWords = <String>[
+  '正片', '普通话', '普通话版', '国语', '国语版', '粤语', '粤语版',
+  '原声', '原声版', '中字', '中字版', '高清', '蓝光', 'TC', 'HD', '4K',
+];
+
 String fxEpisodeLabel(int ep, [String? name]) {
   final s = (name ?? '').trim();
   if (s.isEmpty) return '第${fxPad2(ep)}集';
+  if (_fxVersionWords.contains(s)) return s;
   if (fxIsExtraEpisode(s)) {
     final head = s.characters.take(8).toString().trim();
     return '$head $ep';
