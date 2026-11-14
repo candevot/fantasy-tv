@@ -977,6 +977,20 @@ class FxPlayer implements Listenable {
   /// 显式播放意图与缓冲状态分开，防止报错亮缓冲后把主动暂停误当播放。
   Future<void> playOrPause() => _player.state.playing ? pause() : play();
 
+  /// 停止：暂停并回到开头，不释放内核。
+  ///
+  /// ExoPlayer 版本有这个接口，回退 mpv 后直播页仍在调用
+  /// （live_detail_page 离开时停流）。缺它会直接编译失败。
+  Future<void> stop() async {
+    _playIntent = false;
+    try {
+      await _player.pause();
+      await _player.seek(Duration.zero);
+    } catch (_) {
+      // 内核还没就绪时停止是空操作。
+    }
+  }
+
   /// 播放器真实播放状态（libmpv 当前值），按钮图标以此为准。
   bool get isPlaying => _player.state.playing;
 
