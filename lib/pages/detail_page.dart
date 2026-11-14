@@ -417,8 +417,8 @@ class _DetailPageState extends State<DetailPage>
   bool get _isMovie {
     final d = _detail;
     if (d == null) return false;
-    return d.category.contains('电影') ||
-        d.type.trim().toLowerCase() == 'movie';
+    // VideoDetail 没有 type 字段，只有 category（服务端已把类型归一成中文）
+    return d.category.contains('电影');
   }
 
   String get _statusText {
