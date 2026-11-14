@@ -126,6 +126,13 @@ class TogetherRoomView extends StatefulWidget {
 }
 
 class _TogetherRoomViewState extends State<TogetherRoomView> {
+  /// ORIENT_FADE（2026-11-14）：横竖屏切换时压一层淡黑过渡。
+  ///
+  /// 竖屏 ↔ 横屏是布局重排，不压一下就是「画面突然跳成另一个样子」。
+  /// 但不能给整页做缩放/位移 —— 里面是 PlatformView（ExoPlayer 原生视图），
+  /// 混合合成下不跟随 Flutter 变换，只能做透明度。
+  bool? _lastCompact;
+  double _orientDim = 0;
   bool _controls = true;
   Timer? _hideTimer;
 
@@ -209,9 +216,9 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   Widget build(BuildContext context) {
     final media = MediaQuery.of(context);
     // CHAT_FULLSCREEN（2026-11-14）：横屏（全屏播放）时不再渲染竖屏那块
-    // 聊天列表 —— 它是一张浅色卡片，横屏时会压住画面，用户看到的就是
-    // 「全屏那个聊天框不透明、挡住视频」。全屏只用下面那层透明悬浮气泡。
-    final isLandscape = media.size.width > media.size.height;
+    // 聊天列表 —— 它是一张浅色卡片，横屏时会压住画面。
+    // 用布局约束判断，不用 MediaQuery：某些机型上旋转后 MediaQuery
+    // 还没刷新，判断会失效（之前横屏聊天卡照样盖住视频就是这个原因）。
     final keyboard = widget.keyboardVisible;
     final fixedVideoHeight = math.max(
       togetherRoomVideoMin,
@@ -221,6 +228,20 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
         52.0 + (keyboard ? 0.0 : 78.0) + 68.0 + media.padding.bottom;
     return LayoutBuilder(
       builder: (context, constraints) {
+        // 高度小于 560 视为横屏（全屏）布局。
+        final compact = constraints.maxHeight < 560;
+        if (_lastCompact != null && _lastCompact != compact) {
+          _lastCompact = compact;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            setState(() => _orientDim = .6);
+            Future<void>.delayed(const Duration(milliseconds: 140), () {
+              if (mounted) setState(() => _orientDim = 0);
+            });
+          });
+        } else {
+          _lastCompact = compact;
+        }
         // 极矮屏幕 + 键盘的兜底：优先保证输入条和视频区仍然存在。
         var videoHeight = fixedVideoHeight;
         final overflow = videoHeight + chromeEstimate - constraints.maxHeight;
@@ -244,7 +265,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 children: [
                   // 键盘弹起时旧消息列表让位（气泡里能看到最新几条），
                   // 避免「列表 + 气泡 + 键盘」三份内容挤在一起。
-                  if (!keyboard && !isLandscape) _buildChat(context),
+                  if (!keyboard && !compact) _buildChat(context),
                 ],
                   ),
                 ),
@@ -257,11 +278,26 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
             // 只让悬浮层自己那小块参与命中测试：TogetherFloatingChat 内部
             // 是 Stack，收起时只有小标志有 GestureDetector，其余区域不拦截，
             // 视频区手势照常。
+            // CHAT_NO_BUBBLE_PORTRAIT（2026-11-14）：竖屏已经有聊天面板，
+            // 不需要再叠一层透明小窗；只有横屏（全屏）才用悬浮气泡。
+            if (compact)
+              Positioned.fill(
+                child: TogetherFloatingChat(
+                  chat: widget.chat,
+                  onSend: widget.onSendChat,
+                  enabled: widget.online,
+                ),
+              ),
+            // 横竖屏切换的过渡：一层淡黑快速压下再抬起，
+            // 把布局重排的跳变盖住（不能动 PlatformView 的变换）。
             Positioned.fill(
-              child: TogetherFloatingChat(
-                chat: widget.chat,
-                onSend: widget.onSendChat,
-                enabled: widget.online,
+              child: IgnorePointer(
+                child: AnimatedOpacity(
+                  opacity: _orientDim,
+                  duration: const Duration(milliseconds: 160),
+                  curve: Curves.easeOut,
+                  child: const ColoredBox(color: Colors.black),
+                ),
               ),
             ),
           ],
@@ -474,9 +510,13 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                     if (!value.isInitialized || !value.isBuffering) {
                       return const SizedBox.shrink();
                     }
-                    // 只认 libmpv cache-buffering-state 的真实填充进度；
+                    // 只认内核上报的真实填充进度；
                     // 拿不到就不显示数字，只给「缓冲中…」+ 不确定转圈。
                     final percent = value.bufferingPercent;
+                    // BUFFER_FULL：缓存已满就别再挂「缓冲中 100%」盖着画面。
+                    if (percent != null && percent >= 99.5) {
+                      return const SizedBox.shrink();
+                    }
                     return FxLoadingOverlay(
                       title:
                           percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
