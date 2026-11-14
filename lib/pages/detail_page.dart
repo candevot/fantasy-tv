@@ -89,6 +89,13 @@ class _DetailPageState extends State<DetailPage>
   Timer? _lineRefreshTimer;
   int _lineRefreshTries = 0;
 
+  /// PLATFORM_PENDING：平台线路永远显示，解析在后台进行。
+  /// 正在现场解析的线路 id（同一条只发一次请求）。
+  final Set<String> _resolvingLines = <String>{};
+
+  /// 详情页进入后已经自动触发过后台解析的平台线，避免来回切页重复打服务端。
+  final Set<String> _autoResolved = <String>{};
+
   /// 平台线补线的节奏：服务端匹配窗口 2.5 秒，两次重试足够等到结果。
   static const int _lineRefreshMax = 2;
   static const Duration _lineRefreshDelay = Duration(milliseconds: 2500);
@@ -201,6 +208,9 @@ class _DetailPageState extends State<DetailPage>
         _groupIndex = _groupIndexOf(_episodeGroups, ep);
       });
       _scheduleLineRefresh();
+      // PLATFORM_PENDING：平台线路进页面就先在后台解析一次（fire-and-forget），
+      // 用户点之前大概率已经 ready，点下去不用等。
+      _autoResolvePlatformLines();
       // 详情页一打开就后台预热当前线路 / 集（上次看的集优先）：
       // PlayerView 的 open / 用户稍后点播放都能直接复用缓存，
       // 不再从 0 等 /api/play 和 m3u8。
@@ -278,11 +288,14 @@ class _DetailPageState extends State<DetailPage>
   }
 
   /// 只刷新线路表：不动当前集数、评论区、历史与播放器实例。
-  Future<void> _refreshLines() async {
+  ///
+  /// [force] = true 用于「强制拿到最新线路状态」：平台线解析完成后即使
+  /// 线路条数没变，也要把 status / 集名更新进来（PLATFORM_PENDING）。
+  Future<void> _refreshLines({bool force = false}) async {
     if (!mounted) return;
     final current = _detail;
     if (current == null) return;
-    if (current.lines.any(fxIsPlatformLine)) return;
+    if (!force && current.lines.any(fxIsPlatformLine)) return;
     VideoDetail fresh;
     try {
       fresh = await Api.detail(widget.id);
@@ -294,13 +307,20 @@ class _DetailPageState extends State<DetailPage>
     if (!mounted) return;
     final latest = _detail;
     if (latest == null) return;
-    if (latest.lines.any(fxIsPlatformLine)) return;
+    if (!force && latest.lines.any(fxIsPlatformLine)) return;
 
     final merged = fxMergeLines(latest.lines, fresh.lines);
-    final changed = merged.length != latest.lines.length ||
-        merged.asMap().entries.any(
-              (entry) => entry.value.id != latest.lines[entry.key].id,
-            );
+    // 线路条数一样也要比状态：pending → ready 只变 status 和集名，长度不变。
+    final changed = force ||
+        merged.length != latest.lines.length ||
+        merged.asMap().entries.any((entry) {
+          if (entry.key >= latest.lines.length) return true;
+          final a = entry.value;
+          final b = latest.lines[entry.key];
+          return a.id != b.id ||
+              a.status != b.status ||
+              a.epNames.length != b.epNames.length;
+        });
     if (changed) {
       var lineId = _lineId;
       if (lineId.isEmpty || !merged.any((line) => line.id == lineId)) {
@@ -319,6 +339,93 @@ class _DetailPageState extends State<DetailPage>
     }
     // 还是没有平台线：排下一轮重试（最多 2 次）。
     _scheduleLineRefresh();
+  }
+
+  /* ------------------------------------------------ 平台线按需解析 */
+
+  /// PLATFORM_PENDING：详情页进入时，对还在解析的平台线自动触发一次后台解析
+  /// （fire-and-forget，不阻塞 UI、不切当前线路）。
+  void _autoResolvePlatformLines() {
+    final d = _detail;
+    if (d == null) return;
+    for (final line in d.lines) {
+      if (!fxIsPlatformLine(line) || !line.linePending) continue;
+      if (!_autoResolved.add(line.id)) continue;
+      unawaited(_backgroundResolve(line));
+    }
+  }
+
+  Future<void> _backgroundResolve(LineInfo line) async {
+    try {
+      final r = await Api.resolveLine(widget.id, line.id);
+      if (!mounted) return;
+      if ('${r['status']}' == 'ready') {
+        await _refreshLines(force: true);
+      } else {
+        // 上游明确不可用：卡片从「解析中」变成「暂时不可用」，线路不消失。
+        _markLine(line.id, status: 'error');
+      }
+    } catch (_) {
+      // 网络抖动：保持 pending，用户点的时候还能再试一次。
+    }
+  }
+
+  /// 用户点 pending / 暂不可用的线路：现场解析，期间播放器显示「正在解析 X」。
+  /// 成功正常播放并刷新选集；失败提示「该线路暂时不可用」，留在原线路不切走。
+  Future<void> _resolveThenPlay(LineInfo line) async {
+    if (!mounted) return;
+    if (!_resolvingLines.add(line.id)) return;
+    final player = _playerKey.currentState;
+    player?.showResolving('正在解析 ${line.displayName}');
+    try {
+      final r = await Api.resolveLine(widget.id, line.id);
+      if (!mounted) return;
+      if ('${r['status']}' != 'ready') {
+        player?.clearResolving();
+        fxToast(context, '该线路暂时不可用');
+        _markLine(line.id, status: 'error');
+        return;
+      }
+      // 成功：先把状态和集名落到本地，再拉一次详情按服务端集数刷新选集区。
+      _markLine(line.id, status: 'ready', epNames: _epNamesOf(r['epnames']));
+      await _refreshLines(force: true);
+      if (!mounted) return;
+      player?.clearResolving();
+      LineInfo? target;
+      for (final l in _detail?.lines ?? const <LineInfo>[]) {
+        if (l.id == line.id) {
+          target = l;
+          break;
+        }
+      }
+      if (target == null) {
+        fxToast(context, '该线路暂时不可用');
+        return;
+      }
+      // 走正常切换路径（此时 status=ready，不会再进解析分支）。
+      _selectLine(target);
+    } catch (_) {
+      player?.clearResolving();
+      if (mounted) fxToast(context, '该线路暂时不可用');
+    } finally {
+      _resolvingLines.remove(line.id);
+    }
+  }
+
+  /// 只改一条线路的 status / 集名，线路顺序和播放器实例都不动。
+  void _markLine(String id, {required String status, List<String>? epNames}) {
+    final d = _detail;
+    if (d == null) return;
+    final lines = <LineInfo>[
+      for (final l in d.lines)
+        l.id == id ? l.copyWith(status: status, epNames: epNames) : l,
+    ];
+    setState(() => _detail = d.copyWith(lines: lines));
+  }
+
+  List<String> _epNamesOf(Object? v) {
+    if (v is! List) return const <String>[];
+    return <String>[for (final e in v) '$e'];
   }
 
   /// `related` 只是 id 数组：按 id 补卡片，最多补 8 个。
@@ -638,6 +745,12 @@ class _DetailPageState extends State<DetailPage>
     // 当前切换一结束就立刻执行，最多 12 秒僵死也会强制接管。
     // 之前这里直接 return，用户会觉得「点了没反应」。
     if (line.id == _lineId && !_playerSwitchingLine) return;
+    // PLATFORM_PENDING：还没解析完（或上游暂不可用）的平台线，先现场解析。
+    // 解析期间留在原线路继续播，播放器上显示「正在解析 X」。
+    if (fxIsPlatformLine(line) && (line.linePending || line.lineUnavailable)) {
+      unawaited(_resolveThenPlay(line));
+      return;
+    }
     _stableTimer?.cancel();
     // 用户手动选线路视为重新开始，允许重试这一条。
     _failedLines.remove(line.id);
@@ -1288,13 +1401,22 @@ class _DetailPageState extends State<DetailPage>
                         // 电影显示它自己的版本名（正片/粤语/国语），
                         // 其它分类一律显示「共 N 集」。
                         subtitle: (() {
+                          // PLATFORM_PENDING：平台线永远占位。
+                          // 还没解析完显示「解析中」，上游不可用显示「暂时不可用」；
+                          // 绝不因为没解析完就藏掉这条线。
+                          if (line.linePending) return '解析中';
+                          if (line.lineUnavailable) return '暂时不可用';
                           final names = line.epNames;
                           final n = names.isNotEmpty ? names.length : total;
                           if (_isMovie) {
                             final first = names.isNotEmpty
                                 ? names.first.trim()
                                 : '';
-                            return first.isNotEmpty ? first : '正片';
+                            // 平台线解析回来的集名是「第N集」，电影不能这么显示
+                            final shown = first.isEmpty || _epNumOnly.hasMatch(first)
+                                ? '正片'
+                                : first;
+                            return shown;
                           }
                           return n > 0 ? '共 $n 集' : null;
                         })(),

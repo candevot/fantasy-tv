@@ -553,6 +553,14 @@ class LineInfo {
   /// 点进去就播不出来。现在按线路显示该线路真实的集。
   final List<String> epNames;
 
+  /// 服务端平台线路的解析状态（PLATFORM_PENDING）：
+  ///   · `ready`   已解析，能播
+  ///   · `pending` 还没解析完（服务端在后台补），线路照常显示
+  ///   · `error`   上游明确不可用，线路保留、点一下可重新解析
+  ///
+  /// 采集线路没有这个字段，默认 `ready`。
+  final String status;
+
   LineInfo(
     this.id,
     this.name,
@@ -563,7 +571,28 @@ class LineInfo {
     this.degraded = false,
     this.healthRate = 0,
     this.epNames = const <String>[],
+    this.status = 'ready',
   });
+
+  /// 线路还在后台解析：卡片显示「解析中」，点了现场触发解析。
+  bool get linePending => status.trim().toLowerCase() == 'pending';
+
+  /// 上游明确不可用：线路不隐藏，点一下重试解析。
+  bool get lineUnavailable => status.trim().toLowerCase() == 'error';
+
+  /// 只改状态 / 集名，保留线路身份（解析成功后原地刷新卡片）。
+  LineInfo copyWith({String? status, List<String>? epNames}) => LineInfo(
+        id,
+        name,
+        type,
+        priority,
+        source: source,
+        from: from,
+        degraded: degraded,
+        healthRate: healthRate,
+        epNames: epNames ?? this.epNames,
+        status: status ?? this.status,
+      );
 
   factory LineInfo.fromJson(Map<String, dynamic> j) {
     final health = j['health'];
@@ -578,6 +607,7 @@ class LineInfo {
       degraded: j['degraded'] == true,
       healthRate: rate.toDouble(),
       epNames: _asStrList(j['epnames']),
+      status: _asStr(j['status'], fallback: 'ready'),
     );
   }
 

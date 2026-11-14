@@ -131,6 +131,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   bool _loading = true;
   bool _error = false;
   String _errorText = '';
+
+  /// PLATFORM_PENDING：详情页正在现场解析某条平台线路时显示在画面上的提示。
+  /// 只盖一层提示，不打断当前播放、不改播放器状态机。
+  String _resolvingText = '';
   bool _sourceFailNotified = false;
   bool _ended = false;
 
@@ -1423,6 +1427,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     });
   }
 
+  /// PLATFORM_PENDING：用户点了一条还在解析的平台线路，画面上给个明确提示
+  /// （「正在解析 幻想爱奇艺」），原线路继续播，解析完再切。
+  void showResolving(String text) {
+    if (!mounted || text.isEmpty) return;
+    setState(() => _resolvingText = text);
+  }
+
+  /// 解析结束（成功或失败）都收起提示；失败时由详情页弹 toast。
+  void clearResolving() {
+    if (!mounted || _resolvingText.isEmpty) return;
+    setState(() => _resolvingText = '');
+  }
+
   // ---------------------------------------------------------------- controls
 
   void _showControls() {
@@ -1720,6 +1737,39 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             // 播放器实例还没建出来（首个 open 之前）：只有状态位可看。
             if (c == null && _loading && !_error && !_suppressLoading)
               Positioned.fill(child: _buildLoading()),
+            // PLATFORM_PENDING：平台线现场解析提示（盖在画面之上、控件之下）。
+            if (_resolvingText.isNotEmpty)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(
+                    color: Colors.black.withValues(alpha: .55),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white70,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            _resolvingText,
+                            style: const TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             // 控件层压在 loading / 缓冲之上：切集 8s 窗口里也能退出全屏。
             // 只按控件显隐禁用指针，不因 loading 整层失效。
             if (_controls && !_error) _buildControls(c),

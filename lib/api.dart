@@ -401,6 +401,22 @@ class Api {
     return VideoDetail.fromJson(d);
   }
 
+  /// `GET /api/line/resolve` — 现场解析一条平台线路（PLATFORM_PENDING）。
+  ///
+  /// 服务端 15 秒超时，这里放到 20 秒，避免客户端先掐断一个马上就能返回的解析。
+  /// 返回 `{status:'ready', count:N, epnames:[...]}` 或 `{status:'error', msg}`。
+  static Future<Map<String, dynamic>> resolveLine(String id, String line) async {
+    try {
+      final r = await http
+          .get(_u('/line/resolve', {'id': id, 'line': line}),
+              headers: _headers())
+          .timeout(const Duration(seconds: 20));
+      return _decode(r);
+    } on TimeoutException {
+      return <String, dynamic>{'status': 'error', 'msg': '解析超时'};
+    }
+  }
+
   static Future<PlayInfo> play(
     String id,
     int ep,
