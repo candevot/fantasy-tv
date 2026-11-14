@@ -444,8 +444,17 @@ class _DetailPageState extends State<DetailPage>
   bool get _isMovie {
     final d = _detail;
     if (d == null) return false;
-    // VideoDetail 没有 type 字段，只有 category（服务端已把类型归一成中文）
-    return d.category.contains('电影');
+    // MOVIE_BY_COUNT（2026-11-14）：不能只靠分类。
+    // 服务端把不少电影归到了「动漫」「动作」这类分类里（例：《蜘蛛侠》被
+    // 归成动漫、65 集），只看 category 会把电影当成剧集显示集数。
+    // 集数 ≤ 1 的记录一律按电影处理：不显示「共N集 / 更新至N集」。
+    if (d.category.contains('电影')) return true;
+    final n = d.episodes;
+    if (n <= 1) return true;
+    // 各线路自己都只有 1 条（正片/国语/粤语这种版本）也算电影
+    final allOne = d.lines.isNotEmpty &&
+        d.lines.every((l) => l.epNames.isEmpty || l.epNames.length <= 1);
+    return allOne;
   }
 
   String get _statusText {
