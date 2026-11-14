@@ -24,18 +24,22 @@ class Api {
   static const String _domainBase =
       String.fromEnvironment('API_BASE', defaultValue: '');
 
-  /// 老服务器 IP 兜底。
-  static const String _ipBase = 'http://47.96.0.112:8787/api';
+  /// 主服务器（佛山，2026-11-14 迁移）。
+  static const String _ipBase = 'http://125.94.244.87:8787/api';
+
+  /// 旧服务器：迁移后保留一段时间做兜底，新机不可达时还能回落。
+  static const String _legacyBase = 'http://47.96.0.112:8787/api';
 
   static String base = _domainBase.isNotEmpty ? _domainBase : _ipBase;
   static String wsBase = _domainBase.isNotEmpty
       ? _domainBase.replaceFirst('http', 'ws').replaceFirst('/api', '/ws/together')
-      : 'ws://47.96.0.112:8787/ws/together';
+      : 'ws://125.94.244.87:8787/ws/together';
 
   /// 可选的服务地址（按优先级）。
   static List<String> get _candidates => <String>[
         if (_domainBase.isNotEmpty) _domainBase,
         _ipBase,
+        _legacyBase,
       ];
 
   /// 探测可用地址并切换。返回最终使用的地址。
