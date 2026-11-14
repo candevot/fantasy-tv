@@ -325,6 +325,20 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     @Volatile
     private var manifestProxied = false
 
+    /** 拖动开始时刻（nanoTime）：0 = 当前没有待量的 seek。 */
+    @Volatile
+    private var seekStartedNanos = 0L
+
+    /**
+     * 上一次拖动到出画用了多少毫秒（-1 = 还没拖过）。
+     *
+     * 目标：拖动响应 ≤ 500ms 出画面。起播分段计时量不到这一档，但用户
+     * 「拖动半天不出画面」的体感和起播慢是同一类问题，所以单独记一笔：
+     * `adb logcat -s FxTiming` 会打 `seek_first_frame out=XXXms`。
+     */
+    @Volatile
+    private var lastSeekOutMs = -1L
+
     fun attach(messenger: BinaryMessenger) {
         MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler(this)
         EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(this)
@@ -437,6 +451,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 // FIRST_FRAME：拖动后旧帧已经作废，加载层要重新压住，
                 // 等 onRenderedFirstFrame 再放开（否则就是「缓冲没了但黑屏」）。
                 firstFrameRendered = false
+                // TIMING_PROBE：拖动计时起点（下一次首帧就是「出画面」）。
+                seekStartedNanos = System.nanoTime()
                 Log.i(LOG_TAG, "SEEK ${ms}ms，首帧标记重置")
                 player?.seekTo(ms)
                 // 预取改道：代际 +1，旧任务立刻作废，从目标分片往后灌（改动 ②）。
@@ -852,6 +868,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                     retryReason = ""
                 }
                 Log.i(LOG_TAG, "FIRST_FRAME 已渲染，pos=${player?.currentPosition}ms")
+                // TIMING_PROBE：拖动出画面（目标 ≤500ms）。和起播分开记，
+                // 免得一次拖动把起播时间线搅乱。
+                if (seekStartedNanos > 0L) {
+                    val out = (System.nanoTime() - seekStartedNanos) / 1_000_000L
+                    seekStartedNanos = 0L
+                    lastSeekOutMs = out
+                    Log.i(LOG_TAG, "t=${FxTiming.elapsedMs()}ms seek_first_frame out=${out}ms")
+                }
                 // TIMING_PROBE：首帧 = 用户真正「看到画面」的时刻，起播计时到这里收尾。
                 FxTiming.mark("first_frame")
                 // CONNECTS（TRANSPORT_OKHTTP，2026-11-15）：起播这一段一共建了
@@ -961,6 +985,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "measuredKbps" to PlayerHttp.measuredKbps(),
             "playerManifestMs" to playerManifestLoadMs,
             "manifestProxied" to manifestProxied,
+            // 拖动响应：上一次 seek → 出画面（≤500ms 是目标）。
+            "seekOutMs" to lastSeekOutMs,
             // TIMING_PROBE：分段耗时（相对「用户点播放」）。
             "timing" to FxTiming.summary(),
             // 传输层诊断摘要：DNS 命中 / 本地清单代理统计，方便用户截图反馈。
