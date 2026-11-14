@@ -337,6 +337,10 @@ class FxPlayer implements Listenable {
   /// 内核状态轮询（事件通道的兜底）。
   Timer? _pollTimer;
 
+  /// 失败时是否自动切到下一条线路。默认关闭：自动换线会把用户选中的
+  /// 线路顶掉（用户报「自动跳线路、切回去也放不了」）。
+  static const bool _autoSwitchLine = false;
+
   /// 本次 open 的类型提示（来自服务端的 type 字段）。
   bool? _typeHint;
   DateTime _lastFlowAt = DateTime.now();
@@ -1225,8 +1229,14 @@ class FxPlayer implements Listenable {
         if (ok) return;
       }
 
-      // ③ 换下一条线路 seek 回原进度
-      final switcher = _lineRescue;
+      // ③ 换下一条线路 —— AUTO_SWITCH_OFF（2026-11-14）：默认关闭。
+      //
+      // 用户明确报「有时候自动跳线路，手动切回去也播放不了」：
+      // 自动换线会把用户选中的线路顶掉，换到一条更差的线路上，
+      // 再切回去时播放器还在上一轮救援的状态里，于是也放不出来。
+      // 线路交给用户自己选。①②（换签名 / 同址重开）仍然保留，
+      // 这两步不改线路，救得回来就不会打断观看。
+      final switcher = _autoSwitchLine ? _lineRescue : null;
       if (switcher == null) {
         _logFx('RESCUE ③-next-line 跳过：页面未提供换线 hook');
       } else if (!_disposed && gen == _rescueGen) {
