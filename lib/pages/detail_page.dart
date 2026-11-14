@@ -216,11 +216,17 @@ class _DetailPageState extends State<DetailPage>
         ep = eps.first.n;
       }
 
+      // NO_LINES（2026-11-15）：这条记录一条线路都没有（热播榜脚本只写了
+      // vod_hits，有些记录的 vod_play_url 是空的）。播放器拿不到线路就什么
+      // 都开不了，所以这里直接把原因说清楚，而不是留一个黑框。
+      if (lines.isEmpty) {
+        fxToast(context, '这部片暂无可播放地址，换一部试试');
+      }
       setState(() {
         _detail = d;
         _lineId = lineId;
         _ep = ep;
-        _error = null;
+        _error = lines.isEmpty ? '这部片暂无可播放地址' : null;
         // 从历史 / 播放器带集数进来时，选集条要切到能看见这一集的分组，
         // 才能高亮并滚动到对应集数。
         _groupIndex = _groupIndexOf(_episodeGroups, ep);

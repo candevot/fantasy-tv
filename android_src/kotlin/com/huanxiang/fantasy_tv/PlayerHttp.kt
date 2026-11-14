@@ -231,6 +231,45 @@ object PlayerHttp {
         url.startsWith("http://") || url.startsWith("https://")
 
     /**
+     * 能不能交给播放器（URL_GUARD 2026-11-15）。
+     *
+     * 只放行三类：http(s)、file:、以及 content:（下载好的本地文件）。
+     * 空串、`about:blank`、`javascript:`、相对路径这些一旦交给
+     * `setMediaSource`，media3 会抛 IllegalArgumentException —— 那条路径在主
+     * 线程上，未捕获就是闪退。所以在 [ExoPlayerPlugin] 的 open 入口先挡掉。
+     */
+    fun isPlayableUrl(url: String): Boolean {
+        val text = url.trim()
+        if (text.isEmpty()) return false
+        val lower = text.lowercase()
+        if (lower.startsWith("http://") || lower.startsWith("https://")) {
+            // 至少要有个主机名，否则 OkHttp 的 Request.Builder().url 会抛。
+            val host = try {
+                Uri.parse(text).host
+            } catch (_: Throwable) {
+                null
+            }
+            return !host.isNullOrEmpty()
+        }
+        return lower.startsWith("file://") ||
+            lower.startsWith("/") ||
+            lower.startsWith("content://")
+    }
+
+    /**
+     * 预热：在主线程把 client（含 trust-all 的 SSLContext）建出来。
+     *
+     * 为什么必须显式做：`client` 是 by lazy，第一次访问它的可能是
+     * FxManifest / PreloaderHls / OkHttp 回调线程。把它们变成「第一次初始化
+     * TLS」的现场，等于把最容易抛异常的初始化放到最没人兜的线程上。
+     */
+    fun warmUp() {
+        // 触发 lazy 初始化；顺带把 socketFactory 也建好。
+        client
+        trustAllFactory()
+    }
+
+    /**
      * 清单预归并（MANIFEST_MERGE，2026-11-15）：master → 第一个 variant。
      *
      * 为什么要做：master 清单本身不可播，播放器必须先拉 master、解析、再拉

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
+import '../services/search_rank.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/exo_player.dart';
@@ -1341,6 +1342,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _showControls();
   }
 
+  /// 本次播放页已经记过的最小集合（避免每帧写一次）。
+  final Set<String> _learnedResKeys = <String>{};
+
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
@@ -1349,6 +1353,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // NEXT_EPISODE_PRELOAD（改动 ⑥）：首帧 + 稳定播放 3 秒触发一次。
     // 放在 loading / 全屏的早退**之前**：全屏观影时也要把下一集预载好。
     if (!_loading && !_error) _maybePreloadNextNative();
+    // RES_LEARNED（2026-11-15）：播放器拿到真实宽高就记一条
+    // `sourceKey|线路名|vodId → 实际高度`，下次搜索排序直接用真实分辨率
+    // 覆盖线路名推断（第三层）。
+    _rememberRealResolution(c.value);
     // 全屏期间由全屏页接管同一个播放器的事件（切集 / 结束 / 报错）；
     // loading 期间的错误由 _bootstrap 的 try/catch 处理。
     if (_fullscreenActive || _loading || _error) return;
@@ -1368,6 +1376,30 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (_ended) return;
     _ended = true;
     unawaited(_handleEnded());
+  }
+
+  /// 记一次真实分辨率（同一集只记一次，尺寸没变就不重复写盘）。
+  void _rememberRealResolution(FxPlayerValue v) {
+    // FxPlayerValue.width / height 是可空的（还没拿到 size 时为 null）。
+    final width = v.width;
+    final height = v.height;
+    if (width == null || height == null || width <= 0 || height <= 0) return;
+    final line = _line;
+    if (line.isEmpty) return;
+    final key = '${widget.videoId}|$line|$width|$height';
+    if (_learnedResKeys.contains(key)) return;
+    _learnedResKeys.add(key);
+    final id = widget.videoId;
+    final marked = id.startsWith('@src:');
+    final source = marked ? id.substring(5).split('::').first : '';
+    final vodId = marked ? id.split('::').last : id;
+    unawaited(LearnedResolution.remember(
+      sourceKey: source,
+      lineName: line,
+      vodId: vodId,
+      width: width,
+      height: height,
+    ));
   }
 
   Future<void> _handleEnded() async {

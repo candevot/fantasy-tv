@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../api.dart';
 import '../models.dart';
 import 'cms_source.dart';
+import 'search_rank.dart';
 
 /// 苹果CMS（maccms10）数据层 —— CMS_LAYER（2026-11-14 第一阶段）。
 ///
@@ -167,19 +168,8 @@ class CmsApi {
     String sort = '',
   }) async {
     try {
-      final body = await _vod(<String, String>{
-        'ac': 'detail',
-        if (type > 0) 't': '$type',
-        'pg': '$page',
-        // HOT_ORDER（2026-11-15）：服务端 `order=` 已经修好且真生效
-        // （实测 `order=vod_hits` 是严格递减），所以热播行必须把 `order`
-        // 和 `by=desc` 一起带上 —— 只带 order 时后台按升序给「最冷」的那批。
-        if (sort.isNotEmpty) ...<String, String>{
-          'order': _orderOf(sort),
-          'by': 'desc',
-        },
-      });
-      return <VideoCard>[for (final vod in _items(body)) cardOf(vod)];
+      final vods = await listVod(type: type, page: page, sort: sort);
+      return <VideoCard>[for (final vod in vods) cardOf(vod)];
     } catch (e) {
       final original = e;
       if (fallback) {
@@ -195,6 +185,44 @@ class CmsApi {
       }
       throw original;
     }
+  }
+
+  /// 列表原始记录（不转模型）。
+  ///
+  /// HOME_PLAYABLE（2026-11-15）：首页要按「有没有播放地址」过滤 —— 热播榜
+  /// 只写了 `vod_hits`，然后按 `order=vod_hits` 排到首页第一条的那些记录里，
+  /// 有一部分 `vod_play_url` 是空的（或只有 `about:blank` 占位）。这种片子
+  /// 点进去没有线路、播放器拿不到地址，用户看到的就是「点开什么都不出来」。
+  /// 过滤要在转模型之前做，所以这里把原始记录露出来。
+  static Future<List<Map<String, dynamic>>> listVod({
+    int type = 0,
+    int page = 1,
+    String sort = '',
+  }) async {
+    final body = await _vod(<String, String>{
+      'ac': 'detail',
+      if (type > 0) 't': '$type',
+      'pg': '$page',
+      // HOT_ORDER（2026-11-15）：服务端 `order=` 已经修好且真生效
+      // （实测 `order=vod_hits` 是严格递减），所以热播行必须把 `order`
+      // 和 `by=desc` 一起带上 —— 只带 order 时后台按升序给「最冷」的那批。
+      if (sort.isNotEmpty) ...<String, String>{
+        'order': _orderOf(sort),
+        'by': 'desc',
+      },
+    });
+    return _items(body);
+  }
+
+  /// 这条记录有没有**真正能播**的地址（至少一集不是空 / 不是占位）。
+  ///
+  /// 判据和 parseLines 一致：`vod_play_url` 按 `$$$` 切线路、按 `#` 切集，
+  /// 任何一段解析出地址就算可播。
+  static bool hasPlayUrl(Map<String, dynamic> vod) {
+    for (final block in splitRaw(_str(vod['vod_play_url']), kLineSep)) {
+      if (epPairs(block).isNotEmpty) return true;
+    }
+    return false;
   }
 
   /// 分类列表（首页横向卡片行 / 分类页用的入口）：`categoryList(typeId, page)`。
@@ -351,8 +379,21 @@ class CmsApi {
   /* ------------------------------------------------------------ 转换 */
 
   /// 一条 CMS 记录 → [VideoCard]。
-  static VideoCard cardOf(Map<String, dynamic> vod) =>
-      VideoCard.fromJson(cardJson(vod));
+  ///
+  /// SEARCH_RANK（2026-11-15）：顺手把这条记录的「最高分辨率 / 线路数 / 分数」
+  /// 记进记分表。主站采集库、云端线路切片、外部 CMS 源、肥猫的 jar 源
+  /// **全部走这个入口**，所以一套规则天然覆盖所有来源。
+  static VideoCard cardOf(Map<String, dynamic> vod) {
+    final card = VideoCard.fromJson(cardJson(vod));
+    SearchRank.record(
+      card,
+      playFrom: _str(vod['vod_play_from']),
+      playUrl: _str(vod['vod_play_url']),
+      extraQuality: _str(vod['vod_quality'] ?? vod['quality']),
+      vodId: _str(vod['vod_id']),
+    );
+    return card;
+  }
 
   /// CMS 记录 → **老接口形状**的卡片 JSON（`VideoCard.fromJson` 直接吃）。
   static Map<String, dynamic> cardJson(Map<String, dynamic> vod) {

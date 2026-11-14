@@ -5,6 +5,7 @@ import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
 import 'jar_spider.dart';
+import 'search_rank.dart';
 import 'source_hub.dart';
 
 /// CMS 数据层 ↔ 现有 UI 的接线层（CMS_WIRING，2026-11-14）。
@@ -192,11 +193,23 @@ class CmsBridge {
   /// 之前按 `vod_time` 拉，首页展示的其实是「最近入库」，用户看到的当然
   /// 不是热播剧。
   static Future<List<VideoCard>> _row(int typeId) async {
-    final list = _withoutLive(
-      await CmsApi.list(type: typeId, page: 1, sort: 'hot'),
-    );
-    _markAll(list, _Origin.cms);
-    return list;
+    // HOME_PLAYABLE（2026-11-15）：**没有播放地址的记录不进首页**。
+    // 热播榜只写 `vod_hits`，按它排出来的第一批里混着 `vod_play_url` 为空 /
+    // 只有占位的记录 —— 点进去必然没有线路，用户看到的是「点开播不了」。
+    // 这里在转模型之前就滤掉，宁可少一条卡片，也不给一条点不开的。
+    final vods = await CmsApi.listVod(type: typeId, page: 1, sort: 'hot');
+    final list = <VideoCard>[];
+    for (final vod in vods) {
+      if (!CmsApi.hasPlayUrl(vod)) continue;
+      try {
+        list.add(CmsApi.cardOf(vod));
+      } catch (_) {
+        // 单条坏数据不影响整行。
+      }
+    }
+    final clean = _withoutLive(list);
+    _markAll(clean, _Origin.cms);
+    return clean;
   }
 
   /// 取一行；失败返回 null（首页按「这一行没有」处理，不影响其它行），
@@ -424,6 +437,28 @@ class CmsBridge {
     return out;
   }
 
+  /// 主站按线路切片的内置源（SEARCH_WAVES 2026-11-15）。
+  ///
+  /// 为什么要单独发这几路：用户反馈「搜索不慢慢加载，壳是一个源一个源出来」。
+  /// 采集库那一次 `wd=` 搜索实测 3.5~4.2 秒（服务端全库 LIKE），如果只等它，
+  /// 页面上就是「转 4 秒 → 一坨全出来」。而按线路切片查同一个关键词，
+  /// 幻想爱奇艺约 0.6 秒就有结果，其余 3.5~3.8 秒陆续回来 —— 首批早到，
+  /// 后面几批陆续追加，观感和壳一致。
+  ///
+  /// 云端的 `cloud_sources` 里通常也有这几条（key 带 api 里的 `?line=`），
+  /// 这里按 api 去重，不会查两遍。
+  static const List<(String, String)> _linePresets = <(String, String)>[
+    ('幻想4K', '幻想4K'),
+    ('幻想蓝光', '幻想蓝光'),
+    ('幻想爱奇艺', '幻想爱奇艺'),
+    ('量子', '量子'),
+    ('红牛', '红牛'),
+  ];
+
+  /// 内置线路切片的地址：`…/api.php/provide/vod/?line=幻想4K`。
+  static String _lineApi(String line) =>
+      '${CmsApi.root}${CmsApi.vodPath}?line=${Uri.encodeQueryComponent(line)}';
+
   /// 主站采集库（本地 CMS）：失败不抛，交给上层按「这个源没结果」处理。
   static Future<List<VideoCard>> _primarySearch(String q, int page) async {
     try {
@@ -470,6 +505,9 @@ class CmsBridge {
     var closed = false;
     Object? primaryFailure;
 
+    /// 主站第一页给了多少条（用来判断要不要补第二页那一波）。
+    var firstPageCount = 0;
+
     /// 收尾：把「查完了」这一批发出去并关流。
     ///
     /// **必须幂等、必须一定被执行**（STREAM_TERMINATE 2026-11-15）。
@@ -506,9 +544,12 @@ class CmsBridge {
         kept.add(card);
       }
       emitted += kept.length;
+      // SEARCH_RANK：每一批都按「分辨率优先」排好再交给页面 —— 先到的一批
+      // 也已经是正确顺序，不会出现「低画质先占位、高画质后到被压在下面」。
+      final ranked = SearchRank.sort(kept);
       ctrl.add(
         SearchBatch(
-          items: kept,
+          items: ranked,
           external: external,
           done: done,
           total: total,
@@ -534,21 +575,68 @@ class CmsBridge {
       await hub.ensureJarStatus();
       if (closed) return;
       final plan = hub.searchPlan;
-      total = plan.total;
+      // 分母：主站 1 + 内置线路切片 + 云端源 + 外部源。
+      final ownApis = <String>{
+        for (final source in plan.own) source.api.trim(),
+      };
+      final lineQueries = <(String, String)>[
+        for (final preset in _linePresets)
+          if (!ownApis.contains(_lineApi(preset.$2))) preset,
+      ];
+      // +1：第一页满页时还会追加「第二页」那一波。
+      total = 2 + lineQueries.length + plan.total;
       final tasks = <Future<void>>[];
 
       // 1. 本地 CMS：第一批发车，回来就渲染。
       tasks.add(() async {
         try {
           final list = _withoutLive(await CmsApi.search(q, page));
+          firstPageCount = list.length;
           _markAll(list, _Origin.cms);
+          done++;
           emit(list, external: false);
         } catch (e) {
           primaryFailure = e;
         }
       }());
 
-      // 2. 我们自己的线路（幻想 7 条）。
+      // 1b. 内置线路切片：谁先回来谁先上屏（幻想爱奇艺通常 0.6 秒）。
+      for (final preset in lineQueries) {
+        final label = preset.$1;
+        final api = _lineApi(preset.$2);
+        tasks.add(() async {
+          final cards = await SourceHub.instance
+              .searchPrepared(
+                KSource(
+                  key: 'line_${preset.$2}',
+                  name: label,
+                  api: api,
+                  kind: KSourceKind.cms,
+                  origin: KSourceOrigin.cloud,
+                ),
+                q,
+                page,
+              )
+              .catchError((Object _) => const <VideoCard>[]);
+          done++;
+          // 线路切片查的是**同一个主站**：id 还原成裸 vod_id，
+          // 否则卡片带着 `@src:line_xxx::` 前缀，点进详情会被当成外部源、
+          // 路由不到任何源 → 「没有找到这部影片」。
+          emit(
+            <VideoCard>[
+              for (final card in cards)
+                SourceHub.relabel(
+                  card,
+                  label: card.sourceLabel,
+                  id: SourceHub.rawIdOf(card.id),
+                ),
+            ],
+            external: false,
+          );
+        }());
+      }
+
+      // 2. 我们自己的线路（云端下发的幻想源）。
       for (final source in plan.own) {
         tasks.add(() async {
           final cards = await hub.searchPrepared(source, q, page);
@@ -567,6 +655,25 @@ class CmsBridge {
       }
 
       await Future.wait(tasks);
+      if (closed) return;
+      // SEARCH_WAVES（2026-11-15）：最后再加一波「第二页」。
+      //
+      // 单页满 20 条说明后面还有内容，把它取回来作为**独立的一批**追加，
+      // 用户会看到结果在第一批之后又长出一截（壳也是这么滚动的），
+      // 而不是「一坨到底、拉到底就没有了」。
+      final firstPageFull = firstPageCount >= _pageSize;
+      if (firstPageFull) {
+        try {
+          final more = _withoutLive(await CmsApi.search(q, page + 1));
+          if (more.isNotEmpty && !closed) {
+            _markAll(more, _Origin.cms);
+            done++;
+            emit(more, external: false);
+          }
+        } catch (_) {
+          // 第二页失败不影响第一批结果。
+        }
+      }
     }
 
     ctrl.onCancel = () {
@@ -970,6 +1077,9 @@ class CmsBridge {
     if (_booted) return;
     _booted = true;
     CmsApi.fallback = false;
+    // RES_LEARNED：把「播放器真正出过的分辨率」读回来（第三层缓存）。
+    // 读不到就是空表，排序退回线路名推断，不影响任何流程。
+    unawaited(LearnedResolution.load());
   }
 
   static final Map<String, _Origin> _origins = <String, _Origin>{};

@@ -128,6 +128,9 @@ jobs:
         run: |
           flutter test test/cms_lines_test.dart
           flutter test test/cms_source_test.dart
+      # SEARCH_RANK：搜索结果按「实际分辨率」跨源全局排序的回归。
+      - name: Search rank regressions
+        run: flutter test test/search_rank_test.dart
       - name: Build release APKs (split per ABI)
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"

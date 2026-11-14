@@ -298,6 +298,16 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     fun attach(messenger: BinaryMessenger) {
         MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler(this)
         EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(this)
+        // TRANSPORT_WARMUP（2026-11-15）：OkHttp client 的 lazy 初始化会建
+        // SSLContext（trust-all）。它第一次如果发生在后台线程（清单预归并的
+        // FxManifest、预取的 PreloaderHls），就把「第一次 TLS 初始化」放到了
+        // 一条没人兜异常的线程上。这里在主线程先热一次，之后所有线程只是读
+        // 一个已经建好的对象。
+        try {
+            PlayerHttp.warmUp()
+        } catch (error: Throwable) {
+            Log.w(LOG_TAG, "传输层预热失败：${error.javaClass.simpleName}")
+        }
     }
 
     fun dispose() {
@@ -332,13 +342,52 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     // ---------------- MethodChannel ----------------
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        // CRASH_GUARD（2026-11-15）：MethodChannel 的回调跑在**主线程**上，
+        // 这里任何未捕获的异常（IllegalArgumentException / IllegalStateException
+        // / NoClassDefFoundError）都会直接把进程带走 —— 用户看到的就是
+        // 「点播放 / 拖动进度条直接闪退」，而且 logcat 里只有一行
+        // AndroidRuntime: FATAL EXCEPTION: main，看不出是哪一家的锅。
+        // 现在兜住 Throwable，一律回 result.error，由 Dart 侧走救援链。
+        try {
+            handleMethod(call, result)
+        } catch (error: Throwable) {
+            Log.e(
+                LOG_TAG,
+                "通道方法 ${call.method} 异常：${error.javaClass.simpleName}: ${error.message}",
+                error,
+            )
+            try {
+                result.error(
+                    "plugin_error",
+                    error.message ?: error.javaClass.simpleName,
+                    null,
+                )
+            } catch (ignored: Throwable) {
+                // 已经回过话（重复 reply）时 result.error 会抛：忽略即可。
+            }
+        }
+    }
+
+    private fun handleMethod(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "init" -> {
                 ensurePlayer()
                 result.success(true)
             }
             "open" -> {
-                val url = call.argument<String>("url") ?: return result.error("bad_arg", "url 为空", null)
+                val url = (call.argument<String>("url") ?: "").trim()
+                // URL_GUARD（2026-11-15）：空串 / 非法的地址**绝不能**交给
+                // ExoPlayer。media3 在 setMediaSource 里对空 Uri 会抛
+                // IllegalArgumentException，而那条路径在主线程上 —— 又是一次
+                // 「点播放直接闪退」。这里提前拦掉，回一句可读的话。
+                if (url.isEmpty()) {
+                    result.error("bad_url", "这一集没有播放地址，换一条线路试试", null)
+                    return
+                }
+                if (!PlayerHttp.isPlayableUrl(url)) {
+                    result.error("bad_url", "播放地址不合法（$url），换一条线路试试", null)
+                    return
+                }
                 val headers = call.argument<Map<String, String>>("headers") ?: emptyMap()
                 val isHls = call.argument<Boolean>("isHls") ?: true
                 // RESUME_START：续播 / 跟进度打开时带起始位置，prepare 之前就落位。

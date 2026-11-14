@@ -168,6 +168,9 @@ def patch_main_activity():
     if is_kt:
         code = (
             '\n        %s\n'
+            '        // CRASH_LOG：未捕获异常写 logcat(FxCrash) 与 filesDir/crash.log，\n'
+            '        // 记录完照原样交还系统默认处理器（只记录、不吞异常）。\n'
+            '        FxCrash.install(this)\n'
             '        // ExoPlayer(Media3) 内核：画面走 PlatformView，控制权留在 Dart 侧\n'
             '        val exoPlugin = ExoPlayerPlugin(this)\n'
             '        exoPlugin.attach(flutterEngine.dartExecutor.binaryMessenger)\n'
@@ -182,6 +185,7 @@ def patch_main_activity():
     else:
         code = (
             '\n        %s\n'
+            '        FxCrash.INSTANCE.install(this);\n'
             '        ExoPlayerPlugin exoPlugin = new ExoPlayerPlugin(this);\n'
             '        exoPlugin.attach(flutterEngine.getDartExecutor().getBinaryMessenger());\n'
             '        ExoPluginHolder.INSTANCE.put(flutterEngine.getDartExecutor().getBinaryMessenger(), exoPlugin);\n'

@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
+import '../services/search_rank.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
@@ -51,6 +52,15 @@ class _SearchPageState extends State<SearchPage> {
 
   /// 骨架卡片是否已经铺出来（300ms 阈值）。
   bool _skeleton = false;
+
+  /// 全局排序后的结果（SEARCH_RANK）。
+  ///
+  /// 用户要求：「排序是全局排序，不是先我们的后肥猫的」。所以这里把
+  /// 我们自己的那批（主站采集库 + 幻想线路）和外部源（肥猫 jar / 自加）
+  /// **合起来**按「实际分辨率分 → 热度 → 更新时间」排一遍再渲染。
+  /// 每收到一批就重排一次，先到的一批也已经是正确顺序。
+  List<VideoCard> get _ranked =>
+      SearchRank.sort(<VideoCard>[..._results, ..._external]);
 
   /// 一轮搜索的兜底看门狗：16 秒还没收到「查完了」，强制收尾。
   ///
@@ -843,6 +853,7 @@ class _SearchPageState extends State<SearchPage> {
   Widget _resultsView() {
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     final ai = _mode == 'ai';
+    final ranked = _ranked;
     return Column(
       children: [
         _resultsHeader(),
@@ -851,29 +862,29 @@ class _SearchPageState extends State<SearchPage> {
             controller: _scroll,
             physics: const BouncingScrollPhysics(),
             slivers: [
-              // 我们自己那一批：主站采集库 + 幻想线路，永远排在最上面。
-              if (_results.isNotEmpty)
+              // 全局排序的单一列表（我们自己的源 + 外部源混排）。
+              if (ranked.isNotEmpty)
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
                   sliver: SliverList(
                     delegate: SliverChildBuilderDelegate(
                       (ctx, i) {
-                        final item = _results[i];
+                        final item = ranked[i];
                         return Padding(
                           // 行间 10dp 间距；最后一行交给底部留白，不拖一条空缝。
                           padding: EdgeInsets.only(
-                              bottom: i == _results.length - 1 ? 0 : 10),
+                              bottom: i == ranked.length - 1 ? 0 : 10),
                           child: FxSearchResultTile(
                             item: item,
                             onTap: () => _openResult(item),
                           ),
                         );
                       },
-                      childCount: _results.length,
+                      childCount: ranked.length,
                     ),
                   ),
                 ),
-              // 自己的还没全回来：骨架补在下面，表示「还在查」。
+              // 还没查完：骨架补在下面，表示「还在查」。
               if (_skeleton)
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
@@ -887,29 +898,6 @@ class _SearchPageState extends State<SearchPage> {
               // 不要让用户以为「外部源就是没有内容」。
               if (!ai && CmsBridge.sourceNotice.isNotEmpty)
                 SliverToBoxAdapter(child: _sourceNotice(CmsBridge.sourceNotice)),
-              // 外部源分区：通栏标题 + 陆续追加的结果（边到边）。
-              if (!ai && _external.isNotEmpty) ...[
-                SliverToBoxAdapter(child: _externalHeader()),
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-                  sliver: SliverList(
-                    delegate: SliverChildBuilderDelegate(
-                      (ctx, i) {
-                        final item = _external[i];
-                        return Padding(
-                          padding: EdgeInsets.only(
-                              bottom: i == _external.length - 1 ? 0 : 10),
-                          child: FxSearchResultTile(
-                            item: item,
-                            onTap: () => _openResult(item),
-                          ),
-                        );
-                      },
-                      childCount: _external.length,
-                    ),
-                  ),
-                ),
-              ],
               SliverToBoxAdapter(child: _footer(bottom)),
             ],
           ),
@@ -993,41 +981,6 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  /// 「外部源结果」分区头：整条通栏（边到边），和上面我们自己那批分开。
-  Widget _externalHeader() {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(top: 6, bottom: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
-      decoration: const BoxDecoration(
-        color: Color(0xFFF1F4FA),
-        border: Border(
-          top: BorderSide(color: Color(0xFFE3E9F2), width: .5),
-          bottom: BorderSide(color: Color(0xFFE3E9F2), width: .5),
-        ),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.hub_rounded, size: 14, color: Fx.accent2),
-          const SizedBox(width: 6),
-          const Text(
-            '外部源结果',
-            style: TextStyle(
-                fontSize: 12, fontWeight: FontWeight.w600, color: Fx.ink),
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              '肥猫 / 自加 · ${_external.length} 部',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11, color: Fx.sub),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
   Widget _footer(double keyboard) {
     if (_loadingMore) {
