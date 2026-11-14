@@ -547,6 +547,9 @@ class FxPlayer implements Listenable {
     _lastBufferedMs = -1;
     _lastSpeedAt = DateTime.now();
     _lastHandledError = '';
+    // 原生重试 token 以「本次 open 时的值」为基线：只有之后新增的重试
+    // 才会触发 Dart 侧重新 resolve（避免新实例上来就白跑一次 refreshPlay）。
+    _lastRetryResolveToken = _engine.state.value.retryResolveToken;
     _value = const FxPlayerValue();
     // 换集 / 换源：上一集的清单索引作废（不同集的时长和分片完全不同）。
     _segmentIndex = null;
@@ -817,6 +820,12 @@ class FxPlayer implements Listenable {
   /// 内核真实播放状态，按钮图标以此为准。
   bool get isPlaying => _engine.state.value.playing;
 
+  /// 本实例是否已经释放。
+  ///
+  /// SWITCH_INSTANCE_REUSE（改动 ④）：播放页换集时用它判断「还能不能复用
+  /// 这个实例」—— 复用就不新建、也不 release 原生播放器。
+  bool get isDisposed => _disposed;
+
   /// 内核当前真实倍速；跨页面交接时以此为准，避免本地状态落后。
   ///
   /// ExoPlayer 的状态回包里没有倍速字段（我们不常用），所以自己记最近一次
@@ -1063,7 +1072,70 @@ class FxPlayer implements Listenable {
     if (err != null && err.isNotEmpty) {
       _onError(err);
     }
+    // LAYERED_RETRY（改动 ⑤）：原生第 1 档重试（IO/HTTP）会要求重新 resolve
+    // 播放地址 —— 原生拿不到 /api/play，只能由 Dart 换新地址再 open。
+    _syncNativeRetryResolve(st);
   }
+
+  /// 原生分层重试：token 变化 = 请 Dart 重新 resolve 播放地址。
+  ///
+  /// 起播阶段（还在 open 里）不插手：那条链本来就有 refreshPlay + 同地址
+  /// 重开的救援逻辑，两处同时重开会互相取代。这里只处理「已经在播」的情况。
+  void _syncNativeRetryResolve(ExoPlayerState st) {
+    final token = st.retryResolveToken;
+    if (token == _lastRetryResolveToken) return;
+    _lastRetryResolveToken = token;
+    if (token <= 0 || _opening != null || !_value.isInitialized) return;
+    unawaited(_reResolveAfterNativeRetry());
+  }
+
+  /// 原生 retry=1 reason=io：拿新签名地址按原进度重新 open。
+  ///
+  /// 原生在发这个请求的同时已经用**原地址**重开了一次兜底，所以这里失败
+  /// 也没关系（最多就是回到原地址重开的结果）。
+  Future<void> _reResolveAfterNativeRetry() async {
+    if (_disposed) return;
+    final refresher = _refreshPlay;
+    if (refresher == null) return;
+    final oldUrl = _sourceUrl;
+    if (oldUrl.isEmpty) return;
+    final gen = _rescueGen;
+    final token = _openToken;
+    _logFx('原生重试 retry=1 reason=io：重新 resolve 播放地址');
+    String? fresh;
+    try {
+      fresh = await _safeRefreshPlay(refresher);
+    } catch (_) {
+      fresh = null;
+    }
+    if (_disposed || gen != _rescueGen || token != _openToken) return;
+    final next = (fresh ?? '').trim();
+    if (next.isEmpty || next == oldUrl) {
+      _logFx('原生重试：没拿到新地址，沿用原地址（原生已用原地址重开）');
+      return;
+    }
+    final resume = _value.position;
+    try {
+      await _engine.open(
+        next,
+        headers: _sourceHeaders,
+        isHls: _typeHint ?? _looksLikeHls(next),
+        startPositionMs: resume.inMilliseconds,
+      );
+      if (_disposed || gen != _rescueGen || token != _openToken) return;
+      _sourceUrl = next;
+      _lastFlowAt = DateTime.now();
+      _logFx('原生重试：地址已刷新，从 ${resume.inSeconds}s 重新 open');
+    } catch (_) {
+      _logFx('原生重试：用新地址重开失败，交给原生兜底');
+    }
+  }
+
+  /// 原生分层重试的「重新 resolve 地址」请求号上一次的值（改动 ⑤）。
+  ///
+  /// 原生在 IO/HTTP 错误时会把它 +1；这里看到变化就去 refreshPlay 拿新地址，
+  /// 把「地址过期」这条真的修掉（原生自己只重开了原地址）。
+  int _lastRetryResolveToken = 0;
 
   /// 上一次采样：已缓冲毫秒数 + 采样时间，用来估算下载速度。
   int _lastBufferedMs = -1;

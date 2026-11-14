@@ -74,6 +74,42 @@ class ExoPlayerEngine {
     }
   }
 
+  /// 预载**下一集**的清单 + 前 2 个分片（改动 ⑥）。
+  ///
+  /// 原生走 CacheDataSource 把字节写进播放器同一份 SimpleCache（只写不读），
+  /// 换集时播放器的首批分片请求就是本地命中。原生入队即返回，失败静默。
+  ///
+  /// 为什么不在这里用 Dart 自己下：SimpleCache 按原生 [FxCacheKeyFactory]
+  /// 算出的 key 查，Dart 拉的字节播放器一个都命中不到（同 [prefetchSegment]）。
+  static Future<bool> preloadNextEpisode(
+    String url, {
+    Map<String, String> headers = const {},
+  }) async {
+    if (url.isEmpty || !isSupported) return false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('preloadNext', {
+        'url': url,
+        'headers': headers,
+      });
+      return r ?? false;
+    } catch (_) {
+      // 下一集预载失败不影响当前播放。
+      return false;
+    }
+  }
+
+  /// 取消上一轮下一集预载（换集 / 换线路时调用）。
+  ///
+  /// 原生 `open` 也会顺手取消一次，这里是给「只换集不 open」的边界兜底。
+  static Future<void> cancelNextPreload() async {
+    if (!isSupported) return;
+    try {
+      await _prefetchChannel.invokeMethod<void>('cancelPreload');
+    } catch (_) {
+      // 取消失败无副作用：下一轮预载会覆盖它。
+    }
+  }
+
   final MethodChannel _method;
   final EventChannel _event;
   StreamSubscription<dynamic>? _sub;
@@ -199,6 +235,9 @@ class ExoPlayerState {
     this.height = 0,
     this.ended = false,
     this.state = 1,
+    this.retryAttempt = 0,
+    this.retryReason = '',
+    this.retryResolveToken = 0,
   });
 
   final Duration position;
@@ -238,6 +277,22 @@ class ExoPlayerState {
   /// Media3 Player.STATE_* 原值：1=IDLE 2=BUFFERING 3=READY 4=ENDED。
   final int state;
 
+  /// 原生分层重试进度（改动 ⑤）：0 = 这次打开还没重试过。
+  ///
+  /// 同一集同一线路最多重试 2 次：第 1 次 IO/HTTP → 重新 resolve 地址；
+  /// 第 2 次解码错误 → 切解码模式（硬解 ↔ 软解）。重试期间原生**不**上报
+  /// error（否则救援链会立刻换线路，等于跳过分级重试）。
+  final int retryAttempt;
+
+  /// 最近一次重试原因：'' / 'io' / 'decode'。
+  final String retryReason;
+
+  /// 重新 resolve 播放地址的请求号：值变化 = 原生希望 Dart 拿新地址重开。
+  ///
+  /// 原生没法自己解析播放地址（那是 Dart 的 /api/play），所以 IO 类错误
+  /// 会把它 +1；Dart 侧看到变化就 refreshPlay 并把新地址交给原生。
+  final int retryResolveToken;
+
   factory ExoPlayerState.fromMap(Map<String, dynamic> m) {
     Duration d(String k) =>
         Duration(milliseconds: (m[k] as num?)?.toInt() ?? 0);
@@ -257,6 +312,9 @@ class ExoPlayerState {
       height: (m['height'] as num?)?.toInt() ?? 0,
       ended: m['ended'] == true,
       state: (m['state'] as num?)?.toInt() ?? 1,
+      retryAttempt: (m['retryAttempt'] as num?)?.toInt() ?? 0,
+      retryReason: (m['retryReason'] as String?) ?? '',
+      retryResolveToken: (m['retryResolveToken'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -278,7 +336,9 @@ class ExoPlayerState {
       'pre=${preloaded.inSeconds}s, '
       'playing=$playing, buffering=$buffering, '
       'firstFrame=$hasRenderedFirstFrame, ${width}x$height, '
-      'ended=$ended, state=$state, err=$error)';
+      'ended=$ended, state=$state, '
+      'retry=$retryAttempt/${retryReason.isEmpty ? '-' : retryReason}, '
+      'err=$error)';
 }
 
 /// 画面视图：把 Android 的 PlayerView 嵌进 Flutter。

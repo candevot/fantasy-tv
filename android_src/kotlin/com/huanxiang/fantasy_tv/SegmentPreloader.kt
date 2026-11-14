@@ -7,7 +7,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.SimpleCache
 import java.io.ByteArrayOutputStream
@@ -86,6 +86,10 @@ class SegmentPreloader(
     @Volatile
     private var requestHeaders: Map<String, String> = emptyMap()
 
+    /** 本次预取的清单地址：只用于生成兜底 Referer（取源站根）。 */
+    @Volatile
+    private var baseUrl: String = ""
+
     @Volatile
     private var released = false
 
@@ -110,6 +114,7 @@ class SegmentPreloader(
     fun start(playlistUrl: String, headers: Map<String, String>, startPositionMs: Long = 0L) {
         if (released || playlistUrl.isEmpty()) return
         requestHeaders = headers
+        baseUrl = playlistUrl
         val generationAtStart = nextGeneration()
         executor.execute {
             val list = loadSegments(playlistUrl, headers)
@@ -273,7 +278,7 @@ class SegmentPreloader(
     }
 
     private fun cacheDataSourceFactory(headers: Map<String, String>): DataSource.Factory {
-        val upstream = DefaultDataSource.Factory(context, httpFactory(headers))
+        val upstream = DefaultDataSource.Factory(context, httpFactory(baseUrl, headers))
         return CacheDataSource.Factory()
             .setCache(cache)
             .setUpstreamDataSourceFactory(upstream)
@@ -284,13 +289,18 @@ class SegmentPreloader(
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     }
 
-    private fun httpFactory(headers: Map<String, String>): DefaultHttpDataSource.Factory {
-        return DefaultHttpDataSource.Factory()
-            .setUserAgent(headers["User-Agent"] ?: "Mozilla/5.0")
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(30_000)
-            .setReadTimeoutMs(30_000)
-            .setDefaultRequestProperties(headers)
+    /**
+     * 传输层（TRANSPORT_OKHTTP，2026-11-15）：预取和播放共用同一个 OkHttpClient。
+     *
+     * 预取最怕的就是「自己单独一套连接」：预取刚把分片灌进缓存，播放器接着
+     * 请求同一台 CDN 时又要重新握手 —— 那就等于白省。共用 [PlayerHttp.client]
+     * 之后，预取的连接直接留在池子里给播放器复用。
+     *
+     * [baseUrl] 只用来生成兜底 Referer（取源站根），所以传清单地址或分片地址
+     * 都一样。
+     */
+    private fun httpFactory(url: String, headers: Map<String, String>): HttpDataSource.Factory {
+        return PlayerHttp.httpFactory(url, headers)
     }
 
     // ------------------------------------------------------------ 清单解析
@@ -308,7 +318,7 @@ class SegmentPreloader(
     }
 
     private fun fetchText(url: String, headers: Map<String, String>): String? {
-        val source = httpFactory(headers).createDataSource()
+        val source = httpFactory(url, headers).createDataSource()
         return try {
             source.open(DataSpec(Uri.parse(url)))
             val out = ByteArrayOutputStream()

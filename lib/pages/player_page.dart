@@ -8,6 +8,7 @@ import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
+import '../services/exo_player.dart';
 import '../services/fx_player.dart';
 import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
@@ -122,6 +123,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 正在 open 的新播放器：loading 浮层据此显示真实缓冲进度，
   /// 而不是复用旧 controller 的缓存百分比。
   FxPlayer? _loadingPlayer;
+
+  /// 已经触发过原生下一集预载的那一集（改动 ⑥）。
+  ///
+  /// 存集号而不是 bool：换集之后自然失效，回来重播同一集也不会重复预载。
+  int? _nativePreloadedEp;
 
   /// 缓存命中 + 已有上一帧快照时跳过 loading 浮层，直接 open。
   bool _suppressLoading = false;
@@ -1033,9 +1039,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final shouldPlay = playOverride ?? (widget.autoPlay && !_covered);
 
     var ok = false;
+    // SWITCH_INSTANCE_REUSE（改动 ④）：换集 / 换线路**复用同一个 FxPlayer**。
+    //
+    // 以前每次 open 都 `FxPlayer.create()`，成功后 `previous.dispose()`：
+    // 那个 dispose 会一路走到原生 `release` → `player.release()` + 缓存释放
+    // + 事件通道解绑。也就是说「刚起来的新一集」会在几百毫秒内被上一次的
+    // 实例拆掉重建，用户看到的就是换集卡一下、偶尔黑屏一下。
+    //
+    // 现在只有「第一次打开 / 上一个实例已经释放」才新建实例；换集只换源
+    // （原生走 stop + clearMediaItems + setMediaSource + prepare）。
+    final reusable =
+        (_controller != null && !_controller!.isDisposed) ? _controller : null;
     for (final url in candidates) {
       if (!mounted || token != _loadToken) return false;
-      final controller = FxPlayer.create();
+      final controller = reusable ?? FxPlayer.create();
       if (mounted) setState(() => _loadingPlayer = controller);
       try {
         // 8 秒拿不到可播状态就判这条地址失败，避免黑屏一直转圈。
@@ -1149,13 +1166,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           return false;
         }
         final previous = _controller;
-        previous?.removeListener(_onVideoValue);
+        // 复用实例时监听器已经在挂了，别 remove 掉（否则进度 / 首帧 / 结束
+        // 事件全部失联）。
+        if (!identical(previous, controller)) {
+          previous?.removeListener(_onVideoValue);
+        }
         _controller = controller;
         _ep = ep;
         if (commitLine) _line = line;
         _loadedEp = ep;
         controller.addListener(_onVideoValue);
-        unawaited(previous?.dispose());
+        // 只有真的换了实例才释放旧的：复用路径下「旧的就是它自己」。
+        if (!identical(previous, controller)) {
+          unawaited(previous?.dispose());
+        }
         setState(() {
           _loading = false;
           _suppressLoading = false;
@@ -1181,9 +1205,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 续播静默处理：直接停在上次位置，不弹「已跳到上次位置」提示。
         break;
       } catch (_) {
-        try {
-          controller.dispose();
-        } catch (_) {}
+        // 复用实例失败时**不能** dispose：原生那边还要靠它接着试下一个
+        // 候选地址（open 会自己重置状态）。只有本次新建的实例才回收。
+        if (!identical(controller, reusable)) {
+          try {
+            controller.dispose();
+          } catch (_) {}
+        }
       }
     }
 
@@ -1248,6 +1276,42 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _notifySourceFailed();
   }
 
+  /// 下一集预载（改动 ⑥）：首帧之后、播放稳定 3 秒触发一次。
+  ///
+  /// 只把「下一集的清单地址」交给原生：原生用 CacheDataSource 把清单 +
+  /// 前 2 个分片写进**播放器同一份**磁盘缓存（只写不读），换集时播放器的
+  /// 首批分片请求就是本地命中。三条约束都在原生侧：
+  ///   · 播放器 BUFFERING 时预载让路；
+  ///   · 换集 / 换线路时取消上一轮（原生 open 会取消）；
+  ///   · 失败静默，绝不影响当前播放。
+  void _maybePreloadNextNative() {
+    if (!mounted || !ExoPlayerEngine.isSupported) return;
+    final c = _controller;
+    final loaded = _loadedEp;
+    if (c == null || loaded == null || loaded != _ep) return;
+    // 每集只触发一次：失败也不重试（切集时照常回源，不差这一次）。
+    if (_nativePreloadedEp == _ep) return;
+    final v = c.value;
+    // 首帧 + 正在播 + 位置过了 3 秒 = 播放稳定，起播那几秒不抢带宽。
+    if (!v.hasRenderedFirstFrame || !v.isPlaying) return;
+    if (v.position < const Duration(seconds: 3)) return;
+    final next = _nextEpNumber();
+    if (next == null) return;
+    _nativePreloadedEp = _ep;
+    unawaited(() async {
+      try {
+        // 复用下一集预解析缓存（和 30 秒预热的 _maybePrewarmNext 同一份）。
+        final info = await FxPlayCache.resolve(widget.videoId, next, _line);
+        if (!mounted || _loading || _error || _ep != loaded) return;
+        final url = fxAbsolutePlayUrl(info.url);
+        if (url.isEmpty) return;
+        await ExoPlayerEngine.preloadNextEpisode(url, headers: info.headers);
+      } catch (_) {
+        // 预载失败静默：不打扰播放，也不弹提示。
+      }
+    }());
+  }
+
   void _notifySourceFailed() {
     if (_sourceFailNotified) return;
     _sourceFailNotified = true;
@@ -1282,6 +1346,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (c == null || !mounted) return;
     // 新流首帧就绪（宽高出现）后淡出切换快照；loading / error 期间不动。
     if (!_fullscreenActive) _maybeFadeFrozenFrame();
+    // NEXT_EPISODE_PRELOAD（改动 ⑥）：首帧 + 稳定播放 3 秒触发一次。
+    // 放在 loading / 全屏的早退**之前**：全屏观影时也要把下一集预载好。
+    if (!_loading && !_error) _maybePreloadNextNative();
     // 全屏期间由全屏页接管同一个播放器的事件（切集 / 结束 / 报错）；
     // loading 期间的错误由 _bootstrap 的 try/catch 处理。
     if (_fullscreenActive || _loading || _error) return;

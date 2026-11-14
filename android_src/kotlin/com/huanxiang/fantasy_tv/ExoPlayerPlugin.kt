@@ -18,7 +18,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
@@ -65,8 +64,11 @@ import io.flutter.plugin.platform.PlatformViewFactory
  *
  * 关键配置（ALIGN_FONGMI 2026-11-15：逐项对齐 FongMi/TV 的 ExoPlayer 取值）：
  *   · LoadControl 50s/50s/1s/2s + backBuffer 0（壳 media3 fork 的默认值）
- *   · connect / read 超时 30s，allowCrossProtocolRedirects = true
+ *   · 传输层走 OkHttp（TRANSPORT_OKHTTP，2026-11-15）：全 App 一个
+ *     OkHttpClient，HTTP/2 + 全局连接池 + trust-all + 兜底 UA，见 [PlayerHttp]；
+ *     connect / read 超时 30s 挂在 client 上，跟随 302 跨协议重定向
  *   · 不自定义 LoadErrorHandlingPolicy（壳跑 media3 默认 3 次重试）
+ *   · HLS 的 http 源先做一次清单预归并（master → variant，800ms 上限）
  *   · 播放路径只读缓存，落盘交给预取线程（壳 setCacheWriteDataSinkFactory(null)）
  *   · 预取在首帧之后才开灌、并从下一片起，播放缓冲时让路
  *   · seek 静音闸 1200ms，首帧回来恢复音量
@@ -120,9 +122,34 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
          * 抖一下、首片要等回源，8 秒就断，断掉之后 Dart 救援链换线路重来，
          * 用户看到的就是「明明能播却一直转圈」。死地址不再靠短超时兜，
          * 靠 media3 默认的 3 次重试 + onPlayerError 把错误交回 Dart。
+         *
+         * TRANSPORT_OKHTTP（2026-11-15）：这两个值现在**挂在 OkHttpClient 上**
+         * （[PlayerHttp.client]），DataSource.Factory 侧不再有对应开关；
+         * 常量留在这里是给日志 / 文档做单一取值来源，改超时只改 PlayerHttp。
          */
         const val HTTP_CONNECT_TIMEOUT_MS = 30_000
         const val HTTP_READ_TIMEOUT_MS = 30_000
+
+        /**
+         * 播放层分级重试上限（改动 ⑤）：同一集同一线路最多重试 2 次。
+         *
+         * 第 1 次：IO / HTTP 类错误 → 让 Dart 重新 resolve 地址 + 本地重开；
+         * 第 2 次：解码类错误 → 切换解码模式（硬解 ↔ 软解）再 prepare；
+         * 超过这次数才把错误交回 Dart，由救援链换线路。
+         *
+         * 为什么是 2 而不是 3：media3 内部对分片本身已经有 3 次退避重试，
+         * 真正冒到 onPlayerError 的，是「整条清单/首片都不行」这种级别，
+         * 再叠加两轮换地址 / 换解码器就够了，再多只是在拖时间。
+         */
+        const val MAX_LAYER_RETRIES = 2
+
+        /**
+         * 下一集预载的触发延时（改动 ⑥）：首帧之后、播放稳定 3 秒才开灌。
+         *
+         * 起播这 3 秒里播放器的缓冲 / 首个分片要独占带宽，抢在前面预载下一集
+         * 只会让首屏更慢。
+         */
+        const val NEXT_PRELOAD_STABLE_MS = 3_000L
     }
 
     private var player: ExoPlayer? = null
@@ -157,6 +184,53 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
 
     private var lastError: String? = null
 
+    // ------------------------------------------------ 下一集预载（改动 ⑥）
+
+    /// 下一集预载器（和播放器同一份 [mediaCache]，只写不读）。
+    private var nextPreloader: NextEpisodePreloader? = null
+
+    /// 已经预载过的下一集地址，避免同一集重复灌。
+    private var nextPreloadUrl = ""
+
+    // ------------------------------------------------ 分级重试（改动 ⑤）
+
+    /// 当前打开源的参数：重试要用同一份（url / headers / isHls）。
+    private class OpenedItem(
+        val url: String,
+        val headers: Map<String, String>,
+        val isHls: Boolean,
+    )
+
+    private var openedItem: OpenedItem? = null
+
+    /// 重试计数器的键（url|isHls）：换集 / 换线路换了地址就重新计数。
+    private var retryKey = ""
+
+    /// 已经重试过几次（只针对 [retryKey] 这一条）。
+    private var retryCount = 0
+
+    /// 最近一次重试原因："" / "io" / "decode"（快照字段，Dart 侧日志用）。
+    @Volatile
+    private var retryReason = ""
+
+    /**
+     * 重新 resolve 播放地址的请求号（快照字段）。
+     *
+     * 原生侧没法自己解析播放地址（那是 Dart 的 /api/play），所以第 1 次
+     * IO 重试时把它 +1：Dart 看到变化就拿新地址重新 open，地址过期这条
+     * 才算真的被修掉。原生同时用原地址重开一次兜底，两条路谁先到都算修复。
+     */
+    @Volatile
+    private var retryResolveToken = 0L
+
+    /// 出错前最后已知的播放位置：重开时从这里接着播，不回到片头。
+    @Volatile
+    private var lastKnownPositionMs = 0L
+
+    /// 是否已经切到「优先软解」的渲染器（改动 ⑦ 的落点）。
+    @Volatile
+    private var softDecoderPreferred = false
+
     /// 首页续播预取的单线程队列（并发 = 1，和 [SegmentPreloader] 同一策略）。
     ///
     /// 为什么不由 [SegmentPreloader] 代劳：那个预取器属于「当前播放的那个源」，
@@ -166,6 +240,22 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private val prefetchQueue: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "FxPrefetch").also { it.isDaemon = true }
     }
+
+    /// 清单预归并（MANIFEST_MERGE，2026-11-15）的串行队列。
+    ///
+    /// 为什么单独一条线程：`open()` 是在 MethodChannel 的主线程上调进来的，
+    /// 而归并要发一次网络请求（最多 800ms）。放主线程 = 起播先卡一次；
+    /// 放在这里跑完再 post 回主线程，播放器 API 仍然只在主线程调。
+    /// 单线程足够了 —— 归并只在 open 时发生，用户换线路也不会撞在一起。
+    private val manifestQueue: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "FxManifest").also { it.isDaemon = true }
+    }
+
+    /// 当前 open 的代际号（只在主线程读写）。
+    ///
+    /// 归并是异步的：A 地址的归并还没回来，用户又点了 B 地址，A 的结果回来
+    /// 时不能再去 setMediaSource（否则就是「点了 B 播出来 A」）。用代际号作废。
+    private var openGeneration = 0
 
     // ---- seek 音频闸（改动 ③）：拖动时静音，首帧回来再恢复 ----
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -195,6 +285,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         mainHandler.removeCallbacks(seekGateTimeout)
         seekGateActive = false
         pendingPreload = null
+        // 下一集预载随播放器一起收掉（它只会往缓存里写，但线程要停）。
+        nextPreloader?.release()
+        nextPreloader = null
+        nextPreloadUrl = ""
         preloader?.release()
         preloader = null
         player?.clearVideoSurface()
@@ -274,6 +368,21 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 prefetchSegment(url, headers, maxBytes, result)
             }
             "state" -> result.success(snapshot())
+            // NEXT_EPISODE_PRELOAD（改动 ⑥）：首帧 + 播放稳定 3 秒后，
+            // Dart 把下一集的清单地址交进来，原生把清单 + 前 2 个分片
+            // 写进播放器同一份缓存（只写不读）。入队即返回，不阻塞 Dart。
+            "preloadNext" -> {
+                val url = call.argument<String>("url") ?: ""
+                val headers = call.argument<Map<String, String>>("headers") ?: emptyMap()
+                result.success(preloadNextEpisode(url, headers))
+            }
+            // 换集 / 换线路时取消上一轮预载（原生 open 也会顺手取消一次，
+            // 这条是给「只换集不 open」的边界情况兜底）。
+            "cancelPreload" -> {
+                nextPreloader?.cancel()
+                nextPreloadUrl = ""
+                result.success(true)
+            }
             "release" -> { dispose(); result.success(true) }
             else -> result.notImplemented()
         }
@@ -316,8 +425,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // MediaCodec 不支持或初始化失败，播放器不断重试，状态一直卡在
         // BUFFERING，Dart 侧就永远显示「缓冲中」。
         // 打开解码器回退后，硬解失败会自动切到软解，画面才能出来。
-        val renderers = androidx.media3.exoplayer.DefaultRenderersFactory(context)
-            .setEnableDecoderFallback(true)
+        //
+        // 改动 ⑦：渲染器改由 [buildRenderers] 建 —— 解码失败重试时要把
+        // 「优先软解」的 MediaCodecSelector 换进去，所以必须能重建。
+        val renderers = buildRenderers()
         player = ExoPlayer.Builder(context, renderers)
             .setLoadControl(loadControl)
             .build()
@@ -341,6 +452,140 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // 「预取随播放器创建即启动」，拿到源地址（open）后立刻开始灌分片，
         // 不等 prepare 完成、不等用户点播放。
         ensurePreloader()
+    }
+
+    // ------------------------------------------- 渲染器 / 解码器降级（改动 ⑦）
+
+    /**
+     * 建渲染器工厂。
+     *
+     * [softDecoderPreferred] = false 时就是原来的行为（media3 自动选，硬解优先，
+     * 硬解失败由 `setEnableDecoderFallback(true)` 自动回退）；
+     * 置 true 后把 `MediaCodecSelector` 换成「软解（softwareOnly）排前面」——
+     * 这是解码失败重试时唯一能真正改变解码路径的开关。
+     */
+    private fun buildRenderers(): androidx.media3.exoplayer.DefaultRenderersFactory {
+        val factory = androidx.media3.exoplayer.DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+        if (softDecoderPreferred) {
+            factory.setMediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+                val infos = androidx.media3.exoplayer.mediacodec.MediaCodecUtil.getDecoderInfos(
+                    mimeType,
+                    requiresSecureDecoder,
+                    requiresTunnelingDecoder,
+                )
+                // 软解排前面；硬解仍在列表里（软解不支持时可回退）。
+                infos.sortedBy { if (it.softwareOnly) 0 else 1 }
+            }
+        }
+        return factory
+    }
+
+    /**
+     * 重建 renderers 后再 prepare 一次（改动 ⑦ / ⑤ 第 2 次重试）。
+     *
+     * 只重建**播放器 + 渲染器**：磁盘缓存、预取器、画面视图（TextureView）
+     * 全部保留 —— 换集本身（改动 ④）不重建实例，只有解码器这条死路才重建。
+     */
+    private fun rebuildRenderersAndReopen(item: OpenedItem) {
+        val old = player
+        val positionMs = lastKnownPositionMs.coerceAtLeast(0)
+        try { old?.stop() } catch (_: Throwable) {}
+        try { old?.clearVideoSurface() } catch (_: Throwable) {}
+        try { old?.release() } catch (_: Throwable) {}
+        player = null
+        // ensurePlayer 会用新的 softDecoderPreferred 重建渲染器，
+        // 并把音频焦点 / seek 参数 / 监听器 / 纹理视图重新绑好。
+        ensurePlayer()
+        Log.i(
+            LOG_TAG,
+            "RENDERERS 重建 softFirst=$softDecoderPreferred pos=${positionMs}ms",
+        )
+        open(item.url, item.headers, item.isHls, positionMs, NoopResult, fromRetry = true)
+    }
+
+    // ------------------------------------------- 分级重试（改动 ⑤）
+
+    /** HTTP / IO 类错误：地址可能过期、CDN 抖动、302 链路断。 */
+    private fun isIoOrSourceError(error: PlaybackException): Boolean {
+        // media3 的 errorCode 分段：1xxx 通用、2xxx IO、3xxx 解析、4xxx 解码。
+        return error.errorCode in 2000..3999
+    }
+
+    /** 解码类错误：硬解初始化失败 / 解码失败。 */
+    private fun isDecodeError(error: PlaybackException): Boolean {
+        if (error.errorCode in 4000..4999) return true
+        // 少数机型把解码失败报成 ERROR_CODE_UNSPECIFIED，用异常链兜一层。
+        var cause: Throwable? = error.cause
+        var depth = 0
+        while (cause != null && depth < 4) {
+            if (cause is android.media.MediaCodec.CodecException) return true
+            cause = cause.cause
+            depth++
+        }
+        return false
+    }
+
+    /**
+     * 播放层分级重试（在 [Player.Listener.onPlayerError] 里调用）。
+     *
+     * 返回 true = 本次错误已经在原生侧吃掉重试，**不要**上报给 Dart
+     * （否则救援链会立刻换线路，等于跳过了分级重试）；
+     * 返回 false = 重试用完了，把错误交回 Dart 换线路。
+     */
+    private fun tryLayerRetry(error: PlaybackException): Boolean {
+        val item = openedItem ?: return false
+        if (retryCount >= MAX_LAYER_RETRIES) {
+            Log.i(
+                LOG_TAG,
+                "retry=giveup 已重试 $retryCount 次，上报 Dart 换线路 code=${error.errorCodeName}",
+            )
+            return false
+        }
+        retryCount++
+        // 出错前的位置：重开从这里接着播，别回到片头。
+        val positionMs = (player?.currentPosition ?: 0L).coerceAtLeast(0L)
+        if (positionMs > 0) lastKnownPositionMs = positionMs
+
+        if (isDecodeError(error)) {
+            // 第 2 档：解码错误 → 切解码模式（硬解 ↔ 软解）再 prepare。
+            retryReason = "decode"
+            softDecoderPreferred = !softDecoderPreferred
+            Log.i(
+                LOG_TAG,
+                "retry=$retryCount reason=decode softFirst=$softDecoderPreferred " +
+                    "code=${error.errorCodeName} pos=${positionMs}ms",
+            )
+            // 重开放到回调外执行：在 onPlayerError 里同步 release / prepare
+            // 播放器会和 media3 内部的错误处理重入。
+            mainHandler.post { rebuildRenderersAndReopen(item) }
+            return true
+        }
+
+        // 第 1 档：IO / HTTP（含解析）→ 重新 resolve 播放地址再 prepare。
+        // 原生拿不到 /api/play，所以先让 Dart 刷新地址（token +1），
+        // 同时本地用原地址重开一次兜底：谁先回来都算恢复，
+        // Dart 拿到新地址会再 open 覆盖这次（open 幂等、旧请求会被取代）。
+        retryReason = "io"
+        retryResolveToken++
+        Log.i(
+            LOG_TAG,
+            "retry=$retryCount reason=io resolveToken=$retryResolveToken " +
+                "kind=${if (isIoOrSourceError(error)) "source" else "other"} " +
+                "code=${error.errorCodeName} pos=${positionMs}ms url=${item.url}",
+        )
+        mainHandler.post {
+            open(item.url, item.headers, item.isHls, positionMs, NoopResult, fromRetry = true)
+        }
+        return true
+    }
+
+    /// 重试时复用的空 result：复用 [open] 全流程（含传输层数据源构造 /
+    /// 缓存工厂 / MediaSource 构造），不重复实现一遍，也不用给 Dart 回包。
+    private object NoopResult : MethodChannel.Result {
+        override fun success(result: Any?) {}
+        override fun error(errorCode: String, errorMessage: String?, errorDetails: Any?) {}
+        override fun notImplemented() {}
     }
 
     /// 建立（或复用）预取器与它共用的磁盘缓存。
@@ -439,7 +684,20 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 // FIRST_FRAME：只有这里才把首帧标记置 true。
                 // Dart 的加载层就是靠它收起的，别再拿 buffering / playing 猜。
                 firstFrameRendered = true
+                // RETRY（改动 ⑤）：重试成功（重新出帧）= 这一轮恢复正常，
+                // 把重试预算还回去。否则一次偶发错误之后，这一集的后续错误
+                // 会直接被判死交给 Dart 换线路。
+                if (retryCount > 0) {
+                    Log.i(LOG_TAG, "retry=recovered 首帧恢复，重试预算归零")
+                    retryCount = 0
+                    retryReason = ""
+                }
                 Log.i(LOG_TAG, "FIRST_FRAME 已渲染，pos=${player?.currentPosition}ms")
+                // CONNECTS（TRANSPORT_OKHTTP，2026-11-15）：起播这一段一共建了
+                // 几条连接（EventListener.connectStart 计数）。同一个源、同一个
+                // 连接池，改造后应该是 1 —— 清单一条，variant 和后面的分片全部
+                // 复用；改造前每次 302 换域都要重新 TCP + TLS，这个数会往上爬。
+                Log.i(LOG_TAG, "connects=${PlayerHttp.connectCount()}（起播连接建立次数）")
                 // 首帧到了：拖动闸放开（对方确证的结束条件之一）。
                 endSeekAudioGate()
                 // PRELOAD_AFTER_FIRST_FRAME（ALIGN_FONGMI）：首帧上屏之后
@@ -450,6 +708,17 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             override fun onPlayerError(error: PlaybackException) {
                 lastError = error.errorCodeName + ": " + (error.message ?: "")
                 endSeekAudioGate()
+                // LAYERED_RETRY（改动 ⑤）：同一集同一线路最多在原生侧重试 2 次
+                // （IO → 重新 resolve 地址；解码 → 切解码模式）。
+                //
+                // 重试期间**不**把错误写进快照：Dart 侧看到 error 就进救援链
+                // 换线路，那等于跳过了分级重试。
+                if (tryLayerRetry(error)) {
+                    lastError = null
+                    emit()
+                    return
+                }
+                // 两次都失败：把错误交回 Dart，由救援链换线路。
                 emit()
             }
         })
@@ -461,7 +730,12 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "preloadedMs" to 0L,
             "playing" to false, "buffering" to true, "error" to null,
             "firstFrameRendered" to false,
-            "width" to 0, "height" to 0, "ended" to false, "state" to 1
+            "width" to 0, "height" to 0, "ended" to false, "state" to 1,
+            // RETRY（改动 ⑤）：Dart 侧用这几个字段区分「原生在重试」和
+            // 「真的失败了」，以及是否该去重新 resolve 播放地址。
+            "retryAttempt" to retryCount,
+            "retryReason" to retryReason,
+            "retryResolveToken" to retryResolveToken
         )
         // 画面尺寸：FxPlayer 的 value.width/height 和分辨率胶囊都靠它，
         // 拿不到就一直显示 "0x0"。format 在 READY 之后才有值。
@@ -471,6 +745,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         var h = fmt?.height ?: 0
         if (rotation == 90 || rotation == 270) {
             val t = w; w = h; h = t
+        }
+        // RETRY（改动 ⑤）：顺便记下最后已知位置 —— 出错时用它重开，
+        // 不能回到片头（重开一次等于整集重新起播）。
+        if (p.playbackState != Player.STATE_IDLE && p.currentPosition > 0) {
+            lastKnownPositionMs = p.currentPosition
         }
         return mapOf(
             "positionMs" to p.currentPosition,
@@ -488,7 +767,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "width" to w,
             "height" to h,
             "ended" to (p.playbackState == Player.STATE_ENDED),
-            "state" to p.playbackState
+            "state" to p.playbackState,
+            // RETRY（改动 ⑤）：原生分层重试进度。retryAttempt=0 表示这次
+            // 打开还没重试过；retryResolveToken 变化 = 请 Dart 重新 resolve
+            // 播放地址（地址过期这条只有 Dart 能修）。
+            "retryAttempt" to retryCount,
+            "retryReason" to retryReason,
+            "retryResolveToken" to retryResolveToken
         )
     }
 
@@ -502,21 +787,127 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         isHls: Boolean,
         startPositionMs: Long,
         result: MethodChannel.Result,
+        /// true = 这次 open 来自原生分级重试（改动 ⑤）：不取消下一集预载、
+        /// 也不重置重试计数，其余流程与用户触发的 open 完全一致。
+        fromRetry: Boolean = false,
     ) {
         ensurePlayer()
         lastError = null
+        // TRANSPORT_OKHTTP + MANIFEST_MERGE（2026-11-15）：HLS 的 http(s) 源先在
+        // 独立线程上做一次「清单预归并」（master → 第一个 variant）。
+        //
+        // 为什么值得多一次请求：master 本身不可播，播放器必须先拉 master、解析、
+        // 再拉 variant，两跳串行。这一步用**同一个 OkHttpClient** 提前把 DNS /
+        // TCP / TLS 付掉，播放器接手 variant 时连接已经在池子里，直接 GET。
+        // 失败 / 超时（800ms）/ 不是 master：原样播，行为与改造前一致。
+        //
+        // 归并在 FxManifest 线程跑完再 post 回主线程 —— 播放器 API（stop /
+        // setMediaSource / prepare）只能在主线程调，但网络不能在主线程等。
+        val generation = ++openGeneration
+        if (!isHls || !PlayerHttp.isHttpUrl(url)) {
+            // 本地文件 / 非 HLS：没有清单可归并，直接开。
+            logTransport(url, url, headers, "raw")
+            startPlayback(url, url, headers, isHls, startPositionMs, result, fromRetry = fromRetry)
+            return
+        }
         try {
-            val httpFactory = DefaultHttpDataSource.Factory()
-                .setUserAgent(headers["User-Agent"] ?: "Mozilla/5.0")
-                .setAllowCrossProtocolRedirects(true)   // 福盈分片 302 必须开
-                // ALIGN_FONGMI：30s / 30s，和壳的 OkHttp TIMEOUT 一致。
-                .setConnectTimeoutMs(HTTP_CONNECT_TIMEOUT_MS)
-                .setReadTimeoutMs(HTTP_READ_TIMEOUT_MS)
-                .setDefaultRequestProperties(headers)
+            manifestQueue.execute {
+                val merged = PlayerHttp.mergeMasterPlaylist(url, headers) { message ->
+                    Log.i(LOG_TAG, message)
+                }
+                mainHandler.post {
+                    if (generation != openGeneration) {
+                        // 期间已经开了别的地址（换线路 / 换集）：这次结果作废。
+                        // 但必须给 Dart 回话，否则那个 Future 永远挂着。
+                        Log.i(LOG_TAG, "OPEN 作废（已被新的 open 取代）$url")
+                        result.success(true)
+                        return@post
+                    }
+                    logTransport(url, merged, headers, if (merged == url) "raw" else "merged")
+                    startPlayback(merged, url, headers, isHls, startPositionMs, result, fromRetry = fromRetry)
+                }
+            }
+        } catch (error: Throwable) {
+            // 归并线程不可用（极罕见）：退化成不归并，照常播。
+            Log.w(LOG_TAG, "清单预归并线程不可用 ${error.javaClass.simpleName}")
+            logTransport(url, url, headers, "raw")
+            startPlayback(url, url, headers, isHls, startPositionMs, result, fromRetry = fromRetry)
+        }
+    }
+
+    /**
+     * 传输层日志（真机核对用）：`transport=okhttp ua=... manifesto=merged|raw`。
+     *
+     * 三个字段分别对应三条改动：传输层是 OkHttp、发出去的 UA 是什么、
+     * 清单有没有归并（merged = 已经换成 variant，raw = 原样）。
+     */
+    private fun logTransport(
+        requestedUrl: String,
+        playUrl: String,
+        headers: Map<String, String>,
+        manifesto: String,
+    ) {
+        val target = if (playUrl == requestedUrl) requestedUrl else "$requestedUrl -> $playUrl"
+        Log.i(
+            LOG_TAG,
+            "transport=okhttp ua=${PlayerHttp.userAgent(headers)} manifesto=$manifesto" +
+                " url=$target",
+        )
+    }
+
+    /**
+     * 真正开播（原 open 的函数体，传输层换成 OkHttp）。
+     *
+     * [playUrl] 是交给播放器的最终地址（可能是归并后的 variant），
+     * [requestedUrl] 是 Dart 给的原地址 —— 重试计数与原生重开都按原地址算，
+     * 免得「这次归并成功、下次超时」把同一线路的重试次数莫名清零。
+     */
+    private fun startPlayback(
+        playUrl: String,
+        requestedUrl: String,
+        headers: Map<String, String>,
+        isHls: Boolean,
+        startPositionMs: Long,
+        result: MethodChannel.Result,
+        /// true = 这次 open 来自原生分级重试（改动 ⑤）：不取消下一集预载、
+        /// 也不重置重试计数，其余流程与用户触发的 open 完全一致。
+        fromRetry: Boolean = false,
+    ) {
+        ensurePlayer()
+        lastError = null
+        // RETRY（改动 ⑤）：同一个地址（同一集同一线路）才累计重试次数；
+        // 换集 / 换线路换了地址就重新计数。
+        val retryAddressKey = "$requestedUrl|$isHls"
+        if (retryAddressKey != retryKey) {
+            retryKey = retryAddressKey
+            retryCount = 0
+            retryReason = ""
+            // 换集 / 换线路：上一轮「下一集预载」整轮作废（改动 ⑥）。
+            if (!fromRetry) {
+                nextPreloader?.cancel()
+                nextPreloadUrl = ""
+            }
+        }
+        // 只有网络源才需要重试（本地文件没有地址过期这回事）。
+        val retryIsLocal = !requestedUrl.startsWith("http://") && !requestedUrl.startsWith("https://")
+        openedItem = if (retryIsLocal) null else OpenedItem(requestedUrl, headers, isHls)
+        lastKnownPositionMs = startPositionMs.coerceAtLeast(0)
+        try {
+            // TRANSPORT_OKHTTP（2026-11-15）：数据源换成 OkHttp。
+            //
+            // 这里只新建 factory（无状态），**client 是全局唯一的**
+            // （[PlayerHttp.client]）—— 连接池因此跨所有 open、所有分片复用。
+            // 以前每次 open 都 `DefaultHttpDataSource.Factory()`，等于每次把
+            // HttpURLConnection 的连接池扔掉：302 换一次域就重新 TCP + TLS，
+            // 移动网 100~600ms，这是起播慢的主要来源。
+            //
+            // 也不再有 setAllowCrossProtocolRedirects / setConnectTimeoutMs /
+            // setReadTimeoutMs —— 这三项在 OkHttp 里都是 client 级配置。
+            val httpFactory = PlayerHttp.httpFactory(playUrl, headers)
 
             // 本地文件（离线播放页）走 DefaultDataSource：它能识别 file:// 和
             // 绝对路径，直接套 HttpDataSource 会失败。
-            val isLocal = !url.startsWith("http://") && !url.startsWith("https://")
+            val isLocal = !playUrl.startsWith("http://") && !playUrl.startsWith("https://")
             val dataSource = if (isLocal) {
                 DefaultDataSource.Factory(context)
             } else {
@@ -539,7 +930,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } else {
                 cacheDataSourceFactory(dataSource, writeToCache = false)
             }
-            val item = MediaItem.fromUri(url)
+            val item = MediaItem.fromUri(playUrl)
             // ALIGN_FONGMI：不挂自定义 LoadErrorHandlingPolicy（壳是空实现，
             // 跑 media3 默认：3 次重试 + 0/1s/2s 退避），死地址交给
             // onPlayerError → Dart 救援链。
@@ -548,34 +939,20 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } else {
                 ProgressiveMediaSource.Factory(cachedFactory).createMediaSource(item)
             }
-            // OPEN_RESET（2026-11-14）：换源前先把上一个源停掉并清空。
-            // 之前某条线路失败后，播放器会停在错误/未就绪状态，
-            // 之后无论手动还是自动切线路，setMediaSource 都会被旧状态拖住，
-            // 表现就是「一旦某条线路失败，切什么都一直加载」。
-            player!!.stop()
-            player!!.clearMediaItems()
-            lastError = null
-            // FIRST_FRAME：换源 / 切集后旧画面作废，加载层重新压住。
-            firstFrameRendered = false
-            player!!.setMediaSource(source)
-            // RESUME_FIRST_SEG（2026-11-14）：带续播位置打开。
-            //
-            // setMediaSource 之后、prepare 之前 seekTo 是 ExoPlayer 支持的
-            // 「起始位置」写法：prepare 会从这个位置开始选分片，第一个网络
-            // 请求就是目标片。以前是 prepare（从第 0 片开始拉）之后再 seek，
-            // 第 0 片先到服务器，把 /api/seg 的首片中转名额用掉了，
-            // 真正需要的目标片只能 302 直连 —— 表现就是「带 27:55 打开比
-            // 从头播慢很多」。
-            if (startPositionMs > 0) {
-                player!!.seekTo(startPositionMs)
-            }
-            player!!.prepare()
+            // CONNECTS（TRANSPORT_OKHTTP，2026-11-15）：清零连接计数，然后按
+            // 壳的 switchEpisode 同款序列换源。首帧回来时打 connects=N ——
+            // 改造后起播应该只有 1 条（清单那条），分片和 variant 全部复用。
+            PlayerHttp.resetConnectCount()
+            // SWITCH_INSTANCE_REUSE（改动 ④）：换集 / 换线路**不重建播放器**，
+            // 也不解绑渲染器和纹理视图 —— 只按壳的 switchEpisode 同款序列
+            // 换源。细节见 [switchToSource]。
+            switchToSource(source, startPositionMs, playWhenReady = fromRetry)
             // RESUME（2026-11-14）：真机 logcat -s FxExo 核对续播是否真的带上了。
             // 「首个分片索引 N」由 SegmentPreloader.start 打出，两条一起看。
             Log.i(
                 LOG_TAG,
                 "RESUME 起始位置 ${startPositionMs}ms（prepare 前 seek）；" +
-                    "isHls=$isHls url=$url",
+                    "isHls=$isHls url=$playUrl（原始 $requestedUrl）",
             )
             // PRELOAD_AFTER_FIRST_FRAME（ALIGN_FONGMI 2026-11-15）：
             // **不再在 open 时立刻开灌分片**，只把请求记下来，等首帧渲染出来
@@ -590,7 +967,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 打到 CDN / 中转，首片等于是和自己的预取抢带宽和连接名额。
             // 现在预取从「当前位置的下一片」开始，并且只在首帧之后跑。
             if (!isLocal && isHls) {
-                pendingPreload = PreloadRequest(url, headers, startPositionMs)
+                // 交给预取器的是**归并后**的地址：它自己拉清单时直接就是媒体
+                // 清单，不用再走一次 master → variant。
+                pendingPreload = PreloadRequest(playUrl, headers, startPositionMs)
             } else {
                 pendingPreload = null
             }
@@ -602,6 +981,113 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             lastError = (e.message ?: e.javaClass.simpleName)
             result.error("open_failed", lastError, null)
         }
+    }
+
+    /**
+     * 换集 / 换线路：**实例不重建、渲染器不解绑**（改动 ④）。
+     *
+     * 对齐壳的 `switchEpisode`：
+     * ```
+     * player.stop()
+     * player.clearMediaItems()
+     * player.setMediaItems(list, index, startPositionMs)
+     * player.prepare()
+     * player.playWhenReady = true
+     * ```
+     *
+     * 这里写 `setMediaSource(source)` 而不是 `setMediaItems(item)`，唯一差别是
+     * 「源工厂」：播放用的 MediaSource 必须带着本次请求的请求头（Referer /
+     * 签名）和共享的 CacheDataSource，直接 `setMediaItems` 会退回 ExoPlayer
+     * 自带的默认工厂，请求头和磁盘缓存全丢。media3 内部 `setMediaItems` 就是
+     * 「清空 playlist → 追加 MediaSource → prepare」，与下面逐句等价。
+     *
+     * 和旧行为的区别：以前每次 open 都 `stop + clearMediaItems` 之后
+     * **Dart 侧还会把整个 FxPlayer 换掉**（新实例 → 原生 `release` →
+     * `player.release()` + 缓存释放 + 事件通道解绑）。换集那一下等于重开
+     * 一条完整链路，解码器、缓存、预取线程全部重建 —— 这就是「换集卡一下」
+     * 的直接原因。现在换集只是换源。
+     */
+    private fun switchToSource(
+        source: MediaSource,
+        startPositionMs: Long,
+        playWhenReady: Boolean,
+    ) {
+        val p = player ?: return
+        // 记住原来的播放意图：换集时用户正在播 → 换完继续播；
+        // 暂停态打开（先拉一帧再 pause）不被强制播起来。
+        val wasPlaying = p.playWhenReady || p.isPlaying
+        // OPEN_RESET（2026-11-14）：换源前先把上一个源停掉并清空。
+        // 之前某条线路失败后，播放器会停在错误/未就绪状态，
+        // 之后无论手动还是自动切线路，setMediaSource 都会被旧状态拖住，
+        // 表现就是「一旦某条线路失败，切什么都一直加载」。
+        p.stop()
+        p.clearMediaItems()
+        lastError = null
+        // FIRST_FRAME：换源 / 切集后旧画面作废，加载层重新压住。
+        firstFrameRendered = false
+        p.setMediaSource(source)
+        // RESUME_FIRST_SEG（2026-11-14）：带续播位置打开。
+        //
+        // setMediaSource 之后、prepare 之前 seekTo 是 ExoPlayer 支持的
+        // 「起始位置」写法：prepare 会从这个位置开始选分片，第一个网络
+        // 请求就是目标片。以前是 prepare（从第 0 片开始拉）之后再 seek，
+        // 第 0 片先到服务器，把 /api/seg 的首片中转名额用掉了，
+        // 真正需要的目标片只能 302 直连 —— 表现就是「带 27:55 打开比
+        // 从头播慢很多」。
+        if (startPositionMs > 0) {
+            p.seekTo(startPositionMs)
+        }
+        p.prepare()
+        if (wasPlaying || playWhenReady) p.playWhenReady = true
+        Log.i(
+            LOG_TAG,
+            "SWITCH 复用实例（不 release / 不解绑渲染器）start=${startPositionMs}ms " +
+                "play=${wasPlaying || playWhenReady}",
+        )
+    }
+
+    // ------------------------------------------------ 下一集预载（改动 ⑥）
+
+    /// 建立（或复用）下一集预载器：和播放器共用同一份磁盘缓存。
+    private fun ensureNextPreloader(): NextEpisodePreloader? {
+        nextPreloader?.let { return it }
+        val cache = ensureMediaCache() ?: return null
+        val created = NextEpisodePreloader(
+            cache = cache,
+            // 传输层：和播放路径同一个工厂（PlayerHttp.httpFactory →
+            // OkHttpDataSource，共用同一个 OkHttpClient 连接池）。
+            upstreamFactory = { url, headers -> PlayerHttp.httpFactory(url, headers) },
+            // PRIORITY：播放器在缓冲时预载让路（和 SegmentPreloader 同一判据）。
+            pauseGate = {
+                val p = player
+                p != null && p.playbackState == Player.STATE_BUFFERING
+            },
+            log = { message -> Log.d(LOG_TAG, message) },
+        )
+        nextPreloader = created
+        return created
+    }
+
+    /**
+     * 预载「下一集」的清单 + 前 N 个分片（只写进缓存，不参与当前播放）。
+     *
+     * 同一集只灌一次；入队即返回，下载在 [NextEpisodePreloader] 自己的线程里跑。
+     */
+    private fun preloadNextEpisode(url: String, headers: Map<String, String>): Boolean {
+        if (url.isEmpty()) return false
+        if (url == nextPreloadUrl) {
+            Log.d(LOG_TAG, "preload next: 这一集已经预载过，跳过")
+            return true
+        }
+        val created = ensureNextPreloader()
+        if (created == null) {
+            Log.d(LOG_TAG, "preload next: 磁盘缓存不可用，跳过")
+            return false
+        }
+        nextPreloadUrl = url
+        Log.d(LOG_TAG, "preload next: 排队 $url")
+        created.preload(url, headers)
+        return true
     }
 
     /// 分片磁盘缓存（1.5 GiB，LRU）。
@@ -671,13 +1157,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         prefetchQueue.execute {
             var source: DataSource? = null
             try {
-                val httpFactory = DefaultHttpDataSource.Factory()
-                    .setUserAgent(headers["User-Agent"] ?: "Mozilla/5.0")
-                    .setAllowCrossProtocolRedirects(true)
-                    // ALIGN_FONGMI：和播放路径同一档超时（壳的 OkHttp 30s）。
-                    .setConnectTimeoutMs(HTTP_CONNECT_TIMEOUT_MS)
-                    .setReadTimeoutMs(HTTP_READ_TIMEOUT_MS)
-                    .setDefaultRequestProperties(headers)
+                // TRANSPORT_OKHTTP（2026-11-15）：首页续播预取也走**同一个**
+                // client —— 预取过的连接留在同一个池子里，用户点「继续观看」
+                // 起播时播放器直接复用这条连接，不用重新握手。
+                val httpFactory = PlayerHttp.httpFactory(url, headers)
                 // 关键：同一个 cacheDataSourceFactory —— 同一份 SimpleCache、
                 // 同一个 cacheKey 规则，播放器读的时候才是本地命中。
                 // 这条路径是**写盘**的（writeToCache = true）：播放路径已经

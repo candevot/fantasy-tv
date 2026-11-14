@@ -21,12 +21,39 @@ DEST_DIR = 'android/app/src/main/kotlin/' + PKG_PATH
 # Media3 版本：和 compileSdk 36 兼容的稳定版
 MEDIA3_VERSION = '1.4.1'
 
+# OkHttp 版本（TRANSPORT_OKHTTP，2026-11-15）。
+#
+# 必须和 media3-datasource-okhttp:1.4.1 自己的依赖对齐：它的 POM 里写的就是
+# okhttp 4.12.0。显式写出来是为了钉住版本（AGP 解析冲突时不会漂到 5.x）。
+# android_src/libs/api.jar 里没有 okhttp3，不存在与 jar 内类的冲突。
+OKHTTP_VERSION = '4.12.0'
+
+# 播放传输层：OkHttpDataSource（HTTP/2 + 全局连接池 + trust-all + 兜底 UA）。
+# DefaultHttpDataSource 走 HttpURLConnection，每次 302 换域都重开 TCP+TLS，
+# 移动网一次 100~600ms —— 那是起播慢的主因，见 PlayerHttp.kt。
+TRANSPORT_DEPS = (
+    "    implementation 'androidx.media3:media3-datasource-okhttp:%s'\n"
+    "    implementation 'com.squareup.okhttp3:okhttp:%s'\n"
+) % (MEDIA3_VERSION, OKHTTP_VERSION)
+
+TRANSPORT_DEPS_KTS = (
+    '    implementation("androidx.media3:media3-datasource-okhttp:%s")\n'
+    '    implementation("com.squareup.okhttp3:okhttp:%s")\n'
+) % (MEDIA3_VERSION, OKHTTP_VERSION)
+
 DEPS = (
     "    implementation 'androidx.media3:media3-exoplayer:%s'\n"
     "    implementation 'androidx.media3:media3-exoplayer-hls:%s'\n"
     "    implementation 'androidx.media3:media3-ui:%s'\n"
     "    implementation 'androidx.media3:media3-datasource:%s'\n"
-) % (MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION)
+) % (MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION) + TRANSPORT_DEPS
+
+DEPS_KTS = '\n'.join([
+    '    implementation("androidx.media3:media3-exoplayer:%s")' % MEDIA3_VERSION,
+    '    implementation("androidx.media3:media3-exoplayer-hls:%s")' % MEDIA3_VERSION,
+    '    implementation("androidx.media3:media3-ui:%s")' % MEDIA3_VERSION,
+    '    implementation("androidx.media3:media3-datasource:%s")' % MEDIA3_VERSION,
+]) + '\n' + TRANSPORT_DEPS_KTS
 
 REGISTER_MARK = '// FX_EXOPLAYER_REGISTER'
 
@@ -56,55 +83,46 @@ def copy_sources():
 
 
 def patch_gradle():
-    """给 app/build.gradle(.kts) 加 Media3 依赖"""
+    """给 app/build.gradle(.kts) 加 Media3 + OkHttp 依赖
+
+    三种情况都要能收敛：
+      · 全新模板（CI 每次 flutter create）→ 4 条 media3 + 2 条传输层一起插；
+      · 已经打过 media3、但没有 okhttp（旧缓存模板）→ 只补传输层那 2 条；
+      · 两条都在 → 跳过。
+    """
     cands = ['android/app/build.gradle.kts', 'android/app/build.gradle']
     path = next((p for p in cands if os.path.exists(p)), None)
     if not path:
         fail('找不到 app/build.gradle')
     src = io.open(path, encoding='utf-8').read()
-    if 'media3-exoplayer' in src:
-        print('  Media3 依赖已存在，跳过')
+
+    is_kts = path.endswith('.kts')
+    have_media3 = 'media3-exoplayer' in src
+    have_okhttp = 'com.squareup.okhttp3' in src or 'okhttp3:okhttp' in src
+    if have_media3 and have_okhttp:
+        print('  Media3 / OkHttp 依赖已存在，跳过')
         return path
 
-    if path.endswith('.kts'):
-        # Kotlin DSL: dependencies { ... }
-        m = re.search(r'dependencies\s*\{', src)
-        if not m:
-            # Flutter 3.47 的模板可能把 dependencies 写在别处，
-            # 兜底：直接追加到文件末尾（Gradle 允许顶层 dependencies 块）
-            print('  未找到 dependencies 块，追加到文件末尾')
-            extra = ('\n\ndependencies {\n'
-                     '    implementation("androidx.media3:media3-exoplayer:%s")\n'
-                     '    implementation("androidx.media3:media3-exoplayer-hls:%s")\n'
-                     '    implementation("androidx.media3:media3-ui:%s")\n'
-                     '    implementation("androidx.media3:media3-datasource:%s")\n'
-                     '}\n') % (MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION)
-            io.open(path, 'w', encoding='utf-8').write(src + extra)
-            print('  已追加 Media3 依赖 -> %s' % path)
-            return path
-        ins = '\n'.join(
-            "    implementation(\"androidx.media3:media3-exoplayer:%s\")" % MEDIA3_VERSION,
-            # 占位，下面重写
-        ) if False else '\n'.join([
-            '    implementation("androidx.media3:media3-exoplayer:%s")' % MEDIA3_VERSION,
-            '    implementation("androidx.media3:media3-exoplayer-hls:%s")' % MEDIA3_VERSION,
-            '    implementation("androidx.media3:media3-ui:%s")' % MEDIA3_VERSION,
-            '    implementation("androidx.media3:media3-datasource:%s")' % MEDIA3_VERSION,
-        ])
-        pos = m.end()
-        src = src[:pos] + '\n' + ins + src[pos:]
+    if have_media3:
+        block = TRANSPORT_DEPS_KTS if is_kts else TRANSPORT_DEPS
+        print('  Media3 已在，补 OkHttp 传输层依赖：%s / %s' % (MEDIA3_VERSION, OKHTTP_VERSION))
     else:
-        m = re.search(r'dependencies\s*\{', src)
-        if not m:
-            print('  未找到 dependencies 块，追加到文件末尾')
-            io.open(path, 'w', encoding='utf-8').write(src + '\n\ndependencies {\n' + DEPS + '}\n')
-            print('  已追加 Media3 依赖 -> %s' % path)
-            return path
-        pos = m.end()
-        src = src[:pos] + '\n' + DEPS + src[pos:]
+        block = DEPS_KTS if is_kts else DEPS
+        print('  加 Media3 %s + OkHttp %s 依赖' % (MEDIA3_VERSION, OKHTTP_VERSION))
+
+    if not block.endswith('\n'):
+        block += '\n'
+
+    m = re.search(r'dependencies\s*\{', src)
+    if not m:
+        # Flutter 模板偶尔把 dependencies 放在别处，兜底：顶层 dependencies 块
+        print('  未找到 dependencies 块，追加到文件末尾')
+        src = src + '\n\ndependencies {\n' + block + '}\n'
+    else:
+        src = src[:m.end()] + '\n' + block + src[m.end():]
 
     io.open(path, 'w', encoding='utf-8').write(src)
-    print('  已加 Media3 %s 依赖 -> %s' % (MEDIA3_VERSION, path))
+    print('  依赖已写入 -> %s' % path)
     return path
 
 
