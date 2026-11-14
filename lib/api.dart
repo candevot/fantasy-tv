@@ -68,10 +68,19 @@ class Api {
     try {
       // 探 /api 根路径：服务端对未知路由回 404 JSON，
       // 能拿到 <500 的响应就说明这条地址活着，不用专门加 /ping 接口。
+      // PROBE_STRICT（2026-11-14）：原来只要 <500 就算活着，但已下线的旧机
+      // 对 /api/* 一律回 404 JSON，被误判成"活着" → base 被永久切到死地址，
+      // 导致登录/弹幕/一起看/投屏全连不上。
+      // 现在要求：200 且能在 respond 里看到我们的业务字段（ok/code/data），
+      // 才算这条地址可用；404/5xx/非 JSON 一律判死。
       final r = await http
-          .get(Uri.parse(cand), headers: const {'accept': '*/*'})
+          .get(Uri.parse('$cand/version'), headers: const {'accept': '*/*'})
           .timeout(const Duration(seconds: 3));
-      return r.statusCode > 0 && r.statusCode < 500;
+      if (r.statusCode != 200) return false;
+      final body = r.body.trim();
+      if (body.isEmpty || !body.startsWith('{')) return false;
+      final low = body.toLowerCase();
+      return low.contains('"ok"') || low.contains('"code"') || low.contains('"data"');
     } catch (_) {
       return false;
     }
