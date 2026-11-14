@@ -2,6 +2,7 @@ package com.huanxiang.fantasy_tv
 
 import android.app.Activity
 import android.content.Context
+import java.io.File
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -10,9 +11,16 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
@@ -53,6 +61,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
     private var events: EventChannel.EventSink? = null
+
+    /// 分片磁盘缓存：拖回已看过的地方不再回源（CDN 有 429 限流）。
+    private var mediaCache: SimpleCache? = null
     private var lastError: String? = null
 
     fun attach(messenger: BinaryMessenger) {
@@ -65,6 +76,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         player?.release()
         player = null
         events = null
+        try { mediaCache?.release() } catch (_: Exception) {}
+        mediaCache = null
     }
 
     // ---------------- EventChannel ----------------
@@ -112,17 +125,31 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
 
     private fun ensurePlayer() {
         if (player != null) return
+        // PERF（2026-11-14）：这几项直接决定「拖几次就卡」。
+        //
+        // 1) 前向缓冲 30s 保底 / 120s 上限：4K 一片 6 秒约 5.5MB，
+        //    原来 15s 只等于 2.5 片，网速一抖就见底 → 缓冲 → 黑屏。
+        // 2) 回看缓冲 30s：往回拖不用重新回源（上游有 429 限流）。
+        // 3) 起播只要 1 秒：第一帧尽快出来。
+        // 4) 重缓冲只要 2 秒：卡一下立刻续上，不干等。
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                15_000,   // minBufferMs
-                60_000,   // maxBufferMs
-                1_500,    // bufferForPlaybackMs —— 卡一下只补 1.5 秒
-                3_000     // bufferForPlaybackAfterRebufferMs
+                30_000,   // minBufferMs
+                120_000,  // maxBufferMs
+                1_000,    // bufferForPlaybackMs
+                2_000     // bufferForPlaybackAfterRebufferMs
             )
+            .setBackBuffer(30_000, true)
+            .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         player = ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
+            // CDN 限流 / 瞬断时多试几次，别一次失败就把整条线路判死
+            .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(5))
             .build()
+        // 精确 seek 要从前一个关键帧开始解码，大分片 4K 上很慢；
+        // 对齐到最近关键帧是各视频 App 的常规做法，拖动手感快很多。
+        player!!.setSeekParameters(SeekParameters.CLOSEST_SYNC)
         bindListener(player!!)
     }
 
@@ -193,11 +220,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } else {
                 DefaultDataSource.Factory(context, httpFactory)
             }
+            // 分片缓存：同一集里来回拖、切集再回来，都先看本地。
+            val cachedFactory = cacheDataSourceFactory(dataSource)
             val item = MediaItem.fromUri(url)
             val source: MediaSource = if (isHls) {
-                HlsMediaSource.Factory(dataSource).createMediaSource(item)
+                HlsMediaSource.Factory(cachedFactory).createMediaSource(item)
             } else {
-                ProgressiveMediaSource.Factory(dataSource).createMediaSource(item)
+                ProgressiveMediaSource.Factory(cachedFactory).createMediaSource(item)
             }
             player!!.setMediaSource(source)
             player!!.prepare()
@@ -208,10 +237,41 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         }
     }
 
+    /// 分片磁盘缓存（512MB，LRU）。
+    ///
+    /// 用户现象：第一次拖很快，再拖就开始卡 —— 因为每次拖动都重新回源，
+    /// 而上游分片 CDN 对同一 IP 有 429 限流。加了缓存后，
+    /// 同一集内来回拖基本不走网络，切集再回来也能命中。
+    private fun cacheDataSourceFactory(upstream: DataSource.Factory): DataSource.Factory {
+        return try {
+            val cache = mediaCache ?: run {
+                val dir = File(context.cacheDir, "exo_media_cache")
+                if (!dir.exists()) dir.mkdirs()
+                val c = SimpleCache(
+                    dir,
+                    LeastRecentlyUsedCacheEvictor(512L * 1024 * 1024),
+                    StandaloneDatabaseProvider(context)
+                )
+                mediaCache = c
+                c
+            }
+            CacheDataSource.Factory()
+                .setCache(cache)
+                .setUpstreamDataSourceFactory(upstream)
+                // 缓存坏了就忽略、直接回源，别让播放卡死
+                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        } catch (e: Exception) {
+            upstream
+        }
+    }
+
     /** 供 PlatformViewFactory 创建画面视图 */
     fun createView(): PlayerView {
         val pv = PlayerView(context)
         pv.useController = false          // 控制层由 Flutter 画
+        // 拖动 / 重缓冲时保留上一帧，不要整块变黑
+        pv.setKeepContentOnPlayerReset(true)
+        pv.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
         pv.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
         pv.player = player
         playerView = pv
