@@ -533,7 +533,7 @@ class _DetailPageState extends State<DetailPage>
       return <EpisodeGroup>[
         for (final g in d.groups)
           EpisodeGroup(
-            g.title,
+            g.name,
             _movieVersions(g.episodes),
           ),
       ];
