@@ -241,7 +241,7 @@ class FxPlayerValue {
 ///     那一整套 mpv 属性 —— 这是「加载慢 / 黑屏 / 卡 99」的根源。
 ///     ExoPlayer 的 DefaultLoadControl 按**时长**缓冲，自己调度分片。
 class FxPlayer implements Listenable {
-  FxPlayer._({this.readyTimeout = const Duration(seconds: 20)}) {
+  FxPlayer._({this.readyTimeout = const Duration(seconds: 10)}) {
     _engine = ExoPlayerEngine();
     _engine.state.addListener(_onEngineState);
     unawaited(_engine.init());
@@ -269,13 +269,19 @@ class FxPlayer implements Listenable {
 
   /// 起播「还在进展」时的最长等待：只要还在往下拉就一直等，
   /// 避免把「大分片加载慢」误判成「线路不可用」并自动换线。
-  static const Duration _openHardCap = Duration(minutes: 2);
+  /// 硬上限：再慢也不等超过这个时间。
+  static const Duration _openHardCap = Duration(seconds: 30);
 
   /// 看门狗采样间隔。ExoPlayer 的状态事件本来就不密，4 秒够。
   static const Duration _watchdogTick = Duration(seconds: 4);
 
   /// 停摆判定门槛：连续这么久完全没有进度 / 缓冲推进才算失败候选。
-  static const Duration _stallTimeout = Duration(seconds: 30);
+  /// 卡住多久判定这条线路不行。
+  ///
+  /// FAST_FAIL（2026-11-14）：原来 30 秒。分片地址拿不到的时候，
+  /// 用户看到的就是「转圈转到放弃」——30 秒才轮到自动换线。
+  /// 压到 8 秒：坏的立刻换走，好的根本不受影响（正常起播 < 2 秒）。
+  static const Duration _stallTimeout = Duration(seconds: 8);
 
   /// 救援链里 refreshPlay / 同地址 reopen 各自先试几次。
   static const int _rescueTries = 2;
@@ -302,7 +308,7 @@ class FxPlayer implements Listenable {
 
   /// 创建播放器实例。
   static FxPlayer create({
-    Duration readyTimeout = const Duration(seconds: 20),
+    Duration readyTimeout = const Duration(seconds: 10),
   }) {
     return FxPlayer._(readyTimeout: readyTimeout);
   }
