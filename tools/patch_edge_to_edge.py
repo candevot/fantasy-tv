@@ -66,11 +66,34 @@ ORIENTATION_FUNC = '''
                         result.error("orientation", e.message, null)
                     }
                 }
+                "sensorPortrait" -> {
+                    try {
+                        requestedOrientation =
+                            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("orientation", e.message, null)
+                    }
+                }
                 else -> result.notImplemented()
             }
         }
     }
 
+'''
+
+# 「竖屏全屏播放」分支：全屏竖屏片要求锁竖屏但允许正/反握，用
+# SENSOR_PORTRAIT（同 SENSOR_LANDSCAPE 不看系统旋转锁）。
+# 单独提出来是为了给已经打过旧版通道的工程补上这一支。
+SENSOR_PORTRAIT_BRANCH = '''                "sensorPortrait" -> {
+                    try {
+                        requestedOrientation =
+                            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("orientation", e.message, null)
+                    }
+                }
 '''
 
 ORIENTATION_CALL = '''
@@ -336,7 +359,15 @@ def patch_orientation(kt: str):
     """在 MainActivity 里加屏幕方向通道（独立函数 + 在 configureFlutterEngine
     里调用一次）；已存在则不动。"""
     if 'fantasy_tv/orientation' in kt:
-        return kt, False
+        # 老工程只打过 sensorLandscape / portrait：补上 sensorPortrait，
+        # 否则全屏竖屏片只能退到「固定竖屏」（正反握不切换）。
+        if 'sensorPortrait' in kt:
+            return kt, False
+        anchor = '                else -> result.notImplemented()'
+        if anchor not in kt:
+            return kt, False
+        kt = kt.replace(anchor, SENSOR_PORTRAIT_BRANCH + anchor, 1)
+        return kt, True
     pattern = re.compile(
         r'class\s+MainActivity\s*:\s*FlutterActivity\(\)\s*\{')
     match = pattern.search(kt)

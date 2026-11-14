@@ -183,9 +183,12 @@ class FsTopBar extends StatelessWidget {
     required this.onCast,
     required this.onMore,
     this.compact = false,
+    this.narrow = false,
     this.qualityLabel = '',
     this.speedText = '',
     this.showCast = true,
+    this.onRotate,
+    this.rotatedToPortrait = false,
   });
 
   final String title;
@@ -207,6 +210,16 @@ class FsTopBar extends StatelessWidget {
   /// 播放设置统一走底栏。调用方仍可传，留作将来放其它功能。
   final VoidCallback onMore;
   final bool compact;
+
+  /// 窄屏（竖屏全屏播放）：右侧一组收窄，网速与时钟胶囊让位给标题，
+  /// 避免 360dp 宽度下顶栏一行挤爆。横屏全屏不传，保持原样。
+  final bool narrow;
+
+  /// 手动转屏按钮；null 时不渲染（离线 / 一起看等场景不传）。
+  final VoidCallback? onRotate;
+
+  /// 当前是否竖屏布局：只决定转屏按钮的图标语义（点了会切到另一边）。
+  final bool rotatedToPortrait;
 
   @override
   Widget build(BuildContext context) {
@@ -294,7 +307,8 @@ class FsTopBar extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               // 实时网速：能看出在动。网络卡住时掉到 0，一眼就知道。
-              if (speedText.isNotEmpty) ...[
+              // 竖屏（narrow）先让它：360dp 宽装不下这么多胶囊。
+              if (!narrow && speedText.isNotEmpty) ...[
                 _TopChip(text: speedText, size: s),
                 const SizedBox(width: 6),
               ],
@@ -302,9 +316,26 @@ class FsTopBar extends StatelessWidget {
               const SizedBox(width: 6),
               // 电量：和手机状态栏同款语义，充电时变绿
               _BatteryChip(size: s),
-              const SizedBox(width: 6),
-              // 当前时间：全屏时看不到系统状态栏，这里补一个
-              _ClockChip(size: s),
+              if (!narrow) ...[
+                const SizedBox(width: 6),
+                // 当前时间：全屏时看不到系统状态栏，这里补一个
+                _ClockChip(size: s),
+              ],
+              if (onRotate != null) ...[
+                const SizedBox(width: 6),
+                // 手动转屏：竖着看短剧想横过来、或反过来时用。点过一次之后
+                // 本次播放内不再自动跟着分辨率切（页面记 user override）。
+                PGlassIcon(
+                  icon: rotatedToPortrait
+                      ? Icons.crop_landscape_rounded
+                      : Icons.crop_portrait_rounded,
+                  size: 32 * s,
+                  iconSize: 17 * s,
+                  tint: .18,
+                  tooltip: rotatedToPortrait ? '转成横屏' : '转成竖屏',
+                  onTap: onRotate,
+                ),
+              ],
               if (showCast) ...[
                 const SizedBox(width: 6),
                 PGlassIcon(

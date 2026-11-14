@@ -38,6 +38,32 @@ class ScreenOrientation {
     }
   }
 
+  /// 全屏竖屏播放：`SENSOR_PORTRAIT`，系统旋转锁开着也不会被系统翻成横屏。
+  ///
+  /// 与 [portrait] 的区别：[portrait] 是「退出播放回竖屏」用的固定竖屏
+  /// （SCREEN_ORIENTATION_PORTRAIT），全屏竖屏片用 SENSOR_PORTRAIT，
+  /// 用户自己正握 / 反握手机都能正常显示。旧包的原生通道没有这个分支，
+  /// 退回 [portrait]，行为与之前一致。
+  static Future<void> sensorPortrait() async {
+    if (!Platform.isAndroid) {
+      await _fallback(const <DeviceOrientation>[DeviceOrientation.portraitUp]);
+      return;
+    }
+    try {
+      await _channel.invokeMethod<void>('sensorPortrait');
+    } catch (error) {
+      debugPrint(
+        'ScreenOrientation: 原生 sensorPortrait 不可用，退回 portrait: $error',
+      );
+      await portrait();
+    }
+  }
+
+  /// 全屏播放按方向定档：竖屏片锁竖屏，其余一律横屏。
+  static Future<void> applyPlayback({required bool portraitMode}) {
+    return portraitMode ? sensorPortrait() : landscape();
+  }
+
   /// 退出播放回到竖屏。
   static Future<void> portrait() async {
     if (!Platform.isAndroid) {

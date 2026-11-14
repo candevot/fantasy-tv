@@ -8,6 +8,7 @@ import '../services/app_settings.dart';
 import '../services/download_service.dart';
 import '../services/fx_display_settings.dart';
 import '../services/fx_player.dart';
+import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
 import '../theme.dart';
 import '../widgets/fs_controls.dart';
@@ -26,7 +27,7 @@ import '../widgets/player_theme.dart'
 
 /// 离线播放页：用 [FxPlayer]（ExoPlayer 内核）打开已下载的本地文件。
 ///
-/// 打开即横屏全屏（与在线全屏一致），横屏控件**完全复用在线全屏组件**：
+/// 打开即全屏（与在线全屏一致；方向按视频分辨率自动横竖），控件**完全复用在线全屏组件**：
 /// [FsTopBar] 返回·剧名·集数·⋯设置 / [FsSideControls] 左锁右±10s /
 /// [FsBottomBar] 进度·播放暂停·下一集·选集·⋯设置·退出；⋯面板里是
 /// 画面比例 / 镜像 / 倍速 / 定时关闭 / 循环。只隐藏在线才有的入口：
@@ -81,6 +82,24 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
   bool _locked = false;
   bool _unlockVisible = true;
 
+  /* ------------------------------------------------------- 播放方向自适应 */
+
+  /// 当前布局方向：离线播放同样按视频自身分辨率定（下载的竖屏短剧竖着播）。
+  FxPlayOrientation _layoutOrientation = FxPlayOrientation.landscape;
+
+  /// 分辨率 → 方向的防抖器（0×0 先到、切集重给尺寸都不抖）。
+  FxPlayOrientationDebouncer? _orientationDebouncer;
+
+  /// 用户手动转过屏：本次播放内不再自动切。
+  bool _userOrientationOverride = false;
+
+  /// 是否已经把方向下发到原生。进页面时若还没有分辨率，就先不转，
+  /// 等播放器报出尺寸后由 [_applyLayoutOrientation] 第一次下发 ——
+  /// 这样下载好的竖屏短剧不会先横过来再翻回去。
+  bool _orientationApplied = false;
+
+  bool get _isPortraitLayout => _layoutOrientation.isPortrait;
+
   /// 切后台那一刻的播放位置：离线播放同样会被系统冻结 / 重置进度，
   /// 回前台按它自愈（拉回原进度并继续播）。
   bool _backgrounded = false;
@@ -117,8 +136,10 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     _service.addListener(_onServiceChanged);
     _refreshEpisodes();
     unawaited(_prepareSettings());
-    // 打开即横屏全屏：竖屏进、横屏播，退出时再恢复竖屏。
-    unawaited(_enterLandscape());
+    // 播放方向：进页面先按已知分辨率定一次，随后由防抖器校正。
+    _initPlayOrientation();
+    // 打开即全屏：竖屏片锁竖屏、横屏片锁横屏，退出时恢复竖屏。
+    unawaited(_enterFullscreen());
     _open();
   }
 
@@ -310,6 +331,8 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     final player = _player;
     if (!mounted || player == null) return;
     final value = player.value;
+    // 分辨率到位后按视频自身横竖自动定方向（竖屏短剧不被强制横屏）。
+    _updatePlayOrientation(value);
     final error = value.hasError
         ? (value.errorText.trim().isEmpty ? '本地文件解码失败' : value.errorText)
         : null;
@@ -551,16 +574,80 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
 
   /* ----------------------------------------------------------- 全屏 / 系统 */
 
-  /// 进页面即横屏 + 沉浸式全屏（与在线全屏同一套系统栏动作）。
-  Future<void> _enterLandscape() async {
+  /// 进页面即沉浸式全屏（与在线全屏同一套系统栏动作），方向按视频自身
+  /// 分辨率定：横屏片横着播，1080×1920 的竖屏短剧竖着播。
+  Future<void> _enterFullscreen() async {
     try {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light);
     } catch (_) {
       // 桌面 / 模拟器上不支持也无所谓
     }
-    // 与在线全屏同一套：SENSOR_LANDSCAPE，系统旋转锁开着也能横屏。
-    await ScreenOrientation.landscape();
+    // 与在线全屏同一套：横屏片 SENSOR_LANDSCAPE，竖屏短剧 SENSOR_PORTRAIT，
+    // 都不看系统旋转锁。
+    //
+    // 分辨率还不知道就先不动方向（本地文件 open 之后马上就有），
+    // 等 [_applyLayoutOrientation] 第一次定下来再转，少翻一次。
+    final (w, h) = _videoDisplaySize(_player?.value);
+    if (w > 0 && h > 0) {
+      _orientationApplied = true;
+      await ScreenOrientation.applyPlayback(
+        portraitMode: _isPortraitLayout,
+      );
+    }
+  }
+
+  /* ---------------------------------------------------------- 播放方向 */
+
+  (int, int) _videoDisplaySize(FxPlayerValue? v) {
+    if (v == null) return (0, 0);
+    var w = v.width ?? 0;
+    var h = v.height ?? 0;
+    if (w <= 0) w = v.videoWidth ?? 0;
+    if (h <= 0) h = v.videoHeight ?? 0;
+    return (w, h);
+  }
+
+  void _initPlayOrientation() {
+    final (w, h) = _videoDisplaySize(_player?.value);
+    _layoutOrientation = fxResolvePlayOrientation(width: w, height: h);
+    _orientationDebouncer = FxPlayOrientationDebouncer(
+      onResolve: _onAutoOrientation,
+    );
+  }
+
+  /// 本地文件 open 之后分辨率才到：等稳定 300ms 再切，不跟着抖。
+  void _updatePlayOrientation(FxPlayerValue value) {
+    final debouncer = _orientationDebouncer;
+    if (debouncer == null || _userOrientationOverride) return;
+    final (w, h) = _videoDisplaySize(value);
+    debouncer.update(w, h);
+  }
+
+  void _onAutoOrientation(FxPlayOrientation target) {
+    if (!mounted || _leaving || _userOrientationOverride) return;
+    _applyLayoutOrientation(target);
+  }
+
+  void _applyLayoutOrientation(FxPlayOrientation target) {
+    // 方向没变、也已经下发过：什么都不做（不重复触发系统旋转）。
+    if (target == _layoutOrientation && _orientationApplied) return;
+    if (target != _layoutOrientation) {
+      setState(() => _layoutOrientation = target);
+    }
+    _orientationApplied = true;
+    unawaited(ScreenOrientation.applyPlayback(portraitMode: target.isPortrait));
+  }
+
+  /// 顶栏转屏按钮：用户手动干预，本次播放内不再自动切。
+  void _toggleOrientationByUser() {
+    final next = _isPortraitLayout
+        ? FxPlayOrientation.landscape
+        : FxPlayOrientation.portrait;
+    _userOrientationOverride = true;
+    _orientationDebouncer?.force(next);
+    _applyLayoutOrientation(next);
+    _wake();
   }
 
   /// 退出前恢复竖屏 + 常规系统栏。
@@ -1313,6 +1400,9 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
       title: _task.title,
       epLabel: '${_task.epLabel} · ${_task.sizeLabel} · 已下载',
       compact: compact,
+      narrow: _isPortraitLayout,
+      rotatedToPortrait: _isPortraitLayout,
+      onRotate: _toggleOrientationByUser,
       qualityLabel: fxPlayerQuality(_player),
       onBack: () => unawaited(_leave()),
       onCast: () {},
@@ -1333,6 +1423,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
       // 清晰度 / 线路只对在线播放有意义：空串即不显示入口。
       qualityLabel: '',
       compact: compact,
+      narrow: _isPortraitLayout,
       onSeek: (position) => unawaited(_seek(position)),
       onTogglePlay: () => unawaited(_playOrPause()),
       onNext: _playNextEpisode,
@@ -1367,6 +1458,8 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _orientationDebouncer?.dispose();
+    _orientationDebouncer = null;
     _openSeq++;
     _hideTimer?.cancel();
     _sleepTimer?.cancel();

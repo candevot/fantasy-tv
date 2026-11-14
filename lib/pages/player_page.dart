@@ -9,6 +9,7 @@ import '../services/cms_bridge.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/fx_player.dart';
+import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
@@ -1544,10 +1545,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     // 全屏交给全屏页接管画面，切换快照不再需要，避免返回竖屏后留下旧帧。
     _clearFrozenFrame();
-    // 先把屏幕方向切成横屏，再推页面：让系统旋转动画跑在淡入之前，
-    // 新页面第一帧就已经是横屏布局，不会先按竖屏铺一遍再重排
+    // 先把屏幕方向切成「这一集该有的方向」，再推页面：让系统旋转动画跑在
+    // 淡入之前，新页面第一帧就已经是正确布局，不会先按竖屏铺一遍再重排
     // （PlatformView 重排会闪一下）。不 await——淡入不该等旋转完成。
-    unawaited(ScreenOrientation.landscape());
+    //
+    // 方向按「视频自身分辨率」算：1080×1920 的竖屏短剧锁竖屏，
+    // 常规横屏片锁横屏；全屏页进去后会再做一次 300ms 防抖校正。
+    final size = c.value;
+    final target = fxResolvePlayOrientation(
+      width: (size.width ?? 0) > 0 ? size.width : size.videoWidth,
+      height: (size.height ?? 0) > 0 ? size.height : size.videoHeight,
+    );
+    unawaited(ScreenOrientation.applyPlayback(portraitMode: target.isPortrait));
     setState(() => _fullscreenActive = true);
 
     FullPlayerResult? result;

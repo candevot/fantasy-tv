@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../tools/test_hls_segment_index.dart' as hlsIndex;
 import '../tools/test_local_hls_proxy.dart' as proxy;
+import '../tools/test_play_orientation.dart' as orientation;
 import '../tools/test_playback_recovery.dart' as recovery;
 import '../tools/test_together_sync.dart' as sync;
 
@@ -27,4 +28,8 @@ void main() {
       hlsIndex.main);
   test('recovery protects progress and verifies seek landing', recovery.main);
   test('room member drift, stall hold and offline synchronization', sync.main);
+  // 全屏播放方向：竖屏短剧锁竖屏、横屏片锁横屏、分辨率抖 300ms 防抖、
+  // 手动切过后不再自动切（纯 Dart，不需要设备）。
+  test('play orientation: auto / forced / debounce / manual override',
+      orientation.main);
 }

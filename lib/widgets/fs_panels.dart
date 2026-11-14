@@ -88,6 +88,7 @@ class FsBottomBar extends StatelessWidget {
     this.compact = false,
     this.bottomInset = 0,
     this.live = false,
+    this.narrow = false,
   });
 
   final Duration position;
@@ -138,6 +139,11 @@ class FsBottomBar extends StatelessWidget {
   final bool jumpActive;
   final bool compact;
   final double bottomInset;
+
+  /// 窄屏（竖屏全屏播放，约 360dp 宽）：底栏仍是底部横排，但把「片头/尾」
+  /// 和「倍速」两个文字入口收进 ⋯ 播放设置，右侧一组不再被 FittedBox 缩成
+  /// 蚂蚁字，选集 / 齿轮 / 退出保持原尺寸好点。
+  final bool narrow;
 
   /// 直播：隐藏进度条 / 下一集 / 倍速 / 选集，显示 LIVE，只保留
   /// 播放暂停、清晰度（线路切换）和退出全屏。
@@ -276,7 +282,7 @@ class FsBottomBar extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (!live && onJump != null) ...[
+                      if (!live && !narrow && onJump != null) ...[
                         FsTextAction(
                           text: '片头/尾',
                           size: s,
@@ -285,7 +291,7 @@ class FsBottomBar extends StatelessWidget {
                         ),
                         const SizedBox(width: 10),
                       ],
-                      if (!live && onSpeed != null) ...[
+                      if (!live && !narrow && onSpeed != null) ...[
                         FsTextAction(
                           text: '倍速',
                           size: s,

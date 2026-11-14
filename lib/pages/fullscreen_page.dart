@@ -12,6 +12,7 @@ import '../services/app_settings.dart';
 import '../services/danmu_local.dart';
 import '../services/device_status.dart';
 import '../services/fx_player.dart';
+import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
@@ -251,6 +252,23 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   int _videoEpoch = 0;
   bool _locked = false;
 
+  /* ------------------------------------------------------- 播放方向自适应 */
+
+  /// 当前布局方向：决定是否锁竖屏、控件留白按哪一侧算。
+  ///
+  /// 进页面时先按竖屏页交过来的分辨率定一次，之后由
+  /// [_orientationDebouncer] 在分辨率稳定后修正。
+  FxPlayOrientation _layoutOrientation = FxPlayOrientation.landscape;
+
+  /// 分辨率 → 方向的 300ms 防抖器（0×0 先到、切集重给尺寸都不抖）。
+  FxPlayOrientationDebouncer? _orientationDebouncer;
+
+  /// 用户手动切过方向（全屏顶栏的转屏按钮）：本次播放内不再自动切。
+  bool _userOrientationOverride = false;
+
+  /// 竖屏布局：控件留白 / 紧凑度都按竖屏算。
+  bool get _isPortraitLayout => _layoutOrientation.isPortrait;
+
   /// 锁屏后解锁钮是否可见：锁定瞬间亮 3 秒后自动隐藏（[_startUnlockTimer]），
   /// 之后由点屏幕即时切换显隐（隐藏 0 延迟），不会常驻。
   bool _unlockVisible = false;
@@ -449,6 +467,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     WidgetsBinding.instance.addObserver(this);
     // 顶栏电量：进全屏就开始订阅，退出时释放
     unawaited(DeviceStatus.instance.attach());
+    // 播放方向：竖屏页交过来的播放器一般已经有分辨率，先立即定一次
+    // （不等防抖，否则用户会先看到一个方向不对的画面）。
+    _initPlayOrientation();
     unawaited(_enterImmersive());
     if (!_isLive) {
       _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -481,6 +502,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _sleepTimer?.cancel();
     _firstFrameTimer?.cancel();
     _freezeClearTimer?.cancel();
+    _orientationDebouncer?.dispose();
+    _orientationDebouncer = null;
     final errorSub = _platformErrorSub;
     _platformErrorSub = null;
     if (errorSub != null) unawaited(errorSub.cancel());
@@ -552,6 +575,71 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     setState(() {});
   }
 
+  /* ------------------------------------------------------ 播放方向自适应 */
+
+  /// 视频「显示用」宽高：优先 [FxPlayerValue.width] / [height]（原生已按
+  /// rotate 元数据交换过），缺了退回 videoWidth / videoHeight。
+  /// 两个值都 ≤ 0 时返回 (0, 0)，交给防抖器忽略。
+  (int, int) _videoDisplaySize(FxPlayerValue? v) {
+    if (v == null) return (0, 0);
+    var w = v.width ?? 0;
+    var h = v.height ?? 0;
+    if (w <= 0) w = v.videoWidth ?? 0;
+    if (h <= 0) h = v.videoHeight ?? 0;
+    return (w, h);
+  }
+
+  /// 进全屏时定一次方向（不等防抖）。
+  ///
+  /// 竖屏页推页面前已经按同一条规则转过屏，这里算出同样的值 → 布局不用改，
+  /// 也不会多下发一次原生旋转。分辨率稍后到齐后由防抖器再校正一次。
+  void _initPlayOrientation() {
+    final (w, h) = _videoDisplaySize(_controller?.value);
+    _layoutOrientation = fxResolvePlayOrientation(width: w, height: h);
+    _orientationDebouncer = FxPlayOrientationDebouncer(
+      onResolve: _onAutoOrientation,
+    );
+  }
+
+  /// 播放中每次播放器状态变化：把当前分辨率丢给防抖器（300ms 稳定才切）。
+  void _updatePlayOrientation(FxPlayerValue? v) {
+    final debouncer = _orientationDebouncer;
+    if (debouncer == null) return;
+    // 用户手动切过：本次播放内不再自动切，连防抖都不开。
+    if (_userOrientationOverride) return;
+    final (w, h) = _videoDisplaySize(v);
+    debouncer.update(w, h);
+  }
+
+  /// 防抖器给出结论：只在方向真的变了时下发一次旋转。
+  void _onAutoOrientation(FxPlayOrientation target) {
+    if (!mounted || _exiting || _userOrientationOverride) return;
+    _applyLayoutOrientation(target);
+  }
+
+  /// 切布局方向 + 通知原生转屏。两者分开：布局要先跟上，控件留白才按对
+  /// 的一侧算；原生旋转本身有系统动画，不用等它。
+  void _applyLayoutOrientation(FxPlayOrientation target) {
+    if (target == _layoutOrientation) return;
+    setState(() => _layoutOrientation = target);
+    unawaited(
+      ScreenOrientation.applyPlayback(portraitMode: target.isPortrait),
+    );
+  }
+
+  /// 顶栏转屏按钮：用户手动干预。切完后本次播放内不再自动切，
+  /// 即使之后再拿到新的分辨率也不动。
+  void _toggleOrientationByUser() {
+    final next = _isPortraitLayout
+        ? FxPlayOrientation.landscape
+        : FxPlayOrientation.portrait;
+    _userOrientationOverride = true;
+    _orientationDebouncer?.force(next);
+    _applyLayoutOrientation(next);
+    // 转屏动作本身算一次操作：控件重新计时隐藏。
+    _wake();
+  }
+
   /* ------------------------------------------------------------------ 系统 */
 
   Future<void> _enterImmersive() async {
@@ -561,9 +649,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     } catch (_) {
       // 桌面 / 模拟器上不支持也无所谓
     }
-    // 横屏必须走 SENSOR_LANDSCAPE：SystemChrome 的 landscape* 会被引擎映射成
-    // USER_LANDSCAPE，遵守系统「自动旋转」开关，竖屏锁定下转不了横屏。
-    await ScreenOrientation.landscape();
+    // 必须走原生通道：SystemChrome 的 landscape* 会被引擎映射成
+    // USER_LANDSCAPE，遵守系统「自动旋转」开关，竖屏锁定下转不动。
+    // 竖屏片（1080×1920 短剧）锁 SENSOR_PORTRAIT，横屏片锁 SENSOR_LANDSCAPE。
+    await ScreenOrientation.applyPlayback(portraitMode: _isPortraitLayout);
   }
 
   Future<void> _restoreSystemUi() async {
@@ -1244,6 +1333,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       _firstFrame = false;
       setState(() {});
     }
+    // 播放方向：分辨率先给 0×0、切集再给一次都会走到这里，
+    // 由防抖器决定「稳定 300ms 再切一次」，不会跟着抖。
+    _updatePlayOrientation(v);
     // loading 期间的错误交给 _bootstrap / _openSource 的 try/catch 处理。
     if (_loading || _error) return;
     // 重新 open 成功后，真实进度追上占位值再释放，避免进度条归零。
@@ -2280,6 +2372,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   ) {
     final compact = MediaQuery.sizeOf(context).width < 700;
     final bottomInset = keyboard > 0 ? 0.0 : pad.bottom;
+    // 竖屏全屏（短剧）：顶栏右侧一组收紧，网速 / 时钟让位，标题不被挤没。
+    final narrow = _isPortraitLayout;
     // 刘海 / 圆角屏安全边距：设置面板跟着右移，不压进屏幕圆角。
     final safe = MediaQuery.viewPaddingOf(context);
     return Stack(
@@ -2297,6 +2391,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               title: _title,
               epLabel: _isLive ? 'LIVE · 直播中' : _epLabel,
               compact: compact,
+              narrow: narrow,
+              rotatedToPortrait: _isPortraitLayout,
               qualityLabel: _qualityText,
               speedText: _isLive
                   ? ''
@@ -2304,6 +2400,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               onBack: () => unawaited(_exit()),
               onCast: () => unawaited(_openCastSheet()),
               onMore: () => unawaited(_openMorePanel()),
+              // 手动转屏：点过之后本次播放内不再自动跟着分辨率切。
+              onRotate: _toggleOrientationByUser,
             ),
           ),
         ),
@@ -2382,6 +2480,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
                       // 倍速 / 定时 / 片头尾等全部收进 ⋯ 播放设置。
                       qualityLabel: '',
                       compact: compact,
+                      narrow: narrow,
                       bottomInset: bottomInset,
                       live: _isLive,
                       onSeek: _isLive ? null : _seekTo,
