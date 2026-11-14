@@ -19,7 +19,6 @@ import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
@@ -156,8 +155,6 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             .build()
         player = ExoPlayer.Builder(context)
             .setLoadControl(loadControl)
-            // CDN 限流 / 瞬断时多试几次，别一次失败就把整条线路判死
-            .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(5))
             .build()
         // 精确 seek 要从前一个关键帧开始解码，大分片 4K 上很慢；
         // 对齐到最近关键帧是各视频 App 的常规做法，拖动手感快很多。
