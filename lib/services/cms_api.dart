@@ -151,7 +151,16 @@ class CmsApi {
 
   /* ------------------------------------------------------------ 四个接口 */
 
-  /// 列表：`ac=list&t=<分类id>&pg=<页>`。
+  /// 列表：`ac=detail&t=<分类id>&pg=<页>`。
+  ///
+  /// **为什么不是 `ac=list`**：实测本站 `ac=list` 只回 9 个字段
+  /// （`vod_id / vod_name / vod_play_from / vod_remarks / vod_time / type_*`），
+  /// 没有 `vod_pic / vod_year / vod_area / vod_score / vod_hits / vod_total /
+  /// vod_play_url`。后果是一串连锁问题：
+  ///   · 卡片的「年份 / 地区 / 评分 / 热度 / 更新至 N 集」全是空的；
+  ///   · 分类页的年份筛选（前端过滤）拿不到 `year`，一筛就整页清空。
+  /// `ac=detail` 的 `t` + `pg` 是同语义分页（实测 20 条/页、`total` 正常），
+  /// 单条 ~2KB、整页 ~41KB，换回上面那些字段是值的。
   static Future<List<VideoCard>> list({
     int type = 0,
     int page = 1,
@@ -159,7 +168,7 @@ class CmsApi {
   }) async {
     try {
       final body = await _vod(<String, String>{
-        'ac': 'list',
+        'ac': 'detail',
         if (type > 0) 't': '$type',
         'pg': '$page',
         if (sort.isNotEmpty) 'order': _orderOf(sort),

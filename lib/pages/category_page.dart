@@ -488,6 +488,10 @@ class CategoryPage extends StatefulWidget {
 class _CategoryPageState extends State<CategoryPage> {
   /// 类型选项跟 CMS 的一级栏目对齐（键同时兼容旧接口的
   /// juji / movie / manhua / zongyi，CmsBridge 里统一翻译成 type_id）。
+  ///
+  /// **不放「直播」**：CMS 的 `type_id=7`（直播）在库里一条数据都没有
+  /// （实测 `t=7` 返回 `total: 0`），点它只会得到一个空列表；直播内容是
+  /// 底部导航「直播」那个独立入口在管，两边混在一起只会让人以为分类页坏了。
   static const List<_Opt> _types = [
     _Opt('', '全部'),
     _Opt('movie', '电影'),
@@ -496,7 +500,6 @@ class _CategoryPageState extends State<CategoryPage> {
     _Opt('zongyi', '综艺'),
     _Opt('duanju', '短剧'),
     _Opt('kids', '少儿'),
-    _Opt('live', '直播'),
   ];
   static const List<_Opt> _areas = [
     _Opt('', '全部'),
@@ -578,18 +581,20 @@ class _CategoryPageState extends State<CategoryPage> {
         if (clear) _items.clear();
       });
       try {
-        final list = await CmsBridge.category(
+        final page1 = await CmsBridge.categoryPage(
             type: _type, area: _area, year: _year, sort: _sort, page: 1);
         if (!mounted || req != _req) return;
         setState(() {
           _items
             ..clear()
-            ..addAll(list);
+            ..addAll(page1.items);
           _page = 1;
           _loading = false;
           _error = null;
           _refreshError = null;
-          _hasMore = list.length >= 20;
+          // 用后端「这一页给满了没有」判断，而不是过滤后的条数：
+          // 带年份筛选时一页可能只剩两三条，按条数算会直接判死「没有更多」。
+          _hasMore = page1.hasMore;
         });
       } catch (e) {
         if (!mounted || req != _req) return;
@@ -618,15 +623,15 @@ class _CategoryPageState extends State<CategoryPage> {
       _moreError = false;
     });
     try {
-      final list = await CmsBridge.category(
+      final more = await CmsBridge.categoryPage(
           type: _type, area: _area, year: _year, sort: _sort, page: next);
       if (!mounted || req != _req) return;
       setState(() {
-        _items.addAll(list);
+        _items.addAll(more.items);
         _page = next;
         _loadingMore = false;
         _refreshError = null;
-        _hasMore = list.length >= 20;
+        _hasMore = more.hasMore;
       });
     } catch (e) {
       if (!mounted || req != _req) return;

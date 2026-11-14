@@ -85,6 +85,20 @@ List<String> splitRaw(String raw, String sep) {
   ];
 }
 
+/// 采集失败时后台塞进来的占位地址（实测「其他」分类里有一条
+/// `vod_play_from=tips` / `vod_play_url=about:blank` 的「采集数据获取失败」记录）。
+///
+/// 这种集地址既有集名又不像空串，不拦掉的话详情页会多出一条叫 `tips` 的线路，
+/// 点开必然解析失败 —— 用户以为是我们播放器坏了。
+bool isPlaceholderAddress(String address) {
+  final text = address.trim().toLowerCase();
+  if (text.isEmpty) return true;
+  return text == 'about:blank' ||
+      text.startsWith('javascript:') ||
+      text == 'null' ||
+      text == 'undefined';
+}
+
 /// 一段 `集名$地址#集名$地址` → `[[集名, 地址], …]`。
 ///
 /// 集名可以为空（`$http://…`）。地址里的 `#` 服务端已经转成 `%23`，
@@ -99,7 +113,7 @@ List<List<String>> epPairs(String block) {
     final cut = item.indexOf(r'$');
     final name = cut > 0 ? item.substring(0, cut).trim() : '';
     final address = cut >= 0 ? item.substring(cut + 1).trim() : item;
-    if (address.isEmpty) continue;
+    if (isPlaceholderAddress(address)) continue;
     out.add(<String>[name, address]);
   }
   return out;

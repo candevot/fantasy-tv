@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../api.dart';
 import '../models.dart';
+import '../services/cms_bridge.dart';
 import '../services/live_source.dart';
 import '../theme.dart';
 import '../utils/fx_route.dart';
@@ -65,12 +66,33 @@ class _LiveAllPageState extends State<LiveAllPage> {
         _error = sections.isEmpty ? '直播列表里没有可用频道，检查后台配置' : null;
       });
     } catch (e) {
-      if (mounted && req == _req) await _loadLegacy(e, req);
+      if (!mounted || req != _req) return;
+      if (!CmsBridge.legacyEnabled) {
+        // 旧接口（8787）已随迁移下线：不再拿它兜底，直接把真实原因说清楚。
+        // 「后台还没配直播接口地址」比先转 16 秒（8 秒超时 ×2 次重试）再报
+        // 一个看不懂的网络错误有用得多。
+        setState(() {
+          _loading = false;
+          _refreshing = false;
+          _error = fxErrorText(e);
+        });
+        return;
+      }
+      await _loadLegacy(e, req);
     }
   }
 
   /// 云端没配 / 拉不到：回落到旧接口的分组数据。
   Future<void> _loadLegacy(Object cause, int req) async {
+    if (!CmsBridge.legacyEnabled) {
+      if (!mounted || req != _req) return;
+      setState(() {
+        _loading = false;
+        _refreshing = false;
+        _error = fxErrorText(cause);
+      });
+      return;
+    }
     try {
       final groups = await Api.liveGroups();
       if (!mounted || req != _req) return;
