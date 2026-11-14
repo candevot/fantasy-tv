@@ -157,6 +157,7 @@ class ExoPlayerState {
     this.preloaded = Duration.zero,
     this.playing = false,
     this.buffering = true,
+    this.hasRenderedFirstFrame = false,
     this.error,
     this.width = 0,
     this.height = 0,
@@ -180,6 +181,15 @@ class ExoPlayerState {
 
   final bool playing;
   final bool buffering;
+
+  /// 是否已经真正渲染出过一帧（原生 `onRenderedFirstFrame`）。
+  ///
+  /// FIRST_FRAME（2026-11-14）：加载层的显隐只看这一个值。
+  /// `buffering == false`、`playing == true`、`hasSize == true` 都可能在
+  /// 首帧上屏之前成立，用它们收加载层就会出现「缓冲没了但黑屏」。
+  /// open / seek 时原生会把它重置为 false。
+  final bool hasRenderedFirstFrame;
+
   final String? error;
 
   /// 解码后的显示宽高（已按 rotationDegrees 交换横竖屏方向）；0 表示还没拿到。
@@ -205,6 +215,7 @@ class ExoPlayerState {
       preloaded: diskBuffered,
       playing: m['playing'] == true,
       buffering: m['buffering'] == true,
+      hasRenderedFirstFrame: m['firstFrameRendered'] == true,
       error: m['error'] as String?,
       width: (m['width'] as num?)?.toInt() ?? 0,
       height: (m['height'] as num?)?.toInt() ?? 0,
@@ -213,7 +224,7 @@ class ExoPlayerState {
     );
   }
 
-  /// 画面尺寸是否已经拿到（首帧就绪的判据之一）。
+  /// 画面尺寸是否已经拿到（**不是**首帧判据，别拿它收加载层）。
   bool get hasSize => width > 0 && height > 0;
 
   /// 缓冲百分比（0-100）。duration 未知时按 0 处理。
@@ -229,7 +240,8 @@ class ExoPlayerState {
   String toString() =>
       'ExoPlayerState(pos=$position, dur=$duration, buf=$buffered, '
       'pre=${preloaded.inSeconds}s, '
-      'playing=$playing, buffering=$buffering, ${width}x$height, '
+      'playing=$playing, buffering=$buffering, '
+      'firstFrame=$hasRenderedFirstFrame, ${width}x$height, '
       'ended=$ended, state=$state, err=$error)';
 }
 

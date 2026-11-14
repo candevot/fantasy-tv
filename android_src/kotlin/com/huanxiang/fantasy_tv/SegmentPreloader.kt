@@ -114,7 +114,12 @@ class SegmentPreloader(
                 cachedFlags = BooleanArray(list.size)
             }
             val startIndex = if (startPositionMs > 0) findIndex(startPositionMs) else 0
-            log("预取: ${list.size} 片，从第 $startIndex 片开始顺序灌缓存")
+            // RESUME（2026-11-14）：和 ExoPlayerPlugin 的「RESUME 起始位置 Xms」
+            // 配对，真机 logcat -s FxExo 能直接看出续播起点有没有到分片级。
+            log(
+                "预取: ${list.size} 片，续播起点 ${startPositionMs}ms，" +
+                    "首个分片索引 $startIndex（time=${list.getOrNull(startIndex)?.startMs}ms）",
+            )
             downloadFrom(startIndex, generationAtStart, headers)
         }
     }

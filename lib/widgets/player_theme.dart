@@ -92,6 +92,24 @@ String fxTime(Duration d) {
 
 String fxClock(DateTime t) => '${fxPad2(t.hour)}:${fxPad2(t.minute)}';
 
+/// 缓冲比例文案（0–100 的真实值）：`42%` / `<1%` / `100%`。
+///
+/// BUFFER_PCT_REAL（2026-11-14）：别再四舍五入成 0% / 99% —— 4K 长片刚
+/// 起播时 buffered/duration 往往不到 1%，直接 round 会显示「缓冲中 0%」，
+/// 看起来像坏掉的假进度。小于 1% 一律显示 `<1%`。
+String fxPercentLabel(double percent) {
+  final p = percent.isFinite ? percent.clamp(0.0, 100.0).toDouble() : 0.0;
+  if (p >= 100) return '100%';
+  if (p > 0 && p < 1) return '<1%';
+  return '${p.round()}%';
+}
+
+/// 缓冲层标题：拿不到真实比例就说「缓冲中…」，绝不编数字。
+String fxBufferingText(double? percent) {
+  if (percent == null) return '缓冲中…';
+  return '缓冲中 ${fxPercentLabel(percent)}';
+}
+
 /// 真实分辨率文案：`宽x高`（如 `1920x1080` / `720x480`）。
 ///
 /// 宽或高任一缺失、≤0 时返回空串（胶囊自动隐藏）；
@@ -772,8 +790,8 @@ class _FxSeekRowState extends State<FxSeekRow> {
 /// 播放器加载 / 缓冲浮层。
 ///
 /// - 切集、切线路、首帧未出：圆环 + 单行「正在加载 线路名 · 第01集」；
-/// - 播放中缓冲：圆环 +「缓冲中 42%」（libmpv cache-buffering-state 的真实
-///   填充进度）；拿不到进度时不确定圆环 +「缓冲中…」，绝不编数字；
+/// - 播放中缓冲：圆环 +「缓冲中 42%」（`bufferedPosition / duration`
+///   的真实比例）；拿不到时不确定圆环 +「缓冲中…」，绝不编数字；
 /// - 时长未知：不确定圆环 +「缓冲中…」。
 ///
 /// 只有一行文案：线路名已经拼在 [title] 里，不再单独叠副文案。
@@ -792,9 +810,9 @@ class FxLoadingOverlay extends StatelessWidget {
 
   /// 0–100；为 null 时圆环不确定进度。
   ///
-  /// 传进来的应该是代理层按真实下载字节算的起播进度（能到 100，
-  /// 到 100 就说明首屏内容齐了）。mpv 的 cache-buffering-state
-  /// 不能直接用 —— 它快满时会长期停在 99，界面就成了假进度。
+  /// 传进来的必须是真实值（`bufferedPosition / duration`）。这里**不再**
+  /// 把百分比夹到 99：以前那个 `clamp(0, 99)` 就是「缓冲永远 99%」的直接
+  /// 原因之一 —— 真实值到顶了也只能显示 99，看起来永远不动。
   final double? percent;
 
   /// 实时网速文案（如「3.2 MB/s」）；空串不显示。
@@ -805,11 +823,11 @@ class FxLoadingOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 兜底：任何情况下都不把缓冲显示成 100%。
+    // 只做数值兜底（NaN / 越界），不再把真实值伪装成 99。
     final safePercent = percent == null
         ? null
         : percent!.isFinite
-        ? percent!.clamp(0.0, 99.0).toDouble()
+        ? percent!.clamp(0.0, 100.0).toDouble()
         : null;
     final value = safePercent == null ? null : safePercent / 100;
     final ring = compact ? 44.0 : 62.0;
@@ -857,7 +875,7 @@ class FxLoadingOverlay extends StatelessWidget {
                         ),
                         if (safePercent != null)
                           Text(
-                            '${safePercent.round()}%',
+                            fxPercentLabel(safePercent),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 10.5,

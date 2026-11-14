@@ -54,7 +54,7 @@ class FxPlayerValue {
     this.isInitialized = false,
     this.isPlaying = false,
     this.isBuffering = false,
-    this.bufferingPercentage = 0,
+    this.hasRenderedFirstFrame = false,
     this.buffered = Duration.zero,
     this.isCompleted = false,
     this.hasError = false,
@@ -67,7 +67,6 @@ class FxPlayerValue {
     this.videoHeight,
     this.aspectRatio = 16 / 9,
     this.bytesPerSecond = 0,
-    this.measuredBufferPercent = 0,
   });
 
   /// 是否已经拿到视频参数/时长，可以开始渲染与 seek。
@@ -79,23 +78,21 @@ class FxPlayerValue {
   /// 是否正在缓冲。
   final bool isBuffering;
 
-  /// libmpv 的真实缓冲百分比（cache-buffering-state，0–100）。
+  /// 是否已经在屏幕上渲染出过一帧。
   ///
-  /// 注意：这个值在缓存快满时会长期停在 99，**不能直接拿去当进度环**，
-  /// 否则界面永远显示「缓冲中 99%」（用户报障原话）。起播进度请用
-  /// [measuredBufferPercent]。
-  final double bufferingPercentage;
-
-  /// 起播缓冲进度（0–100，按真实下载字节算，能到 100）。
+  /// FIRST_FRAME（2026-11-14）：这是「能不能收起加载层」的唯一判据。
+  /// 以前的判据是 `isBuffering == false` / `isPlaying == true` /
+  /// 「拿到视频尺寸」，这三种都可能在首帧真正上屏之前就成立 ——
+  /// 用户看到的就是「缓冲层消失、画面还是黑的，还要再等一会儿」。
   ///
-  /// 与 [bufferingPercentage] 的区别：这个是「为了起播还差多少」，
-  /// 由代理层已下载字节 / 起播目标字节得出，涨到头就是 100 并结束。
-  final double measuredBufferPercent;
+  /// 值来自原生 `Player.Listener.onRenderedFirstFrame()`；open / seek
+  /// 会把它重置成 false，等新画面真的渲染出来再变 true。
+  final bool hasRenderedFirstFrame;
 
   /// 实时下载速度（字节/秒）；0 表示还没测到。
   final double bytesPerSecond;
 
-  /// 已缓冲 / 已解码的媒体时长（demuxer-cache-time）。
+  /// 已缓冲的媒体时长（`max(ExoPlayer.bufferedPosition, 磁盘预取)`）。
   final Duration buffered;
 
   /// 是否已播放到结尾。
@@ -141,37 +138,20 @@ class FxPlayerValue {
     return '${w}x$h';
   }
 
-  /// 真实缓冲进度（0–99）；拿不到时返回 null，UI 显示不带数字的转圈。
+  /// 真实缓冲比例（0–100）= 已缓冲位置 ÷ 总时长；两者任一拿不到就返回
+  /// null，UI 显示不带数字的转圈。
   ///
-  /// 只用 libmpv 的 `cache-buffering-state`：本次缓冲需要把缓存填到的
-  /// 百分比，0→100 填满即恢复播放，是唯一随缓冲真实推进的进度。
-  /// 「已缓存时长 ÷ 总时长」只是全片下载比例——停在百分之十几、缓存够了
-  /// 又瞬间跳满，看起来像假进度，不再拿来显示数字。
+  /// BUFFER_PCT_REAL（2026-11-14）：以前这里有两个假数 ——
+  ///   · 代理层按字节算的 measuredBufferPercent（直连时恒为 0）；
+  ///   · 「已缓冲时长 ÷ 2 秒 × 100」，2 秒一到就顶到 100，界面又被
+  ///     FxLoadingOverlay 夹到 99，于是用户看到的就是「一直 99%」。
+  /// 现在只报真实值：bufferedPosition / duration。缓存停在 12% 就是 12%，
+  /// 不会因为「够播了」而伪造出 99%。
   double? get bufferingPercent {
-    if (measuredBufferPercent > 0) {
-      return measuredBufferPercent.clamp(0.0, 100.0);
-    }
-    // BUFFER_PCT_FIX（2026-11-13）：不再用 mpv 的 cache-buffering-state。
-    //
-    // 那个值的分母是 demuxer-max-bytes（我们设 192MB），
-    // 4K 要真的下满 192MB 才会到 100 —— 永远到不了，界面就长期
-    // 停在「缓冲 99%」。用户报障原话就是「缓冲卡 99」。
-    //
-    // 改成按「已缓冲时长 ÷ 起播需要的最小缓冲」算，涨到 100 就是能播了：
-    //   · 起播 / 卡顿恢复都按 2 秒算（cache-pause-wait 已改成 0.5 秒）
-    const needSec = 2.0;
-    final haveSec = buffered.inMilliseconds / 1000.0;
-    if (haveSec <= 0) return null;
-    return (haveSec / needSec * 100).clamp(0.0, 100.0);
-  }
-
-  /// 起播进度是否已经到顶（可以隐藏进度环）。
-  ///
-  /// 原来只看 measuredBufferPercent（代理层按字节算的），
-  /// 直连模式下它恒为 0 → 永远判成未就绪。现在按已缓冲时长兜底。
-  bool get bufferingSettled {
-    if (measuredBufferPercent >= 100) return true;
-    return buffered.inMilliseconds >= 2000;
+    final total = duration.inMilliseconds;
+    final have = buffered.inMilliseconds;
+    if (total <= 0 || have <= 0) return null;
+    return (have / total * 100).clamp(0.0, 100.0).toDouble();
   }
 
   /// 把字节/秒格式化成「3.2 MB/s」这类文案；0 返回空串。
@@ -187,8 +167,7 @@ class FxPlayerValue {
     bool? isInitialized,
     bool? isPlaying,
     bool? isBuffering,
-    double? bufferingPercentage,
-    double? measuredBufferPercent,
+    bool? hasRenderedFirstFrame,
     double? bytesPerSecond,
     Duration? buffered,
     bool? isCompleted,
@@ -206,9 +185,8 @@ class FxPlayerValue {
       isInitialized: isInitialized ?? this.isInitialized,
       isPlaying: isPlaying ?? this.isPlaying,
       isBuffering: isBuffering ?? this.isBuffering,
-      bufferingPercentage: bufferingPercentage ?? this.bufferingPercentage,
-      measuredBufferPercent:
-          measuredBufferPercent ?? this.measuredBufferPercent,
+      hasRenderedFirstFrame:
+          hasRenderedFirstFrame ?? this.hasRenderedFirstFrame,
       bytesPerSecond: bytesPerSecond ?? this.bytesPerSecond,
       buffered: buffered ?? this.buffered,
       isCompleted: isCompleted ?? this.isCompleted,
@@ -732,6 +710,13 @@ class FxPlayer implements Listenable {
     }
     // 优先用服务端声明的类型；没有才退回按地址猜。
     final isHls = _typeHint ?? _looksLikeHls(source.url);
+    // RESUME_LOG（2026-11-14）：续播最容易被中间某一环静默丢掉参数，
+    // 真机 logcat 里搜 `RESUME` 就能看到这一条，配合原生的
+    // 「RESUME 起始位置 Xms / 首个分片索引 N」一起确认。
+    _logFx(
+      'RESUME 起始位置 ${startPositionMs}ms → open（hls=$isHls, '
+      'direct=$_sourceDirect）',
+    );
     final ok = await _engine.open(
       source.url,
       headers: source.headers,
@@ -746,6 +731,10 @@ class FxPlayer implements Listenable {
     if (!ok) {
       throw FxPlayerException(_engine.error ?? '播放器打开失败');
     }
+    // 原生 open 已经把首帧标记清空（快照里是 false）。这里同步一次本地值：
+    // 250ms 轮询有可能在 open 之前带回过上一部片的 true，不覆盖的话
+    // 加载层会在 open 返回到下一次轮询之间提前收起（又变成黑屏）。
+    _value = _value.copyWith(hasRenderedFirstFrame: false);
     // 内核在 open 时会把 lastError 清空，Dart 侧的去重标记也要跟着清，
     // 否则救援重开之后同类错误会被当成「已处理过」而漏掉。
     _lastHandledError = '';
@@ -814,7 +803,11 @@ class FxPlayer implements Listenable {
   Future<void> seek(Duration position) async {
     await _engine.seek(position);
     _positionNotifier.value = position;
-    _setValue(_value.copyWith(position: position));
+    // 拖动后画面要重新渲染一帧才不是黑的：首帧标记先落回 false，
+    // 加载层重新压住，等原生 onRenderedFirstFrame 再放开。
+    _setValue(
+      _value.copyWith(position: position, hasRenderedFirstFrame: false),
+    );
     // 拖动后按目标位置把本地清单索引对到一个分片，先校验再预热。
     _warmSegmentAt(position);
   }
@@ -999,6 +992,9 @@ class FxPlayer implements Listenable {
       isInitialized: _value.isInitialized || hasSize || st.hasDuration,
       isPlaying: st.playing,
       isBuffering: _rescueHold ? true : st.buffering,
+      // FIRST_FRAME：只有原生确认「已经渲染出一帧」才置 true。
+      // 加载层的显隐完全按它走，不再用 isBuffering / isPlaying 猜。
+      hasRenderedFirstFrame: st.hasRenderedFirstFrame,
       buffered: st.buffered,
       isCompleted: st.ended,
       position: shown,
@@ -1015,6 +1011,8 @@ class FxPlayer implements Listenable {
     final stateChanged =
         next.isPlaying != _value.isPlaying ||
         next.isBuffering != _value.isBuffering ||
+        // 首帧状态翻转必须立刻通知：加载层就是靠它收起的。
+        next.hasRenderedFirstFrame != _value.hasRenderedFirstFrame ||
         next.isCompleted != _value.isCompleted ||
         next.duration != _value.duration ||
         next.width != _value.width;

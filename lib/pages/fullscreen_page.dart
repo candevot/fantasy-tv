@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -994,9 +995,21 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   /* ------------------------------------------------------ 首帧 / 错误检测 */
 
-  /// 是否已经拿到视频画面参数（宽高 > 0）。open 成功但一直没画面时，
-  /// 由 [_firstFrameTimeout] 兜底进入错误页。
+  /// 首帧是否已经真的上屏（原生 `onRenderedFirstFrame`）。
+  ///
+  /// FIRST_FRAME（2026-11-14）：加载层 / 缓冲层的收放改成看这个。
+  /// 以前看「视频宽高 > 0」—— 宽高在首帧渲染之前就已经能拿到，
+  /// 于是加载层提前收起，用户看到的是「缓冲没了，画面还是黑的」。
   bool _hasFirstFrame(FxPlayer? player) {
+    final v = player?.value;
+    return v?.hasRenderedFirstFrame ?? false;
+  }
+
+  /// 画面纹理是否可以挂载：拿到视频尺寸就挂。
+  ///
+  /// 不能等首帧标记 —— 纹理不挂上去，原生就没有输出面，首帧永远不会渲染。
+  /// 同时也不能更早：宽高未知时挂上去，部分设备会闪红屏 / 透明残帧。
+  bool _surfaceReady(FxPlayer? player) {
     final v = player?.value;
     if (v == null || !v.isInitialized) return false;
     var w = v.videoWidth ?? 0;
@@ -1013,10 +1026,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       if (!mounted || _error || _exiting) return;
       if (!_firstFrame && _hasFirstFrame(_controller)) {
         _firstFrame = true;
-            setState(() {});
+        setState(() {});
         return;
       }
       if (_firstFrame) return;
+      // FIRST_FRAME：首帧判据改用原生 onRenderedFirstFrame 之后，个别 4K
+      // HEVC 片子解码慢，10 秒内可能还没回调。只要播放位置已经在走，就
+      // 说明这条流是活的，继续等首帧、不判失败（停摆另有看门狗兜底）。
+      final v = _controller?.value;
+      if (v != null && v.isInitialized && v.position.inMilliseconds > 800) {
+        debugPrint('FxPlayer: 首帧等待超过 10s，但位置已到 ${v.position}，继续等');
+        return;
+      }
       unawaited(_onPlaybackFailure());
     });
   }
@@ -2092,10 +2113,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 再留 12dp 间距，字幕层就不会压在进度条/按钮上。
     final controlsHeight =
         26.0 + 40.0 + 4.0 + 34.0 + 6.0 + MediaQuery.paddingOf(context).bottom;
-    // 首帧未出 / 出错时不要挂 Video 纹理：部分设备会显示红屏或透明残帧。
+    // 尺寸未知 / 出错时不要挂 Video 纹理：部分设备会显示红屏或透明残帧。
     // 始终先铺纯黑底色，再把 Video 放上去，缓冲时不会出现纯黑无内容的画面。
-    final showVideo =
-        c != null && c.value.isInitialized && _firstFrame && !_error;
+    //
+    // FIRST_FRAME：这里**不能**再等 `_firstFrame` —— 纹理不挂载，原生就
+    // 没有输出面，onRenderedFirstFrame 永远不会回调，首帧就死锁了。
+    final showVideo = _surfaceReady(c) && !_error;
     return ClipRect(
       child: Stack(
         fit: StackFit.expand,
@@ -2136,7 +2159,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 不再叠一行旧线路名小字。
     final loading = _loadingHint ?? fxLoadingLineText(_ep, _lineName);
     // 真实缓存进度：起播 / 切集阶段有 buffer 就显示，不拿假进度凑数。
-    if (!_firstFrame || _loading) {
+    // FIRST_FRAME：首帧没上屏（含拖动后的重新渲染）就继续压着加载层，
+    // 不再只看 `_firstFrame` / `_loading` 这两个页面自维护的状态。
+    if (!_firstFrame || _loading || !v.hasRenderedFirstFrame) {
       return FxLoadingOverlay(
         title: loading,
         percent: v.bufferingPercent,
@@ -2146,14 +2171,15 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     // 已在播放（声音出来、位置在走）就不显示缓冲层
     if (!v.isBuffering || v.isPlaying) return const SizedBox.shrink();
+    // FIRST_FRAME：首帧没上屏时由上面的加载层负责，别叠两个圈。
+    if (!v.hasRenderedFirstFrame) return const SizedBox.shrink();
     final percent = v.bufferingPercent;
-    // BUFFER_FULL（2026-11-14）：缓存已满就别再挂「缓冲中 100%」，
-    // 截图里画面正常在播、中间却一直顶着一个 100% 圆环就是这个。
-    if (percent != null && percent >= 99.5) {
+    // BUFFER_FULL：真实比例已经 100% 说明数据齐了，等的是解码不是下载。
+    if (percent != null && percent >= 100) {
       return const SizedBox.shrink();
     }
     return FxLoadingOverlay(
-      title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
+      title: fxBufferingText(percent),
       percent: percent,
       speedText: v.speedText,
       dim: false,

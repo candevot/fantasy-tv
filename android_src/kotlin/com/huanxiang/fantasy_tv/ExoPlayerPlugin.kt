@@ -1,6 +1,7 @@
 package com.huanxiang.fantasy_tv
 
 import android.app.Activity
+import android.util.Log
 import android.content.Context
 import java.io.File
 import android.view.View
@@ -54,6 +55,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     EventChannel.StreamHandler {
 
     companion object {
+        /** 真机 logcat 过滤标签：`adb logcat -s FxExo`。 */
+        const val LOG_TAG = "FxExo"
+
         const val METHOD_CHANNEL = "fantasy_tv/exo_player"
         const val EVENT_CHANNEL = "fantasy_tv/exo_player_events"
         const val VIEW_TYPE = "fantasy_tv/exo_view"
@@ -99,6 +103,19 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private var seekGateActive = false
     private var volumeBeforeSeekGate = 1f
     private val seekGateTimeout = Runnable { endSeekAudioGate() }
+
+    /**
+     * 是否已经真正渲染出过一帧（FIRST_FRAME，2026-11-14）。
+     *
+     * 这个值是 Dart 侧加载层唯一的显隐判据。以前 Dart 用
+     * `buffering == false` / `playing == true` / 「拿到视频宽高」判断，
+     * 三种都可能在首帧上屏之前成立 —— 用户看到「缓冲层消失、画面还黑」。
+     *
+     * `open` / `seek` 都会把它重置成 false，直到 [Player.Listener.onRenderedFirstFrame]
+     * 再次回调才变 true。
+     */
+    @Volatile
+    private var firstFrameRendered = false
 
     fun attach(messenger: BinaryMessenger) {
         MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler(this)
@@ -151,9 +168,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 val ms = call.argument<Number>("positionMs")?.toLong() ?: 0L
                 // 先闸音量再 seek：避免「画面还在旧帧、声音已经跳过去」（改动 ③）。
                 beginSeekAudioGate()
+                // FIRST_FRAME：拖动后旧帧已经作废，加载层要重新压住，
+                // 等 onRenderedFirstFrame 再放开（否则就是「缓冲没了但黑屏」）。
+                firstFrameRendered = false
+                Log.i(LOG_TAG, "SEEK ${ms}ms，首帧标记重置")
                 player?.seekTo(ms)
                 // 预取改道：代际 +1，旧任务立刻作废，从目标分片往后灌（改动 ②）。
                 preloader?.seekTo(ms)
+                emit()
                 result.success(true)
             }
             "rate" -> {
@@ -310,6 +332,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 emit()
             }
             override fun onRenderedFirstFrame() {
+                // FIRST_FRAME：只有这里才把首帧标记置 true。
+                // Dart 的加载层就是靠它收起的，别再拿 buffering / playing 猜。
+                firstFrameRendered = true
+                Log.i(LOG_TAG, "FIRST_FRAME 已渲染，pos=${player?.currentPosition}ms")
                 // 首帧到了：拖动闸放开（对方确证的结束条件之一）。
                 endSeekAudioGate()
                 emit()
@@ -327,6 +353,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "positionMs" to 0, "durationMs" to 0, "bufferedMs" to 0,
             "preloadedMs" to 0L,
             "playing" to false, "buffering" to true, "error" to null,
+            "firstFrameRendered" to false,
             "width" to 0, "height" to 0, "ended" to false, "state" to 1
         )
         // 画面尺寸：FxPlayer 的 value.width/height 和分辨率胶囊都靠它，
@@ -348,6 +375,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "preloadedMs" to (preloader?.continuousCachedMs(p.currentPosition) ?: 0L),
             "playing" to p.isPlaying,
             "buffering" to (p.playbackState == Player.STATE_BUFFERING),
+            // FIRST_FRAME：Dart 加载层只认这一个字段（open / seek 会重置）。
+            "firstFrameRendered" to firstFrameRendered,
             "error" to lastError,
             "width" to w,
             "height" to h,
@@ -406,6 +435,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             player!!.stop()
             player!!.clearMediaItems()
             lastError = null
+            // FIRST_FRAME：换源 / 切集后旧画面作废，加载层重新压住。
+            firstFrameRendered = false
             player!!.setMediaSource(source)
             // RESUME_FIRST_SEG（2026-11-14）：带续播位置打开。
             //
@@ -419,6 +450,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 player!!.seekTo(startPositionMs)
             }
             player!!.prepare()
+            // RESUME（2026-11-14）：真机 logcat -s FxExo 核对续播是否真的带上了。
+            // 「首个分片索引 N」由 SegmentPreloader.start 打出，两条一起看。
+            Log.i(
+                LOG_TAG,
+                "RESUME 起始位置 ${startPositionMs}ms（prepare 前 seek）；" +
+                    "isHls=$isHls url=$url",
+            )
             // 预取随 open 立刻开灌（改动 ②）：HLS 才需要分片级预取，
             // 本地文件 / 渐进式源跳过。起点同样是这个起始位置，
             // 不然预取会先把前几片拉一遍，继续占用中转槽位。

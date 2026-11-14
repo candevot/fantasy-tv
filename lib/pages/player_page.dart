@@ -1677,17 +1677,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     if (!v.isInitialized || !v.isBuffering || v.isPlaying) {
                       return const SizedBox.shrink();
                     }
+                    // FIRST_FRAME：首帧还没上屏时由下面的加载层负责，
+                    // 这里再叠一个「缓冲中」只会和它打架。
+                    if (!v.hasRenderedFirstFrame) {
+                      return const SizedBox.shrink();
+                    }
                     final percent = v.bufferingPercent;
-                    // BUFFER_FULL（2026-11-14）：缓存已经满了就别再挂
-                    // 「缓冲中 100%」——用户在截图里看到的就是画面正常在播、
-                    // 中间却一直顶着一个 100% 的圆环。
-                    // 画面在走的时候，缓冲到 99.5% 以上视为已就绪。
-                    if (percent != null && percent >= 99.5) {
+                    // BUFFER_FULL：真实比例已经 100% 就别再挂「缓冲中 100%」
+                    // ——那说明数据齐了，等的是解码不是下载。
+                    if (percent != null && percent >= 100) {
                       return const SizedBox.shrink();
                     }
                     return FxLoadingOverlay(
-                      title:
-                          percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
+                      title: fxBufferingText(percent),
                       percent: percent,
                       speedText: v.speedText,
                       dim: false,
@@ -1696,7 +1698,28 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   },
                 ),
               ),
-            if (_loading && !_error && !_suppressLoading) _buildLoading(),
+            // 加载层（FIRST_FRAME）：只在「首帧还没上屏」时显示，
+            // hasRenderedFirstFrame 变 true 才收起。
+            //
+            // 以前这里是 `if (_loading) _buildLoading()`，而 `_loading` 在
+            // open 返回（拿到尺寸/时长）时就置 false —— 那时首帧还没渲染，
+            // 于是层一收、画面还是黑的，用户要再等几百毫秒。
+            if (!_error && !_suppressLoading && c != null)
+              Positioned.fill(
+                child: AnimatedBuilder(
+                  animation: c,
+                  builder: (context, _) {
+                    final waitingFirst = !c.value.hasRenderedFirstFrame;
+                    if (!_loading && !waitingFirst) {
+                      return const SizedBox.shrink();
+                    }
+                    return _buildLoading();
+                  },
+                ),
+              ),
+            // 播放器实例还没建出来（首个 open 之前）：只有状态位可看。
+            if (c == null && _loading && !_error && !_suppressLoading)
+              Positioned.fill(child: _buildLoading()),
             // 控件层压在 loading / 缓冲之上：切集 8s 窗口里也能退出全屏。
             // 只按控件显隐禁用指针，不因 loading 整层失效。
             if (_controls && !_error) _buildControls(c),
@@ -1707,25 +1730,28 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     );
   }
 
+  /// 加载层内容（不带定位）：由调用方决定挂在哪一层 Stack 上。
   Widget _buildLoading() {
     final title = fxLoadingLineText(_requestEp, _loadingLineName);
     // 只显示本次 open 的新播放器缓存进度；新实例还没建好时用不确定圆环，
     // 不能拿旧 controller 的百分比冒充新集进度。
-    final c = _loadingPlayer;
+    //
+    // FIRST_FRAME：open 返回后 `_loadingPlayer` 就被清掉了，但加载层还要
+    // 挂到首帧上屏，这段时间用当前 controller（此时它一定还没出首帧）。
+    final c = _loadingPlayer ??
+        (_controller?.value.hasRenderedFirstFrame == false
+            ? _controller
+            : null);
     if (c == null) {
-      return Positioned.fill(
-        child: FxLoadingOverlay(title: title, compact: true),
-      );
+      return FxLoadingOverlay(title: title, compact: true);
     }
-    return Positioned.fill(
-      child: AnimatedBuilder(
-        animation: c,
-        builder: (context, _) => FxLoadingOverlay(
-          title: title,
-          percent: c.value.bufferingPercent,
-          speedText: c.value.speedText,
-          compact: true,
-        ),
+    return AnimatedBuilder(
+      animation: c,
+      builder: (context, _) => FxLoadingOverlay(
+        title: title,
+        percent: c.value.bufferingPercent,
+        speedText: c.value.speedText,
+        compact: true,
       ),
     );
   }

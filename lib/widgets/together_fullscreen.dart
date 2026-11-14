@@ -500,11 +500,19 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                   if (!value.isInitialized || !value.isBuffering) {
                     return const SizedBox.shrink();
                   }
-                  // 只认 libmpv cache-buffering-state 的真实填充进度；
+                  // FIRST_FRAME：首帧没上屏时由下面的加载层负责，
+                  // 这里再叠一个圈只会和它打架。
+                  if (!value.hasRenderedFirstFrame) {
+                    return const SizedBox.shrink();
+                  }
+                  // 只认真实填充进度（buffered / duration）；
                   // 拿不到就不显示数字，只给「缓冲中…」+ 不确定转圈。
                   final percent = value.bufferingPercent;
+                  if (percent != null && percent >= 100) {
+                    return const SizedBox.shrink();
+                  }
                   return FxLoadingOverlay(
-                    title: percent == null ? '缓冲中…' : '缓冲中 ${percent.round()}%',
+                    title: fxBufferingText(percent),
                     percent: percent,
                     speedText: value.speedText,
                     dim: false,
@@ -513,6 +521,11 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                 },
               ),
             ),
+          // 加载层：只跟着 widget.loading 走。
+          //
+          // FIRST_FRAME：这里不按「首帧是否渲染」加挂加载层 —— 一起看会被
+          // 同步纠偏频繁 seek，首帧标记每次 seek 都会回落，挂上去就是一
+          // 片黑闪。主播放页 / 全屏页才按首帧收放。
           if (widget.loading)
             Positioned.fill(
               child: widget.player == null
