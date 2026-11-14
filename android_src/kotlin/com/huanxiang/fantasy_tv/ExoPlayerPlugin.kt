@@ -58,7 +58,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     private var player: ExoPlayer? = null
-    private var playerView: PlayerView? = null
+    /// TEXTURE_VIEW（2026-11-14）：画面必须用 TextureView，不能用 SurfaceView。
+    ///
+    /// PlayerView 默认 surface_type=surface_view。SurfaceView 有独立图层，
+    /// 在 Flutter 的混合合成 PlatformView 里不参与合成，于是「声音正常、
+    /// 画面全黑」—— 用户反复报的就是这个。
+    /// TextureView 走正常的 View 绘制流程，能被合成进 PlatformView。
+    private var videoView: android.view.TextureView? = null
     private var events: EventChannel.EventSink? = null
 
     /// 分片磁盘缓存：拖回已看过的地方不再回源（CDN 有 429 限流）。
@@ -71,7 +77,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     fun dispose() {
-        playerView?.player = null
+        player?.clearVideoSurface()
         player?.release()
         player = null
         events = null
@@ -121,10 +127,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "mirror" -> {
                 val fx = call.argument<Boolean>("flipX") ?: false
                 val fy = call.argument<Boolean>("flipY") ?: false
-                val pv = playerView
-                if (pv != null) {
-                    pv.scaleX = if (fx) -1f else 1f
-                    pv.scaleY = if (fy) -1f else 1f
+                val v = videoView
+                if (v != null) {
+                    v.scaleX = if (fx) -1f else 1f
+                    v.scaleY = if (fy) -1f else 1f
                 }
                 result.success(true)
             }
@@ -174,6 +180,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             true
         )
         player!!.setHandleAudioBecomingNoisy(true)
+        // 播放器可能晚于视图创建，这里补一次绑定
+        videoView?.let { player!!.setVideoTextureView(it) }
         // 精确 seek 要从前一个关键帧开始解码，大分片 4K 上很慢；
         // 对齐到最近关键帧是各视频 App 的常规做法，拖动手感快很多。
         player!!.setSeekParameters(SeekParameters.CLOSEST_SYNC)
@@ -307,16 +315,23 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     /** 供 PlatformViewFactory 创建画面视图 */
-    fun createView(): PlayerView {
-        val pv = PlayerView(context)
-        pv.useController = false          // 控制层由 Flutter 画
-        // 拖动 / 重缓冲时保留上一帧，不要整块变黑
-        pv.setKeepContentOnPlayerReset(true)
-        pv.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
-        pv.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
-        pv.player = player
-        playerView = pv
-        return pv
+    /// 视图销毁时解绑，避免播放器继续往已销毁的纹理里画（会黑屏/闪退）
+    fun detachView(v: android.view.TextureView) {
+        if (videoView === v) {
+            try { player?.clearVideoSurface() } catch (_: Exception) {}
+            videoView = null
+        }
+    }
+
+    fun createView(): android.view.TextureView {
+        val tv = android.view.TextureView(context)
+        tv.layoutParams = android.view.ViewGroup.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        videoView = tv
+        player?.setVideoTextureView(tv)
+        return tv
     }
 }
 
@@ -324,20 +339,22 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
 @OptIn(UnstableApi::class)
 class ExoView(context: Context, messenger: BinaryMessenger, id: Int, params: Any?) :
     PlatformView {
-    private val pv: PlayerView
+    private val tv: android.view.TextureView
 
     init {
         val plugin = ExoPluginHolder.get(messenger)
-        pv = plugin?.createView() ?: PlayerView(context)
-        // 画面比例档位（适应 / 铺满 / 拉伸）由 Flutter 侧通过 creationParams 传进来。
-        // 不传这个的话 PlayerView 永远按 FIT 缩放，"铺满"档位会失效。
-        val mode = (params as? Map<*, *>)?.get("resizeMode") as? Int
-        if (mode != null) pv.resizeMode = mode
+        tv = plugin?.createView() ?: android.view.TextureView(context)
+        // 画面比例档位在 Flutter 侧用 AspectRatio 控制，这里只保证铺满容器
+        tv.layoutParams = android.view.ViewGroup.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        )
     }
 
-    override fun getView(): View = pv
+    override fun getView(): View = tv
     override fun dispose() {
-        pv.player = null
+        // 视图销毁时解绑纹理，避免播放器往已销毁的 TextureView 里画
+        ExoPluginHolder.get(messenger)?.let { it.detachView(tv) }
     }
 }
 
