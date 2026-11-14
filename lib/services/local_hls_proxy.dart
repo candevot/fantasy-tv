@@ -2054,10 +2054,15 @@ class LocalHlsProxy {
         final affordable = ((cacheLimitBytes * 0.7) / avgSegBytes).floor();
         depth = math.min(prefetchCount, math.max(8, affordable));
       }
-      // 4K 大分片（>6MB/片）不做深度预取：一集 2.4GB 根本缓存不下，
-      // 预取只会和正在播的那片抢带宽，反而制造卡顿。
-      if (avgSegBytes >= 6 * 1024 * 1024) {
-        depth = math.min(depth, 3);
+      // PRELOAD_DEPTH（2026-11-14，按逆向结论调整）
+      //
+      // 逆向咕噜咕噜：它靠 setInfinitePreload + 动态加深下一片预取做到秒拖，
+      // 不是靠少预取。我们原来对 >6MB 的分片直接把深度压到 3 片，
+      // 而实测幻想4K 是 41 片 × 60 秒（整集约 225MB，512MB 缓存装得下），
+      // 压到 3 片只有 180 秒储备，往远处拖必然重新拉流。
+      // 阈值提到 8MB，且大分片保底 6 片（约 6 分钟储备）。
+      if (avgSegBytes >= 8 * 1024 * 1024) {
+        depth = math.min(depth, 6);
       }
     }
     final end = math.min(playlist.segments.length, start + depth);
