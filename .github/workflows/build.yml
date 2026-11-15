@@ -118,7 +118,18 @@ jobs:
           fi
           echo 'media_kit 已完全移除，内核走 android_src/ 的 ExoPlayer 桥'
       - run: flutter pub get
-      - run: flutter analyze
+      - name: Run flutter analyze
+        run: |
+          set +e
+          flutter analyze --no-fatal-infos > /tmp/analyze.txt 2>&1
+          code=$?
+          cat /tmp/analyze.txt
+          # 把每条问题都变成 GitHub annotation：public 仓库拿不到 job log 时，
+          # 也能从 check-runs/annotations 读到具体文件和原因。
+          grep -E "(error|warning) •" /tmp/analyze.txt | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit $code
       - name: Playback recovery regressions
         run: flutter test test/playback_regressions_test.dart
       # LINES_ALL / HOT_ORDER（2026-11-15）：多线路解析 + 热播排序映射的回归。
