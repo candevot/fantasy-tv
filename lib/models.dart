@@ -803,11 +803,42 @@ bool fxUrlNeedsClientProxy(String url) {
 ///
 /// 现在凡是 http(s) 的 m3u8 都交给代理：mpv 拿到的仍是本地地址，
 /// 代理负责下载、缓存、预取，分片仍然是直连 CDN（不额外消耗服务器带宽）。
-bool fxShouldUseHlsProxy(String url, {required bool isHls}) {
-  // PROXY_OFF（2026-11-14 第三轮结论，恢复为此前已定案的决策）
-  // 一律直连：ExoPlayer 原生支持 Range 与边下边播，服务端已把分片地址
-  // 改写成绝对地址；本地代理只在 mpv 时代服务于「整集预热/落盘/提前换签」。
-  return false;
+/// 免费资源站（量子/红牛）的直链：走本地 HLS 代理做「智能去广告」。
+///
+/// AD_FREE（2026-11-15）：用户只要求对免费资源站去广告——这几条线片头常带
+/// 15~60 秒贴片，而我们自己的线路（4K/1080P/爱奇艺/SH4K/shvip/官采）没有广告，
+/// 开过滤只会增加误删风险，所以按 URL 域名判定，只放行免费站的媒体地址。
+/// 代理抓不到清单时会 302 回原始地址，最坏情况等于直连。
+const List<String> _kAdFreeHosts = <String>[
+  'lzcdn', // 量子（v.lzcdn27/lzcdn31/...）
+  'bfvvs', // 红牛（hn.bfvvs.com）
+  'lztutu', // 量子的图床/部分直链
+];
+
+bool fxShouldUseHlsProxy(
+  String url, {
+  required bool isHls,
+  String? lineName,
+}) {
+  if (!isHls) return false;
+  final lower = url.toLowerCase();
+  if (lower.contains('/hxparse/')) return false; // 我们自己的解析产物，清单已是最优
+  // 线路名优先（更准），拿不到就看域名。
+  final name = (lineName ?? '').trim();
+  if (name.isNotEmpty) {
+    if (name == '量子' || name == '红牛') return true;
+    if (name.startsWith('幻想') ||
+        name == 'SH4K' ||
+        name == 'shvip' ||
+        name == 'qiyi' ||
+        name == 'qq' ||
+        name == 'youku' ||
+        name == 'bilibili' ||
+        name == 'mgtv') {
+      return false;
+    }
+  }
+  return _kAdFreeHosts.any(lower.contains);
 }
 
 bool fxIsPlatformLine(LineInfo line) {
