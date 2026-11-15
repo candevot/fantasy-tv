@@ -4,7 +4,6 @@ import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
-import 'fatcat_home.dart';
 import 'jar_spider.dart';
 import 'search_rank.dart';
 import 'source_hub.dart';
@@ -134,192 +133,15 @@ class CmsBridge {
 
   /* ------------------------------------------------------------ 首页 */
 
-  /// jar 插件没装时的提示（首页 / 分类页顶部那条提示卡）。
-  static const String installNotice =
-      '肥猫的源需要先安装 jar 插件（spider.jar）才能出内容';
-
-  /// jar 装了、但肥猫这次一个分区都没回来。
-  static const String noContentNotice = '肥猫的源这次没有返回内容，先看我们自己的热播';
-
-  /// 首页数据（一次性）：收 [homeStream] 里最后一版有内容的。
-  ///
-  /// 老调用方（一起看选片）还在用 Future；页面走 [homeStream] —— 肥猫的
-  /// jar 源一个比一个慢，等全部回来才上屏就是「转 8 秒然后一坨」。
-  static Future<HomeData> home(String channel) async {
-    var last = HomeData(const <BannerItem>[], const <HomeSection>[]);
-    await for (final data in homeStream(channel)) {
-      if (data.sections.isNotEmpty || data.banners.isNotEmpty) last = data;
-    }
-    return last;
-  }
-
-  /// 首页的流式版本（FATCAT_HOME 2026-11-15）。
-  ///
-  /// **配置和影视壳对齐**：壳用肥猫首页 + 我们的搜索，App 也这样 ——
-  ///   · 「推荐」= 肥猫 jar 源的 `homeContent`：每个源一个分区、标题用源名，
-  ///     首个有内容的源的第一批做 banner；
-  ///   · 分类频道（电影 / 电视剧 / 动漫 / 综艺 / 短剧 / 少儿）= 肥猫源的
-  ///     同名分类（`categoryContent`，用该源自己的类目映射）；
-  ///   · 我们自己的采集库只在搜索里出现；只有「jar 没装 / 肥猫一个分区都
-  ///     没给」时才回落我们自己的热播，首页永远有内容可看。
-  ///
-  /// [force] 为 true 时跳过当日缓存（下拉刷新）。
-  static Stream<HomeData> homeStream(String channel, {bool force = false}) {
-    _boot();
-    final ch = channelOf(channel);
-    if (ch != null && ch.typeId > 0) return _channelFeed(ch, force: force);
-    return _recommendFeed(force: force);
-  }
-
-  /// 「推荐」频道：肥猫 jar 源的首页，谁先回谁先上屏。
-  static Stream<HomeData> _recommendFeed({bool force = false}) {
-    final ctrl = StreamController<HomeData>();
-    var closed = false;
-    var sawContent = false;
-
-    void push(HomeData data) {
-      if (closed) return;
-      if (data.sections.isNotEmpty || data.banners.isNotEmpty) sawContent = true;
-      ctrl.add(data);
-    }
-
-    void close() {
-      if (closed) return;
-      closed = true;
-      unawaited(ctrl.close());
-    }
-
-    Future<void> run() async {
-      final hub = SourceHub.instance;
-      // 片源索引（读本地缓存 + 肥猫那份片源表）单独兜超时：这一步不该把
-      // 首屏拖死，超时就按「手上没有 jar 源」继续。
-      try {
-        await hub.ensureReady().timeout(
-          const Duration(seconds: 3),
-          onTimeout: () => null,
-        );
-      } catch (_) {
-        // 索引坏了也要能出首页：下面按「jar 不可用」走回落。
-      }
-      if (closed) return;
-      await hub.ensureJarStatus();
-      if (closed) return;
-      if (!hub.jarReady) {
-        // jar 没装：肥猫的源一条内容都出不来 —— 明确提示 + 回落热播。
-        push(await _fallbackHome(null, installNotice, jarMissing: true));
-        close();
-        return;
-      }
-      await for (final feed in FatcatHome.homeStream(force: force)) {
-        if (closed) return;
-        push(
-          HomeData(
-            feed.banners,
-            <HomeSection>[
-              for (final section in feed.sections)
-                HomeSection(
-                  section.title,
-                  section.items.take(fatcatSectionLimit).toList(),
-                ),
-            ],
-            finished: feed.finished,
-          ),
-        );
-      }
-      if (closed) return;
-      if (!sawContent) {
-        // jar 在、候选源一个都没给内容：不白屏，回落我们自己的热播。
-        push(await _fallbackHome(null, noContentNotice));
-      }
-      close();
-    }
-
-    ctrl.onCancel = () {
-      closed = true;
-    };
-    unawaited(
-      run().catchError((Object _) {
-        // 任何一步炸了都要收尾：页面不能停在骨架屏。
-        close();
-      }),
-    );
-    return ctrl.stream;
-  }
-
-  /// 分类频道：肥猫源的同名分类，一个分区 20 条。
-  static Stream<HomeData> _channelFeed(
-    CmsChannel ch, {
-    bool force = false,
-  }) async* {
-    final hub = SourceHub.instance;
-    try {
-      await hub.ensureReady().timeout(
-        const Duration(seconds: 3),
-        onTimeout: () => null,
-      );
-    } catch (_) {
-      // 同 [_recommendFeed]：索引不通也要给出首页。
-    }
-    await hub.ensureJarStatus();
-    if (!hub.jarReady) {
-      yield await _fallbackHome(ch, installNotice, jarMissing: true);
-      return;
-    }
-    final feed = await FatcatHome.category(ch.key, 1, force: force);
-    if (feed.hasContent) {
-      final items = feed.items.take(fatcatSectionLimit).toList();
-      yield HomeData(
-        <BannerItem>[
-          for (final card in items.take(_bannerCount))
-            BannerItem(card.id, card.title, card.cover, card.desc, card.rating),
-        ],
-        <HomeSection>[HomeSection(ch.label, items)],
-      );
-      return;
-    }
-    yield await _fallbackHome(ch, noContentNotice);
-  }
-
-  /// 回落：我们自己的采集库热播 —— 首页永远有内容可看。
-  ///
-  /// [jarMissing] / [notice] 一路带到页面上，用户能看清「为什么现在是
-  /// 我们自己的片」以及怎么把肥猫的源修好。
-  static Future<HomeData> _fallbackHome(
-    CmsChannel? ch,
-    String notice, {
-    bool jarMissing = false,
-  }) async {
-    try {
-      final own = await _ownHome(ch);
-      return HomeData(
-        own.banners,
-        own.sections,
-        jarMissing: jarMissing,
-        notice: notice,
-        fallback: true,
-      );
-    } catch (_) {
-      // 自己的采集库也不通：给提示和空列表，页面显示重试（不是白屏）。
-      return HomeData(
-        const <BannerItem>[],
-        const <HomeSection>[],
-        jarMissing: jarMissing,
-        notice: notice,
-        fallback: true,
-      );
-    }
-  }
-
-  /// 我们自己的首页：推荐页按分类铺 6 行，单分类频道只铺这一行。
+  /// 首页数据：推荐页按分类铺 6 行，单分类频道只铺这一行。
   ///
   /// 六行**并行**取，某一行失败只当「这一行没有」，绝不让整页变成「加载
   /// 失败」——这正是用户看到的「分类行空白 / 加载失败」的来源：以前先拿第一
   /// 行探路，第一行一挂就整页抛错。只有六行**全部失败**才当接口不通，
   /// 那时才回落旧接口或者把错误交给页面。
-  ///
-  /// FATCAT_HOME 之后它只剩两个用途：下拉刷新时肥猫全挂的兜底，和
-  /// `FX_LEGACY=1` 的旧接口回落。
-  static Future<HomeData> _ownHome(CmsChannel? ch) async {
+  static Future<HomeData> home(String channel) async {
+    _boot();
+    final ch = channelOf(channel);
     final rows = (ch == null || ch.typeId <= 0) ? _homeRows : <CmsChannel>[ch];
     Object? failure;
     final lists = await Future.wait(<Future<List<VideoCard>?>>[
@@ -363,7 +185,7 @@ class CmsBridge {
     return HomeData(banners, sections);
   }
 
-  /// 取一行；失败抛出去，由 [_ownHome] 决定是回落还是报错。
+  /// 取一行；失败抛出去，由 [home] 决定是回落还是报错。
   ///
   /// HOT_ORDER（2026-11-15）：首页每一行要的是**热播**，不是「刚更新」。
   /// 服务端 `Provide.php` 已经修好、`order=vod_hits&by=desc` 实测严格递减
@@ -443,12 +265,8 @@ class CmsBridge {
 
   /// 分类列表：`type` 接受频道键 / CMS 数字 id / 中文名。
   ///
-  /// FATCAT_HOME（2026-11-15）：分类页和首页一样走**肥猫源的同名分类**
-  /// （`categoryContent`），我们自己的采集库只在搜索里出现；jar 没装 /
-  /// 肥猫这一页没内容时回落我们自己的采集库（[categoryPage] 里决定）。
-  ///
-  /// 地区 / 年份是旧接口的服务端筛选，肥猫 / CMS 的接口都不支持 —— 这里按
-  /// 当前页做一次客户端过滤，筛选胶囊不会变成「点了没反应」。
+  /// 地区 / 年份是旧接口的服务端筛选，CMS 的接口不支持 —— 这里按当前页做一次
+  /// 客户端过滤，筛选胶囊不会变成「点了没反应」。
   static Future<List<VideoCard>> category({
     String type = '',
     String area = '',
@@ -467,13 +285,6 @@ class CmsBridge {
   }
 
   /// [category] 的完整版：多带一个 `hasMore` 给上拉分页用。
-  ///
-  /// 数据流向：
-  ///   1. jar 就绪 → 肥猫前几个源的同名分类并行取（每个源 8 秒超时），
-  ///      去重后按「片名 + 年份 + 片源」合并；
-  ///   2. 有内容就直接给 —— `hasMore` 看有没有源这一页给满 20 条；
-  ///   3. jar 没装 / 肥猫这一页空：第 1 页回落我们自己的采集库并带提示，
-  ///      后面的页不回落（不把两套编号混进同一页）。
   static Future<CmsPage> categoryPage({
     String type = '',
     String area = '',
@@ -482,70 +293,10 @@ class CmsBridge {
     int page = 1,
   }) async {
     _boot();
-    final channel = channelOf(type);
-    final channelKey =
-        (channel == null || channel.key == 'recommend') ? '' : channel.key;
-    final hub = SourceHub.instance;
-    try {
-      await hub.ensureReady().timeout(
-        const Duration(seconds: 3),
-        onTimeout: () => null,
-      );
-    } catch (_) {
-      // 索引不通也要能出分类页：下面按「jar 不可用」走回落。
-    }
-    await hub.ensureJarStatus();
-
-    if (hub.jarReady) {
-      final feed = await FatcatHome.category(channelKey, page);
-      if (feed.hasContent) {
-        return CmsPage(
-          _filter(feed.items, area: area, year: year),
-          hasMore: feed.hasMore,
-        );
-      }
-      if (page > 1) return const CmsPage(<VideoCard>[], hasMore: false);
-      final own = await _ownCategoryPage(
-        type: type,
-        area: area,
-        year: year,
-        sort: sort,
-        page: page,
-      );
-      return CmsPage(
-        own.items,
-        hasMore: own.hasMore,
-        notice: noContentNotice,
-      );
-    }
-
-    final own = await _ownCategoryPage(
-      type: type,
-      area: area,
-      year: year,
-      sort: sort,
-      page: page,
-    );
-    return CmsPage(
-      own.items,
-      hasMore: own.hasMore,
-      jarMissing: true,
-      notice: installNotice,
-    );
-  }
-
-  /// 回落：我们自己的采集库分类列表（原有逻辑）。
-  ///
-  /// 带年份 / 地区筛选时连读 [_scanPages] 页再滤 —— CMS 的 `ac=list` 不支持
-  /// 服务端筛选，只滤一页常常一条不剩。
-  static Future<CmsPage> _ownCategoryPage({
-    String type = '',
-    String area = '',
-    String year = '',
-    String sort = 'latest',
-    int page = 1,
-  }) async {
     final typeId = CmsApi.typeIdOf(type);
+    // 外部源（云端 / 自加）与主站并行查：外部源内部也是并行的，
+    // 这里先发车再等主站，两边的耗时取长的那个，不是相加。
+    final extraFuture = SourceHub.instance.categoryAll(type, page);
     final wanted = _filterWanted(area: area, year: year);
     final scan = wanted ? _scanPages : 1;
 
@@ -570,11 +321,24 @@ class CmsBridge {
       // 没筛选就只取一页；有筛选且已经够一页了也不用再扫。
       if (!wanted || raw.length >= _pageSize) break;
     }
+
+    final extra = await _safe(extraFuture);
     if (failure == null) {
-      return CmsPage(_filter(raw, area: area, year: year), hasMore: hasMore);
+      return CmsPage(
+        _mergeWith(_filter(raw, area: area, year: year), extra),
+        hasMore: hasMore,
+      );
     }
-    if (legacyEnabled) {
-      final legacy = _withoutLive(await Api.category(
+
+    // 主站这一页彻底失败（不是「空结果」）：先看外部源有没有货。
+    if (!legacyEnabled) {
+      if (extra.isNotEmpty) return CmsPage(extra);
+      throw failure;
+    }
+
+    List<VideoCard> legacy = const <VideoCard>[];
+    try {
+      legacy = _withoutLive(await Api.category(
         type: CmsApi.legacyTypeOf(typeId),
         area: area,
         year: year,
@@ -582,9 +346,15 @@ class CmsBridge {
         page: page,
       ));
       _markAll(legacy, _Origin.legacy);
-      return CmsPage(_filter(legacy, area: area, year: year), hasMore: hasMore);
+    } catch (_) {
+      // 两边都不通：外部源有结果就先给结果，否则把主站的错误抛给页面。
+      if (extra.isNotEmpty) return CmsPage(extra);
+      throw failure;
     }
-    throw failure;
+    return CmsPage(
+      _mergeWith(legacy, extra),
+      hasMore: legacy.length >= _pageSize,
+    );
   }
 
   /// 地区 / 年份的前端过滤。
@@ -924,6 +694,29 @@ class CmsBridge {
     return ctrl.stream;
   }
 
+  /// 合并主站 / 外部源两份结果（分类页还在用；搜索走 [searchStream]）。
+  ///
+  /// 去重按片名分桶记年份：主站的卡片带年份（`ac=detail`），外部源走通用的
+  /// `ac=list`（第三方接口不一定给 `vod_year`），同一个片名一边是
+  /// `头号玩家|2018`、一边是 `头号玩家|0`，拼串比对会把同一部片留两条。
+  static List<VideoCard> _mergeWith(
+    List<VideoCard> primary,
+    List<VideoCard> extra,
+  ) {
+    if (extra.isEmpty) return primary;
+    final dedupe = _Dedupe();
+    final out = <VideoCard>[];
+    for (final card in primary) {
+      if (!dedupe.fresh(card)) continue;
+      out.add(SourceHub.relabel(card, label: '采集库'));
+    }
+    for (final card in extra) {
+      if (!dedupe.fresh(card)) continue;
+      out.add(card);
+    }
+    return out;
+  }
+
   /// 直播内容不进搜索 / 分类 / 排行（直播有独立入口）。
   static List<VideoCard> _withoutLive(List<VideoCard> list) {
     var clean = true;
@@ -938,6 +731,17 @@ class CmsBridge {
       for (final card in list)
         if (!SourceHub.isLiveCard(card)) card,
     ];
+  }
+
+  /// 外部源失败不能拖垮整页：当作「这个源没结果」。
+  static Future<List<VideoCard>> _safe(
+    Future<List<VideoCard>> task,
+  ) async {
+    try {
+      return await task;
+    } catch (_) {
+      return const <VideoCard>[];
+    }
   }
 
   /// 热搜词：CMS 按点击量排的片名；拿不到再用旧接口的日榜。
@@ -1305,14 +1109,10 @@ class CmsBridge {
     }
   }
 
-  /// 清掉来源账本 + 肥猫首页缓存（切换站点 / 装好 jar 之后调）。
-  ///
-  /// FATCAT_HOME：首页 / 分类的内容来自肥猫的 jar 源，装好 spider.jar 后
-  /// 当日缓存里的「没有内容」必须作废，否则用户装完 jar 还看到回落内容。
+  /// 清掉来源账本（切换站点 / 调试用）。
   static void clearCache() {
     _origins.clear();
     CmsApi.clearCache();
-    FatcatHome.clearCache();
   }
 }
 
@@ -1348,23 +1148,12 @@ class SearchBatch {
 
 /// 一页分类列表：条目 + 还有没有下一页。
 class CmsPage {
-  const CmsPage(
-    this.items, {
-    this.hasMore = false,
-    this.jarMissing = false,
-    this.notice = '',
-  });
+  const CmsPage(this.items, {this.hasMore = false});
 
   final List<VideoCard> items;
 
   /// 后端这一页是否给满（给满才代表后面还有）。
   final bool hasMore;
-
-  /// 肥猫的 jar 插件没装（页面据此显示「去装 jar 插件」的入口）。
-  final bool jarMissing;
-
-  /// 页面顶部的提示文案（jar 缺失 / 肥猫这一页没内容），空串表示不提示。
-  final String notice;
 }
 
 /// CMS 的一级栏目：页面用的键、导航显示名、`type_id`、旧接口的分类键。

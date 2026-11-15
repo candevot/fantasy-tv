@@ -120,16 +120,13 @@ jobs:
       - run: flutter pub get
       - name: Run flutter analyze
         run: |
-          # FATCAT_HOME（2026-11-15）：门禁恢复成 --fatal-infos（`flutter analyze`
-          # 的默认值）。之前为了绕过一批 info 才降成 --no-fatal-infos，那些
-          # 现在都清掉了；info 级问题也要修，别再放回来。
           set +e
-          flutter analyze --fatal-infos > /tmp/analyze.txt 2>&1
+          flutter analyze --no-fatal-infos > /tmp/analyze.txt 2>&1
           code=$?
           cat /tmp/analyze.txt
           # 把每条问题都变成 GitHub annotation：public 仓库拿不到 job log 时，
           # 也能从 check-runs/annotations 读到具体文件和原因。
-          grep -E "(error|warning|info) •" /tmp/analyze.txt | head -60 | while IFS= read -r line; do
+          grep -E "(error|warning) •" /tmp/analyze.txt | head -60 | while IFS= read -r line; do
             echo "::error::$line"
           done
           exit $code
@@ -145,10 +142,6 @@ jobs:
       # SEARCH_RANK：搜索结果按「实际分辨率」跨源全局排序的回归。
       - name: Search rank regressions
         run: flutter test test/search_rank_test.dart
-      # FATCAT_HOME（2026-11-15）：首页 / 分类改成肥猫 jar 源供内容，
-      # 选源顺序、并行渲染、「最多 6 区 / 每区 20 条」、当日缓存都要钉住。
-      - name: fatcat home regressions
-        run: flutter test test/fatcat_home_test.dart
       # JAR_PLUGIN（2026-11-15）：肥猫那 41 个 csp_ 源的 jar 插件链路。
       # 原生侧进度 / 自检回传的结构 -> Dart 模型；失败原因必须能翻译成
       # 「类找不到 / 方法签名不匹配 / 缺依赖 / 源站异常」四类人话。

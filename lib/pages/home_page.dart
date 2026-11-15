@@ -10,7 +10,6 @@ import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
 import 'search_page.dart';
-import 'source_settings_page.dart';
 import 'together_page.dart';
 import '../utils/fx_route.dart';
 import '../widgets/fx_resume_bar.dart' show FxResumeBarHost;
@@ -31,19 +30,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final Map<String, HomeData> _cache = {};
 
   Timer? _timer;
-
-  /// 首屏骨架的延时器：300ms 内没内容才亮骨架（见 [_load]）。
-  Timer? _skeletonTimer;
-
-  /// 首页数据流：肥猫的 jar 源是「谁先回谁先上屏」，所以是订阅而不是 await。
-  StreamSubscription<HomeData>? _sub;
-
-  /// 骨架是否已经亮出来（300ms 之后才为 true）。
-  bool _showSkeleton = false;
-
-  /// 已经预热过封面的频道（流式多批时只预热第一批）。
-  final Set<String> _prefetched = <String>{};
-
   String _channel = 'recommend';
 
   /// banner 页码只驱动指示点，不再 setState 整页。
@@ -120,92 +106,46 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _tickerMode?.removeListener(_onTickerModeChanged);
     _timer?.cancel();
-    _skeletonTimer?.cancel();
-    _sub?.cancel();
     _bannerCtrl.dispose();
     _bannerPage.dispose();
     super.dispose();
   }
 
-  /// 首页数据：订阅 [CmsBridge.homeStream] 边到边渲染。
-  ///
-  /// 为什么不再 await 一次：肥猫的 jar 源一个比一个慢，等全部回来才上屏就是
-  /// 「转 8 秒然后一坨」。现在每个源回来一版就刷新一次界面；300ms 内还没
-  /// 内容才亮骨架，有一条内容就不再等其余的源。
   Future<void> _load({bool force = false}) async {
     final channel = _channel;
     final req = ++_req;
     final cached = _cache.containsKey(channel);
-    _skeletonTimer?.cancel();
     if (!cached) {
       setState(() {
         _loading = true;
         _error = null;
-        _showSkeleton = false;
       });
-      _skeletonTimer = Timer(const Duration(milliseconds: 300), () {
-        if (!mounted || req != _req) return;
-        if (!_loading) return;
-        setState(() => _showSkeleton = true);
-      });
-    } else {
-      setState(() => _error = null);
     }
-
-    await _sub?.cancel();
-    final settled = Completer<void>();
-    var jumped = false;
-    _sub = CmsBridge.homeStream(channel, force: force).listen(
-      (data) {
-        if (!mounted || req != _req || channel != _channel) return;
-        final hasContent = data.banners.isNotEmpty || data.sections.isNotEmpty;
-        // 还没出内容、也不是最后一版：中间态不渲染（保持骨架 / 旧内容）。
-        if (!hasContent && !data.finished) return;
-        setState(() {
-          _cache[channel] = data;
-          _loading = false;
-          _showSkeleton = false;
-          if (hasContent) _error = null;
-        });
-        _skeletonTimer?.cancel();
-        if (hasContent && _prefetched.add(channel)) {
-          _precacheFirstCovers(_arrangeSections(data.sections), channel);
+    try {
+      final data = await CmsBridge.home(channel);
+      if (!mounted || req != _req || channel != _channel) return;
+      setState(() {
+        _cache[channel] = data;
+        _loading = false;
+        _error = null;
+        _bannerPage.value = 0;
+      });
+      _precacheFirstCovers(_arrangeSections(data.sections), channel);
+      _restartAuto();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _bannerCtrl.hasClients) {
+          _bannerCtrl.jumpToPage(0);
         }
-        if (hasContent && !jumped) {
-          jumped = true;
-          _bannerPage.value = 0;
-          _restartAuto();
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && _bannerCtrl.hasClients) {
-              _bannerCtrl.jumpToPage(0);
-            }
-          });
-        }
-        if (!settled.isCompleted) settled.complete();
-      },
-      onError: (Object e) {
-        if (!settled.isCompleted) settled.complete();
-        if (!mounted || req != _req || channel != _channel) return;
-        final msg = fxErrorText(e);
-        final kept = _cache.containsKey(channel);
-        setState(() {
-          _loading = false;
-          _showSkeleton = false;
-          if (!kept) _error = msg;
-        });
-        if (kept) _toast(msg);
-      },
-      onDone: () {
-        if (!settled.isCompleted) settled.complete();
-        if (!mounted || req != _req || channel != _channel) return;
-        if (!_loading) return;
-        setState(() {
-          _loading = false;
-          _showSkeleton = false;
-        });
-      },
-    );
-    await settled.future;
+      });
+    } catch (e) {
+      if (!mounted || req != _req || channel != _channel) return;
+      final msg = fxErrorText(e);
+      setState(() {
+        _loading = false;
+        if (!cached) _error = msg;
+      });
+      if (cached) _toast(msg);
+    }
   }
 
   void _toast(String msg) {
@@ -383,29 +323,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   List<HomeSection> _arrangeSections(List<HomeSection> raw) {
-    final indexed = <MapEntry<int, HomeSection>>[
-      for (var i = 0; i < raw.length; i++)
-        if (raw[i].items.isNotEmpty)
-          MapEntry(
-            i,
-            HomeSection(
-              _sectionLabel(raw[i].title),
-              raw[i].items.take(20).toList(),
-            ),
-          ),
+    final list = <HomeSection>[
+      for (final s in raw)
+        if (s.items.isNotEmpty)
+          HomeSection(_sectionLabel(s.title), s.items.take(10).toList()),
     ];
-    // 排序：已知分区（我们自己热播回落的那批）按 _sectionOrder 排前面，
-    // 肥猫的源分区（标题是源名）保持**到达顺序**。
+    // 排序：已知分区按 _sectionOrder 排前面，未知分区按原顺序跟后面。
     //
-    // 必须带原下标做二次比较：Dart 的 List.sort 不是稳定排序，只按 rank 比
-    // 会把「咕噜 / 热播 / 下饭」的先后顺序打乱 —— 而那个顺序正是用户能在
-    // 首页看到的「哪个源排在前面」。
-    indexed.sort((a, b) {
-      final rank = _sectionRank(a.value.title)
-          .compareTo(_sectionRank(b.value.title));
-      return rank != 0 ? rank : a.key.compareTo(b.key);
-    });
-    return <HomeSection>[for (final entry in indexed) entry.value];
+    // 原来这里是严格白名单（只输出 _sectionOrder 里的标签），服务端返回的
+    // 「电视剧热播榜 / 电影精选 / 综艺现场 / 动漫番剧」一个都匹配不上，
+    // sections 变空 → 首页只剩 banner，看起来就是白屏。
+    list.sort((a, b) => _sectionRank(a.title).compareTo(_sectionRank(b.title)));
+    return list;
   }
 
   @override
@@ -459,15 +388,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   List<Widget> _body(HomeData? data) {
     if (data == null) {
       if (_loading) {
-        // 300ms 内还没内容才亮骨架；之前留一块同高的空白占位，
-        // 免得「骨架闪一下又被内容顶掉」。
-        return <Widget>[
-          SliverToBoxAdapter(
-            child: _showSkeleton
-                ? const _HomeSkeleton()
-                : const SizedBox(height: 220),
-          ),
-        ];
+        return const [SliverToBoxAdapter(child: _HomeSkeleton())];
       }
       return [
         SliverFillRemaining(
@@ -497,7 +418,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     return [
-      if (data.notice.isNotEmpty) SliverToBoxAdapter(child: _notice(data)),
       if (data.banners.isNotEmpty)
         SliverToBoxAdapter(child: _banner(data.banners)),
       SliverList(
@@ -956,92 +876,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Widget _section(HomeSection s) {
-    // 肥猫的源分区标题就是源名（咕噜 / 热播 …），没有对应的 CMS 栏目，
-    // 不给「更多」—— 点了也只会落到「全部片库」，反而像坏了。
-    final target = CmsBridge.channelOfLabel(s.title);
     return Padding(
       padding: const EdgeInsets.only(top: 20),
       child: FxSectionRow(
         title: s.title,
         items: s.items,
-        maxItems: 20,
-        onMore: target == null ? null : () => _openSectionMore(s),
+        onMore: () => _openSectionMore(s),
         onTapItem: (item) => _openDetail(item.id),
       ),
     );
-  }
-
-  /// 顶部提示条：jar 插件没装 / 肥猫这次没内容。
-  ///
-  /// 文案说清「为什么首页现在是这些东西」，jar 缺失时还给一个直接跳
-  /// 「片源管理 → 安装 jar 插件」的按钮 —— 用户不用自己去找入口。
-  Widget _notice(HomeData data) {
-    final text = data.fallback ? '${data.notice}（下面是我们自己的热播）' : data.notice;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFF3E6),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: const Color(0xFFFFD9AE)),
-        ),
-        child: Row(
-          children: [
-            const Icon(Icons.extension_off,
-                size: 16, color: Color(0xFFB26A1F)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                text,
-                style: const TextStyle(
-                  fontSize: 12,
-                  height: 1.45,
-                  color: Color(0xFF8A5A1E),
-                ),
-              ),
-            ),
-            if (data.jarMissing) ...[
-              const SizedBox(width: 8),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _openJarPlugin,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    gradient: Fx.brand,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Text(
-                    '安装 jar 插件',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 跳「片源管理 → 安装 jar 插件」；回来后强制重拉一次首页。
-  ///
-  /// 装完 jar 之后，当日缓存里的「没有内容」就不成立了，所以顺手清掉
-  /// 肥猫那份缓存并重新拉一遍，用户不用再手动下拉刷新。
-  Future<void> _openJarPlugin() async {
-    await Navigator.of(context).push(
-      FxPageRoute(builder: (_) => const SourceSettingsPage()),
-    );
-    if (!mounted) return;
-    CmsBridge.clearCache();
-    _prefetched.remove(_channel);
-    await _load(force: true);
   }
 }
 
