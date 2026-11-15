@@ -205,6 +205,12 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     }
     final line = _lineFor(lineId);
     if (line == null || line.url.trim().isEmpty) {
+      // LIVE_DEAD_LINE（2026-11-15）：这条线路没有可用地址时，也必须把**正在
+      // 播的上一条**释放掉。原来这里直接 return，错误层盖在画面上、下面的旧
+      // 频道还在出声 —— 用户看到「该线路暂不可用」，耳朵里还是上一个台。
+      final dead = _player;
+      _player = null;
+      if (dead != null) await _dropPlayer(dead);
       if (mounted) {
         setState(() {
           _loading = false;
@@ -421,6 +427,12 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         }
       }
       if (next.lines.isEmpty) {
+        // LIVE_DEAD_CHANNEL（2026-11-15）：换台换到一个没有线路的台时，上一台
+        // 的播放器还挂着并继续出声（画面被错误层盖住，声音停不下来）。
+        // 先释放再报错。
+        final dead = _player;
+        _player = null;
+        if (dead != null) await _dropPlayer(dead);
         if (mounted) {
           setState(() {
             _loading = false;
@@ -486,7 +498,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
       } else {
         final list = await FxStore.read(FxStore.favoriteKey);
         list.removeWhere((e) => '${e['id']}' == id && '${e['kind']}' == 'live');
-        await FxStore.write(FxStore.favoriteKey, list);
+        await FxStore.writeQueued(FxStore.favoriteKey, list);
       }
     } catch (_) {}
     if (!mounted) return;

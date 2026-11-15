@@ -19,6 +19,7 @@ import '../widgets/player_theme.dart'
     show
         FxLoadingOverlay,
         FxPlayerSurface,
+        fxIsFinishedPosition,
         fxLoadProgress,
         fxPlayerQuality,
         fxResumeMinSeconds,
@@ -112,6 +113,13 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
   Timer? _hideTimer;
   Timer? _sleepTimer;
   Timer? _unlockTimer;
+
+  /// 周期回写进度（10 秒一次，和在线播放页同口径）。
+  ///
+  /// OFFLINE_PROGRESS（2026-11-15）：离线页原来只在「切后台 / 退出 / 播完」
+  /// 才写一次进度。进程被系统直接杀掉（内存回收、从最近任务划掉）时那一次
+  /// 不一定跑得到，整段观看进度就丢了 —— 用户的主观感受是「离线看的进度不记」。
+  Timer? _progressTimer;
   int _openSeq = 0;
 
   /// 设置面板打开期间用于刷新面板自身的选中态。
@@ -141,6 +149,12 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     // 打开即全屏：竖屏片锁竖屏、横屏片锁横屏，退出时恢复竖屏。
     unawaited(_enterFullscreen());
     _open();
+    // 播放中每 10 秒回写一次进度（切集 / 暂停 / 未就绪时跳过）。
+    _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (!mounted || _switching || _loading) return;
+      if (!_playing || _error != null) return;
+      unawaited(_savePosition());
+    });
   }
 
   @override
@@ -447,10 +461,17 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
   /// 记进度：播完写 0（下次从头看），退出 / 切集写当前位置。
   Future<void> _savePosition({bool ended = false}) async {
     final task = _task;
-    final seconds =
-        ended ? 0.0 : _position.inMilliseconds / 1000.0;
+    var seconds = ended ? 0.0 : _position.inMilliseconds / 1000.0;
     if (!ended && seconds <= 0) return;
     if (seconds.isNaN || seconds.isInfinite) return;
+    // OFFLINE_ENDING（2026-11-15）：片尾 90 秒内退出也归零。
+    // 在线播放页早就有这条（`fxIsFinishedPosition`），离线页漏了：
+    // 在片尾曲退出会把「距结尾 30 秒」存成进度，下次打开直接停在片尾，
+    // 用户看到的是「一打开就结束了」。
+    if (!ended &&
+        fxIsFinishedPosition(seconds, _duration.inMilliseconds / 1000.0)) {
+      seconds = 0;
+    }
     unawaited(fxSaveProgress(task.id, task.ep, seconds));
   }
 
@@ -1464,6 +1485,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
     _hideTimer?.cancel();
     _sleepTimer?.cancel();
     _unlockTimer?.cancel();
+    _progressTimer?.cancel();
     final player = _player;
     _player = null;
     if (player != null) {

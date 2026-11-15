@@ -49,6 +49,17 @@ class FxStore {
   /// 不加队列时后写会覆盖先写，集数与进度互相打架。
   static Future<void> _pending = Future<void>.value();
 
+  /// 走同一条队列的整表写入（收藏页 / 历史页 / 详情页收藏用）。
+  ///
+  /// FAV_RACE（2026-11-15）：这几个页面原来直接调 [write]，而详情页收藏是
+  /// 「读-改-写」。两边同时写 `fx_favorites_v1` 时，后写的会把先写的结果整个
+  /// 覆盖掉 —— 用户看到的就是「点了取消收藏，退出再进来又有了」。
+  static Future<void> writeQueued(
+    String key,
+    List<Map<String, dynamic>> items,
+  ) =>
+      _serialized(() => write(key, items));
+
   static Future<void> _serialized(Future<void> Function() action) {
     final next = _pending.then<void>((_) => action()).catchError((_) {});
     _pending = next;
@@ -313,7 +324,7 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   Future<void> _persist() async {
-    await FxStore.write(
+    await FxStore.writeQueued(
         FxStore.historyKey, _items.map((e) => e.toMap()).toList());
   }
 
@@ -346,6 +357,7 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   void _toast(String msg) {
+    if (!mounted) return;
     final m = ScaffoldMessenger.maybeOf(context);
     if (m == null) return;
     m.hideCurrentSnackBar();
@@ -434,8 +446,14 @@ class _HistoryPageState extends State<HistoryPage> {
           // 每张卡带封面、进度条、集数角标，和首页片卡同一套视觉。
           child: CustomScrollView(
             physics: const BouncingScrollPhysics(),
+            // GROUP_PAIR（2026-11-15）：日期标题和它自己的网格必须成对出现。
+            //
+            // 原来这里是两个独立的 `for (final group in _grouped())`：先铺完
+            // 所有日期标题、再铺所有网格，于是「今天 / 昨天 / 本周」三个标题
+            // 挤在顶部，下面才是三段海报 —— 标题和内容对不上，分组等于失效。
+            // 现在每个分组一次性展开「标题 + 网格」，`_grouped()` 也只算一遍。
             slivers: [
-              for (final group in _grouped())
+              for (final group in _grouped()) ...[
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
                   sliver: SliverToBoxAdapter(
@@ -467,7 +485,6 @@ class _HistoryPageState extends State<HistoryPage> {
                     ),
                   ),
                 ),
-              for (final group in _grouped())
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
                   sliver: SliverGrid(
@@ -484,6 +501,7 @@ class _HistoryPageState extends State<HistoryPage> {
                     ),
                   ),
                 ),
+              ],
               const SliverToBoxAdapter(child: SizedBox(height: 28)),
             ],
           ),

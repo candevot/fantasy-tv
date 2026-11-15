@@ -353,14 +353,15 @@ class CmsBridge {
 
     if (failure == null) {
       final items = _filter(raw, area: area, year: year);
-      // 带筛选时一个逻辑页由 [_scanPages] 个原始页组成，逐页按 [_pageSize]
-      // 切开，不能把三页 60 条一次性都当第 1 页给出去 ——
-      // 那样第 2 页永远取不到（rawPage 从 (page-1)*scan+1 起跳，
-      // 而第 1 页已经把前 3 页吞掉了）。
-      final pageItems = (wanted && items.length > _pageSize)
-          ? items.sublist(0, _pageSize)
-          : items;
-      return CmsPage(pageItems, hasMore: hasMore);
+      // 带筛选时一个逻辑页由 [_scanPages] 个原始页组成（rawPage 从
+      // `(page-1)*scan+1` 起跳），窗口之间不重叠，所以这一整批过滤结果
+      // **必须全部交出去**。
+      //
+      // PAGE_TRUNC（2026-11-15）：原来这里还按 `_pageSize` 切成 20 条，
+      // 剩下的 40 条既不在本页、也不会出现在后面的页里（下一逻辑页从头开始
+      // 读原始第 4 页）—— 筛选后 50 条命中的分类，用户只能看到 20 条，
+      // 越翻越少，属于静默丢数据。
+      return CmsPage(items, hasMore: hasMore);
     }
     // 主站这一页彻底失败（不是「空结果」）：旧接口开关打开时再试一次。
     if (!legacyEnabled) throw failure;
@@ -894,7 +895,10 @@ class CmsBridge {
   ///
   /// 已知来自旧接口的 id 直接走旧接口；来源未知的 id 先试 CMS，
   /// 失败再试旧接口 —— 两套编号不通用，所以不做「无脑互换」。
-  static Future<VideoDetail> detail(String id) async {
+  /// [fresh] = true 时跳过主站的详情缓存（下拉刷新 / 重试用）：
+  /// 线路变更、平台线路 `pending → ready`、集数补齐都只体现在新响应里，
+  /// 命中旧快照就永远刷不出来。
+  static Future<VideoDetail> detail(String id, {bool fresh = false}) async {
     _boot();
     final external = await _externalSource(id);
     if (external != null) {
@@ -919,7 +923,7 @@ class CmsBridge {
     final origin = _originOf(id);
     if (origin == CmsOrigin.legacy) return _legacyDetail(id);
     try {
-      final detail = await CmsApi.detail(id);
+      final detail = await CmsApi.detail(id, fresh: fresh);
       _mark(id, CmsOrigin.cms);
       return detail;
     } catch (e) {

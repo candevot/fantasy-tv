@@ -129,10 +129,16 @@ class _RankPageState extends State<RankPage> {
   void _selectPeriod(String key) {
     if (_period == key) return;
     // 周期换的是样本窗口（读几页），所以要重新拉一次；不是本地重排。
+    //
+    // RANK_PERIOD（2026-11-15）：必须像切类型一样先清空。原来只把
+    // `_loading` 设成 `_items.isEmpty`（恒为 false）且不清 `_items`，
+    // 结果头部已经显示「月榜」，下面渲染的仍是周榜的片子、还没有加载态；
+    // 拉取失败时旧榜会永久留在「月榜」标题下，用户看到的榜就是错的。
     setState(() {
       _period = key;
+      _items = <VideoCard>[];
       _error = null;
-      _loading = _items.isEmpty;
+      _loading = true;
     });
     _load();
   }

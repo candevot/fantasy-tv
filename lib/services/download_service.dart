@@ -557,6 +557,33 @@ class DownloadService extends ChangeNotifier {
       task.resetSpeed();
       if (task.status == DownloadStatus.queued ||
           task.status == DownloadStatus.downloading) {
+        // RECONCILE_DONE（2026-11-15）：先确认成品是不是其实已经下完了。
+        //
+        // `_finalize` 的顺序是「rename 成品 → 改状态 → _persist（900ms 防抖）」，
+        // HLS 目录缓存则是「写完 index.m3u8 → 改状态 → _persist」。进程在这个
+        // 窗口里被杀/断电，重启后任务还是 downloading/queued，原来的逻辑一律
+        // 改成「已暂停」；用户点「继续」时下载器会先删成品再从头下 ——
+        // 已经下好的一整集被丢掉重下（几十集就是几个 G 的流量）。
+        //
+        // 成品存在且非空就按「已完成」认领：这个窗口自愈，也顺带修好「暂停时
+        // 其实已经下完」的情况。
+        final finished = await _existingFile(task);
+        if (finished != null) {
+          final length = task.isHlsLocal
+              ? await DownloadStorage.directoryBytes(finished.parent.path)
+              : await finished.length();
+          if (length > 0) {
+            task
+              ..status = DownloadStatus.completed
+              ..filePath = finished.path
+              ..bytes = length
+              ..progress = 1
+              ..speed = 0
+              ..error = null
+              ..updatedAt = now;
+            continue;
+          }
+        }
         // App 重启后不自动续传，统一恢复成「已暂停」由用户决定。
         task.status = DownloadStatus.paused;
         task.error = null;
@@ -749,7 +776,21 @@ class DownloadService extends ChangeNotifier {
       if (req.id.isEmpty || req.ep <= 0) continue;
       final existing = taskFor(req.id, req.ep);
       if (existing != null) {
-        if (existing.status != DownloadStatus.failed) continue;
+        if (existing.status == DownloadStatus.completed) {
+          // DL_FILE_GONE（2026-11-15）：记录说「已完成」，但成品可能已经被系统
+          // 清理 / 用户删掉。原来这里一律跳过 → 这一集既播不了（fileFor 返回
+          // null 只弹一句提示）、也重新下不了（enqueue 又不收），用户只能删记录
+          // 或重启 App 等 `_reconcile` 兜。文件真不在了就按失败重新入队。
+          if (await _existingFile(existing) != null) continue;
+          existing
+            ..status = DownloadStatus.failed
+            ..filePath = null
+            ..bytes = 0
+            ..progress = 0
+            ..error = '缓存文件已被清理';
+        } else if (existing.status != DownloadStatus.failed) {
+          continue;
+        }
         existing
           // 重试时用户可能已经换了线路：跟着用这次请求的线路，别沿用旧线路。
           ..line = req.line.isEmpty ? existing.line : req.line

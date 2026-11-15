@@ -333,67 +333,82 @@ class FsTopBar extends StatelessWidget {
           // 窄屏时会被标题挤到屏幕中间偏左，看起来「散在左边」。
           // 现在把 网速 / 分辨率 / 电量 / 投屏 收进一个 Row，
           // 由 Spacer 推到最右，视觉上是一整组。
-          const Spacer(),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // 实时网速：能看出在动。网络卡住时掉到 0，一眼就知道。
-              // 竖屏（narrow）先让它：360dp 宽装不下这么多胶囊。
-              if (!narrow && speedText.isNotEmpty) ...[
-                _TopChip(text: speedText, size: s),
-                const SizedBox(width: 6),
-              ],
-              // 胶囊固定宽度、分辨率未就绪时只占位不画内容 —— 那样就没有可
-              // 长按的区域。这里固定一个最小高度把它撑起来，长按才不会落空。
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onLongPress: onLongPressQuality,
-                child: SizedBox(
-                  height: 26 * s,
-                  child: Center(
-                    child: FsQualityPill(label: qualityLabel, size: s),
+          // TOPBAR_FIT（2026-11-15）：右侧这一组要能被压缩。
+          //
+          // title 已经是 Expanded，它自己就会把右侧推到最右，原来的 Spacer
+          // 是多余的；而右侧那组是固定宽的 Row（分辨率 + 电量 + 转屏 + 投屏
+          // + actions），一起看全屏会多传「换源 / 换剧 / 成员 / 邀请 / 退出
+          // 房间」5 个按钮 —— 360dp 竖屏下合计约 515dp，右侧溢出约 150dp，
+          // 后面几个按钮被裁到屏幕外，用户点不到「退出房间」。
+          // 现在右侧用 Flexible + FittedBox(scaleDown)：空间够就原尺寸，
+          // 不够就整体等比缩小，永远不会溢出。
+          Flexible(
+            fit: FlexFit.loose,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 实时网速：能看出在动。网络卡住时掉到 0，一眼就知道。
+                  // 竖屏（narrow）先让它：360dp 宽装不下这么多胶囊。
+                  if (!narrow && speedText.isNotEmpty) ...[
+                    _TopChip(text: speedText, size: s),
+                    const SizedBox(width: 6),
+                  ],
+                  // 胶囊固定宽度、分辨率未就绪时只占位不画内容 —— 那样就没有可
+                  // 长按的区域。这里固定一个最小高度把它撑起来，长按才不会落空。
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onLongPress: onLongPressQuality,
+                    child: SizedBox(
+                      height: 26 * s,
+                      child: Center(
+                        child: FsQualityPill(label: qualityLabel, size: s),
+                      ),
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 6),
+                  // 电量：和手机状态栏同款语义，充电时变绿
+                  _BatteryChip(size: s),
+                  if (!narrow) ...[
+                    const SizedBox(width: 6),
+                    // 当前时间：全屏时看不到系统状态栏，这里补一个
+                    _ClockChip(size: s),
+                  ],
+                  if (onRotate != null) ...[
+                    const SizedBox(width: 6),
+                    // 手动转屏：竖着看短剧想横过来、或反过来时用。点过一次之后
+                    // 本次播放内不再自动跟着分辨率切（页面记 user override）。
+                    PGlassIcon(
+                      icon: rotatedToPortrait
+                          ? Icons.crop_landscape_rounded
+                          : Icons.crop_portrait_rounded,
+                      size: 32 * s,
+                      iconSize: 17 * s,
+                      tint: .18,
+                      tooltip: rotatedToPortrait ? '转成横屏' : '转成竖屏',
+                      onTap: onRotate,
+                    ),
+                  ],
+                  if (showCast) ...[
+                    const SizedBox(width: 6),
+                    PGlassIcon(
+                      icon: Icons.cast_rounded,
+                      size: 32 * s,
+                      iconSize: 17 * s,
+                      tint: .18,
+                      tooltip: '投屏',
+                      onTap: onCast,
+                    ),
+                  ],
+                  for (final action in actions) ...[
+                    const SizedBox(width: 6),
+                    action,
+                  ],
+                ],
               ),
-              const SizedBox(width: 6),
-              // 电量：和手机状态栏同款语义，充电时变绿
-              _BatteryChip(size: s),
-              if (!narrow) ...[
-                const SizedBox(width: 6),
-                // 当前时间：全屏时看不到系统状态栏，这里补一个
-                _ClockChip(size: s),
-              ],
-              if (onRotate != null) ...[
-                const SizedBox(width: 6),
-                // 手动转屏：竖着看短剧想横过来、或反过来时用。点过一次之后
-                // 本次播放内不再自动跟着分辨率切（页面记 user override）。
-                PGlassIcon(
-                  icon: rotatedToPortrait
-                      ? Icons.crop_landscape_rounded
-                      : Icons.crop_portrait_rounded,
-                  size: 32 * s,
-                  iconSize: 17 * s,
-                  tint: .18,
-                  tooltip: rotatedToPortrait ? '转成横屏' : '转成竖屏',
-                  onTap: onRotate,
-                ),
-              ],
-              if (showCast) ...[
-                const SizedBox(width: 6),
-                PGlassIcon(
-                  icon: Icons.cast_rounded,
-                  size: 32 * s,
-                  iconSize: 17 * s,
-                  tint: .18,
-                  tooltip: '投屏',
-                  onTap: onCast,
-                ),
-              ],
-              for (final action in actions) ...[
-                const SizedBox(width: 6),
-                action,
-              ],
-            ],
+            ),
           ),
         ],
       ),

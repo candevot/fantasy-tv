@@ -101,6 +101,9 @@ class _DetailPageState extends State<DetailPage>
   int _autoLineTries = 0;
   int _relatedOffset = 0;
 
+  /// 详情请求序号：晚到的旧响应不许覆盖新数据（下拉刷新 / 重试 / 补线并发）。
+  int _detailReq = 0;
+
   /// 选集分组下标（正片 / 花絮 …）；切换分组只影响下方横滑列表。
   int _groupIndex = 0;
 
@@ -229,21 +232,27 @@ class _DetailPageState extends State<DetailPage>
 
   /* --------------------------------------------------------------- data */
 
-  Future<void> _loadDetail({bool silent = false}) async {
+  Future<void> _loadDetail({bool silent = false, bool fresh = false}) async {
+    // DETAIL_REQ（2026-11-15）：详情也有请求序号。
+    //
+    // 下拉刷新 / 重试 / 后台补线三路都会改 `_detail` / `_lineId` / `_ep`，
+    // 没有序号时晚到的旧响应会把新数据整体覆盖（刚补上的线路、刚 ready 的
+    // 平台线路都能被「回退」掉）。和分类页 `_req` 一个口径。
+    final req = ++_detailReq;
     if (!silent && mounted) setState(() => _error = null);
     try {
       // DETAIL_TIMEOUT（2026-11-15）：详情整条链（主站 8 秒 ×2 重试、
       // 外部源、jar 源）都必须有一个总上限 —— 页面不能一直转圈。
       // jar 源自己已经有 8 秒硬超时（CmsBridge._jarGuard），这里是最后一道，
       // 12 秒还没回来就按「加载失败」给文案 + 重试入口。
-      final d = await CmsBridge.detail(widget.id).timeout(
+      final d = await CmsBridge.detail(widget.id, fresh: fresh).timeout(
         const Duration(seconds: 12),
         onTimeout: () => throw ApiException(
           '加载超时了，换个网络或稍后重试',
           kind: ApiErrorKind.timeout,
         ),
       );
-      if (!mounted) return;
+      if (!mounted || req != _detailReq) return;
       _cmsBacked = CmsBridge.isCms(widget.id);
 
       final lines = d.lines;
@@ -261,17 +270,7 @@ class _DetailPageState extends State<DetailPage>
       }
 
       final eps = _episodesOf(d, lineId);
-      var ep = _ep;
-      if (eps.isNotEmpty && !eps.any((e) => e.n == ep)) {
-        // 目标线路集数更少时夹到「不超过当前集的最大集」，不要直接跳回第 1 集：
-        // 4K(28 集) ↔ 量子(29 集) 来回切、正在看第 29 集时，切 4K 应该落到
-        // 第 28 集，而不是从头开始。
-        var fallback = eps.first.n;
-        for (final e in eps) {
-          if (e.n <= ep) fallback = e.n;
-        }
-        ep = fallback;
-      }
+      var ep = _clampEpisode(eps, _ep);
 
       // NO_LINES（2026-11-15）：这条记录一条线路都没有（热播榜脚本只写了
       // vod_hits，有些记录的 vod_play_url 是空的）。播放器拿不到线路就什么
@@ -279,6 +278,8 @@ class _DetailPageState extends State<DetailPage>
       if (lines.isEmpty) {
         fxToast(context, '这部片暂无可播放地址，换一部试试');
       }
+      // 这期间又发起了新的详情请求：这一份是旧的，直接丢掉。
+      if (!mounted || req != _detailReq) return;
       setState(() {
         // LINE_HEALTH（2026-11-15）：健康度高的线路排前面，已知坏的沉后。
         // 只调顺序、不隐藏：探测也可能误判，用户想点坏的照样能点
@@ -427,7 +428,7 @@ class _DetailPageState extends State<DetailPage>
     try {
       final list = await FxStore.read(FxStore.historyKey);
       list.removeWhere((e) => '${e['id']}' == widget.id);
-      await FxStore.write(FxStore.historyKey, list);
+      await FxStore.writeQueued(FxStore.historyKey, list);
     } catch (_) {}
     try {
       // 从收藏进来时，「这条记录」也在收藏里，一并清掉。
@@ -435,7 +436,7 @@ class _DetailPageState extends State<DetailPage>
       final before = favs.length;
       favs.removeWhere((e) => '${e['id']}' == widget.id);
       if (favs.length != before) {
-        await FxStore.write(FxStore.favoriteKey, favs);
+        await FxStore.writeQueued(FxStore.favoriteKey, favs);
       }
     } catch (_) {}
     try {
@@ -662,6 +663,26 @@ class _DetailPageState extends State<DetailPage>
   /// LINE_EPNAMES（2026-11-14）：以前所有线路共用「合并后最长那条线路」
   /// 的集名 —— 三条线路都显示同一套 5 集，可有的线路根本没这些集，
   /// 点进去就播不出来。现在线路自带 epnames 时优先用它。
+  /// 把集号夹到这条线路真实拥有的范围内（首屏与手动换线共用同一套规则）。
+  ///
+  /// 目标线路集数更少时落到「不超过当前集的最大集」，不要直接跳回第 1 集：
+  /// 4K(28 集) ↔ 量子(29 集) 来回切、正在看第 29 集时，切 4K 应该落到
+  /// 第 28 集，而不是从头开始。
+  ///
+  /// EP_CLAMP（2026-11-15）：这条规则原来只写在首屏 `_loadDetail` 里，
+  /// `_selectLineReady`（用户点线路卡）单独写成了 `_ep = eps.first.n`，
+  /// 于是同一个动作一处夹取、一处跳回第 1 集，还会把「第 1 集」立刻写进
+  /// 观看历史 —— 用户点一下线路就丢进度。
+  static int _clampEpisode(List<Episode> eps, int ep) {
+    if (eps.isEmpty) return ep;
+    if (eps.any((e) => e.n == ep)) return ep;
+    var fallback = eps.first.n;
+    for (final e in eps) {
+      if (e.n <= ep) fallback = e.n;
+    }
+    return fallback;
+  }
+
   List<Episode> _episodesOf(VideoDetail d, [String? lineId]) {
     final wantLine = (lineId ?? _lineId).trim();
     if (wantLine.isNotEmpty) {
@@ -871,7 +892,7 @@ class _DetailPageState extends State<DetailPage>
       } else {
         final list = await FxStore.read(FxStore.favoriteKey);
         list.removeWhere((m) => '${m['id']}' == widget.id);
-        await FxStore.write(FxStore.favoriteKey, list);
+        await FxStore.writeQueued(FxStore.favoriteKey, list);
       }
     } catch (_) {
       // 收藏是「乐观更新」，但写盘失败时必须回滚：否则页面显示已收藏、
@@ -1002,10 +1023,9 @@ class _DetailPageState extends State<DetailPage>
       _autoLineTries = 0;
       // 换线路后集数可能变少（这条线路没有那么多集）：
       // 把当前集夹到该线路真实拥有的范围内，避免点了播不出来。
+      // 规则和首屏完全一致 —— 少一集时落到「不超过当前集的最大集」。
       final eps = _episodesOf(_detail!, line.id);
-      if (eps.isNotEmpty && !eps.any((e) => e.n == _ep)) {
-        _ep = eps.first.n;
-      }
+      _ep = _clampEpisode(eps, _ep);
       _groupIndex = _groupIndexOf(_episodeGroups, _ep);
     });
     _saveHistory();
@@ -1453,7 +1473,8 @@ class _DetailPageState extends State<DetailPage>
     _lineRefreshTimer?.cancel();
     _lineRefreshTimer = null;
     _lineRefreshTries = 0;
-    await _loadDetail(silent: true);
+    // 下拉刷新必须绕过主站详情缓存，否则线路 / 集数永远刷不出来。
+    await _loadDetail(silent: true, fresh: true);
     if (!mounted) return;
     await _loadComments(reset: true, silent: true);
   }

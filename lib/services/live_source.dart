@@ -203,10 +203,15 @@ class LiveSourceService {
     if (head.contains('#genre#')) return LiveFormat.txt;
     // 头几行里只要有一行是「台名,地址」就按 TXT 处理：
     // 首行可能是注释或分组标记，不能只看第一行。
+    //
+    // TXT_HEADER（2026-11-15）：注释行（`#` 开头）不占扫描配额。
+    // 原来注释也计数，源站头部放一段「声明 / 更新日志」超过 20 行时，
+    // 整个列表被判成「未知格式」→ 频道 0 个 → 直播页报「列表是空的」，
+    // 明明源是好的，排查方向还会被带到后台配置上。
     var scanned = 0;
     for (final raw in head.split('\n')) {
       final line = raw.trim();
-      if (line.isEmpty) continue;
+      if (line.isEmpty || line.startsWith('#')) continue;
       if (_splitPair(line) != null) return LiveFormat.txt;
       scanned++;
       if (scanned >= 20) break;

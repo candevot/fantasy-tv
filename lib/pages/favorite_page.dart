@@ -119,7 +119,9 @@ class _FavoritePageState extends State<FavoritePage> {
   }
 
   Future<void> _persist() async {
-    await FxStore.write(
+    // 走 FxStore 的串行队列：详情页收藏是「读-改-写」，两边并发时
+    // 直接 write 会互相覆盖（取消收藏后又自己出现）。
+    await FxStore.writeQueued(
         FxStore.favoriteKey, _items.map((e) => e.toMap()).toList());
   }
 
@@ -175,6 +177,9 @@ class _FavoritePageState extends State<FavoritePage> {
   }
 
   void _toast(String msg) {
+    // 调用点都在 await 之后（写盘 / 清标记），期间页面可能已经被 pop：
+    // 拿已销毁 State 的 context 查祖先会抛「deactivated widget's ancestor」。
+    if (!mounted) return;
     final m = ScaffoldMessenger.maybeOf(context);
     if (m == null) return;
     m.hideCurrentSnackBar();
@@ -186,7 +191,7 @@ class _FavoritePageState extends State<FavoritePage> {
     ));
   }
 
-  void _open(FavRecord r) {
+  Future<void> _open(FavRecord r) async {
     if (r.isLive) {
       final channel = LiveChannel(
         id: r.id,
@@ -196,18 +201,26 @@ class _FavoritePageState extends State<FavoritePage> {
         group: r.group,
         lines: r.lines,
       );
-      Navigator.of(context).push(
+      await Navigator.of(context).push(
         FxPageRoute(builder: (_) => LiveDetailPage(channel: channel)),
       );
+      // 直播详情里也能取消收藏：回来必须重读，否则列表还是旧快照。
+      if (!mounted) return;
+      await _load();
       return;
     }
-    Navigator.of(context).push(
+    await Navigator.of(context).push(
       FxPageRoute(
         // 片名 + 年份一起带过去：这张卡片的 vod_id 可能已经被服务端去重
         // 合并掉，详情页靠它们重查（ID_RETRY 2026-11-15）。
         builder: (_) => DetailPage(id: r.id, title: r.title, year: r.year),
       ),
     );
+    // FAV_SYNC（2026-11-15）：详情页点亮 / 取消爱心是直接改 favoriteKey 的，
+    // 而本页只在自己 _load() 时读一次。返回后不重读就会出现「刚取消的片子
+    // 还躺在收藏列表里、点进去又能再打开」—— 和详情页状态互相矛盾。
+    if (!mounted) return;
+    await _load();
   }
 
   @override

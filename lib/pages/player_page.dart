@@ -554,7 +554,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 切换动作默认「继续播放」；只有切换前确实是暂停（用户主动暂停）
     // 才保持暂停。未就绪 / 报错时按继续处理，避免自动换线后停在暂停。
     final continuePlayback = _shouldContinuePlayback(old);
-    final resume = healthy ? old.value.position : Duration.zero;
+    // LINE_EP_ALIGN（2026-11-15）：一次切换可能同时改线路和集数 ——
+    // 详情页换到集数更少的线路时会把集号夹小（第 29 集 → 第 28 集），
+    // 这时 `old.value.position` 是**上一集**的位置，原样带过去就是
+    // 「第 28 集从第 29 集播到的中段开始」。只有集号没变才沿用当前位置，
+    // 集号变了就按该集自己保存的进度续播。
+    final sameEp = targetEp == _ep;
+    final resume = healthy && sameEp ? old.value.position : Duration.zero;
     final oldDuration = old?.value.duration;
     var resumeSeconds = resume.inMilliseconds / 1000.0;
 
@@ -563,7 +569,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       await _saveProgress();
       if (!mounted) return;
 
-      if (!healthy) {
+      if (!healthy || !sameEp) {
         final saved = await fxLoadProgress(widget.videoId, targetEp);
         // 不足 60 秒视为刚看片头，不把 20 秒进度当成续播。
         resumeSeconds = saved >= fxResumeMinSeconds ? saved : 0;
@@ -1302,8 +1308,16 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           openFuture,
           hevc: target.hevc,
         );
+        // 被新一次 open 取代：只回收**本次新建**的实例。
+        //
+        // SWITCH_REUSE_GUARD（2026-11-15）：复用实例（`reusable`）是后来的
+        // 那次 open 正在用的同一个对象，这里 dispose 掉它就是「旧请求把新
+        // 播放器拆了」—— 原生已释放、Dart 侧还认为已就绪，结果是新的一次
+        // 起播被判「线路不可用」（还会被冷却 10 分钟）、画面停帧或黑屏。
         if (!mounted || token != _loadToken) {
-          await controller.dispose();
+          if (!identical(controller, reusable)) {
+            await controller.dispose();
+          }
           return false;
         }
         _activeCastUrl = url;
@@ -1340,8 +1354,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           await controller.pause();
         }
         // 初始化期间被新操作取代：释放新实例，不要把旧 controller 挂回。
+        // 复用实例不能在这里 dispose（它是后一次 open 正在用的那一个）。
         if (!mounted || token != _loadToken) {
-          await controller.dispose();
+          if (!identical(controller, reusable)) {
+            await controller.dispose();
+          }
           return false;
         }
         final previous = _controller;
@@ -1369,6 +1386,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _errorText = '';
         });
         _sourceFailNotified = false;
+        // STALL_RESET（2026-11-15）：这一次起播成功了，就清掉「本轮已判卡死」
+        // 的记录。原来这个字段只写不清，同一条线路在一集里卡死过一次之后，
+        // 后面再卡就是纯等 —— 永远不再自动换线（用户看到的是一直转圈）。
+        _bufferingFailedLine = '';
+        _stallProgress.reset();
         openedHevc = target.hevc;
         openedDegraded = target.degradeFromHevc;
         _iqHevc = openedHevc;

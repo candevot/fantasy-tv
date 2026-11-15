@@ -3171,7 +3171,11 @@ class _TogetherPageState extends State<TogetherPage>
       return;
     }
     final key = 'live|${channel.id}|${line.id}';
-    if (!_liveJumping && (key == _loadedKey || key == _loadingKey)) return;
+    // 同 `_syncVideo`：实例已经被别的换台释放时不能只靠 `_loadedKey` 去重。
+    if (!_liveJumping &&
+        (key == _loadingKey || (key == _loadedKey && _controller != null))) {
+      return;
+    }
     _loadingKey = key;
     final seq = ++_videoSeq;
     _liveRescueTried.clear();
@@ -3354,7 +3358,13 @@ class _TogetherPageState extends State<TogetherPage>
     }
     if (_videoId.isEmpty) return;
     final key = '$_videoId|$_ep|$_videoLine';
-    if (key == _loadedKey || key == _loadingKey) return;
+    // ROOM_SWITCH_BACK（2026-11-15）：命中 `_loadedKey` 还不够 —— 播放器实例
+    // 可能已经被「另一次换线」释放掉了（那次加载还在飞）。A→B→A 回切时，
+    // 第二次 A 会在这里被去重吞掉：既不发新请求、也不作废 B 的那一次，
+    // B 完成后画面就是 B，而线路标签是 A，之后再也没有状态变化来纠正。
+    // 只有「key 一致 **且** 实例还在」才算真的在播这个 key。
+    if (key == _loadingKey) return;
+    if (key == _loadedKey && _controller != null) return;
     unawaited(_loadVideo(_videoId, _ep, _videoLine));
   }
 

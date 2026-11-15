@@ -404,8 +404,15 @@ class _ChatBubble extends StatelessWidget {
                 ),
               ],
       ),
+      // CHAT_LONG（2026-11-15）：接收侧限高。
+      //
+      // 发送侧限 300 字（输入框 maxLength），但对面可能是别的客户端 / 老版本，
+      // 一条几千字的消息会把气泡撑到十几屏，聊天区完全看不到别人说话。
+      // 这里最多 10 行 + 省略号。
       child: Text(
         message.text,
+        maxLines: 10,
+        overflow: TextOverflow.ellipsis,
         style: TextStyle(
           fontSize: compact ? 12 : 14,
           height: 1.35,
