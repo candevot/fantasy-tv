@@ -447,6 +447,46 @@ jobs:
       # 操作流水文案「小明 …」/ 自己「你 …」且同动作 1 秒内合并。
       - name: together sync policy regressions
         run: flutter test test/together_sync_policy_test.dart
+      # TOGETHER_FOUR_FIX（2026-11-16）：用户实测四条一起看问题。
+      #
+      # 这一组是**现场症状**的门禁，不是「代码风格」门禁 —— 每一条都对应
+      # 一次用户截图报障，回退了必然复现：
+      #   ① 「你 开始播放」连刷：同人同动作 3 秒窗口 + 连续重复丢弃 +
+      #      非用户动作白名单；心跳 / 进度 / resync 绝不生成操作提示；
+      #   ② 横屏全屏聊天不自动滚到底：必须在布局前取样「是否贴底」，
+      #      且 ListView 的 maxScrollExtent 要连追几帧才落到真正的底；
+      #   ③ 顶栏按钮小得离谱：热区 ≥44dp、字号 ≥12sp，放不下进「更多」，
+      #      组件树里不许再出现 FittedBox 缩放；
+      #   ④ 房间信息卡片占一整块：压成一行「片名 · 第N集 · N人」。
+      - name: together four fixes (op dedupe / chat autoscroll / top bar 44 / info one-line)
+        run: |
+          set -e
+          # ② 自动贴底的实现必须还在：布局前取样 + 多帧追底 + 视口变化跟随。
+          grep -q '_isNearBottom()' lib/widgets/together_chat.dart
+          grep -q '_followMaxAttempts' lib/widgets/together_chat.dart
+          grep -q '_lastViewport' lib/widgets/together_chat.dart
+          # ① 去重口径：3 秒窗口 + 连续重复丢弃 + 用户动作白名单。
+          grep -q 'togetherOpDedupeWindow = Duration(seconds: 3)' lib/widgets/together_ui.dart
+          grep -q 'togetherShouldSkipOp' lib/widgets/together_ui.dart
+          grep -q 'togetherIsUserOp' lib/widgets/together_ui.dart
+          # ① 内部上报（建房 / resync）不许再带 op。
+          grep -q '_reportInternalState' lib/pages/together_page.dart
+          grep -q '_applyingRemote' lib/pages/together_page.dart
+          # ③ 顶栏：44dp / 12sp 常量，且房间页与全屏都不再缩放动作区。
+          grep -q 'kTogetherActionHit = 44' lib/widgets/together_top_actions.dart
+          grep -q 'kTogetherActionFont = 12.5' lib/widgets/together_top_actions.dart
+          # ④ 信息条压成一行。
+          grep -qF '人' lib/widgets/together_room.dart
+          grep -qF "· " lib/widgets/together_room.dart
+          flutter test test/together_four_fixes_test.dart
+          flutter test test/together_top_actions_test.dart
+          # 服务端闸门：非用户动作不播 + 同人同动作 3 秒内只播一条。
+          # （源码取仓库里的 together_ws_new.js 副本，见 tools/ 下的说明）
+          if [ -f tools/together_ws_new.js ]; then
+            TOGETHER_WS_SRC=tools/together_ws_new.js node tools/test_together_op_dedupe.js
+          else
+            echo 'SKIP 服务端副本不在仓库里，跳过（客户端闸门已覆盖同一口径）'
+          fi
       - name: Build release APKs (split per ABI)
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"

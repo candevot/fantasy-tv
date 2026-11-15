@@ -108,19 +108,48 @@ class _TogetherChatListState extends State<TogetherChatList>
     with WidgetsBindingObserver {
   final ScrollController _scroll = ScrollController();
 
+  /// 上一次渲染过的消息签名。
+  ///
+  /// CHAT_FOLLOW_FIX：不能拿 `oldWidget.messages` 比。页面层发布的虽然每次都是
+  /// 新 List，但同一份 list 被**原地追加**时（或上层直接复用可变列表时），
+  /// oldWidget 拿到的已经是加完之后的同一份内容，签名恒等，
+  /// didUpdateWidget 里「有新消息」那条分支根本进不去 —— 这就是「不自动滚」。
+  /// 缓存自己上一次看到的签名才可靠。
+  String _lastSignature = '';
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _scrollToBottom(jump: true);
+    _lastSignature = _signature(widget.messages);
+    _scrollToBottom(jump: true, force: true);
   }
 
   @override
   void didUpdateWidget(covariant TogetherChatList oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_signature(widget.messages) != _signature(oldWidget.messages)) {
-      _scrollToBottom();
+    final next = _signature(widget.messages);
+    if (next != _lastSignature) {
+      _lastSignature = next;
+      // CHAT_FOLLOW_FIX（2026-11-16）：**必须在布局之前**取「是否在底部」。
+      //
+      // 老代码把这个判断放进 addPostFrameCallback：那一刻新消息已经布局完成，
+      // maxScrollExtent 已经变大，pixels 自然离底 >48dp → atBottom=false →
+      // 直接 return。竖屏偶尔看着能滚，是因为消息刚好一屏内不产生滚动量；
+      // 全屏浮动面板高度小、几乎每条都会增长，于是「永远不自动到底」。
+      // 现在先在这里（旧布局仍然有效）取样，再在下一帧按取样结果贴底。
+      final follow = _isNearBottom();
+      _scrollToBottom(follow: follow);
     }
+  }
+
+  /// 当前视图是否贴着底（离底 <48dp）。
+  bool _isNearBottom() {
+    if (!_scroll.hasClients) return true;
+    final position = _scroll.position;
+    if (!position.hasContentDimensions) return true;
+    if (position.maxScrollExtent <= 0) return true;
+    return position.maxScrollExtent - position.pixels <= 48;
   }
 
   String _signature(List<TogetherChatMessage> messages) {
@@ -133,8 +162,21 @@ class _TogetherChatListState extends State<TogetherChatList>
   @override
   void didChangeMetrics() {
     // 键盘弹起 / 收起、面板高度变化时保持最新消息可见。
-    _scrollToBottom();
+    //
+    // 这里不看「是否在底部」：键盘把视口压矮本身就是一次被动变化，
+    // 用户没动过列表，贴底是唯一不让人漏消息的选择。
+    _scrollToBottom(force: true);
   }
+
+  /// 上一次布局给到的视口尺寸。
+  ///
+  /// CHAT_KEYBOARD（2026-11-16）：只在 didChangeMetrics 里贴底是不够的 ——
+  /// 一起看全屏的聊天面板是**自己算高度**的浮动面板（`min(45%屏高, 420)`），
+  /// 键盘弹起时它的高度是被 key 内布局重算的，MediaQuery 的 viewInsets 变化
+  /// 不一定让 metrics 回调先到；竖屏房间页又用 `resizeToAvoidBottomInset`，
+  /// body 的 viewInsets 被清零。真正稳定的信号是「布局给的高度变了」，
+  /// 所以在 build 里比一次。
+  Size _lastViewport = Size.zero;
 
   @override
   void dispose() {
@@ -145,25 +187,42 @@ class _TogetherChatListState extends State<TogetherChatList>
 
   /// 新消息自动贴底；用户主动上翻时不抢。
   ///
-  /// CHAT_NO_YANK（2026-11-15）：以前每次消息变化都 animateTo 到底，
-  /// 用户正在往上翻历史，一来新消息就被拽回底部。现在只在「本来就贴着
-  /// 底」（离底部 48dp 内）或者 [jump] 时跟随。
-  void _scrollToBottom({bool jump = false}) {
+  /// CHAT_NO_YANK（2026-11-15）：用户正在往上翻历史时，新消息不该把人拽回底部。
+  /// CHAT_FOLLOW_FIX（2026-11-16）：但「是否在底部」必须在**布局之前**取样
+  /// （见 didUpdateWidget），否则新增内容已经把 maxScrollExtent 撑大，
+  /// 判断永远是「不在底部」，全屏浮动面板就再也滚不到底。
+  ///
+  /// [follow] 为取样结果：true = 跟随到底。[force] = 无视取样强制贴底
+  /// （键盘弹起 / 首次进入）。
+  void _scrollToBottom({bool jump = false, bool? follow, bool force = false}) {
+    final shouldFollow = force || follow == true;
+    if (!shouldFollow && !jump) return;
+    _followBottom(jump: jump || force, attempt: 0);
+  }
+
+  /// 贴底最多连追几帧。
+  ///
+  /// CHAT_FOLLOW_FIX：`ListView.builder` 的 `maxScrollExtent` 是**估出来的**，
+  /// 新增内容后第一帧只量到旧高度 —— 一次 jump 到旧的底，随后滚动条把剩余
+  /// 内容铺开、extent 又变大，画面就停在「离底还差一条消息」的位置。
+  /// 用户看到的就是「不自动滚到底」。所以跟到底要连追几帧，直到真的到 0 距离。
+  static const int _followMaxAttempts = 6;
+
+  void _followBottom({required bool jump, required int attempt}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
-      final position = _scroll.position;
-      final target = position.maxScrollExtent;
-      final atBottom = position.maxScrollExtent - position.pixels <= 48;
-      if (!jump && !atBottom) return;
-      if (jump || atBottom) {
-        _scroll.jumpTo(target);
-        return;
+      if (!_scroll.position.hasContentDimensions) return;
+      final target = _scroll.position.maxScrollExtent;
+      final gap = target - _scroll.position.pixels;
+      if (gap <= 1) return;
+      // CHAT_FOLLOW_FIX：这里必须用 jumping 而不是 animateTo。
+      // post-frame 里 animateTo 发出的滚动动画会被同帧的布局/重建打断，
+      // 而 jumpTo 在 extent 还没稳定时会落到旧 maxScrollExtent 上，
+      // 所以两者都要靠外层循环「多跳几帧」才落到真正的底。
+      _scroll.jumpTo(target);
+      if (attempt + 1 < _followMaxAttempts) {
+        _followBottom(jump: jump, attempt: attempt + 1);
       }
-      _scroll.animateTo(
-        target,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
     });
   }
 
@@ -196,6 +255,23 @@ class _TogetherChatListState extends State<TogetherChatList>
         ),
       );
     }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+        if (_lastViewport != Size.zero &&
+            (size.height - _lastViewport.height).abs() > 1) {
+          // 视口高度变化（键盘弹起 / 收起 / 面板被拖动改高）：保持贴底。
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _scrollToBottom(force: true);
+          });
+        }
+        _lastViewport = size;
+        return _buildList(context);
+      },
+    );
+  }
+
+  Widget _buildList(BuildContext context) {
     return ListView.builder(
       controller: _scroll,
       padding:

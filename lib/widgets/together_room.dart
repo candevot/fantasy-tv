@@ -12,6 +12,7 @@ import 'fs_controls.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
 import 'together_floating_chat.dart';
+import 'together_top_actions.dart';
 import 'together_ui.dart';
 
 /* ========================================================================== */
@@ -352,44 +353,60 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
 
   /* ------------------------------------------------------------ 顶部栏 */
 
+  /// 竖屏顶栏（TOPBAR_44 / 2026-11-16 用户实测重排）。
+  ///
+  /// 现场：`<- 房间 320551 (复制)   [1人][邀请][投屏][☆我在操作][换源][换剧]`
+  /// —— 左边「房间 320551」占着一大片空白，右边 6 个胶囊被
+  /// `FittedBox(scaleDown)` 硬压成一串小字（7~9sp、热区十几 dp），点不准。
+  ///
+  /// 现在的版式：
+  ///   · 左：返回 + 房间号（复制图标同行）+ **内联状态**（我在操作 / 已同步 /
+  ///     落后 x s）—— 状态本来就不是按钮，内联到左边就不再占一个按钮位；
+  ///   · 右：只有真正要点的动作，邀请 / 换源 / 换剧常驻，1人 / 投屏 按 priority
+  ///     收进「更多」；每项热区 ≥44dp、字号 ≥12.5sp、图标 15dp；
+  ///   · 放不下就**换行**（Wrap），绝不缩放 —— 见 [TogetherTopActionBar]。
   Widget _buildHeader(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 6, 10, 6),
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
       child: Row(
-        children: [
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
           TogetherCircleButton(
             icon: Icons.arrow_back_ios_new_rounded,
             size: 34,
             iconSize: 15,
+            tooltip: '退出房间',
             onTap: widget.onBack,
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 2),
+          // 左侧：房间号 + 复制 + 内联状态。Expanded 让它吃掉中间空白，
+          // 右侧动作区按自身宽度贴右（不再用 Spacer 留一大片空）。
           Expanded(
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: widget.onCopyCode,
               child: Row(
-                children: [
+                children: <Widget>[
                   Flexible(
                     child: Text(
                       '房间 ${widget.roomCode.isEmpty ? '——' : widget.roomCode}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        fontSize: 13.5,
+                        fontSize: 14,
                         fontWeight: FontWeight.w800,
                         color: Fx.ink,
                         letterSpacing: .2,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 4),
+                  const SizedBox(width: 3),
                   Icon(
                     Icons.copy_rounded,
-                    size: 12,
-                    color: Fx.sub.withValues(alpha: .65),
+                    size: 13,
+                    color: Fx.sub.withValues(alpha: .7),
                   ),
-                  if (!widget.online) ...[
+                  if (!widget.online) ...<Widget>[
                     const SizedBox(width: 5),
                     Container(
                       width: 6,
@@ -400,89 +417,150 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                       ),
                     ),
                   ],
+                  if (!widget.isLive) ...<Widget>[
+                    const SizedBox(width: 8),
+                    Flexible(child: _buildInlineStatus()),
+                  ],
                 ],
               ),
             ),
           ),
-          // HEADER_RIGHT_GROUP（2026-11-15）：右侧一组整体收进 FittedBox，
-          // 成员 / 邀请 / 投屏 / 同步状态 / 换源 / 换剧 全在时，360dp 窄屏
-          // 也不会溢出把「换剧」顶出屏幕（与底栏右组同一个保底做法）。
-          Flexible(
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.centerRight,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TogetherPill(
-                    text: '${widget.members.length}',
-                    icon: Icons.people_alt_outlined,
-                    height: 30,
-                    onTap: widget.onMembers,
-                  ),
-                  const SizedBox(width: 6),
-                  TogetherPill(
-                    text: '邀请',
-                    icon: Icons.person_add_alt_1_rounded,
-                    height: 30,
-                    accent: true,
-                    onTap: widget.onInvite,
-                  ),
-                  // 投屏：主播放竖屏顶栏同一颗（tv_rounded）入口，图标 / 尺寸一致，
-                  // 只是房间页是浅色底，用同款的浅色玻璃圆钮承载。
-                  if (!widget.isLive) ...[
-                    const SizedBox(width: 6),
-                    TogetherCircleButton(
-                      icon: Icons.tv_rounded,
-                      size: 30,
-                      iconSize: 16,
-                      tooltip: '投屏',
-                      onTap: widget.onCast,
-                    ),
-                  ],
-                  // 手动对齐房主进度：成员侧才显示。偏差 >1 秒才高亮，
-                  // 平时保持低调，不抢「邀请 / 换源」的视觉位置。
-                  // SYNC_ALWAYS（2026-11-14）：同步状态对房主也要显示。
-                  // 之前只有成员（!isHost）才渲染，房主进全屏后什么都看不到，
-                  // 用户报「竖屏有同步、全屏没有同步」就是这条判断。
-                  // 房主显示「房主」，成员显示「已同步 / 落后 x s」。
-                  if (!widget.isLive) ...[
-                    const SizedBox(width: 6),
-                    if (widget.onSyncToHost != null && !widget.isHost)
-                      _SyncToHostPill(
-                        offsetSeconds: widget.syncOffsetSeconds,
-                        onTap: widget.onSyncToHost!,
-                      )
-                    else
-                      TogetherPill(
-                        text: widget.isHost ? '我在操作' : '已同步',
-                        icon: widget.isHost
-                            ? Icons.star_outline_rounded
-                            : Icons.check_circle_outline_rounded,
-                        height: 30,
-                      ),
-                  ],
-                  const SizedBox(width: 6),
-                  TogetherPill(
-                    text: widget.isLive ? '换线' : '换源',
-                    height: 30,
-                    onTap: widget.onSwitchLine,
-                  ),
-                  if (!widget.isLive) ...[
-                    const SizedBox(width: 6),
-                    TogetherPill(
-                      text: '换剧',
-                      height: 30,
-                      onTap: widget.onChangeDrama,
-                    ),
-                  ],
-                ],
-              ),
+          const SizedBox(width: 4),
+          // 右侧动作区：每一项都是 44dp 热区，放不下换行 / 进「更多」。
+          //
+          // TOPBAR_44：宽度预算按**屏幕宽度**算，不用 Expanded 平分 ——
+          // 平分会让左侧房间号把剩余空间吃光，480dp 屏也会把「1人」挤进更多。
+          TogetherTopActionBar(
+            actions: _headerActions(),
+            dark: false,
+            maxWidth: togetherHeaderActionsBudget(
+              MediaQuery.sizeOf(context).width,
             ),
           ),
         ],
       ),
     );
+  }
+
+  /// 顶栏左侧的内联状态（原来是「☆ 我在操作」/「已同步」那个胶囊）。
+  ///
+  /// 状态不是操作入口，占一个 44dp 按钮位太浪费：房主显示「我在操作」，
+  /// 成员显示「已同步」或「落后 x.xs」；成员的落后项仍然可点（手动对齐）。
+  Widget _buildInlineStatus() {
+    if (widget.isHost) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(
+            Icons.star_outline_rounded,
+            size: 13,
+            color: Fx.sub.withValues(alpha: .85),
+          ),
+          const SizedBox(width: 3),
+          Flexible(
+            child: Text(
+              '我在操作',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Fx.sub.withValues(alpha: .9),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    final offset = widget.syncOffsetSeconds;
+    final synced = offset.abs() < 1 || widget.onSyncToHost == null;
+    final label = synced ? '已同步' : '落后 ${offset.toStringAsFixed(1)}s';
+    final text = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Icon(
+          synced
+              ? Icons.check_circle_outline_rounded
+              : Icons.sync_problem_rounded,
+          size: 13,
+          color: synced
+              ? Fx.sub.withValues(alpha: .8)
+              : Fx.accent.withValues(alpha: .95),
+        ),
+        const SizedBox(width: 3),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: synced
+                  ? Fx.sub.withValues(alpha: .85)
+                  : Fx.accent.withValues(alpha: .95),
+            ),
+          ),
+        ),
+      ],
+    );
+    if (widget.onSyncToHost == null) return text;
+    // 落后时给一个不占版面的点击区（44dp 高，视觉仍是文字）。
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: widget.onSyncToHost,
+      child: SizedBox(height: 44, child: Center(child: text)),
+    );
+  }
+
+  /// 顶栏动作：邀请 / 换源 / 换剧常驻，1人 / 投屏按 priority 收进「更多」。
+  List<TogetherActionItem> _headerActions() {
+    return <TogetherActionItem>[
+      TogetherActionItem(
+        id: 'members',
+        label: '${widget.members.length}人',
+        icon: Icons.people_alt_outlined,
+        showLabel: true,
+        priority: 2,
+        onTap: widget.onMembers,
+      ),
+      if (!widget.isLive)
+        TogetherActionItem(
+          id: 'cast',
+          label: '投屏',
+          icon: Icons.tv_rounded,
+          priority: 3,
+          onTap: widget.onCast,
+        ),
+      TogetherActionItem(
+        id: 'invite',
+        label: '邀请',
+        icon: Icons.person_add_alt_1_rounded,
+        showLabel: true,
+        always: true,
+        priority: 0,
+        onTap: widget.onInvite,
+      ),
+      TogetherActionItem(
+        id: 'line',
+        label: widget.isLive ? '换线' : '换源',
+        icon: Icons.alt_route_rounded,
+        showLabel: true,
+        always: true,
+        priority: 1,
+        onTap: widget.onSwitchLine,
+      ),
+      if (!widget.isLive)
+        TogetherActionItem(
+          id: 'drama',
+          label: '换剧',
+          icon: Icons.movie_filter_rounded,
+          showLabel: true,
+          always: true,
+          priority: 1,
+          onTap: widget.onChangeDrama,
+        ),
+    ];
   }
 
   /* ------------------------------------------------------------ 视频区 */
@@ -863,116 +941,55 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
 
   /* ------------------------------------------------------------ 信息区 */
 
+  /// 房间信息条（ROOM_INFO_ONELINE / 2026-11-16）。
+  ///
+  /// 现场：`济公传 / 第01集 / 共58集 / 1人` 两行 + 头像行占了一整块玻璃卡片，
+  /// 聊天区被挤得只剩两三条。现在压成**一行**：`片名 · 第N集 · N人`，
+  /// 高度从约 76dp 降到 34dp，省出来的空间全部给聊天列表。
+  ///
+  /// 成员头像不再单独占一行：点「N人」就是成员面板，那里看得更清楚；
+  /// 直播房用「直播中」替掉集数。
   Widget _buildInfo(BuildContext context) {
     final count = _episodeCount;
+    final epText = widget.isLive
+        ? '直播中'
+        : (count > 0 ? '$_epLabel · 共 $count 集' : _epLabel);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-        decoration: togetherGlass(radius: 16, opacity: .62),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      color: Fx.ink,
-                    ),
-                  ),
+      padding: const EdgeInsets.fromLTRB(14, 4, 14, 0),
+      child: SizedBox(
+        // 44dp 高：一行文字 + 可点的「N人」，热区也够。
+        height: 38,
+        child: Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                '$_title · $epText · ${widget.members.length}人',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  height: 1.2,
+                  fontWeight: FontWeight.w700,
+                  color: Fx.ink,
                 ),
-                const SizedBox(width: 6),
-                Text(
-                  widget.isLive
-                      ? '直播中'
-                      : (count > 0 ? '$_epLabel · 共 $count 集' : _epLabel),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    color: widget.isLive
-                        ? const Color(0xFFFF5A5A)
-                        : Fx.sub.withValues(alpha: .92),
-                  ),
-                ),
-              ],
+              ),
             ),
-            const SizedBox(height: 7),
-            Row(
-              children: [
-                Expanded(
-                  child: SizedBox(
-                    height: 28,
-                    child: widget.members.isEmpty
-                        ? Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              '等待成员加入',
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: Fx.sub.withValues(alpha: .7),
-                              ),
-                            ),
-                          )
-                        : ListView.separated(
-                            scrollDirection: Axis.horizontal,
-                            physics: const BouncingScrollPhysics(),
-                            itemCount: widget.members.length,
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(width: 5),
-                            itemBuilder: (context, i) {
-                              final member = widget.members[i];
-                              return Tooltip(
-                                message: member.host
-                                    ? '${member.name}（房主）'
-                                    : member.name,
-                                child: GestureDetector(
-                                  behavior: HitTestBehavior.opaque,
-                                  onTap: widget.onMembers,
-                                  child: TogetherAvatar(
-                                    name: member.name,
-                                    avatar: member.avatar,
-                                    size: 26,
-                                    host: member.host,
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
+            const SizedBox(width: 6),
+            // 成员入口：视觉只是个小图标，热区 44dp。
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: widget.onMembers,
+              child: SizedBox(
+                height: 44,
+                width: 44,
+                child: Center(
+                  child: Icon(
+                    Icons.groups_2_outlined,
+                    size: 18,
+                    color: Fx.sub.withValues(alpha: .85),
                   ),
                 ),
-                const SizedBox(width: 6),
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: widget.onMembers,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.people_outline_rounded,
-                        size: 12,
-                        color: Fx.sub.withValues(alpha: .8),
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        '${widget.members.length} 人',
-                        style: TextStyle(
-                          fontSize: 9.5,
-                          fontWeight: FontWeight.w600,
-                          color: Fx.sub.withValues(alpha: .9),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+              ),
             ),
           ],
         ),
@@ -1114,34 +1131,3 @@ class _RoomProgress extends StatelessWidget {
   }
 }
 
-/// 「同步房主」按钮：显示与房主的进度偏差，点一下立刻对齐。
-///
-/// 设计取舍：一起看默认自动纠偏（倍速微调 + 超阈值硬跳），但网络差的一方
-/// 偶尔会持续落后。与其让它反复自动硬跳，不如给用户一个明确的手动入口，
-/// 偏差可见、一键追平，避免「一直来回跳」的观感。
-class _SyncToHostPill extends StatelessWidget {
-  const _SyncToHostPill({required this.offsetSeconds, required this.onTap});
-
-  /// 正数 = 自己落后房主，负数 = 自己领先。
-  final double offsetSeconds;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final off = offsetSeconds.abs();
-    final behind = offsetSeconds > 0;
-    // 1 秒以内算同步良好，不高亮、不显示秒数。
-    final synced = off < 1.0;
-    final label = synced
-        ? '已同步'
-        : '${behind ? '落后' : '领先'} ${off.toStringAsFixed(off >= 10 ? 0 : 1)}s';
-    return TogetherPill(
-      text: label,
-      icon: synced ? Icons.check_circle_outline_rounded : Icons.sync_rounded,
-      height: 30,
-      // 不同步时才用强调色，平时是普通胶囊。
-      accent: !synced,
-      onTap: onTap,
-    );
-  }
-}

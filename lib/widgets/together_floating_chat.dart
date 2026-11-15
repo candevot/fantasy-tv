@@ -35,7 +35,8 @@ class TogetherFloatingChat extends StatefulWidget {
   State<TogetherFloatingChat> createState() => _TogetherFloatingChatState();
 }
 
-class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
+class _TogetherFloatingChatState extends State<TogetherFloatingChat>
+    with WidgetsBindingObserver {
   bool _open = false;
   int _seen = 0;
   final TextEditingController _input = TextEditingController();
@@ -49,6 +50,7 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     widget.chat.addListener(_onChat);
     _seen = widget.chat.value.length;
   }
@@ -62,8 +64,19 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     }
   }
 
+  /// 键盘弹起 / 收起时面板高度变化：贴在底部的话继续保持最新可见。
+  ///
+  /// 不挂这个回调时，键盘一起来面板被压矮，reverse 列表会把最新那条推到
+  /// 视口外，用户得手动往上滑才能看见刚发出去的话。
+  @override
+  void didChangeMetrics() {
+    if (!_open) return;
+    _scrollToLatest(jump: true);
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.chat.removeListener(_onChat);
     _floatTimer?.cancel();
     _input.dispose();
@@ -72,6 +85,15 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     super.dispose();
   }
 
+  /// CHAT_AUTOSCROLL（2026-11-16）：全屏悬浮聊天不自动到底的根因。
+  ///
+  /// 这个气泡用的是 `reverse: true` 的 ListView：offset 0 就是「最新一条」。
+  /// 老逻辑只在展开时设一次 `_seen`，之后**再没有**任何 scrollTo ——
+  /// 用户往上翻过历史（offset > 0）之后，新消息只会加在 offset 0 那边，
+  /// 视图停在原地，看起来就是「不自动滚、漏消息」。
+  ///
+  /// 现在：新消息到达时，如果视图还在底部附近（reverse 下 = offset 足够小）
+  /// 就 animate 回 0；用户主动往上翻（offset 明显 > 阈值）时不抢。
   void _onChat() {
     if (!mounted) return;
     final list = widget.chat.value;
@@ -86,8 +108,33 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
     // 未读数 = 总消息数 - 已读基线。
     // 注意：收起状态下**不能**把 _seen 推到最新，否则未读永远是 0，
     // 角标永远不出现（之前就是这样）。只有展开时才标记已读。
+    final wasAtBottom = _isNearBottom();
     setState(() {
       if (_open) _seen = list.length;
+    });
+    // 展开时才滚动（收起状态下气泡不可见，滚了也没意义）。
+    if (_open && wasAtBottom) _scrollToLatest();
+  }
+
+  /// reverse 列表：offset 0 = 最新一条。离底 <48dp 视为「贴着底」。
+  bool _isNearBottom() {
+    if (!_scroll.hasClients) return true;
+    return _scroll.position.pixels <= 48;
+  }
+
+  void _scrollToLatest({bool jump = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      if (!jump && !_isNearBottom()) return;
+      if (jump) {
+        _scroll.jumpTo(0);
+        return;
+      }
+      _scroll.animateTo(
+        0,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -116,9 +163,15 @@ class _TogetherFloatingChatState extends State<TogetherFloatingChat> {
       }
     });
     if (_open) {
+      // 展开：直接贴到最新消息（reverse 列表 offset 0）。
+      _scrollToLatest(jump: true);
       // 展开后自动聚焦，用户直接就能打字。
       Future<void>.delayed(const Duration(milliseconds: 120), () {
-        if (mounted) _focus.requestFocus();
+        if (mounted) {
+          _focus.requestFocus();
+          // 键盘弹起会压缩面板，聚焦后再贴一次底。
+          _scrollToLatest(jump: true);
+        }
       });
     } else {
       _focus.unfocus();

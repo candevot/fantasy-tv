@@ -13,6 +13,7 @@ import 'fs_panels.dart';
 import 'player_gestures.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
+import 'together_top_actions.dart';
 import 'together_ui.dart';
 
 /* ========================================================================== */
@@ -698,54 +699,64 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         // 顶栏不再有「更多」按钮，这里只是必填字段。
         onMore: () {},
         onRotate: widget.onRotate,
+        // TOPBAR_44（2026-11-16）：房间动作不再塞 5 个独立小件进顶栏。
+        //
+        // 现场：横屏顶部「1人 / 邀请 / 投屏 / 我在操作 / 换源 / 换剧」挤成一排，
+        // 被 FittedBox 等比压小到点不准。现在交给 [TogetherTopActionBar]：
+        // 每项热区 44dp、字号 12.5sp，按屏宽自适应 —— 「换源 / 换剧」永远
+        // 直接可见，其余放不下就收进「更多」，绝不缩放。
         actions: <Widget>[
-          PGlassIcon.fs(
-            icon: Icons.alt_route_rounded,
-            tooltip: '换源',
-            onTap: widget.onSwitchLine,
-          ),
-          if (!widget.isLive)
-            PGlassIcon.fs(
-              icon: Icons.movie_filter_rounded,
-              tooltip: '换剧',
-              onTap: widget.onChangeDrama,
+          TogetherTopActionBar(
+            dark: true,
+            // 留出标题 / 返回 / 状态胶囊的位置，避免动作区把标题挤没。
+            maxWidth: math.min(
+              MediaQuery.sizeOf(context).width * .58,
+              520.0,
             ),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.onMembers,
-            child: PGlassPill(
-              padding: const EdgeInsets.symmetric(horizontal: 9),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.people_alt_outlined,
-                    size: 13,
-                    color: Colors.white,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    '${widget.members.length}',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w700,
-                      shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
-                    ),
-                  ),
-                ],
+            actions: <TogetherActionItem>[
+              TogetherActionItem(
+                id: 'members',
+                label: '${widget.members.length}人',
+                icon: Icons.people_alt_outlined,
+                showLabel: true,
+                priority: 2,
+                onTap: widget.onMembers,
               ),
-            ),
-          ),
-          PGlassIcon.fs(
-            icon: Icons.person_add_alt_1_rounded,
-            tooltip: '邀请好友',
-            onTap: widget.onInvite,
-          ),
-          PGlassIcon.fs(
-            icon: Icons.logout_rounded,
-            tooltip: '退出房间',
-            onTap: widget.onExitRoom,
+              TogetherActionItem(
+                id: 'invite',
+                label: '邀请',
+                icon: Icons.person_add_alt_1_rounded,
+                showLabel: true,
+                priority: 3,
+                onTap: widget.onInvite,
+              ),
+              TogetherActionItem(
+                id: 'line',
+                label: widget.isLive ? '换线' : '换源',
+                icon: Icons.alt_route_rounded,
+                showLabel: true,
+                always: true,
+                priority: 0,
+                onTap: widget.onSwitchLine,
+              ),
+              if (!widget.isLive)
+                TogetherActionItem(
+                  id: 'drama',
+                  label: '换剧',
+                  icon: Icons.movie_filter_rounded,
+                  showLabel: true,
+                  always: true,
+                  priority: 0,
+                  onTap: widget.onChangeDrama,
+                ),
+              TogetherActionItem(
+                id: 'exit',
+                label: '退出房间',
+                icon: Icons.logout_rounded,
+                priority: 4,
+                onTap: widget.onExitRoom,
+              ),
+            ],
           ),
         ],
       ),

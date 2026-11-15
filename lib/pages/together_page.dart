@@ -164,6 +164,26 @@ class _TogetherPageState extends State<TogetherPage>
 
   /// 最近一次房间操作（「小明 换了线路 → 幻想4K」），房间顶部展示。
   TogetherOp? _lastOp;
+
+  /// 上一条操作流水是谁做的（服务端 `by.id`，空时退回昵称）。
+  ///
+  /// OP_DEDUPE_3S：去重必须区分人 —— 不同人做同一个动作是两条真实事件，
+  /// 只按 action 合并会把人名吃掉。
+  String _lastOperationBy = '';
+
+  /// 上一条操作流水的 `by|action` 签名：连续重复的同人同动作直接丢弃。
+  String _lastOperationSignature = '';
+
+  /// 正在把远端权威状态写进本地播放器（含随之而来的内核事件）。
+  ///
+  /// OP_REENTRY_GUARD（2026-11-16）：本地 apply 远端状态会触发内核的
+  /// play/pause/seek 回调，老逻辑在这些回调里又把「当前状态」当成一次
+  /// 用户操作上报 —— 服务端再 announceOp，聊天区就出现「你 开始播放」
+  /// 的循环。这个标志在整段 apply 期间为真，期间任何上报都按 quiet 发、
+  /// 不生成 op；只有真正的手势回调（_togglePlay/_seekTo/…）会主动清掉它。
+  int _remoteApplyDepth = 0;
+
+  bool get _applyingRemote => _remoteApplyDepth > 0;
   bool _foreground = true;
   bool _downReported = false;
   bool _needsHostResync = false;
@@ -717,7 +737,10 @@ class _TogetherPageState extends State<TogetherPage>
     final startPosition = _resumePos ?? 0;
     _position.value = startPosition;
     if (_isHost && _online) {
-      _reportHostState(
+      // OP_NO_BOUNCE：建房初始态是「系统同步」，不是用户点了播放。
+      // 走 quiet 上报，服务端不会 announceOp，成员也不会在聊天区看到
+      // 一条莫名其妙的「房主 开始播放」。
+      _reportInternalState(
         _resumePlaying ? 'play' : 'pause',
         startPosition,
         videoId: _videoId,
@@ -949,9 +972,19 @@ class _TogetherPageState extends State<TogetherPage>
   ///
   /// OP_LOG（2026-11-15）：这条流水要写进聊天区，**单独成条**（不是气泡），
   /// 自己的操作也插一条（把名字换成「你」），让所有人看到同一份操作流水。
-  /// 同一个动作 1 秒内连续触发（拖动途中的 seek）只保留最后一条。
+  ///
+  /// OP_DEDUPE_3S（2026-11-16）：现场「你 开始播放」连刷 5 条以上。根因有两层：
+  ///   1. 服务端 `state` 分支任何一条非 quiet 上报都会 announceOp，
+  ///      而客户端建房的初始 state、重连 resync、缓冲结束都会再发一条；
+  ///   2. 客户端只按「动作」合并 1 秒，同一个人隔 1.2 秒再来一次就又是新的一条。
+  /// 现在客户端这里挡两道：非白名单动作直接丢；同一个人同一动作 3 秒内合并。
   void _onOp(TogetherOp op) {
     if (!mounted || op.name.isEmpty) return;
+    // 心跳 / 进度推送 / 缓冲抖动不该变成「操作提示」：只认用户主动动作。
+    if (!togetherIsUserOp(op.action)) {
+      _logSync('忽略非用户操作广播：action=${op.action} label=${op.label}');
+      return;
+    }
     _lastOp = op;
     if (mounted) setState(() {});
     final mine = op.id.isNotEmpty && op.id == _myId;
@@ -960,13 +993,34 @@ class _TogetherPageState extends State<TogetherPage>
       label: op.label,
       mine: mine,
     );
-    _appendOperation(text, action: op.action);
+    _appendOperation(text, action: op.action, by: op.id.isEmpty ? op.name : op.id);
   }
 
-  /// 追加一条操作流水；同一个人 + 同一个动作 1 秒内只保留最后一条。
-  void _appendOperation(String text, {required String action}) {
+  /// 追加一条操作流水。
+  ///
+  /// OP_DEDUPE_3S（2026-11-16）：两层去重，缺一不可 ——
+  ///   1. 窗口层：同一个人 + 同一个动作 3 秒内**原地改文案**，不新增行；
+  ///   2. 重复层：他这个人的上一条流水就是同一个动作（中间没做过别的）
+  ///      → 根本不是新事件，**直接丢弃**。只靠窗口层压不住频率：
+  ///      3 秒窗口下 1 分钟仍能冒出十几条，用户口径是「不超过 3 条」。
+  /// 不同人的同一动作是两条真实事件，两层都不合并。
+  void _appendOperation(
+    String text, {
+    required String action,
+    String by = '',
+  }) {
     final now = DateTime.now();
+    final signature = togetherOpSignature(by: by, action: action);
+    if (togetherShouldSkipOp(
+      lastSignature: _lastOperationSignature,
+      by: by,
+      action: action,
+    )) {
+      _logSync('丢弃重复操作提示：$signature');
+      return;
+    }
     final last = _messages.isEmpty ? null : _messages.last;
+    final lastBy = _lastOperationBy;
     if (last != null &&
         last.isOperation &&
         togetherShouldMergeOperation(
@@ -974,15 +1028,21 @@ class _TogetherPageState extends State<TogetherPage>
           lastAt: last.time,
           action: action,
           now: now,
+          lastBy: lastBy,
+          by: by,
         )) {
       _messages[_messages.length - 1] = TogetherChatMessage.operation(
         text,
         action: action,
         time: last.time,
       );
+      _lastOperationBy = by;
+      _lastOperationSignature = signature;
       _publishChat();
       return;
     }
+    _lastOperationBy = by;
+    _lastOperationSignature = signature;
     _appendMessage(
       TogetherChatMessage.operation(text, action: action, time: now),
     );
@@ -1208,7 +1268,11 @@ class _TogetherPageState extends State<TogetherPage>
   }
 
   /// 房主广播直播播放状态：只同步 play/pause 和线路，不传进度。
-  void _sendLiveState(bool playing) {
+  ///
+  /// [userAction] 只有「用户主动点播放/暂停」才传 true，此时带 `op` 生成操作
+  /// 提示；重连重广播、首帧兜底、回前台重拉流都传 false（quiet），
+  /// 否则直播房会重复刷「你 开始播放」（OP_NO_BOUNCE）。
+  void _sendLiveState(bool playing, {bool userAction = false}) {
     _livePlaying = playing;
     if (!_online) return;
     _client.sendState(
@@ -1216,6 +1280,8 @@ class _TogetherPageState extends State<TogetherPage>
       0,
       line: _liveLineId,
       live: true,
+      quiet: !userAction,
+      op: userAction ? (playing ? 'play' : 'pause') : null,
     );
     _markRemote(playing ? 'play' : 'pause', 0);
   }
@@ -1620,13 +1686,15 @@ class _TogetherPageState extends State<TogetherPage>
       if (controller != null && controller.value.isInitialized) {
         final position = controller.value.position.inMilliseconds / 1000.0;
         final playing = controller.value.isPlaying;
-        _reportHostState(
+        // OP_NO_BOUNCE：重连 / 回前台的 resync 不是用户动作，quiet 且无 op。
+        _reportInternalState(
           playing ? 'play' : 'pause',
           position,
           videoId: _videoId,
           ep: _ep,
           line: _videoLine,
           rate: _hostRate,
+          mark: false,
         );
       }
     } else {
@@ -2096,7 +2164,27 @@ class _TogetherPageState extends State<TogetherPage>
   }
 
   /// 收到新房主 state：先立即应用 play / pause / seek / rate，再做一次 drift 决策。
+  ///
+  /// OP_REENTRY_GUARD（2026-11-16）：整段 apply 都包在 [_remoteApplyDepth] 里。
+  /// 里面调用的 `play / pause / seek / setRate` 会立刻触发内核事件，而内核
+  /// 事件回调（[_onVideoValue] → [_watchHostBuffering] / [_pushHostProgressThrottled]）
+  /// 在旧逻辑里会再上报一次非 quiet 的 state —— 服务端 announceOp，客户端
+  /// `_onOp` 再记一条，形成「apply 远端 → 再上报 → 又 apply」的循环。
+  /// 有这层 guard 后，apply 期间产生的任何上报都自动降级成 quiet（不产生 op）。
   void _applyRemoteState(
+    TogetherRoomState state, {
+    TogetherRoomState? prev,
+    bool mediaChanged = false,
+  }) {
+    _remoteApplyDepth++;
+    try {
+      _applyRemoteStateInner(state, prev: prev, mediaChanged: mediaChanged);
+    } finally {
+      _remoteApplyDepth--;
+    }
+  }
+
+  void _applyRemoteStateInner(
     TogetherRoomState state, {
     TogetherRoomState? prev,
     bool mediaChanged = false,
@@ -2335,6 +2423,11 @@ class _TogetherPageState extends State<TogetherPage>
       position,
       fresh: fresh || _hostReportFresh,
     );
+    // OP_REENTRY_GUARD：正在应用远端状态时，这里的调用全部来自内核回调 /
+    // apply 副作用，不是用户操作 —— 强制 quiet 且丢掉 op，服务端就不会
+    // announceOp，聊天区也不会再出现一条「你 开始播放」。
+    final effectiveQuiet = quiet || _applyingRemote;
+    final effectiveOp = _applyingRemote ? null : op;
     // 房主操作一律立刻推 room_state（不等心跳）；合并窗口只削掉拖拽途中的
     // 中间态。本地镜像要按原始目标立即更新，不能等窗口到点。
     if (_online) {
@@ -2346,12 +2439,41 @@ class _TogetherPageState extends State<TogetherPage>
         line: line,
         rate: rate,
         coalesce: coalesce,
-        quiet: quiet,
-        op: op,
+        quiet: effectiveQuiet,
+        op: effectiveOp,
       );
     }
     if (mark) _markRemote(state, safe, rate: rate);
     return safe;
+  }
+
+  /// 内部状态同步（建房初始态 / 重连 resync / 缓冲补报）绝不带 op。
+  ///
+  /// OP_NO_BOUNCE（2026-11-16）：这些上报不是用户动作，带上 `op` 就会在
+  /// 服务端 announceOp 一次、客户端再 `_onOp` 一条，表现就是「你 开始播放」
+  /// 反复刷屏。统一走这个包装，`op` 恒为 null，服务端就不会生成操作提示。
+  void _reportInternalState(
+    String state,
+    double position, {
+    String? videoId,
+    int? ep,
+    String? line,
+    double? rate,
+    bool fresh = false,
+    bool mark = true,
+    bool quiet = true,
+  }) {
+    _reportHostState(
+      state,
+      position,
+      videoId: videoId,
+      ep: ep,
+      line: line,
+      rate: rate,
+      fresh: fresh,
+      mark: mark,
+      quiet: quiet,
+    );
   }
 
   /// 房主进度按 [_pushIntervalMs] 节流推送。
@@ -2471,7 +2593,8 @@ class _TogetherPageState extends State<TogetherPage>
       } else {
         controller.pause().catchError((_) {});
       }
-      _sendLiveState(next);
+      // 用户主动点了播放 / 暂停：这是真正的操作，带 op 让全员看到。
+      _sendLiveState(next, userAction: true);
       if (mounted) setState(() {});
       return;
     }

@@ -504,19 +504,76 @@ String togetherOperationText({
   return '$who $what';
 }
 
-/// 同一动作 1 秒内的操作流水要不要合并成一条（拖动途中会连着触发 seek）。
+/// 同一个人 + 同一个动作的去重窗口（OP_DEDUPE_3S / 2026-11-16）。
+///
+/// 现场：聊天区连续 5 条以上「你 开始播放」。根因是**同一个人同一个动作**
+/// 被反复广播：播放状态每次变化（room_state 回声 / 重连 resync / 缓冲抖动）
+/// 都可能再发一条非 quiet 的 state，服务端照单全收就再播一条操作提示。
+///
+/// 现在客户端与服务端共用这一条口径：同一个人 + 同一个动作，3 秒内只记一条。
+const Duration togetherOpDedupeWindow = Duration(seconds: 3);
+
+/// 同一动作 3 秒内的操作流水要不要合并成一条。
+///
+/// [lastBy] / [by] 是操作人标识（服务端 `by.id`，为空时退回昵称）。
+/// 不同的人做同一个动作**不能**合并 —— 那是两条真实事件。
 bool togetherShouldMergeOperation({
   required String lastAction,
   required DateTime lastAt,
   required String action,
   required DateTime now,
-  Duration window = const Duration(seconds: 1),
+  String lastBy = '',
+  String by = '',
+  Duration window = togetherOpDedupeWindow,
 }) {
   if (lastAction.isEmpty || action.isEmpty) return false;
   if (lastAction != action) return false;
+  if (lastBy.trim() != by.trim()) return false;
   final gap = now.difference(lastAt);
   return !gap.isNegative && gap <= window;
 }
+
+/// 同一个人连续做**同一个动作**是否只是重复广播。
+///
+/// OP_DEDUPE_3S 的第二层（也是「1 分钟不超过 3 条」真正生效的那一层）：
+/// 时间窗口只能把频率压到 1/窗口，广播一直来就还是会一条条冒出来
+/// （3 秒窗口下 1 分钟仍有 17 条）。真正的重复是「这个人上一条流水也是
+/// 同一个动作、中间他没做过别的」—— 那不是新事件，直接丢掉。
+///
+/// 只要他中间做过别的动作（播放 → 暂停 → 播放），或者换人操作，
+/// [lastSignature] 就不再相等，这条动作照常记录。
+bool togetherShouldSkipOp({
+  required String lastSignature,
+  required String by,
+  required String action,
+}) {
+  if (lastSignature.isEmpty) return false;
+  final key = '${by.trim()}|${action.trim()}';
+  return lastSignature == key;
+}
+
+/// 操作签名：`by|action`，[togetherShouldSkipOp] 用它判「同一个重复动作」。
+String togetherOpSignature({required String by, required String action}) =>
+    '${by.trim()}|${action.trim()}';
+
+/// 播放操作白名单：只有**用户主动做**的这些动作才生成操作提示。
+///
+/// 心跳 / 进度推送 / 建房的初始 state / 重连 resync / 缓冲抖动一律不在其中，
+/// 它们就算被广播成 state，也不会变成聊天区的一句「开始播放」。
+const Set<String> togetherUserOpActions = <String>{
+  'play',
+  'pause',
+  'seek',
+  'rate',
+  'episode',
+  'switchLine',
+  'switchTitle',
+  'switchSource',
+};
+
+/// 服务端 `op` 字段是否值得广播成一条操作提示。
+bool togetherIsUserOp(String action) =>
+    togetherUserOpActions.contains(action.trim());
 
 String togetherFmt(num seconds) {
   final total = seconds.isNaN || seconds < 0 ? 0 : seconds.round();

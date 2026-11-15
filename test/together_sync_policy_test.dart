@@ -151,35 +151,40 @@ void main() {
       );
     });
 
-    test('同一动作 1 秒内合并，超过 1 秒或换动作不合并', () {
+    test('同一个人同一动作 3 秒内合并，超过 3 秒 / 换动作 / 换人都不合并', () {
+      // OP_DEDUPE_3S（2026-11-16）：窗口从 1 秒放宽到 3 秒 —— 现场「你 开始播放」
+      // 连刷 5 条，间隔就是 1.2~2 秒（room_state 回声 / resync / 缓冲抖动）。
       final t0 = DateTime(2026, 11, 15, 12, 0, 0);
-      expect(
-        togetherShouldMergeOperation(
-          lastAction: 'seek',
-          lastAt: t0,
-          action: 'seek',
-          now: t0.add(const Duration(milliseconds: 800)),
-        ),
-        isTrue,
-      );
-      expect(
-        togetherShouldMergeOperation(
-          lastAction: 'seek',
-          lastAt: t0,
-          action: 'seek',
-          now: t0.add(const Duration(milliseconds: 1200)),
-        ),
-        isFalse,
-      );
-      expect(
-        togetherShouldMergeOperation(
-          lastAction: 'pause',
-          lastAt: t0,
-          action: 'seek',
-          now: t0.add(const Duration(milliseconds: 100)),
-        ),
-        isFalse,
-      );
+      bool merge({
+        required int ms,
+        String lastAction = 'play',
+        String action = 'play',
+        String lastBy = 'g_1',
+        String by = 'g_1',
+      }) =>
+          togetherShouldMergeOperation(
+            lastAction: lastAction,
+            lastAt: t0,
+            action: action,
+            now: t0.add(Duration(milliseconds: ms)),
+            lastBy: lastBy,
+            by: by,
+          );
+
+      expect(togetherOpDedupeWindow, const Duration(seconds: 3));
+      // 窗口内（含 1.2 秒这种旧逻辑会漏掉的间隔）一律合并。
+      for (final ms in <int>[0, 100, 800, 1200, 2000, 2999, 3000]) {
+        expect(merge(ms: ms), isTrue, reason: '${ms}ms 应合并');
+      }
+      // 超过窗口不再合并。
+      expect(merge(ms: 3001), isFalse);
+      expect(merge(ms: 5000), isFalse);
+      // 换动作不合并（暂停和播放是两条真实事件）。
+      expect(merge(ms: 100, action: 'pause'), isFalse);
+      // 换人不合并：同一个动作由两个人做，是两条真实事件。
+      expect(merge(ms: 100, by: 'g_2'), isFalse);
+      // 空动作不参与合并。
+      expect(merge(ms: 100, action: ''), isFalse);
     });
   });
 }

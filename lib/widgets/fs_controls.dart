@@ -401,14 +401,27 @@ class FsTopBar extends StatelessWidget {
                       onTap: onCast,
                     ),
                   ],
-                  for (final action in actions) ...[
-                    const SizedBox(width: 6),
-                    action,
-                  ],
                 ],
               ),
             ),
           ),
+          // ACTIONS_NO_SCALE（2026-11-16）：房间专属动作（换源 / 换剧 / 成员 /
+          // 邀请 / 退出房间）**不进**上面那个 FittedBox。
+          //
+          // 现场：一起看全屏的顶部一排按钮「小得离谱」，根因就是这一组跟着
+          // 状态胶囊一起被 scaleDown 压缩 —— 越挤越缩，字和图标一起变小，
+          // 热区也跟着塌。现在动作区单独排，宽度不够时**换行**（Wrap），
+          // 字号 / 热区保持调用方给的规格（一起看全是 44dp 热区）。
+          if (actions.isNotEmpty)
+            Flexible(
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 6,
+                runSpacing: 4,
+                children: actions,
+              ),
+            ),
         ],
       ),
     );
