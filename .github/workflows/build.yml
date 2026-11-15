@@ -193,6 +193,20 @@ jobs:
       # SEARCH_RANK：搜索结果按「实际分辨率」跨源全局排序的回归。
       - name: Search rank regressions
         run: flutter test test/search_rank_test.dart
+      # SEARCH_RELEVANCE / DEDUPE_LINES / PANEL_CAP / FS_ICON_SPEC（2026-11-15）：
+      # 这一轮现场问题的回归，四件事各自钉死：
+      #   · 搜「济公传」时肥猫那一段不能再出现「背着善宰跑」这类无关片
+      #     （jar 侧的 searchContent 不保证按关键词搜，客户端必须有相关性闸门）；
+      #   · 没有任何可用线路的空壳记录在搜索/列表阶段就丢掉；同名记录去重保留
+      #     线路多的那条（搜索里那条点进去必失败的重复记录就是这样没的）；
+      #   · 播放设置面板横屏 ≤55% 屏高且 ≤360dp、竖屏 ≤40% 且 ≤480dp，内部可滚；
+      #   · 全屏控件只有一套规格（底 30 / 图标 19.5 / tint .13 / 热区 44）。
+      - name: Search relevance & panel/control spec regressions
+        run: |
+          flutter test test/search_relevance_test.dart
+          flutter test test/search_dedupe_test.dart
+          flutter test test/player_more_panel_test.dart
+          flutter test test/fs_controls_spec_test.dart
       # SOURCE_LABEL（2026-11-15）：搜索结果卡片的「来源」标注回归。
       #
       # 用户实测同一部片一会儿「来源：云端」一会儿「来源：幻想」。规则是
