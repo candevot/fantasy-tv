@@ -263,7 +263,15 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
     return LayoutBuilder(
       builder: (context, constraints) {
         // 高度小于 560 视为横屏（全屏）布局。
-        final compact = constraints.maxHeight < 560;
+        //
+        // ROOM_KEYBOARD（2026-11-15）：用**屏幕高度**判断，不看当前约束高度。
+        // 竖屏房间是 `resizeToAvoidBottomInset: true`，键盘弹起后 constraints
+        // 会被压掉 300dp 以上（800 → 500），按它算会误判成横屏：聊天面板
+        // （连同刚补上的输入条）被整块隐藏 —— 用户一点输入框、键盘一起来，
+        // 框就没了，等于竖屏还是聊不了天。屏幕高度不受键盘影响；旋转时它
+        // 照样跟着变，横屏判定不受影响。
+        final screenHeight = math.max(media.size.height, constraints.maxHeight);
+        final compact = screenHeight < 560;
         if (_lastCompact != null && _lastCompact != compact) {
           _lastCompact = compact;
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -294,9 +302,14 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 Expanded(
                   child: Stack(
                     children: [
-                      // 键盘弹起时旧消息列表让位（气泡里能看到最新几条），
-                      // 避免「列表 + 气泡 + 键盘」三份内容挤在一起。
-                      if (!keyboard && !compact) _buildChat(context),
+                      // CHAT_KEEP_TYPING（2026-11-15）：竖屏聊天面板（含输入条）
+                      // 在键盘弹起时必须留在树里 —— 输入框一旦被移出 widget 树，
+                      // 焦点立刻丢失、键盘随之收起，字打不进去。
+                      // 键盘压缩的是这块 Expanded，视频区高度不变（见上面
+                      // chromeEstimate 的兜底）。横屏（compact）仍然不渲染它，
+                      // 那里用悬浮气泡。
+                      if (!compact)
+                        Positioned.fill(child: _buildChat(context)),
                     ],
                   ),
                 ),
@@ -978,30 +991,49 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   /* ------------------------------------------------------------ 聊天 */
 
   Widget _buildChat(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-      child: Container(
-        decoration: togetherGlass(radius: 18, opacity: .60),
-        clipBehavior: Clip.antiAlias,
-        child: Column(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 键盘弹起 / 极矮屏幕时这块 Expanded 会只剩几十 dp：
+        // 列表和输入条一起硬塞会 overflow，所以放不下时只留输入条。
+        final showList = constraints.maxHeight > 150;
+        return Column(
           children: [
-            Expanded(
-              child: ValueListenableBuilder<List<TogetherChatMessage>>(
-                valueListenable: widget.chat,
-                builder: (context, messages, _) =>
-                    TogetherChatList(messages: messages),
+            if (showList)
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+                  child: Container(
+                    decoration: togetherGlass(radius: 18, opacity: .60),
+                    clipBehavior: Clip.antiAlias,
+                    child:
+                        ValueListenableBuilder<List<TogetherChatMessage>>(
+                          valueListenable: widget.chat,
+                          builder: (context, messages, _) =>
+                              TogetherChatList(messages: messages),
+                        ),
+                  ),
+                ),
+              ),
+            // CHAT_COMPOSER_PORTRAIT（2026-11-15）：竖屏房间底部输入条。
+            // 之前这里只有只读列表，输入框只在横屏全屏的悬浮聊天里，竖屏
+            // 根本没法说话。复用全屏那个组件（样式一致），区别只有：
+            // 这一层放在页面底色上、组件自身是不透明玻璃胶囊
+            // （transparent 保持默认 false），全屏那层才用半透明浮在画面上。
+            // 页面是 `SafeArea(bottom: false)`：输入条自己要躲开手势条 /
+            // 三键导航，否则最后一排按钮压进系统导航区点不到。
+            Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.paddingOf(context).bottom,
+              ),
+              child: TogetherComposer(
+                enabled: widget.online,
+                hint: widget.online ? '说点什么…' : '正在重连…',
+                onSend: widget.onSendChat,
               ),
             ),
-            // CHAT_COMPOSER_PORTRAIT（2026-11-15）：竖屏房间底部补输入条。
-            // 之前这里只有列表，输入框只在全屏悬浮聊天里，竖屏根本没法说话。
-            TogetherComposer(
-              onSend: widget.onSendChat,
-              enabled: widget.online,
-              hint: '说点什么…',
-            ),
           ],
-        ),
-      ),
+        );
+      },
     );
   }
 }
