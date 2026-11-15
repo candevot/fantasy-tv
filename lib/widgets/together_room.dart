@@ -983,10 +983,23 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
       child: Container(
         decoration: togetherGlass(radius: 18, opacity: .60),
         clipBehavior: Clip.antiAlias,
-        child: ValueListenableBuilder<List<TogetherChatMessage>>(
-          valueListenable: widget.chat,
-          builder: (context, messages, _) =>
-              TogetherChatList(messages: messages),
+        child: Column(
+          children: [
+            Expanded(
+              child: ValueListenableBuilder<List<TogetherChatMessage>>(
+                valueListenable: widget.chat,
+                builder: (context, messages, _) =>
+                    TogetherChatList(messages: messages),
+              ),
+            ),
+            // CHAT_COMPOSER_PORTRAIT（2026-11-15）：竖屏房间底部补输入条。
+            // 之前这里只有列表，输入框只在全屏悬浮聊天里，竖屏根本没法说话。
+            TogetherComposer(
+              onSend: widget.onSendChat,
+              enabled: widget.online,
+              hint: '说点什么…',
+            ),
+          ],
         ),
       ),
     );
