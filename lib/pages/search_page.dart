@@ -55,20 +55,28 @@ class _SearchPageState extends State<SearchPage> {
   /// 骨架卡片是否已经铺出来（300ms 阈值）。
   bool _skeleton = false;
 
-  /// 全局排序后的结果（SEARCH_RANK）。
+  /// 我们自己的那批（主站采集库 + 幻想线路），段内按「实际分辨率 →
+  /// 热度 → 更新时间」排序。
   ///
-  /// 用户要求：「排序是全局排序，不是先我们的后肥猫的」。所以这里把
-  /// 我们自己的那批（主站采集库 + 幻想线路）和外部源（肥猫 jar / 自加）
-  /// **合起来**按「实际分辨率分 → 热度 → 更新时间」排一遍再渲染。
-  /// 每收到一批就重排一次，先到的一批也已经是正确顺序。
-  List<VideoCard> get _ranked =>
-      SearchRank.sort(<VideoCard>[..._results, ..._external]);
+  /// SEARCH_SEGMENT（2026-11-15）：产品规则是「我们的先出，肥猫的 jar 源
+  /// 陆续补」，所以结果是**两段**：前一段永远是我们自己的，后一段才是
+  /// 肥猫 / 自加的外部源；每段内部各自排序。
+  /// 之前这里是全局混排（`SearchRank.sort([..._results, ..._external])`），
+  /// 一条高分辨率的外部结果会挤到我们自己的结果上面，看列表第一屏分不出
+  /// 哪条是自己的、哪条是肥猫的，和规则相反。
+  List<VideoCard> get _ownRanked => SearchRank.sort(_results);
+
+  /// 外部源（肥猫的 jar 源 + 用户自加）那一批，段内同样排序。
+  List<VideoCard> get _externalRanked => SearchRank.sort(_external);
 
   /// 一轮搜索的兜底看门狗：16 秒还没收到「查完了」，强制收尾。
   ///
   /// 流自己已经有 15 秒硬上限（见 `CmsBridge.searchStream`），这里是页面侧
   /// 的第二道保险：**任何情况下用户都不会对着骨架屏无限等**。
   Timer? _watchdog;
+
+  /// 输入即搜的防抖计时器（停手 400ms 才发请求）。
+  Timer? _debounce;
 
   String? _mode;
   String? _lastQuery;
@@ -110,6 +118,7 @@ class _SearchPageState extends State<SearchPage> {
     _sub?.cancel();
     _skeletonTimer?.cancel();
     _watchdog?.cancel();
+    _debounce?.cancel();
     JarPluginManager.instance.removeListener(_onJarChanged);
     _q.dispose();
     _ai.dispose();
@@ -121,6 +130,33 @@ class _SearchPageState extends State<SearchPage> {
 
   void _onQueryChanged() {
     if (mounted) setState(() {});
+  }
+
+  /// 输入即搜（SEARCH_TYPEAHEAD 2026-11-15）。
+  ///
+  /// 之前只有「回车 / 点搜索 / 点历史词」才会查，边打字边等是没有任何反馈的，
+  /// 用户以为搜索坏了。这里补上防抖：
+  ///   · 中文输入法组字期间（`composing` 有效）不查，否则拼音字母会变成
+  ///     一次毫无意义的全库搜索；
+  ///   · 停手 400ms 才发车，连续打字只发最后一次；
+  ///   · 清空输入框直接回到热搜页；
+  ///   · 触发时不收键盘、不写搜索历史（键盘一收用户就没法接着改字）。
+  void _onInput(String raw) {
+    _debounce?.cancel();
+    final text = raw.trim();
+    if (text.isEmpty) {
+      if (_mode == 'search') _reset();
+      return;
+    }
+    if (_q.value.composing.isValid) return;
+    _debounce = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
+      if (_q.value.composing.isValid) return;
+      final q = _q.text.trim();
+      if (q.isEmpty) return;
+      if (q == _lastQuery && (_loading || _results.isNotEmpty)) return;
+      unawaited(_search(q, keepFocus: true));
+    });
   }
 
   /// jar 插件状态变化：进度 / 失败原因直接反映在提示条上；
@@ -233,18 +269,23 @@ class _SearchPageState extends State<SearchPage> {
   ///   · 接着是幻想那 7 条线路（同一个接口）；
   ///   · 肥猫的 41 个 jar 源在后台并行跑，回来一批追加一批到「外部源结果」。
   /// 单源 8 秒超时，超时算这个源没结果，不阻塞别人。
-  Future<void> _search(String raw) async {
+  Future<void> _search(String raw, {bool keepFocus = false}) async {
     final text = raw.trim();
     if (text.isEmpty) {
       _focus.requestFocus();
       return;
     }
+    _debounce?.cancel();
     if (_q.text != text) {
       _q.text = text;
       _q.selection = TextSelection.collapsed(offset: text.length);
     }
-    FocusScope.of(context).unfocus();
-    _saveHistory(text);
+    // 输入即搜时不能收键盘、也不能把每个中间状态写进历史：
+    // 边打字边搜只服务「现在就出结果」，历史只记用户真正提交过的词。
+    if (!keepFocus) {
+      FocusScope.of(context).unfocus();
+      _saveHistory(text);
+    }
 
     final req = ++_req;
     await _sub?.cancel();
@@ -287,9 +328,11 @@ class _SearchPageState extends State<SearchPage> {
         }
       });
     });
+    var firstBatch = true;
     _sub = CmsBridge.searchStream(text, 1).listen(
       (batch) {
-        _onBatch(batch, req, first: true);
+        _onBatch(batch, req, first: firstBatch);
+        firstBatch = false;
         if (batch.finished) _watchdog?.cancel();
       },
       onError: (Object e) {
@@ -327,24 +370,23 @@ class _SearchPageState extends State<SearchPage> {
         batch.items.isNotEmpty &&
         _results.isEmpty;
     setState(() {
-      if (batch.external) {
-        _external.addAll(batch.items);
-      } else {
-        _results.addAll(batch.items);
-        _loading = false;
-      }
-      if (first) {
-        _done = batch.done;
-        _total = batch.total;
-      }
-      // 骨架卡只由「我们自己那批」收尾：外部源先回来也不代表我们的源查完了。
-      if (!batch.external || batch.finished) _skeleton = false;
+      // 追加时按 id 去重：流里除了第 1 页还会补一波第 2 页，上拉再取同一页
+      // 时不能把同一部片挂两遍。
+      _appendUnique(batch.external ? _external : _results, batch.items);
+      _done = batch.done;
+      _total = batch.total;
+      // 页码推进到「真实已经拿到的那一页」：SEARCH_WAVES 会顺带把第 2 页
+      // 追加进来，页面还按 1 算的话，上拉会再取一次第 2 页。
+      if (!batch.external && batch.page > _page) _page = batch.page;
+      // 转圈 / 骨架只由「整轮查完」收：我们这批先回来（哪怕是个空批次）时，
+      // 肥猫那 41 个 jar 源还在跑，这时把 loading 关掉，页面会立刻显示
+      // 「没有找到相关影片」—— 用户看到的空态是假的。
       if (batch.finished) {
         _loading = false;
         _loadingMore = false;
-        if (first) {
-          _hasMore = (_results.length + _external.length) >= 20;
-        }
+        _skeleton = false;
+        // 有没有下一页只看**我们自己**这一批：外部源不分页。
+        _hasMore = _results.length >= 20;
       }
     });
     if (pinTop) _scrollTop();
@@ -358,6 +400,15 @@ class _SearchPageState extends State<SearchPage> {
       } else {
         _jarRerunPending = false;
       }
+    }
+  }
+
+  /// 按 id 追加去重（同一批次重复、第 2 页与第 1 页重叠都走这里）。
+  void _appendUnique(List<VideoCard> target, List<VideoCard> items) {
+    if (items.isEmpty) return;
+    final seen = <String>{for (final card in target) card.id};
+    for (final card in items) {
+      if (seen.add(card.id)) target.add(card);
     }
   }
 
@@ -376,11 +427,13 @@ class _SearchPageState extends State<SearchPage> {
       // 原样再返回一遍），追加进来只会变成重复卡片。
       final list = await CmsBridge.searchOwn(q, next);
       if (!mounted || req != _req || _mode != 'search') return;
+      final before = _results.length;
       setState(() {
-        _results.addAll(list);
+        _appendUnique(_results, list);
         _page = next;
         _loadingMore = false;
-        _hasMore = list.length >= 20;
+        // 去重后没长出来也算「没有更多」：否则上拉会一直空转。
+        _hasMore = list.length >= 20 && _results.length > before;
       });
     } catch (_) {
       if (!mounted || req != _req) return;
@@ -555,7 +608,8 @@ class _SearchPageState extends State<SearchPage> {
                       controller: _q,
                       focusNode: _focus,
                       textInputAction: TextInputAction.search,
-                      onSubmitted: _search,
+                      onSubmitted: (v) => _search(v),
+                      onChanged: _onInput,
                       style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w400,
@@ -900,7 +954,8 @@ class _SearchPageState extends State<SearchPage> {
   Widget _resultsView() {
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     final ai = _mode == 'ai';
-    final ranked = _ranked;
+    final own = _ownRanked;
+    final external = _externalRanked;
     return Column(
       children: [
         _resultsHeader(),
@@ -909,28 +964,13 @@ class _SearchPageState extends State<SearchPage> {
             controller: _scroll,
             physics: const BouncingScrollPhysics(),
             slivers: [
-              // 全局排序的单一列表（我们自己的源 + 外部源混排）。
-              if (ranked.isNotEmpty)
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-                  sliver: SliverList(
-                    delegate: SliverChildBuilderDelegate(
-                      (ctx, i) {
-                        final item = ranked[i];
-                        return Padding(
-                          // 行间 10dp 间距；最后一行交给底部留白，不拖一条空缝。
-                          padding: EdgeInsets.only(
-                              bottom: i == ranked.length - 1 ? 0 : 10),
-                          child: FxSearchResultTile(
-                            item: item,
-                            onTap: () => _openResult(item),
-                          ),
-                        );
-                      },
-                      childCount: ranked.length,
-                    ),
-                  ),
-                ),
+              // 第一段：我们自己的片源（主站采集库 + 幻想线路）。
+              if (own.isNotEmpty) _resultSliver(own),
+              // 第二段：肥猫的 jar 源 + 自加的外部源，后补、单独一条分隔。
+              if (external.isNotEmpty) ...<Widget>[
+                SliverToBoxAdapter(child: _externalHeader(external.length)),
+                _resultSliver(external),
+              ],
               // 还没查完：骨架补在下面，表示「还在查」。
               if (_skeleton)
                 SliverPadding(
@@ -958,6 +998,58 @@ class _SearchPageState extends State<SearchPage> {
       ],
     );
   }
+
+  /// 一段结果列表（行间 10dp；最后一行交给底部留白，不拖一条空缝）。
+  Widget _resultSliver(List<VideoCard> list) => SliverPadding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+        sliver: SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (ctx, i) {
+              final item = list[i];
+              return Padding(
+                padding: EdgeInsets.only(bottom: i == list.length - 1 ? 0 : 10),
+                child: FxSearchResultTile(
+                  item: item,
+                  onTap: () => _openResult(item),
+                ),
+              );
+            },
+            childCount: list.length,
+          ),
+        ),
+      );
+
+  /// 外部源分区的分隔标题：让用户一眼看出「下面这些来自肥猫的 jar 源」。
+  Widget _externalHeader(int count) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+        child: Row(
+          children: [
+            Container(
+              width: 3,
+              height: 12,
+              decoration: BoxDecoration(
+                color: Fx.accent.withValues(alpha: .55),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(width: 7),
+            Text(
+              '肥猫的源',
+              style: const TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w600, color: Fx.ink),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '外部源结果 · $count 部',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11, color: Fx.sub),
+              ),
+            ),
+          ],
+        ),
+      );
 
   /// 结果头：标题 + 总数 + 进度「已查 12/48 个源」。
   Widget _resultsHeader() {

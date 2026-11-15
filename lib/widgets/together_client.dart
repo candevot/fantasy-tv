@@ -99,7 +99,9 @@ class TogetherRoomState {
       code: '${j['code'] ?? ''}',
       title: title,
       hostId: '${j['hostId'] ?? ''}',
-      members: ((j['members'] ?? []) as List)
+      // 服务端字段类型不做保证：`members` 不是数组时 `as List` 会抛
+      // TypeError，而 try 只包了 jsonDecode，异常会从 listen 回调里跑出去。
+      members: (j['members'] is List ? j['members'] as List : const <Object?>[])
           .whereType<Map>()
           .map((e) => TogetherMember.fromJson(togetherMap(e)))
           .toList(),
@@ -200,7 +202,9 @@ class TogetherRoomInfo {
       ep: togetherInt(j['ep'], 1),
       line: '${j['line'] ?? 'l1'}',
       hostId: '${j['host'] ?? ''}',
-      members: ((j['members'] ?? []) as List)
+      // 服务端字段类型不做保证：`members` 不是数组时 `as List` 会抛
+      // TypeError，而 try 只包了 jsonDecode，异常会从 listen 回调里跑出去。
+      members: (j['members'] is List ? j['members'] as List : const <Object?>[])
           .whereType<Map>()
           .map((e) => TogetherMember.fromJson(togetherMap(e)))
           .toList(),

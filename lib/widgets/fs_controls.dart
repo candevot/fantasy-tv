@@ -614,7 +614,10 @@ class _ClockChipState extends State<_ClockChip> {
     // 对齐到下一分钟整点再开始 1 分钟周期，避免显示错一分钟。
     final now = DateTime.now();
     final msToNextMinute = 60000 - (now.second * 1000 + now.millisecond);
-    Timer(Duration(milliseconds: msToNextMinute), () {
+    // 这个「对齐整分钟」的 Timer 也要挂在 _timer 上：不挂的话 dispose 取消
+    // 不到它，widget 销毁后它还会醒一次并持有 State（widget test 会报
+    // pending timer，真机上就是一次无意义的回调）。
+    _timer = Timer(Duration(milliseconds: msToNextMinute), () {
       if (!mounted) return;
       setState(() {});
       _timer = Timer.periodic(const Duration(minutes: 1), (_) {

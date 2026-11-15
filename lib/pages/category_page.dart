@@ -570,6 +570,10 @@ class _CategoryPageState extends State<CategoryPage> {
       final req = ++_req;
       // 保留现有内容的刷新失败不该占整页错误态，否则上拉会被 _error 卡死。
       final refreshing = !clear && _items.isNotEmpty;
+      // 刷新失败要把页码回滚：下面已经把它重置成 1，而 _items 里还留着
+      // 第 1..N 页的内容，不回滚的话下一次上拉会把第 2 页再追加一遍
+      // （重复卡片 + 分页错位）。
+      final prevPage = _page;
       setState(() {
         _loading = true;
         _loadingMore = false;
@@ -603,12 +607,16 @@ class _CategoryPageState extends State<CategoryPage> {
           setState(() {
             _loading = false;
             _refreshError = message;
+            _page = prevPage;
           });
           _toast('刷新失败：$message');
         } else {
           setState(() {
             _loading = false;
             _error = message;
+            // 首屏失败时不能还留着「还有更多」：错误页上任何滚动都会被
+            // _onScroll 当成上拉，直接去拉第 2 页并把半页结果当整页渲染。
+            _hasMore = false;
           });
         }
       }

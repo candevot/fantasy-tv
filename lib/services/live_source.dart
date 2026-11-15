@@ -223,7 +223,17 @@ class LiveSourceService {
     for (final raw in lines) {
       final line = raw.trim();
       if (line.isEmpty) continue;
-      if (line.startsWith('#EXTINF') || line.startsWith('#EXTGRP')) {
+      // `#EXTGRP:央视` 只补分组：它既没有 tvg-* 属性也没有逗号后的台名，
+      // 按 EXTINF 解析会得到空 map，把上一条 `#EXTINF` 的台名/分组全清掉
+      // （表现就是台名退化成域名、分组丢失）。
+      if (line.startsWith('#EXTGRP')) {
+        final group = line.substring('#EXTGRP'.length).trim().replaceFirst(':', '').trim();
+        if (group.isNotEmpty) {
+          meta = <String, String>{...meta, 'group': group};
+        }
+        continue;
+      }
+      if (line.startsWith('#EXTINF')) {
         meta = _extInfo(line);
         continue;
       }

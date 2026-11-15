@@ -214,7 +214,11 @@ class Api {
         if (r.statusCode == 401) _notifyUnauthorized();
         return r;
       } on TimeoutException {
-        failure = ApiException.timeout();
+        // TIMEOUT_NO_RETRY（2026-11-15）：超时**不再重试**。
+        // 8 秒超时 + 重试一次 = 一次请求固定 16 秒，用户看到的就是
+        // 「点了没反应，16 秒后弹一句网络错误」。超时说明服务端这一轮
+        // 就是响应不过来，立刻把错误交给页面（页面自己有重试按钮）更快。
+        throw ApiException.timeout();
       } on SocketException {
         failure = ApiException.network();
       } on HandshakeException {

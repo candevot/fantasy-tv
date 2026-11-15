@@ -388,6 +388,7 @@ class _TogetherPageState extends State<TogetherPage>
     _enterTimer = null;
     _awaitingStateTimer?.cancel();
     _awaitingStateTimer = null;
+    _cancelStaggerSeek();
     _frozenFadeTimer?.cancel();
     _frozenFallbackTimer?.cancel();
     _liveFirstFrameTimer?.cancel();
@@ -437,7 +438,14 @@ class _TogetherPageState extends State<TogetherPage>
       if (_stage == _TogetherStage.room) {
         // 不断连：socket 还在就直接要一次权威状态，否则重连。
         if (_client.connected) {
-          if (!_isHost) _armAwaitingState();
+          if (!_isHost) {
+            // RESUME_SYNC（2026-11-15）：成员回前台要**主动要**一次权威状态。
+            // 房主暂停时不再推送 room_state（心跳和进度推送都因 !isPlaying
+            // 提前 return），只「等」等于永远等不到 —— 成员画面会一直停在
+            // 回前台前的位置，和房主永久不同步。
+            _client.refreshRoom();
+            _armAwaitingState();
+          }
         } else {
           _client.connect();
         }
@@ -490,10 +498,13 @@ class _TogetherPageState extends State<TogetherPage>
     _awaitingStateTimer = Timer(const Duration(seconds: 3), () {
       if (!mounted || !_awaitingRoomState) return;
       _awaitingRoomState = false;
-      // 放弃等待：让播放继续，下一次 room_state 到达再对齐。
+      // 放弃等待：按「已知的房间状态」继续，而不是无脑 play ——
+      // 房主暂停时兜底把画面放起来，声音/画面就和房间里其它人对不上。
+      // 下一次 room_state 到达再对齐。
       final c = _controller;
+      final remote = _remote;
       if (c != null && !c.value.hasError) {
-        unawaited(c.play());
+        unawaited(remote != null && !remote.playing ? c.pause() : c.play());
       }
       if (mounted) setState(() {});
     });

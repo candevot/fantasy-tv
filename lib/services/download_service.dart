@@ -414,7 +414,16 @@ class DownloadService extends ChangeNotifier {
       final sp = await SharedPreferences.getInstance();
       final raw = sp.getString(queuePrefsKey);
       if (raw != null && raw.trim().isNotEmpty) {
-        final decoded = jsonDecode(raw);
+        // 整表解析单独兜一层：一条坏数据不能让 jsonDecode 抛出去 ——
+        // 那样整个队列都读不出来，磁盘上的文件全成孤儿（看不到、不能播、
+        // 也不能单集删除），而且每次启动都会重复一次。
+        dynamic decoded;
+        try {
+          decoded = jsonDecode(raw);
+        } catch (e) {
+          debugPrint('DownloadService: queue json broken: $e');
+          decoded = const <dynamic>[];
+        }
         final List<dynamic> list;
         if (decoded is Map && decoded['tasks'] is List) {
           list = decoded['tasks'] as List<dynamic>;
@@ -643,7 +652,10 @@ class DownloadService extends ChangeNotifier {
   int seriesCachedBytes(String id) {
     var bytes = 0;
     for (final t in _tasks) {
-      if (t.id == id) bytes += t.bytes;
+      // 口径和 totalCachedBytes 一致：只算已完成的集。
+      // 把下载中 / 失败任务的部分字节算进来会显示「已缓存 3.2GB」，
+      // 实际能离线播放的只有一集。
+      if (t.id == id && t.status == DownloadStatus.completed) bytes += t.bytes;
     }
     return bytes;
   }
@@ -2162,6 +2174,10 @@ class DownloadService extends ChangeNotifier {
         return await action();
       } catch (e) {
         if (e is _CacheException) rethrow;
+        // 超时不重试：一次 8 秒超时 × 3 次 = 任务在「排队中」冻 20 多秒，
+        // 其间暂停 / 删除都不生效（_pump 是串行 await）。直接失败，
+        // 让任务落到 failed 并给「重试」按钮。
+        if (e is ApiException && e.kind == ApiErrorKind.timeout) rethrow;
         last = e;
         if (attempt < _retryCount) {
           await Future<void>.delayed(_retryBackoff);

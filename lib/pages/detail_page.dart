@@ -213,7 +213,14 @@ class _DetailPageState extends State<DetailPage>
       final eps = _episodesOf(d, lineId);
       var ep = _ep;
       if (eps.isNotEmpty && !eps.any((e) => e.n == ep)) {
-        ep = eps.first.n;
+        // 目标线路集数更少时夹到「不超过当前集的最大集」，不要直接跳回第 1 集：
+        // 4K(28 集) ↔ 量子(29 集) 来回切、正在看第 29 集时，切 4K 应该落到
+        // 第 28 集，而不是从头开始。
+        var fallback = eps.first.n;
+        for (final e in eps) {
+          if (e.n <= ep) fallback = e.n;
+        }
+        ep = fallback;
       }
 
       // NO_LINES（2026-11-15）：这条记录一条线路都没有（热播榜脚本只写了
@@ -558,6 +565,15 @@ class _DetailPageState extends State<DetailPage>
   List<EpisodeGroup> get _episodeGroups {
     final d = _detail;
     if (d == null) return const <EpisodeGroup>[];
+    // LINE_GROUP（2026-11-15）：`cms_api` 只造一个「正片」组，而且集名取的
+    // 是**最长那条线路**。直接用它会出现：4K 只有 28 集、量子 29 集时，
+    // 选 4K 仍列出 29 个集胶囊，点第 29 集播的其实是第 28 集。
+    // 所以「只有一个组」时改用当前线路自己的集（[_episodes] 已是按线路取的）。
+    final own = _episodes;
+    if (d.groups.length <= 1 && own.isNotEmpty) {
+      final name = d.groups.isEmpty ? '正片' : d.groups.first.name;
+      return <EpisodeGroup>[EpisodeGroup(name, own)];
+    }
     if (d.groups.isNotEmpty) {
       // 接口自带分组时也要过一遍电影版本名，否则电影会显示「第01集」。
       if (!_isMovie) return d.groups;
@@ -705,7 +721,15 @@ class _DetailPageState extends State<DetailPage>
         list.removeWhere((m) => '${m['id']}' == widget.id);
         await FxStore.write(FxStore.favoriteKey, list);
       }
-    } catch (_) {}
+    } catch (_) {
+      // 收藏是「乐观更新」，但写盘失败时必须回滚：否则页面显示已收藏、
+      // 重启后又变回未收藏，中间一句提示都没有（收藏列表是唯一事实源）。
+      if (mounted) {
+        setState(() => _fav = !next);
+        fxToast(context, '收藏失败，请重试');
+      }
+      return;
+    }
     if (!mounted) return;
     fxToast(context, next ? '已加入收藏' : '已取消收藏');
   }
@@ -762,7 +786,13 @@ class _DetailPageState extends State<DetailPage>
     // 切换中仍然接受点击：播放器会把这次选择记成 pendingSwitch，
     // 当前切换一结束就立刻执行，最多 12 秒僵死也会强制接管。
     // 之前这里直接 return，用户会觉得「点了没反应」。
-    if (line.id == _lineId && !_playerSwitchingLine) return;
+    if (line.id == _lineId && !_playerSwitchingLine) {
+      // 就是当前线路：不再「点了没反应」，改成重播一次（用户在这里点的
+      // 语义一定是「这条线路再试一下」，单线路的片尤其需要这个出口）。
+      fxToast(context, '正在重试该线路…');
+      unawaited(_playerKey.currentState?.reload() ?? Future<void>.value());
+      return;
+    }
     // PLATFORM_PENDING：还没解析完（或上游暂不可用）的平台线，先现场解析。
     // 解析期间留在原线路继续播，播放器上显示「正在解析 X」。
     if (fxIsPlatformLine(line) && (line.linePending || line.lineUnavailable)) {

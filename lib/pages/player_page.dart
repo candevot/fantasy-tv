@@ -11,6 +11,7 @@ import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/exo_player.dart';
 import '../services/fx_player.dart';
+import '../services/hls_segment_index.dart';
 import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
@@ -82,7 +83,14 @@ class PlayerView extends StatefulWidget {
 
 class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 单次 open 等待 ready 的上限：超过即视为该地址不可播，避免黑屏空等。
-  static const Duration _openReadyTimeout = Duration(seconds: 8);
+  /// 页面等「起播就绪」的上限（OPEN_TIMEOUT 2026-11-15）。
+  ///
+  /// 必须和内核对齐：原生 open 的硬上限是 30 秒（fx_player 的 `_openHardCap`），
+  /// 页面这里原来是 8 秒 —— 复用同一个 FxPlayer 实例时，8 秒一到页面就切到
+  /// 错误态，可内核还在继续 open，10~12 秒后真的出画了；而 `_onVideoValue`
+  /// 在 `_error` 时直接 return，既不 setState 也不挂 Video 纹理，用户看到的是
+  /// 「有声音没画面、错误页还不消失」。宁可等内核自己判失败。
+  static const Duration _openReadyTimeout = Duration(seconds: 30);
 
   /// 切线路时最多尝试的线路数（含用户选中的目标线路）。
   /// 换线时最多依次尝试几条线路（含目标线路）。
@@ -108,6 +116,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   late int _ep;
   late String _line;
+
+  /// 父级上一次传进来的线路（用来区分「父级换线」和「我们自动换线兜底」）。
+  String _lastWidgetLine = '';
   int _loadToken = 0;
 
   /// controller 实际已经打开的集。进度只写这一集，loading 时不写。
@@ -353,6 +364,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     _line = widget.line;
     _requestEp = widget.ep;
     _requestLine = widget.line;
+    _lastWidgetLine = widget.line;
     WidgetsBinding.instance.addObserver(this);
     // 诊断浮层开关：上次开着就继续开着（两个播放页读同一份设置）。
     unawaited(_restoreDiagnostics());
@@ -370,8 +382,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   @override
   void didUpdateWidget(covariant PlayerView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.ep == _ep && widget.line == _line) return;
-    if (widget.line != _line) {
+    // LINE_SYNC（2026-11-15）：判断「要不要换线」只能看父级入参有没有真的变，
+    // 不能拿 `_line` 比 —— 自动换线失败后 `_line` 已经被改成兜底线路，与
+    // widget.line 永久分叉，于是父级任何一次 rebuild 都会再跑一遍「3 条线路
+    // × 8 秒」的换线，越换越乱。
+    final lineChanged = widget.line != _lastWidgetLine;
+    _lastWidgetLine = widget.line;
+    if (!lineChanged && widget.ep == _ep) return;
+    if (lineChanged) {
       // 切线路：记住当前集+进度，就绪后 seek 回并恢复播放；
       // 目标线路失败会自动尝试下一条，最多 2 条。
       unawaited(_switchLine(widget.line, widget.ep));
@@ -1315,6 +1333,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         if (!mounted || _loading || _error || _ep != loaded) return;
         final url = fxAbsolutePlayUrl(info.url);
         if (url.isEmpty) return;
+        // PRELOAD_ONCE（2026-11-15）：一次性令牌清单（`/hxparse` 的
+        // `FY-*` / `/share/` 这类）只能被拉一次，预载会把它烧掉，
+        // 真正切集时命中缓存复用同一地址就 403 / 0 分片。和 fx_player
+        // 打开时的闸保持一致，这种地址不预载。
+        if (HlsSegmentIndex.isOneTimePlaylist(url)) return;
         await ExoPlayerEngine.preloadNextEpisode(url, headers: info.headers);
       } catch (_) {
         // 预载失败静默：不打扰播放，也不弹提示。

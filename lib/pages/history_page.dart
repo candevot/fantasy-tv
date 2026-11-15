@@ -169,6 +169,11 @@ class FxStore {
     List<Map<String, dynamic>> lines = const <Map<String, dynamic>>[],
   }) async {
     if (id.isEmpty) return;
+    // FAV_SERIAL（2026-11-15）：收藏和观看历史一样走串行队列。
+    // 之前是「读-改-写」直接落盘，详情页和直播详情页同时收藏时两边读到
+    // 同一份旧列表，后写的把先写的覆盖掉；而且没有条数上限（每条还带
+    // 一份 lines 数组），收藏多了文件会一直涨。
+    await _serialized(() async {
     final list = await read(favoriteKey);
     list.removeWhere(
         (e) => '${e['id']}' == id && '${e['kind'] ?? 'video'}' == kind);
@@ -188,7 +193,9 @@ class FxStore {
       if (lines.isNotEmpty) 'lines': lines,
       'updatedAt': DateTime.now().millisecondsSinceEpoch,
     });
+    if (list.length > 200) list.removeRange(200, list.length);
     await write(favoriteKey, list);
+    });
   }
 }
 
