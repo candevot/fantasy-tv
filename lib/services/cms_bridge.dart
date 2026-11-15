@@ -837,7 +837,10 @@ class CmsBridge {
     // （quick=false 空 → quick=true）单个源最长能占满 12 秒，41 个源同时发
     // 在 15 秒时被整轮截断，日志里会出现「源还没跑完就被收尾」，
     // 用户看到的是「进度停在 12/41」。
-    Timer(const Duration(seconds: 20), finish);
+    // SEARCH_BUDGET（2026-11-16）：并发从 6 提到 20 之后，41 个源在 12 秒
+    // 单源预算内能跑完 ≈ 3 轮，整体 20 秒仍然偏紧（最后一批刚好被砍）。
+    // 放宽到 30 秒：用户早就在逐条看到结果了，这个上限只是兜「绝不允许无限转圈」。
+    Timer(const Duration(seconds: 30), finish);
     return ctrl.stream;
   }
 

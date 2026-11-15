@@ -368,7 +368,13 @@ class JarSpider {
   /// 时间一起**算进 `guard()` 的超时，于是「还没开始跑就先超时了」。
   /// 两边对齐之后：最多 6 个源同时在跑，其余排队，队列长度由
   /// `cms_bridge` 的并发闸门控制。
-  static const int maxConcurrentSearches = 6;
+  /// 同时搜多少个源（JAR_PARALLEL 2026-11-16）。
+  ///
+  /// 用户口径：**要影视壳那样「一下加载许多」，不是一条一条来**。
+  /// 实测 41 个源、单源 12 秒预算，并发 6 的话排在后面的 30+ 个源根
+  /// 本轮不到（搜「济公传」时只跑了 16/41 个）。壳是多源并行。
+  /// 这里提到 20 —— 原生线程池必须同步提到 20（JarSpiderLoader）。
+  static const int maxConcurrentSearches = 20;
 
   /// 一轮搜索里单个源的**总**预算（quick=false + quick=true 两次尝试之和）。
   ///

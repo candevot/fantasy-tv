@@ -84,7 +84,15 @@ class JarSpiderLoader(
         const val DEFAULT_TIMEOUT_MS = 12_000L
 
         /** 并行 worker 数：和 Dart 侧 `JarSpider.maxConcurrentSearches` 对齐。 */
-        const val WORKER_THREADS = 6
+        /**
+         * 并行 worker 数（JAR_PARALLEL 2026-11-16）。
+         *
+         * 原来是 6：41 个源一起搜时后 35 个在队列里排队，排队时间也算进
+         * 单源超时 → 只有最前面几个源能出结果（用户看到「只出咕噜」）。
+         * 壳是多源并行，这里提到 20，和 Dart 侧
+         * `JarSpider.maxConcurrentSearches` 保持一致。
+         */
+        const val WORKER_THREADS = 20
 
         /** 类名没有包名时补这个前缀（TVBox 的约定）。 */
         const val CLASS_PREFIX = "com.github.catvod.spider."
