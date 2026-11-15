@@ -62,7 +62,6 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.onRate,
     required this.onQuality,
     required this.onRetry,
-    required this.onHostOnly,
     required this.onSendChat,
     this.isLive = false,
   });
@@ -113,7 +112,6 @@ class TogetherFullscreenView extends StatefulWidget {
   final ValueChanged<double> onRate;
   final ValueChanged<String?> onQuality;
   final VoidCallback onRetry;
-  final VoidCallback onHostOnly;
   final bool Function(String text) onSendChat;
 
   /// 直播房：隐藏进度 / 选集 / 倍速 / 换剧，显示 LIVE。
@@ -331,10 +329,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   /* ------------------------------------------------------------ 长按 3x */
 
   void _startHold() {
-    if (!widget.isHost) {
-      widget.onHostOnly();
-      return;
-    }
     final player = widget.player;
     if (player == null || !player.value.isInitialized) return;
     _rateBeforeHold = player.rate;
@@ -366,10 +360,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   /* ------------------------------------------------------------ 弹层 / 聊天 */
 
   void _toggleSpeed() {
-    if (!widget.isHost) {
-      widget.onHostOnly();
-      return;
-    }
     _hideTimer?.cancel();
     setState(() {
       _showSpeed = !_showSpeed;
@@ -380,10 +370,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   }
 
   void _toggleQuality() {
-    if (!widget.isHost) {
-      widget.onHostOnly();
-      return;
-    }
     if (!widget.canChangeQuality) {
       return;
     }
@@ -408,11 +394,9 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     _wake();
   }
 
+  /// 旧「房主专属动作」包装。TOGETHER_OPEN_CONTROL 之后没有房主权限，
+  /// 任何人的操作都直接执行并广播（服务端不做校验）。
   void _runHost(VoidCallback action) {
-    if (!widget.isHost) {
-      widget.onHostOnly();
-      return;
-    }
     action();
     _wake();
   }
@@ -800,7 +784,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             icon: Icons.logout_rounded,
             size: 32,
             iconSize: 17,
-            tooltip: widget.isHost ? '解散房间' : '退出房间',
+            tooltip: '退出房间',
             onTap: widget.onExitRoom,
           ),
         ],

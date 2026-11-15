@@ -66,14 +66,24 @@ void main() {
   check(d.move == TogetherSyncMove.rate, '超前 → 微调');
   near(d.rate, 0.95, 1e-9, '超前 → 0.95x');
 
+  // TOGETHER_OPEN_CONTROL（2026-11-15）：验收口径是「允许 ±2 秒误差，不要
+  // 每次都硬 seek」。2.0s 以内交给微调倍速，超过才硬跳。
   d = decideTogetherDrift(
     expected: 102.0,
     current: 100.0,
     playing: true,
     baseRate: 1.0,
   );
-  check(d.move == TogetherSyncMove.seek, '>1.5s → 硬 seek');
-  near(d.target, 102.0, 1e-9, 'seek 到期望位置');
+  check(d.move == TogetherSyncMove.rate, '2.0s 以内不硬跳（微调倍速追）');
+
+  d = decideTogetherDrift(
+    expected: 102.5,
+    current: 100.0,
+    playing: true,
+    baseRate: 1.0,
+  );
+  check(d.move == TogetherSyncMove.seek, '>2.0s → 硬 seek');
+  near(d.target, 102.5, 1e-9, 'seek 到期望位置');
 
   d = decideTogetherDrift(
     expected: 100.5,
@@ -223,12 +233,12 @@ void main() {
   );
   check(d.move == TogetherSyncMove.rate, '1.5s 仍微调');
   d = decideTogetherDrift(
-    expected: 101.5001,
+    expected: 102.0001,
     current: 100.0,
     playing: true,
     baseRate: 1.0,
   );
-  check(d.move == TogetherSyncMove.seek, '>1.5s 硬 seek');
+  check(d.move == TogetherSyncMove.seek, '>2.0s 硬 seek');
 
   // 时钟校准版本 / 增量：用于发现 offset 台阶。
   final clock2 = TogetherClock();
@@ -310,12 +320,12 @@ void main() {
 
   // 负向 drift：默认允许回跳，关闭后先降速吸收。
   d = decideTogetherDrift(
-    expected: 98.0,
+    expected: 97.9,
     current: 100.0,
     playing: true,
     baseRate: 1.0,
   );
-  check(d.move == TogetherSyncMove.seek, '默认负向 >1.5s 仍可回跳');
+  check(d.move == TogetherSyncMove.seek, '默认负向 >2.0s 仍可回跳');
 
   d = decideTogetherDrift(
     expected: 98.0,

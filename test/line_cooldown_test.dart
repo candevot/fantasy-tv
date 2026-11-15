@@ -59,7 +59,7 @@ void main() {
       LineInfo('b', '量子', 'hls', 1),
       LineInfo('c', '幻想4K', 'parse', 2),
     ];
-    final ordered = FxLineCooldown.sortLines('100', lines);
+    final ordered = FxLineCooldown.sortLines('100', lines, now: now);
     expect(ordered.last.name, '红牛');
     expect(ordered.first.name, '量子');
   });

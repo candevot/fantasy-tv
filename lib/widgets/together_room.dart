@@ -60,6 +60,7 @@ class TogetherRoomView extends StatefulWidget {
     this.syncOffsetSeconds = 0,
     this.keyboardVisible = false,
     this.isLive = false,
+    this.opText = '',
   });
 
   final FxPlayer? player;
@@ -118,6 +119,9 @@ class TogetherRoomView extends StatefulWidget {
 
   /// 直播房：隐藏进度、选集、换剧，显示 LIVE。
   final bool isLive;
+
+  /// 最近一次房间操作：「小明 换了线路 → 幻想4K」。空串时整行不渲染。
+  final String opText;
 
   @override
   State<TogetherRoomView> createState() => _TogetherRoomViewState();
@@ -387,7 +391,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               )
             else
               TogetherPill(
-                text: widget.isHost ? '房主' : '已同步',
+                text: widget.isHost ? '我在操作' : '已同步',
                 icon: widget.isHost
                     ? Icons.star_outline_rounded
                     : Icons.check_circle_outline_rounded,
@@ -398,7 +402,6 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           TogetherPill(
             text: widget.isLive ? '换线' : '换源',
             height: 30,
-            locked: !widget.isHost,
             onTap: widget.onSwitchLine,
           ),
           if (!widget.isLive) ...[
@@ -406,7 +409,6 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
             TogetherPill(
               text: '换剧',
               height: 30,
-              locked: !widget.isHost,
               onTap: widget.onChangeDrama,
             ),
           ],
@@ -535,6 +537,38 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               top: 8,
               child: IgnorePointer(child: _buildSyncChip()),
             ),
+            // 「谁操作的」：小明 换了线路 → 幻想4K
+            if (widget.opText.isNotEmpty)
+              Positioned(
+                left: 8,
+                right: 8,
+                top: 34,
+                child: IgnorePointer(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: .40),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Text(
+                        widget.opText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xE6FFFFFF),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             if (widget.errorText.isNotEmpty)
               Positioned.fill(child: _buildError(context)),
           ],
@@ -571,7 +605,8 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   child: _RoomProgress(
                     position: widget.position,
                     duration: player.value.duration,
-                    enabled: widget.isHost,
+                    // 进度条对所有人都可拖：拖动会广播给房间（服务端不校验身份）。
+                    enabled: true,
                     onSeek: _seekTo,
                     onBlocked: widget.onHostOnly,
                   ),
@@ -607,7 +642,8 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   }
 
   Widget _buildSyncChip() {
-    final stateText = widget.isHost ? '房主' : '跟随房主';
+    // 没有房主权限了：这里只显示「我在带动播放」还是「跟着别人」。
+    final stateText = widget.isHost ? '我在操作' : '同步中';
     final dot =
         widget.online ? const Color(0xFF57D3A3) : const Color(0xFFFF8A80);
     // 房间内掉线即进入自动重连（客户端会回原房间号），顶栏小标显示「重连中」。
@@ -658,7 +694,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                 ? (loading ? '正在加载直播…' : '等待房主开始直播')
                 : (loading
                     ? '正在加载视频…'
-                    : (widget.isHost ? '点击播放，和朋友一起看' : '等待房主播放')),
+                    : (widget.isHost ? '点击播放，和朋友一起看' : '跟着房间播放')),
             style: TextStyle(
               fontSize: 11,
               color: Colors.white.withValues(alpha: .72),

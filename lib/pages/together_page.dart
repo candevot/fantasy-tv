@@ -12,6 +12,7 @@ import '../services/cms_bridge.dart';
 import '../services/fx_player.dart';
 import '../services/iq_codec_gate.dart';
 import '../services/iqiyi_codec.dart';
+import '../services/fallback_match.dart';
 import '../services/play_log.dart';
 import '../theme.dart';
 import '../widgets/player_theme.dart';
@@ -20,6 +21,7 @@ import '../widgets/together_client.dart';
 import '../widgets/together_fullscreen.dart';
 import '../widgets/together_picker.dart';
 import '../widgets/together_room.dart';
+import '../widgets/together_room_picker.dart';
 import '../widgets/together_sheets.dart';
 import '../widgets/together_sync.dart';
 import '../widgets/together_ui.dart';
@@ -27,7 +29,8 @@ import '../widgets/together_ui.dart';
 /* ========================================================================== */
 /*  一起看                                                                     */
 /*                                                                            */
-/*  · 入口/建房/加入；房间内服务器权威同步（房主写 state/seek/episode）          */
+/*  · 入口/建房/加入；房间内**任何人都能**操作（播放/进度/线路/片源/倍速），   */
+/*    服务端只广播「最后一条 + 是谁操作的」，没有房主权限（TOGETHER_OPEN_CONTROL）*/
 /*  · 竖屏房间 UI 在 widgets/together_room.dart，全屏在 together_fullscreen.dart */
 /*  · 切后台不断 WS / 不暂停播放，回前台 refreshRoom 后再对齐                   */
 /*  · 退出房间 pause → stop → dispose，并把房间进度写回本地进度                 */
@@ -137,7 +140,24 @@ class _TogetherPageState extends State<TogetherPage>
   bool _authExpired = false;
 
   bool _online = false;
+
+  /// 我是不是「当前主导者」：最后一条控制指令是我发的。
+  ///
+  /// 这**不是权限**（任何操作都不需要身份）：别人一发指令就会顶掉它。
+  /// 它只决定「谁在推进度心跳、谁跟别人的进度」，以及本地播放器是否跟随权威。
   bool _isHost = false;
+
+  /// 当前房间绑定的线路（房间线路列表里的名字）；换线路 / 换片都按它比对。
+  String _roomLine = '';
+
+  /// 房间指定的线路名，但本地详情还没拉到、暂时映射不到线路 id。
+  String _pendingLineName = '';
+
+  /// 从详情页进来时的来源标注（列表接口给的「来源」文案，没有就空）。
+  String _videoSourceLabel = '';
+
+  /// 最近一次房间操作（「小明 换了线路 → 幻想4K」），房间顶部展示。
+  TogetherOp? _lastOp;
   bool _foreground = true;
   bool _downReported = false;
   bool _needsHostResync = false;
@@ -174,8 +194,11 @@ class _TogetherPageState extends State<TogetherPage>
         awaitingRoomState: _awaitingRoomState || _waitingStaggerSeek,
       );
 
-  /// 应用房主操作后的短暂静默期：先让 play / pause / seek 落位，再开始纠偏。
+  /// 应用别人操作后的短暂静默期：先让 play / pause / seek 落位，再开始纠偏。
   int _applyHoldUntil = 0;
+
+  /// 本地最近一次主动操作的时间戳：这段时间内不跟别人的权威状态抢位置。
+  int _lastLocalControlAt = 0;
 
   /// 硬 seek 后 2 秒内不再纠偏（防抖）。
   int _seekGuardUntil = 0;
@@ -356,6 +379,7 @@ class _TogetherPageState extends State<TogetherPage>
       onClosed: _onClosed,
       onAuthFailed: _onAuthFailed,
       onUnreachable: _onUnreachable,
+      onOp: _onOp,
     );
     WidgetsBinding.instance.addObserver(this);
     _startTimers();
@@ -648,6 +672,7 @@ class _TogetherPageState extends State<TogetherPage>
       if (!_isLive && info.videoId.isNotEmpty) _videoId = info.videoId;
       if (!_isLive && info.ep > 0) _ep = info.ep;
       if (!_isLive && info.line.isNotEmpty) _videoLine = info.line;
+      if (!_isLive && info.lineName.isNotEmpty) _roomLine = info.lineName;
       _members = info.members.isEmpty
           ? <TogetherMember>[
               TogetherMember(
@@ -735,13 +760,7 @@ class _TogetherPageState extends State<TogetherPage>
           _liveLineId = targetLine;
           _videoLine = targetLine;
         }
-        if (state.members.isNotEmpty) {
-          var host = false;
-          for (final member in state.members) {
-            if (member.id == _myId && member.host) host = true;
-          }
-          _isHost = host;
-        }
+        _isHost = _leaderIsMe(state);
       });
       _downReported = false;
       if (changedChannel && _isLive) {
@@ -762,7 +781,27 @@ class _TogetherPageState extends State<TogetherPage>
     }
     final changedVideo = state.videoId.isNotEmpty && state.videoId != _videoId;
     final changedEp = state.ep > 0 && state.ep != _ep;
-    final changedLine = state.line.isNotEmpty && state.line != _videoLine;
+    // 房间线路按**名字**比对：服务端存的是建房时那个源的线路名，
+    // 每个成员本地的线路线路 id 不一定一样。
+    final roomLine = (state.lineName.isNotEmpty ? state.lineName : state.line).trim();
+    final changedLine = roomLine.isNotEmpty && roomLine != _roomLine;
+    var mappedLine = '';
+    var missingLine = '';
+    if (changedLine) {
+      _roomLine = roomLine;
+      if (changedVideo || _lines.isEmpty) {
+        // 换片了 / 详情还没拉到：先记住名字，_loadVideo 拉到线路后再定位。
+        // 不能拿旧片的线路去映射（会指向一个根本不存在的线路 id）。
+        _pendingLineName = roomLine;
+      } else {
+        final mapped = _localLineIdFor(roomLine);
+        if (mapped == null) {
+          missingLine = roomLine;
+        } else {
+          mappedLine = mapped;
+        }
+      }
+    }
 
     setState(() {
       _remote = state;
@@ -775,15 +814,17 @@ class _TogetherPageState extends State<TogetherPage>
       _membersLive.value = _members;
       if (state.videoId.isNotEmpty) _videoId = state.videoId;
       if (state.ep > 0) _ep = state.ep;
-      if (state.line.isNotEmpty) _videoLine = state.line;
-      if (state.members.isNotEmpty) {
-        var host = false;
-        for (final member in state.members) {
-          if (member.id == _myId && member.host) host = true;
-        }
-        _isHost = host;
-      }
+      if (mappedLine.isNotEmpty) _videoLine = mappedLine;
+      _isHost = _leaderIsMe(state);
+      _lastOp = state.by;
     });
+    // 房间当前绑定的源 / 片 / 线路记到客户端：断线重连若房间已解散，
+    // 用它按最新绑定重建，而不是回到建房那一刻的旧片。
+    _client.adoptRoom(state);
+    if (missingLine.isNotEmpty) {
+      // 本地没有这个源 / 这条线路：提示，但不踢出房间，也不打断本地播放。
+      togetherToast(context, '你这边没有「$missingLine」这条线路，无法跟随');
+    }
     _downReported = false;
 
     if (changedVideo) {
@@ -811,6 +852,68 @@ class _TogetherPageState extends State<TogetherPage>
       _resync();
     }
     _position.value = _displayPosition();
+  }
+
+  /// 房间线路名 → 本地这条源里的线路 id（本地没有返回 null）。
+  String? _localLineIdFor(String name) {
+    final key = name.trim();
+    if (key.isEmpty) return null;
+    for (final line in _lines) {
+      if (line.id == key) return line.id;
+      if (line.displayName.trim() == key) return line.id;
+      if (line.name.trim() == key) return line.id;
+    }
+    return null;
+  }
+
+  /// 本地线路 id → 展示名（房间线路名用它对齐）。
+  String _labelOfLineId(String id) {
+    for (final line in _lines) {
+      if (line.id != id) continue;
+      final name = line.displayName.trim();
+      return name.isEmpty ? line.id : name;
+    }
+    return _roomLine;
+  }
+
+  /// 本地有这条线路吗（弹层里标「本机没有」用）。
+  Set<String> get _localLineNames => <String>{
+        for (final line in _lines) line.displayName.trim(),
+        for (final line in _lines) line.name.trim(),
+        for (final line in _lines) line.id,
+      };
+
+  /// 服务端说谁是主导者。老服务端没有 leaderId 时退回「创建者」标记。
+  bool _leaderIsMe(TogetherRoomState state) {
+    final leader = state.leaderId.trim();
+    if (leader.isEmpty) {
+      for (final member in state.members) {
+        if (member.id == _myId && member.host) return true;
+      }
+      return false;
+    }
+    return leader == _myId || leader == _client.selfId;
+  }
+
+  /// 本地刚发出控制指令：立刻把自己当成主导者，别等服务端回声再跟随，
+  /// 否则这几十毫秒里 `_applyRemoteState` 会把刚跳的位置又拽回去。
+  void _claimControl() {
+    _lastLocalControlAt = DateTime.now().millisecondsSinceEpoch;
+    if (_isHost) return;
+    if (mounted) {
+      setState(() => _isHost = true);
+    } else {
+      _isHost = true;
+    }
+  }
+
+  void _onOp(TogetherOp op) {
+    if (!mounted || op.name.isEmpty) return;
+    _lastOp = op;
+    if (mounted) setState(() {});
+    if (op.id.isNotEmpty && op.id == _myId) return; // 自己的操作不用再提示一遍
+    fxShowTopTag(op.text);
+    _appendSystem(op.text);
   }
 
   void _onChat(TogetherChatIncoming chat) {
@@ -1094,7 +1197,12 @@ class _TogetherPageState extends State<TogetherPage>
     }
   }
 
-  void _createRoom(String videoId, int ep, {VideoDetail? detail}) {
+  void _createRoom(
+    String videoId,
+    int ep, {
+    VideoDetail? detail,
+    TogetherRoomDraft? draft,
+  }) {
     _liveChannel = null;
     _liveLineId = '';
     _clearMessages();
@@ -1125,6 +1233,19 @@ class _TogetherPageState extends State<TogetherPage>
     _detailVideoId = detail == null ? '' : videoId;
     _lines = detail?.lines ?? const <LineInfo>[];
     _episodes = detail?.allEpisodes ?? const <Episode>[];
+    if (draft != null) {
+      // 三步选择器已经把「这个源的线路列表」拿全了：房间直接绑这一份，
+      // 本地也用它起播（线路 id 就是那个源的真实 id）。
+      _lines = <LineInfo>[
+        for (final line in draft.lines)
+          LineInfo(line.id.isEmpty ? line.name : line.id, line.name, 'hls', 0),
+      ];
+      _episodes = const <Episode>[];
+      _roomLine = draft.line;
+      if (_videoLine.trim().isEmpty) {
+        _videoLine = draft.pickedLine?.id ?? draft.line;
+      }
+    }
     _loadedKey = '';
     _loadingKey = '';
     _videoError = '';
@@ -1134,11 +1255,32 @@ class _TogetherPageState extends State<TogetherPage>
     if (_resumePos == null) _resumePos = 0;
     _resumePlaying = true;
     _online = _client.connected;
+    final source = draft == null
+        ? togetherSourceOfId(videoId, label: _videoSourceLabel)
+        : (
+            key: draft.sourceKey,
+            name: draft.sourceName,
+            kind: draft.sourceKind,
+            api: draft.sourceApi,
+          );
+    // 详情页进来的房间没有 draft：用本地详情里的线路当作房间线路列表。
+    final roomLines = draft?.lines ??
+        <TogetherLine>[
+          for (final line in _lines) togetherLineOfInfo(line, episodes: _episodes.length),
+        ];
     _client.createRoom(
       videoId: videoId,
       ep: _ep,
       line: _videoLine,
+      lineName: draft?.line ?? '',
       title: _videoTitle.isEmpty ? '' : '$_videoTitle · 一起看',
+      sourceKey: source.key,
+      sourceName: source.name,
+      sourceKind: source.kind,
+      sourceApi: source.api,
+      vodName: draft?.vodName ?? _videoTitle,
+      vodYear: draft?.vodYear ?? 0,
+      lines: roomLines,
     );
     _client.connect();
     _armEnterTimer();
@@ -1277,13 +1419,13 @@ class _TogetherPageState extends State<TogetherPage>
     if (!mounted || _exiting || _leaving) return;
     if (_stage != _TogetherStage.room) return;
     _exiting = true;
-    final host = _isHost;
+    // 没有房主了：谁退出都只是自己离开，房间和进度对其他成员照旧。
     final ok = await showTogetherConfirm(
       context,
-      title: host ? '解散房间？' : '退出房间？',
-      content: host ? '你是房主，退出后房间会解散，其他成员将全部离开。' : '退出后可以重新加入，房主和播放进度不受影响。',
-      confirmText: host ? '解散离开' : '退出',
-      danger: host,
+      title: '退出房间？',
+      content: '退出后房间还在、进度照旧，其他人不受影响；你可以用房间号随时回来。',
+      confirmText: '退出',
+      danger: false,
     );
     _exiting = false;
     if (!ok || !mounted) return;
@@ -1870,6 +2012,9 @@ class _TogetherPageState extends State<TogetherPage>
     bool mediaChanged = false,
   }) {
     if (_isHost) return;
+    // 本地刚发过控制指令：这 700ms 内不跟权威纠偏。
+    // 服务端回声还没到 / 别人也在动的时候，两边互相拽会让画面来回跳。
+    if (DateTime.now().millisecondsSinceEpoch - _lastLocalControlAt < 700) return;
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
     if (mediaChanged) {
@@ -2089,6 +2234,8 @@ class _TogetherPageState extends State<TogetherPage>
     bool fresh = false,
     bool mark = true,
     bool coalesce = false,
+    bool quiet = false,
+    String? op,
   }) {
     final safe = _sanitizeHostPosition(
       state,
@@ -2106,6 +2253,8 @@ class _TogetherPageState extends State<TogetherPage>
         line: line,
         rate: rate,
         coalesce: coalesce,
+        quiet: quiet,
+        op: op,
       );
     }
     if (mark) _markRemote(state, safe, rate: rate);
@@ -2138,6 +2287,8 @@ class _TogetherPageState extends State<TogetherPage>
       value.position.inMilliseconds / 1000.0,
       rate: _hostRate,
       mark: false,
+      // 纯进度心跳不算「操作」：不抢主导者，也不覆盖别人的权威状态。
+      quiet: true,
     );
   }
 
@@ -2164,6 +2315,7 @@ class _TogetherPageState extends State<TogetherPage>
     _reportHostState(
       intent ? 'play' : 'pause',
       value.position.inMilliseconds / 1000.0,
+      quiet: true,
     );
   }
 
@@ -2207,19 +2359,18 @@ class _TogetherPageState extends State<TogetherPage>
 
   /* ------------------------------------------------------------ 播放操作 */
 
+  /// 旧「只有房主能操作」提示。TOGETHER_OPEN_CONTROL 之后没有房主权限，
+  /// 控制条常驻可点；这个方法只留给弹层里那些「已禁用」的兜底回调。
   void _hostOnly() {
-    fxShowTopTag('跟随房主');
+    fxShowTopTag('控制已同步给所有人');
   }
 
   void _togglePlay() {
-    if (!_isHost) {
-      _hostOnly();
-      return;
-    }
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
       return;
     }
+    _claimControl();
     if (_isLive) {
       final next = !controller.value.isPlaying;
       if (next) {
@@ -2234,7 +2385,7 @@ class _TogetherPageState extends State<TogetherPage>
     final position = controller.value.position.inMilliseconds / 1000.0;
     if (controller.value.isPlaying) {
       controller.pause().catchError((_) {});
-      _reportHostState('pause', position, rate: _hostRate);
+      _reportHostState('pause', position, rate: _hostRate, op: 'pause');
       if (mounted) setState(() {});
       return;
     }
@@ -2247,7 +2398,7 @@ class _TogetherPageState extends State<TogetherPage>
     final start = ended ? 0.0 : position;
     controller.play().catchError((_) {});
     // 从片尾重播会把 position 拉回 0：这是主动重播，不能被当成读数回退。
-    _reportHostState('play', start, rate: _hostRate, fresh: ended);
+    _reportHostState('play', start, rate: _hostRate, fresh: ended, op: 'play');
     if (mounted) setState(() {});
   }
 
@@ -2255,13 +2406,9 @@ class _TogetherPageState extends State<TogetherPage>
     if (_isLive) {
       return;
     }
-    if (!_isHost) {
-      _hostOnly();
-      _bounceToAuthority();
-      return;
-    }
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
+    _claimControl();
     var target = seconds;
     if (!target.isFinite || target < 0) target = 0;
     final duration = controller.value.duration.inMilliseconds / 1000.0;
@@ -2282,6 +2429,7 @@ class _TogetherPageState extends State<TogetherPage>
         rate: _hostRate,
         fresh: true,
         coalesce: true,
+        op: 'seek',
       );
     }
     if (mounted) _position.value = target;
@@ -2291,22 +2439,14 @@ class _TogetherPageState extends State<TogetherPage>
     if (_isLive) {
       return;
     }
-    if (!_isHost) {
-      _hostOnly();
-      _bounceToAuthority();
-      return;
-    }
     _seekTo(_displayPosition() + seconds);
   }
 
   void _setHostRate(double rate) {
-    if (!_isHost) {
-      _hostOnly();
-      return;
-    }
     if (_isLive) {
       return;
     }
+    _claimControl();
     final value = rate.clamp(.5, 2.0).toDouble();
     _hostRate = value;
     final controller = _controller;
@@ -2321,7 +2461,12 @@ class _TogetherPageState extends State<TogetherPage>
       controller.setRate(value).catchError((_) {});
     }
     // 倍速也是房主操作：立即广播，成员同帧跟随。
-    _reportHostState(playing ? 'play' : 'pause', position, rate: value);
+    _reportHostState(
+      playing ? 'play' : 'pause',
+      position,
+      rate: value,
+      op: 'rate',
+    );
     if (mounted) setState(() {});
   }
 
@@ -2347,6 +2492,7 @@ class _TogetherPageState extends State<TogetherPage>
   }
 
   String get _currentLineLabel {
+    if (_roomLine.isNotEmpty) return _roomLine;
     for (final line in _lines) {
       if (line.id == _videoLine) {
         final name = line.displayName.trim();
@@ -2357,10 +2503,6 @@ class _TogetherPageState extends State<TogetherPage>
   }
 
   Future<void> _showMediaSheet() async {
-    if (!_isHost) {
-      _hostOnly();
-      return;
-    }
     final qualities = _playInfo?.quality ?? const <QualityItem>[];
     // TOGETHER_ALL_LINES（2026-11-14）：不再剔除 needsParse 线路。
     // 幻想4K / 幻想自建 都属于「需要解析」，之前一起看把它们全过滤了，
@@ -2392,97 +2534,68 @@ class _TogetherPageState extends State<TogetherPage>
     }
   }
 
+  /// 房间内换片 / 换源：和建房用同一个三步选择器（搜片 → 选源 → 选线路）。
+  ///
+  /// 区别只在最后一步：建房是开新房，这里是广播 [sendSwitchTitle] 让全房间
+  /// 切过去；集号尽量保持（对方有这集就跳，没有就从第 1 集）。
   Future<void> _pickDrama() async {
-    if (!_isHost) {
-      _hostOnly();
-      return;
-    }
-    final card = await showTogetherVideoPicker(context);
-    if (!mounted || card == null) return;
-    // 选片后必须先选集：服务端 room_state 只负责同步，不能替用户默认第 1 集。
-    final detail = await _fetchDetailForPicker(card.id);
-    if (!mounted) return;
-    final episodes = _episodesForPicker(detail, card);
-    final episode = await _pickEpisodeFor(card, episodes);
-    if (!mounted) return;
-    if (!_online) {
-      return;
-    }
-    // 换剧视为「继续播放」：切换前暂停才保持暂停。
+    final draft = await showTogetherRoomPicker(
+      context,
+      currentVodId: _videoId,
+      currentSourceKey: _remote?.sourceKey ?? '',
+    );
+    if (!mounted || draft == null) return;
+    if (!_online) return;
+    _applyRoomTitleSwitch(draft);
+  }
+
+  void _applyRoomTitleSwitch(TogetherRoomDraft draft) {
     final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
-    // 没有详情时留空，交给 _loadVideo 重新拉详情后再定线路；
-    // 写死 'l1' 会让切剧后线路对不上（服务端没有这个 id）。
-    final lineId = detail != null && detail.lines.isNotEmpty
-        ? detail.lines.first.id
-        : '';
-    // 房主本地立即切到新片，再广播 room_state；其它成员收到后重新拉流。
-    // 最后一帧由 _loadVideo 抓取，切剧不黑屏。
+    // 对方有当前这集就接着看，没有就从第 1 集（跳错集比跳第 1 集更糟）。
+    final targetEp = draft.episodes > 0
+        ? fxFallbackEp(wantEp: _ep, availableEps: draft.episodes)
+        : 1;
+    _claimControl();
     setState(() {
-      _videoId = card.id;
-      _ep = episode;
-      _videoLine = lineId;
-      _videoTitle = card.title;
-      _videoCover = togetherCoverUrl(card.cover);
-      _episodes = episodes;
-      _lines = detail?.lines ?? const <LineInfo>[];
-      _detailVideoId = detail == null ? '' : card.id;
+      _videoId = draft.vodId;
+      _ep = targetEp;
+      _videoLine = draft.pickedLine?.id ?? draft.line;
+      _videoTitle = draft.vodName;
+      _videoCover = togetherCoverUrl(draft.cover);
+      _episodes = const <Episode>[];
+      _lines = const <LineInfo>[];
+      _detailVideoId = '';
       _qualityKey = null;
       _playInfo = null;
       _videoError = '';
       _resumePos = 0;
       _resumePlaying = playing;
       _endedSent = false;
+      _roomLine = draft.line;
+      _pendingLineName = '';
     });
     _loadedKey = '';
     _loadingKey = '';
-    _reportHostState(
-      playing ? 'play' : 'pause',
-      0,
-      videoId: card.id,
-      ep: episode,
-      line: lineId,
-      rate: _hostRate,
-      fresh: true,
-      mark: false,
+    _client.sendSwitchTitle(
+      videoId: draft.vodId,
+      vodName: draft.vodName,
+      vodYear: draft.vodYear,
+      sourceKey: draft.sourceKey,
+      sourceName: draft.sourceName,
+      sourceKind: draft.sourceKind,
+      sourceApi: draft.sourceApi,
+      lines: draft.lines,
+      line: draft.line,
+      ep: targetEp,
+      position: 0,
+      playing: playing,
     );
+    _markRemote(playing ? 'play' : 'pause', 0);
     _syncVideo();
-  }
-
-  /// 选片弹层用：拿详情补真实集数；失败时退回卡片自带的集数。
-  Future<VideoDetail?> _fetchDetailForPicker(String videoId) async {
-    try {
-      return await CmsBridge.detail(videoId);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  List<Episode> _episodesForPicker(VideoDetail? detail, VideoCard card) {
-    final real = detail?.allEpisodes ?? const <Episode>[];
-    if (real.isNotEmpty) return real;
-    final detailCount = detail?.episodes ?? 0;
-    final count = detailCount > 0 ? detailCount : card.episodes;
-    if (count <= 0) return const <Episode>[];
-    return <Episode>[for (var i = 1; i <= count; i++) Episode(i, '', 0)];
-  }
-
-  /// 选完片先弹一次选集面板；直接关闭 / 下滑取消时默认第 1 集。
-  Future<int> _pickEpisodeFor(VideoCard card, List<Episode> episodes) async {
-    final picked = await showTogetherEpisodePicker(
-      context,
-      episodes: episodes,
-      current: 1,
-      title: card.title,
-    );
-    return picked ?? 1;
   }
 
   Future<void> _pickEpisode() async {
     if (_isLive) {
-      return;
-    }
-    if (!_isHost) {
-      _hostOnly();
       return;
     }
     if (_episodes.isEmpty) {
@@ -2495,6 +2608,7 @@ class _TogetherPageState extends State<TogetherPage>
       title: _videoTitle,
     );
     if (!mounted || episode == null || episode == _ep) return;
+    _claimControl();
     if (!_online) {
       return;
     }
@@ -2511,15 +2625,12 @@ class _TogetherPageState extends State<TogetherPage>
       rate: _hostRate,
       fresh: true,
       mark: false,
+      op: 'episode',
     );
   }
 
   void _nextEpisode() {
     if (_isLive) {
-      return;
-    }
-    if (!_isHost) {
-      _hostOnly();
       return;
     }
     if (_episodes.isEmpty) {
@@ -2540,6 +2651,7 @@ class _TogetherPageState extends State<TogetherPage>
     if (!_online) {
       return;
     }
+    _claimControl();
     final playing = _controller?.value.isPlaying ?? (_remote?.playing ?? true);
     _resumePos = 0;
     _resumePlaying = playing;
@@ -2551,16 +2663,13 @@ class _TogetherPageState extends State<TogetherPage>
       rate: _hostRate,
       fresh: true,
       mark: false,
+      op: 'episode',
     );
   }
 
   Future<void> _pickQuality() async {
     if (_isLive) {
       await _pickLiveLine();
-      return;
-    }
-    if (!_isHost) {
-      _hostOnly();
       return;
     }
     final items = _playInfo?.quality ?? const <QualityItem>[];
@@ -2578,10 +2687,6 @@ class _TogetherPageState extends State<TogetherPage>
 
   /// 直播线路切换：房主广播 lineId，成员收到 changedLine 后重新拉流。
   Future<void> _pickLiveLine() async {
-    if (!_isHost) {
-      _hostOnly();
-      return;
-    }
     final channel = _liveChannel;
     final lines = channel?.lines ?? const <LiveLine>[];
     if (lines.length < 2) {
@@ -2606,14 +2711,11 @@ class _TogetherPageState extends State<TogetherPage>
   }
 
   Future<void> _setLiveLine(String lineId) async {
-    if (!_isHost) {
-      _hostOnly();
-      return;
-    }
     if (lineId == _liveLineId) return;
     if (!_online) {
       return;
     }
+    _claimControl();
     setState(() {
       _liveLineId = lineId;
       _videoLine = lineId;
@@ -2635,10 +2737,6 @@ class _TogetherPageState extends State<TogetherPage>
       if (key != null) await _setLiveLine(key);
       return;
     }
-    if (!_isHost) {
-      _hostOnly();
-      return;
-    }
     if (key == _qualityKey) return;
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
@@ -2657,8 +2755,17 @@ class _TogetherPageState extends State<TogetherPage>
       await _pickLiveLine();
       return;
     }
-    if (!_isHost) {
-      _hostOnly();
+    // 房间绑定的是「建房时那个源」的线路列表：谁都能在这里换，换完全员同步。
+    final roomLines = _remote?.lines ?? const <TogetherLine>[];
+    if (roomLines.length >= 2) {
+      final picked = await showTogetherRoomLineSheet(
+        context,
+        lines: roomLines,
+        current: _roomLine,
+        locals: _localLineNames,
+      );
+      if (!mounted || picked == null || picked == _roomLine) return;
+      await _switchRoomLine(picked);
       return;
     }
     if (_lines.isEmpty && _videoId.isNotEmpty) {
@@ -2706,14 +2813,54 @@ class _TogetherPageState extends State<TogetherPage>
       rate: _hostRate,
       fresh: true,
       mark: false,
+      op: 'switchLine',
     );
   }
 
-  Future<void> _pickSpeed() async {
-    if (!_isHost) {
-      _hostOnly();
-      return;
+  /// 换到房间线路列表里的某一条：**保持当前进度**，全员同步。
+  ///
+  /// 本地有这条线路 → 立刻切流并 seek 回原位置；本地没有（没装这个源 /
+  /// 这个源的线路结构不一样）→ 提示但不打断，也不把人踢出房间。
+  Future<void> _switchRoomLine(String name) async {
+    if (!_online) return;
+    _claimControl();
+    final controller = _controller;
+    final ready = controller != null && controller.value.isInitialized;
+    final position = ready
+        ? controller.value.position.inMilliseconds / 1000.0
+        : _displayPosition();
+    final playing = ready ? controller.value.isPlaying : (_remote?.playing ?? false);
+    final localId = _localLineIdFor(name);
+    _roomLine = name;
+    if (localId == null) {
+      _pendingLineName = name;
+      if (mounted) {
+        togetherToast(context, '你这边没有「$name」这条线路，先跟着进度走');
+      }
+    } else {
+      _pendingLineName = '';
+      _resumePos = position;
+      _resumePlaying = playing;
+      setState(() {
+        _videoLine = localId;
+        _qualityKey = null;
+        _playInfo = null;
+      });
+      _loadedKey = '';
+      _loadingKey = '';
+      _syncVideo();
     }
+    _client.sendSwitchLine(
+      name,
+      position: position,
+      playing: playing,
+      ep: _ep,
+    );
+    _markRemote(playing ? 'play' : 'pause', position);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _pickSpeed() async {
     final picked = await showTogetherSpeedSheet(context, current: _hostRate);
     if (!mounted || picked == null) return;
     _setHostRate(picked);
@@ -3159,6 +3306,34 @@ class _TogetherPageState extends State<TogetherPage>
     await _ensureDetail(videoId);
     if (!mounted || seq != _videoSeq) return;
 
+    // 房间指定的线路（换线路 / 新成员进房时只知道名字）：详情拿到了才映射得到 id。
+    if (_pendingLineName.isNotEmpty) {
+      final mapped = _localLineIdFor(_pendingLineName);
+      if (mapped != null) {
+        line = mapped;
+        _videoLine = mapped;
+        _pendingLineName = '';
+      }
+    }
+    // 房间还没绑定线路列表（详情页「一起看」入口：详情是后到的）：补一次绑定，
+    // 成员的换线路列表才有内容。
+    final boundLines = _remote?.lines ?? const <TogetherLine>[];
+    if (boundLines.isEmpty && _lines.isNotEmpty && _online) {
+      final boundLineId = line.isNotEmpty ? line : _lines.first.id;
+      if (_videoLine.isEmpty) _videoLine = boundLineId;
+      _client.sendState(
+        _remote?.playing == true ? 'play' : 'pause',
+        _desiredStartSeconds(localResumePos),
+        line: boundLineId,
+        lineName: _labelOfLineId(boundLineId),
+        lines: <TogetherLine>[
+          for (final info in _lines)
+            togetherLineOfInfo(info, episodes: _episodes.length),
+        ],
+        quiet: true,
+      );
+    }
+
     var playable = _lines.toList();
     if (playable.isEmpty) {
       // 详情拿不到时仍尝试一次默认线路，避免房间完全不可看。
@@ -3579,26 +3754,23 @@ class _TogetherPageState extends State<TogetherPage>
 
   /* ------------------------------------------------------------ 入口 UI */
 
+  /// 建房：三步选择器（搜片 → 选源 → 选线路），房间绑定「源 + 片 + 线路列表」。
   Future<void> _pickAndCreate() async {
-    final card = await showTogetherVideoPicker(context);
-    if (!mounted || card == null) return;
-    // 选片后先选集，再建房；直接关闭选集面板时默认第 1 集。
-    final detail = await _fetchDetailForPicker(card.id);
-    if (!mounted) return;
-    final episodes = _episodesForPicker(detail, card);
-    final episode = await _pickEpisodeFor(card, episodes);
-    if (!mounted) return;
-    _videoTitle = card.title;
-    _videoCover = togetherCoverUrl(card.cover);
-    _episodes = episodes;
-    _lines = detail?.lines ?? const <LineInfo>[];
-    _videoLine = detail != null && detail.lines.isNotEmpty
-        ? detail.lines.first.id
-        : '';
-    // 主动选片建房视为「开始观看」，从第 1 集（或用户选的那集）自动播放。
+    final draft = await showTogetherRoomPicker(context);
+    if (!mounted || draft == null) return;
+    _videoTitle = draft.vodName;
+    _videoCover = togetherCoverUrl(draft.cover);
+    _episodes = const <Episode>[];
+    _lines = <LineInfo>[
+      for (final line in draft.lines)
+        LineInfo(line.id.isEmpty ? line.name : line.id, line.name, 'hls', 0),
+    ];
+    // 选完就开房：从第 1 集开始播（用户要开头的顺序看剧，不继承旧进度）。
     _resumePos = 0;
     _resumePlaying = true;
-    _createRoom(card.id, episode, detail: detail);
+    _roomLine = draft.line;
+    _videoLine = draft.pickedLine?.id ?? draft.line;
+    _createRoom(draft.vodId, 1, draft: draft);
   }
 
   void _joinByInput() {
@@ -3698,7 +3870,6 @@ class _TogetherPageState extends State<TogetherPage>
       onRate: _setHostRate,
       onQuality: (key) => unawaited(_setQuality(key)),
       onRetry: _retryVideo,
-      onHostOnly: _hostOnly,
       onSendChat: _sendChat,
     );
   }
@@ -3743,6 +3914,7 @@ class _TogetherPageState extends State<TogetherPage>
       onHostOnly: _hostOnly,
       onSyncToHost: _isHost ? null : () => unawaited(_syncToHostNow()),
       syncOffsetSeconds: _syncOffsetSeconds(),
+      opText: _lastOp?.text ?? '',
       keyboardVisible: keyboard,
     );
   }
@@ -3775,7 +3947,7 @@ class _TogetherPageState extends State<TogetherPage>
                     ),
                     SizedBox(height: 2),
                     Text(
-                      '和好友同步追剧，进度由房主统一控制',
+                      '和好友同步追剧，谁都能操作，所有人一起变',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 10.5, color: Fx.sub),
@@ -3930,7 +4102,7 @@ class _TogetherPageState extends State<TogetherPage>
                       ),
                       const SizedBox(height: 4),
                       const Text(
-                        '创建房间并选一部片，把邀请发给好友，\n对方输入房间号即可同步追剧',
+                        '搜片名 → 挑一个源 → 选一条线路，就能开房；\n好友输房间号进来，谁都能换源 / 换线路 / 拖动',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           fontSize: 10.5,
@@ -3942,8 +4114,8 @@ class _TogetherPageState extends State<TogetherPage>
                       SizedBox(
                         width: double.infinity,
                         child: GradButton(
-                          text: '创建一起看房间',
-                          icon: Icons.add_rounded,
+                          text: '搜片开房',
+                          icon: Icons.search_rounded,
                           height: 46,
                           onTap: _pickAndCreate,
                         ),

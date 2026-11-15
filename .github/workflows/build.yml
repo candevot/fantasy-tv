@@ -216,6 +216,19 @@ jobs:
       # （旧机 47.96.0.112 已下线、尾斜杠 / https 不能拼错）。
       - name: together endpoint regressions
         run: flutter test test/together_endpoint_test.dart
+      # TOGETHER_OPEN_CONTROL（2026-11-15）：一起看去掉房主权限、房间绑定
+      # 「源 + 片 + 线路列表」的协议回归。
+      #
+      # 钉住的事：room_state 里的 source/lines/leaderId/by 都得解析出来；
+      # 房间线路按名字认（大小写无关）；操作广播能拼成「小明 换了线路 → 幻想4K」；
+      # 老服务端（没有 lines / leaderId）仍然能进房间，不因为缺字段就拒人。
+      - name: together open-control regressions
+        run: |
+          # 纯模型层：room_state 的源 / 片 / 线路 / leaderId / op 解析。
+          flutter test test/together_open_control_test.dart
+          # 客户端报文层：起一个本地假 ws 服务器，验证建房带「源 + 片 + 线路」、
+          # switchLine 带当前进度、switchTitle 带新线路列表、心跳带 quiet。
+          flutter test test/together_client_ws_test.dart
       - name: Build release APKs (split per ABI)
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"

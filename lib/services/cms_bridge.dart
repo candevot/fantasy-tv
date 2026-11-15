@@ -542,7 +542,15 @@ class CmsBridge {
   ///
   /// 所有源都空、而主站采集库是**报错**（不是空结果）时，最后补一个错误：
   /// 页面就能给出「重新搜索」，而不是含糊的「没有找到」。
-  static Stream<SearchBatch> searchStream(String keyword, int page) {
+  static Stream<SearchBatch> searchStream(
+    String keyword,
+    int page, {
+    /// 同一部片在不同源的版本**不合并**（一起看建房要按源分别列出）。
+    ///
+    /// 默认 false 保持原来的去重口径（片名+片源）；置 true 时只按卡片 id
+    /// 去重，咕噜一条、剧圈一条都留在结果里。
+    bool keepDuplicates = false,
+  }) {
     _boot();
     final q = keyword.trim();
     if (q.isEmpty) {
@@ -557,7 +565,7 @@ class CmsBridge {
       );
     }
     final hub = SourceHub.instance;
-    final dedupe = _Dedupe();
+    final dedupe = _Dedupe(byId: keepDuplicates);
     final ctrl = StreamController<SearchBatch>();
     var done = 0;
     var total = 0;
@@ -1270,9 +1278,15 @@ class CmsChannel {
 /// 同名不同年（翻拍版）仍然各留一条。渐进检索要把这个账本一路带下去，
 /// 每批都过一遍，才能保证「外部源结果」里不会冒出上面已经有的片子。
 class _Dedupe {
+  _Dedupe({this.byId = false});
+
   final Map<String, Set<int>> _seen = <String, Set<int>>{};
 
+  /// 按卡片 id 去重（跨源不合并）：一起看建房要列出「同一部片在各个源」。
+  final bool byId;
+
   bool fresh(VideoCard card) {
+    if (byId) return _seen.putIfAbsent('id:${card.id}', () => <int>{}).add(0);
     // SOURCE_SPLIT（2026-11-15）：按「片名+片源」分桶 —— 幻想那条和
     // 官采切片那条是两部「记录」，都要留在列表里。
     final key = '${SourceHub.normTitle(card.title)}|${card.fromSource}';

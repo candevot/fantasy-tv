@@ -151,11 +151,18 @@ class FxLineCooldown {
   }
 
   /// `LineInfo` 列表按冷却期重排（详情页默认线路 / 播放页自动轮都用它）。
-  static List<LineInfo> sortLines(String videoId, List<LineInfo> lines) =>
+  static List<LineInfo> sortLines(
+    String videoId,
+    List<LineInfo> lines, {
+    /// 注入「现在」：不传就用真实时间。冷却期是按时间算的，
+    /// 缺了它这件事在测试里跨过 10 分钟就会自己变红（TIME_FLAKE 2026-11-15）。
+    DateTime? now,
+  }) =>
       sortCoolingLast<LineInfo>(
         videoId,
         lines,
         (line) => line.displayName,
+        now: now,
       );
 
   /// 给外部排序（`SearchRank`）用的惩罚位：0 = 正常，1 = 最近失败过。

@@ -12,7 +12,13 @@ import 'together_ui.dart';
 
 /* ========================================================================== */
 /*  一起看 · 协议客户端                                                        */
-/*  API.md §4：服务器权威同步 room_state{rev, at}，房主独占 state/seek/episode  */
+/*                                                                            */
+/*  TOGETHER_OPEN_CONTROL（2026-11-15）：房间没有房主权限了。play / pause /    */
+/*  seek / next / prev / rate / switchLine / switchTitle / switchSource 谁发都  */
+/*  算数，服务端只广播「最后一条 + 是谁操作的」。房间绑定「源 + 片 + 线路」。  */
+/*                                                                            */
+/*  协议里的 leaderId 不是权限，只是「谁在推进度心跳」：最后一条控制指令的      */
+/*  发送者。别人一操作，主导权就换过去，不会有人被挡住。                       */
 /* ========================================================================== */
 
 int togetherInt(dynamic v, [int fallback = 0]) {
@@ -30,6 +36,129 @@ double togetherDouble(dynamic v, [double fallback = 0]) {
 
 Map<String, dynamic> togetherMap(dynamic v) =>
     v is Map ? Map<String, dynamic>.from(v) : const <String, dynamic>{};
+
+/// 房间绑定的线路（建房时从「源」里带进来的线路列表）。
+///
+/// 服务端只认 [name]：同一部片在咕噜源上有「金牌极速 / 旋风VIP / 电影天堂」
+/// 三条，房间就存这三条，任何成员换线路都在这个列表里换。
+class TogetherLine {
+  const TogetherLine({
+    required this.name,
+    this.id = '',
+    this.episodes = 0,
+    this.quality = '',
+    this.status = '',
+  });
+
+  final String name;
+  final String id;
+  final int episodes;
+  final String quality;
+  final String status;
+
+  bool get isEmpty => name.trim().isEmpty;
+
+  /// 画质提示：线路自带的 `quality` 优先，没有就从线路名里认
+  /// （「幻想4K」「1080P」这类命名在源里很常见）。
+  String get qualityLabel {
+    final own = quality.trim();
+    if (own.isNotEmpty) return own;
+    final text = name.toUpperCase().replaceAll(' ', '');
+    if (text.contains('4K') || text.contains('2160')) return '4K';
+    if (text.contains('2K') || text.contains('1440')) return '2K';
+    if (text.contains('1080') || text.contains('蓝光') || text.contains('超清')) {
+      return '1080P';
+    }
+    if (text.contains('720') || text.contains('高清')) return '720P';
+    return '';
+  }
+
+  /// 列表里的一行摘要：「金牌极速 · 1080P · 24 集」。
+  String get subtitle {
+    final parts = <String>[
+      if (qualityLabel.isNotEmpty) qualityLabel,
+      if (episodes > 0) '$episodes 集',
+    ];
+    return parts.join(' · ');
+  }
+
+  factory TogetherLine.fromJson(Map<String, dynamic> j) {
+    final name = '${j['name'] ?? j['lineName'] ?? j['label'] ?? j['id'] ?? ''}'
+        .trim();
+    final id = '${j['id'] ?? j['line'] ?? j['lineId'] ?? ''}'.trim();
+    return TogetherLine(
+      name: name.isEmpty ? id : name,
+      id: id.isEmpty ? name : id,
+      episodes: togetherInt(j['episodes'] ?? j['count'] ?? j['ep']),
+      quality: '${j['quality'] ?? j['resolution'] ?? ''}'.trim(),
+      status: '${j['status'] ?? ''}'.trim(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'name': name,
+        // id 空的时候用名字当 id：服务端按名字找线路，客户端按 id 起播，
+        // 两者一致才不会出现「房间换了线、本地还播旧线」。
+        'id': id.isEmpty ? name : id,
+        'episodes': episodes,
+        if (quality.isNotEmpty) 'quality': quality,
+      };
+
+  static List<TogetherLine> listFrom(dynamic raw) {
+    if (raw is! List) return const <TogetherLine>[];
+    final out = <TogetherLine>[];
+    for (final item in raw) {
+      final line = item is Map
+          ? TogetherLine.fromJson(togetherMap(item))
+          : TogetherLine(name: '$item'.trim(), id: '$item'.trim());
+      if (!line.isEmpty) out.add(line);
+    }
+    return out;
+  }
+}
+
+/// 「谁做了什么」：服务端 `op` 广播 / `room_state.by`。
+class TogetherOp {
+  const TogetherOp({
+    required this.id,
+    required this.name,
+    required this.avatar,
+    required this.action,
+    required this.label,
+    this.from = '',
+    this.to = '',
+  });
+
+  final String id;
+  final String name;
+  final String avatar;
+
+  /// `play` / `pause` / `seek` / `rate` / `episode` / `switchLine` /
+  /// `switchTitle` / `switchSource`。
+  final String action;
+
+  /// 人话文案：「换了线路 → 幻想4K」。
+  final String label;
+  final String from;
+  final String to;
+
+  /// 聊天区 / 顶部提示里显示的整句。「小明 换了线路 → 幻想4K」。
+  String get text => label.isEmpty ? '$name 操作了播放' : '$name $label';
+
+  factory TogetherOp.fromJson(Map<String, dynamic> j) {
+    final who = togetherMap(j['by']);
+    return TogetherOp(
+      id: '${who['id'] ?? ''}',
+      name: '${who['name'] ?? j['name'] ?? '有人'}',
+      avatar: '${who['avatar'] ?? ''}',
+      action: '${j['op'] ?? j['action'] ?? ''}',
+      label: '${j['label'] ?? ''}',
+      from: '${j['from'] ?? ''}',
+      to: '${j['to'] ?? ''}',
+    );
+  }
+}
+
 
 /// 服务器权威房间状态（`room_state`）。
 class TogetherRoomState {
@@ -49,6 +178,17 @@ class TogetherRoomState {
     required this.rate,
     this.kind = '',
     this.liveChannel,
+    this.leaderId = '',
+    this.leaderName = '',
+    this.by,
+    this.sourceKey = '',
+    this.sourceName = '',
+    this.sourceKind = '',
+    this.sourceApi = '',
+    this.vodName = '',
+    this.vodYear = 0,
+    this.lines = const <TogetherLine>[],
+    this.lineName = '',
   });
 
   final String code;
@@ -77,7 +217,34 @@ class TogetherRoomState {
   /// 直播房解析出的频道（含线路）；普通房为 null。
   final LiveChannel? liveChannel;
 
+  /// 当前主导者（最后一条控制指令的发送者）。**不是权限**：
+  /// 任何人发指令都会顶掉它；只有他的进度心跳会被服务端当成权威。
+  final String leaderId;
+  final String leaderName;
+
+  /// 最近一次操作（谁 + 做了什么），给 UI 显示「小明 换了线路 → 幻想4K」。
+  final TogetherOp? by;
+
+  /// 房间绑定的源：`hx` / `咕噜` / `剧圈` …
+  final String sourceKey;
+  final String sourceName;
+  final String sourceKind;
+  final String sourceApi;
+
+  /// 房间绑定的片名 / 年份。
+  final String vodName;
+  final int vodYear;
+
+  /// 房间绑定的线路列表（建房时那个源的线路，任何人都在这里面换）。
+  final List<TogetherLine> lines;
+
+  /// 当前线路的展示名。
+  final String lineName;
+
   bool get isLive => kind == 'live' || liveChannel != null;
+
+  /// 有没有绑定线路列表（老服务端 / 没传 lines 的房间没有）。
+  bool get hasLines => lines.isNotEmpty;
 
   /// 旧字段别名，保留给仍读 at / rev / line 的地方。
   int get at => serverTime;
@@ -116,6 +283,17 @@ class TogetherRoomState {
       rate: togetherClampRate(togetherDouble(j['rate'], 1)),
       kind: rawKind.isEmpty ? (live != null ? 'live' : '') : rawKind,
       liveChannel: live,
+      leaderId: '${j['leaderId'] ?? ''}'.trim(),
+      leaderName: '${j['leader'] ?? ''}'.trim(),
+      by: j['by'] is Map ? TogetherOp.fromJson(togetherMap(j['by'])) : null,
+      sourceKey: '${j['sourceKey'] ?? ''}'.trim(),
+      sourceName: '${j['sourceName'] ?? ''}'.trim(),
+      sourceKind: '${j['sourceKind'] ?? ''}'.trim(),
+      sourceApi: '${j['sourceApi'] ?? ''}'.trim(),
+      vodName: '${j['vodName'] ?? ''}'.trim(),
+      vodYear: togetherInt(j['vodYear']),
+      lines: TogetherLine.listFrom(j['lines']),
+      lineName: '${j['lineName'] ?? ''}'.trim(),
     );
   }
 
@@ -143,7 +321,29 @@ class TogetherRoomState {
       rate: rate ?? this.rate,
       kind: kind,
       liveChannel: liveChannel,
+      leaderId: leaderId,
+      leaderName: leaderName,
+      by: by,
+      sourceKey: sourceKey,
+      sourceName: sourceName,
+      sourceKind: sourceKind,
+      sourceApi: sourceApi,
+      vodName: vodName,
+      vodYear: vodYear,
+      lines: lines,
+      lineName: lineName,
     );
+  }
+
+  /// 这条线路名在本房间里是否合法（房间绑定了线路列表时按列表校验）。
+  bool allowsLine(String name) {
+    final key = name.trim();
+    if (key.isEmpty) return false;
+    if (lines.isEmpty) return true;
+    for (final line in lines) {
+      if (line.name == key || line.id == key) return true;
+    }
+    return false;
   }
 }
 
@@ -178,6 +378,15 @@ class TogetherRoomInfo {
     required this.members,
     this.kind = '',
     this.liveChannel,
+    this.leaderId = '',
+    this.sourceKey = '',
+    this.sourceName = '',
+    this.sourceKind = '',
+    this.sourceApi = '',
+    this.vodName = '',
+    this.vodYear = 0,
+    this.lines = const <TogetherLine>[],
+    this.lineName = '',
   });
 
   final String code;
@@ -191,6 +400,17 @@ class TogetherRoomInfo {
   /// 直播房类型与频道数据。
   final String kind;
   final LiveChannel? liveChannel;
+
+  /// 建房时绑定的「源 + 片 + 线路列表」。
+  final String leaderId;
+  final String sourceKey;
+  final String sourceName;
+  final String sourceKind;
+  final String sourceApi;
+  final String vodName;
+  final int vodYear;
+  final List<TogetherLine> lines;
+  final String lineName;
 
   factory TogetherRoomInfo.fromJson(Map<String, dynamic> j) {
     final title = '${j['title'] ?? '一起看'}';
@@ -212,6 +432,15 @@ class TogetherRoomInfo {
           ? (live != null ? 'live' : '')
           : '${j['kind']}'.trim(),
       liveChannel: live,
+      leaderId: '${j['leaderId'] ?? ''}'.trim(),
+      sourceKey: '${j['sourceKey'] ?? ''}'.trim(),
+      sourceName: '${j['sourceName'] ?? ''}'.trim(),
+      sourceKind: '${j['sourceKind'] ?? ''}'.trim(),
+      sourceApi: '${j['sourceApi'] ?? ''}'.trim(),
+      vodName: '${j['vodName'] ?? ''}'.trim(),
+      vodYear: togetherInt(j['vodYear']),
+      lines: TogetherLine.listFrom(j['lines']),
+      lineName: '${j['lineName'] ?? ''}'.trim(),
     );
   }
 }
@@ -243,6 +472,7 @@ class TogetherClient {
     required this.onClosed,
     this.onAuthFailed,
     this.onUnreachable,
+    this.onOp,
   });
 
   final void Function(TogetherMember me) onOpen;
@@ -257,6 +487,11 @@ class TogetherClient {
   /// 重连前探测确认 token 已过期（HTTP 401）时回调；回调后不再重连。
   final void Function()? onAuthFailed;
 
+  /// 房间里有人操作播放 / 线路 / 片源时回调：「小明 换了线路 → 幻想4K」。
+  ///
+  /// 服务端已经广播给所有人（包括发起者），UI 只负责显示，不做权限判断。
+  final void Function(TogetherOp op)? onOp;
+
   /// 连续失败 [giveUpAfterFailures] 次后回调（参数是当前 ws 地址）。
   ///
   /// 页面拿它显示「连不上 <地址>」+ 一个「重试」按钮，而不是让
@@ -269,7 +504,10 @@ class TogetherClient {
   /// 不能等 9 秒心跳；但拖拽过程中 seek 会连续触发，逐条发给服务端等于
   /// 自己把房间消息刷爆。所以这里只对「可合并」的推送开一个 200ms 窗口：
   /// 窗口内只保留最后一次 payload，到点发一次。
-  static const Duration hostPushWindow = Duration(milliseconds: 200);
+  /// TOGETHER_OPEN_CONTROL（2026-11-15）：合并窗口按用户的验收口径取 300ms
+  /// —— 拖动进度时会连续触发 seek，300ms 内只发最后一次，服务端不被打爆，
+  /// 别人也不会被拖着一下一下硬跳。
+  static const Duration hostPushWindow = Duration(milliseconds: 300);
 
   static const Duration _pingPeriod = Duration(seconds: 10);
   static const Duration _clockRefreshPeriod = Duration(seconds: 30);
@@ -335,7 +573,16 @@ class TogetherClient {
   String _hostVideoId = '';
   int _hostEp = 1;
   String _hostLine = 'l1';
+  String _hostLineName = '';
   String _hostTitle = '';
+  /* 房间绑定的「源 + 片 + 线路列表」：重连重建房间时原样带上。 */
+  String _hostSourceKey = '';
+  String _hostSourceName = '';
+  String _hostSourceKind = '';
+  String _hostSourceApi = '';
+  String _hostVodName = '';
+  int _hostVodYear = 0;
+  List<TogetherLine> _hostLines = const <TogetherLine>[];
   String _hostKind = '';
   String _hostChannelId = '';
   Map<String, dynamic> _hostLive = const <String, dynamic>{};
@@ -658,14 +905,30 @@ class TogetherClient {
     String kind = '',
     String channelId = '',
     Map<String, dynamic> live = const <String, dynamic>{},
+    String sourceKey = '',
+    String sourceName = '',
+    String sourceKind = '',
+    String sourceApi = '',
+    String vodName = '',
+    int vodYear = 0,
+    List<TogetherLine> lines = const <TogetherLine>[],
+    String lineName = '',
   }) {
     _hostVideoId = videoId;
     _hostEp = ep < 1 ? 1 : ep;
     _hostLine = line.isEmpty ? 'l1' : line;
+    _hostLineName = lineName;
     _hostTitle = title;
     _hostKind = kind;
     _hostChannelId = channelId;
     _hostLive = live;
+    _hostSourceKey = sourceKey;
+    _hostSourceName = sourceName;
+    _hostSourceKind = sourceKind;
+    _hostSourceApi = sourceApi;
+    _hostVodName = vodName;
+    _hostVodYear = vodYear;
+    _hostLines = lines;
     host = true;
     _hostCredential.clear();
     code = '';
@@ -693,7 +956,19 @@ class TogetherClient {
       'videoId': _hostVideoId,
       'ep': _hostEp,
       'line': _hostLine,
+      if (_hostLineName.isNotEmpty) 'lineName': _hostLineName,
       if (_hostTitle.isNotEmpty) 'title': _hostTitle,
+      // 房间绑定的「源 + 片 + 线路列表」：新成员进房间拿到的就是这一份。
+      if (_hostSourceKey.isNotEmpty) 'sourceKey': _hostSourceKey,
+      if (_hostSourceName.isNotEmpty) 'sourceName': _hostSourceName,
+      if (_hostSourceKind.isNotEmpty) 'sourceKind': _hostSourceKind,
+      if (_hostSourceApi.isNotEmpty) 'sourceApi': _hostSourceApi,
+      if (_hostVodName.isNotEmpty) 'vodName': _hostVodName,
+      if (_hostVodYear > 0) 'vodYear': _hostVodYear,
+      if (_hostLines.isNotEmpty)
+        'lines': <Map<String, dynamic>>[
+          for (final line in _hostLines) line.toJson(),
+        ],
     };
   }
 
@@ -727,6 +1002,10 @@ class TogetherClient {
     double? rate,
     bool live = false,
     bool coalesce = false,
+    bool quiet = false,
+    List<TogetherLine>? lines,
+    String? lineName,
+    String? op,
   }) {
     // 房主标记由服务器判定：即使本地标记过期，也让服务器拒绝并回发权威状态。
     if (videoId != null && videoId.isNotEmpty) _hostVideoId = videoId;
@@ -741,6 +1020,15 @@ class TogetherClient {
       if (ep != null && ep > 0) 'ep': ep,
       if (line != null && line.isNotEmpty) 'line': line,
       if (rate != null && rate > 0) 'rate': rate,
+      if (lineName != null && lineName.isNotEmpty) 'lineName': lineName,
+      // 操作类型：只用于服务端拼「谁操作的」文案（跳到 12:34 / 暂停了 / 1.5x）。
+      if (op != null && op.isNotEmpty) 'op': op,
+      // 房间线路列表：详情页进来的房间详情是后到的，拉到后补一次绑定。
+      if (lines != null && lines.isNotEmpty)
+        'lines': <Map<String, dynamic>>[for (final l in lines) l.toJson()],
+      // 纯进度心跳：服务端不接受它改「当前主导者」，也不认非主导者的心跳，
+      // 避免两个人都开着播放器时互相把权威进度拽来拽去。
+      if (quiet) 'quiet': true,
       if (live) ...<String, dynamic>{
         'kind': 'live',
         'channelId': _hostChannelId,
@@ -819,6 +1107,127 @@ class TogetherClient {
     });
   }
 
+  /* ------------------------------------------------------ 房间内多人操作 */
+
+  /// 换线路（房间内任何人可发，限建房时那个源的线路）。
+  ///
+  /// 只换线路，**不动进度**：传上当前 position，服务端原样保留并广播，
+  /// 所有人换完线路还是接着看原来的位置，不会从头开始。
+  void sendSwitchLine(
+    String name, {
+    double? position,
+    bool? playing,
+    int? ep,
+  }) {
+    final value = name.trim();
+    if (value.isEmpty) return;
+    _hostLine = value;
+    _hostLineName = value;
+    _flushHostState();
+    _send(<String, dynamic>{
+      'action': 'switchLine',
+      'name': value,
+      if (position != null) 'position': position < 0 ? 0 : position,
+      if (playing != null) 'playing': playing,
+      if (ep != null && ep > 0) 'ep': ep,
+    });
+  }
+
+  /// 换片 / 换源（房间内，三步选择器选完）：新的源、片、线路列表一起下发。
+  void sendSwitchTitle({
+    required String videoId,
+    required String vodName,
+    int vodYear = 0,
+    String sourceKey = '',
+    String sourceName = '',
+    String sourceKind = '',
+    String sourceApi = '',
+    List<TogetherLine> lines = const <TogetherLine>[],
+    String line = '',
+    int ep = 1,
+    double position = 0,
+    bool playing = true,
+  }) {
+    if (videoId.trim().isEmpty) return;
+    _hostVideoId = videoId.trim();
+    _hostVodName = vodName;
+    _hostVodYear = vodYear;
+    _hostSourceKey = sourceKey;
+    _hostSourceName = sourceName;
+    _hostSourceKind = sourceKind;
+    _hostSourceApi = sourceApi;
+    if (lines.isNotEmpty) _hostLines = lines;
+    _hostLine = line;
+    _hostEp = ep < 1 ? 1 : ep;
+    _flushHostState();
+    _send(<String, dynamic>{
+      'action': 'switchTitle',
+      'videoId': _hostVideoId,
+      'vodName': vodName,
+      if (vodYear > 0) 'vodYear': vodYear,
+      if (sourceKey.isNotEmpty) 'sourceKey': sourceKey,
+      if (sourceName.isNotEmpty) 'sourceName': sourceName,
+      if (sourceKind.isNotEmpty) 'sourceKind': sourceKind,
+      if (sourceApi.isNotEmpty) 'sourceApi': sourceApi,
+      if (lines.isNotEmpty)
+        'lines': <Map<String, dynamic>>[for (final l in lines) l.toJson()],
+      if (line.isNotEmpty) 'line': line,
+      'ep': _hostEp,
+      'position': position < 0 ? 0 : position,
+      'playing': playing,
+    });
+  }
+
+  /// 只换源（同一部片换到另一个源）：线路列表跟着换。
+  void sendSwitchSource({
+    required String sourceKey,
+    String sourceName = '',
+    String sourceKind = '',
+    String sourceApi = '',
+    List<TogetherLine> lines = const <TogetherLine>[],
+    String line = '',
+    double? position,
+  }) {
+    final key = sourceKey.trim();
+    if (key.isEmpty) return;
+    _hostSourceKey = key;
+    _hostSourceName = sourceName.isEmpty ? key : sourceName;
+    _hostSourceKind = sourceKind;
+    _hostSourceApi = sourceApi;
+    if (lines.isNotEmpty) _hostLines = lines;
+    if (line.isNotEmpty) _hostLine = line;
+    _flushHostState();
+    _send(<String, dynamic>{
+      'action': 'switchSource',
+      'sourceKey': key,
+      'sourceName': _hostSourceName,
+      if (sourceKind.isNotEmpty) 'sourceKind': sourceKind,
+      if (sourceApi.isNotEmpty) 'sourceApi': sourceApi,
+      if (lines.isNotEmpty)
+        'lines': <Map<String, dynamic>>[for (final l in lines) l.toJson()],
+      if (line.isNotEmpty) 'line': line,
+      if (position != null) 'position': position < 0 ? 0 : position,
+    });
+  }
+
+  /// 记住房间当前绑定的源 / 片 / 线路：断线重连时若房间已解散，
+  /// 用这份最新的绑定重建，而不是回到建房那一刻的旧片。
+  void adoptRoom(TogetherRoomState state) {
+    if (state.code.isEmpty || state.code != code) return;
+    if (state.videoId.isNotEmpty) _hostVideoId = state.videoId;
+    if (state.ep > 0) _hostEp = state.ep;
+    if (state.line.isNotEmpty) _hostLine = state.line;
+    if (state.lineName.isNotEmpty) _hostLineName = state.lineName;
+    if (state.sourceKey.isNotEmpty) _hostSourceKey = state.sourceKey;
+    if (state.sourceName.isNotEmpty) _hostSourceName = state.sourceName;
+    if (state.sourceKind.isNotEmpty) _hostSourceKind = state.sourceKind;
+    if (state.sourceApi.isNotEmpty) _hostSourceApi = state.sourceApi;
+    if (state.vodName.isNotEmpty) _hostVodName = state.vodName;
+    if (state.vodYear > 0) _hostVodYear = state.vodYear;
+    if (state.lines.isNotEmpty) _hostLines = state.lines;
+    if (_hostTitle.isEmpty && state.title.isNotEmpty) _hostTitle = state.title;
+  }
+
   void leave() {
     if (_connected && code.isNotEmpty) _send({'action': 'leave'});
     _dropHostState();
@@ -890,6 +1299,9 @@ class TogetherClient {
           avatar: '${user['avatar'] ?? ''}',
           text: '${msg['text'] ?? ''}',
         ));
+        break;
+      case 'op':
+        onOp?.call(TogetherOp.fromJson(msg));
         break;
       case 'system':
         onSystem('${msg['text'] ?? ''}');

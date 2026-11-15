@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../models.dart';
 import '../theme.dart';
+import 'together_client.dart';
 import 'together_ui.dart';
 
 /* ========================================================================== */
@@ -704,4 +705,138 @@ class _ChoiceChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 房间线路列表（建房时那个源的线路）：任何人点一条都能换，全员同步。
+///
+/// 返回选中的线路名；null 表示取消。[locals] 是本地已有的线路名 / id：
+/// 不在里面的线路会标「本机没有」，点它只换房间、本地不切流。
+Future<String?> showTogetherRoomLineSheet(
+  BuildContext context, {
+  required List<TogetherLine> lines,
+  required String current,
+  Set<String> locals = const <String>{},
+}) {
+  return showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    useSafeArea: true,
+    barrierColor: Colors.black.withValues(alpha: .28),
+    builder: (ctx) => SafeArea(
+      top: false,
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(ctx).height * .62,
+        ),
+        decoration: const BoxDecoration(
+          color: Color(0xFFF9FBFF),
+          borderRadius: BorderRadius.all(Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '换线路',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                color: Fx.ink,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '换线路保持当前进度；房间里的所有人都跟着换过去',
+              style: TextStyle(fontSize: 10.5, color: Fx.sub.withValues(alpha: .95)),
+            ),
+            const SizedBox(height: 10),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: lines.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 7),
+                itemBuilder: (ctx, i) {
+                  final line = lines[i];
+                  final active = line.name == current || line.id == current;
+                  final local = locals.contains(line.name) || locals.contains(line.id);
+                  return InkWell(
+                    onTap: () => Navigator.of(ctx).pop(line.name),
+                    borderRadius: BorderRadius.circular(14),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 11,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: active
+                              ? Fx.accent.withValues(alpha: .45)
+                              : const Color(0xFFEDF1F8),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              line.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                fontWeight:
+                                    active ? FontWeight.w800 : FontWeight.w600,
+                                color: Fx.ink,
+                              ),
+                            ),
+                          ),
+                          if (line.qualityLabel.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: Text(
+                                line.qualityLabel,
+                                style: TextStyle(
+                                  fontSize: 9.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: Fx.accent,
+                                ),
+                              ),
+                            ),
+                          if (line.episodes > 0)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: Text(
+                                '${line.episodes} 集',
+                                style: TextStyle(fontSize: 9.5, color: Fx.sub),
+                              ),
+                            ),
+                          if (!local)
+                            Text(
+                              '本机没有',
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                color: Fx.sub.withValues(alpha: .8),
+                              ),
+                            ),
+                          if (active)
+                            const Icon(
+                              Icons.check_circle_rounded,
+                              size: 15,
+                              color: Fx.accent,
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }

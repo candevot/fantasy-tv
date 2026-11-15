@@ -12,7 +12,11 @@
 const double togetherDriftDeadband = 0.4;
 
 /// 超过该误差直接硬 seek；区间内用微调倍速追。
-const double togetherDriftSeek = 1.5;
+///
+/// TOGETHER_OPEN_CONTROL（2026-11-15）：用户验收口径是「允许 ±2 秒误差，
+/// 不要每次都硬 seek」。硬跳阈值从 1.5s 放宽到 2.0s —— 1.5~2.0s 这个区间
+/// 交给 ±0.05x 的微调倍速慢慢追，观感上不跳，声音也不断。
+const double togetherDriftSeek = 2.0;
 
 /// 缓冲中放宽的硬跳阈值：6 秒以内一律不动，让它自己缓冲完。
 const double togetherBufferingSeek = 6.0;
