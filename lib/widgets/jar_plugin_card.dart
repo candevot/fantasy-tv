@@ -9,6 +9,7 @@ library;
 
 import 'dart:async';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../services/app_settings.dart';
@@ -106,8 +107,7 @@ class _JarPluginCardState extends State<JarPluginCard> {
     });
   }
 
-
-  /// 让用户输入本地 jar 的绝对路径（替代 file_picker）。
+  /// 手填本地 jar 的绝对路径（文件选择器不可用时的兜底）。
   Future<String?> _askPath() async {
     final ctrl = TextEditingController(
       text: '/sdcard/Download/spider.jar',
@@ -141,12 +141,28 @@ class _JarPluginCardState extends State<JarPluginCard> {
   }
 
   Future<void> _installFromFile() async {
-    // 不依赖 file_picker（它在 CI 上解析不到，analyze 会报 undefined_getter）。
-    // 改成让用户填 jar 的绝对路径，功能等价：本地文件安装依然可用。
-    final path = await _askPath();
-    if (path == null || path.trim().isEmpty || !mounted) return;
+    // 优先走系统文件选择器；某些机型没有 SAF / 选择器抛异常，再回落到
+    // 「手填绝对路径」。两条路都能装本地 jar，不会因为一个 API 不可用
+    // 就把这个入口做成死按钮。
+    String? path;
+    try {
+      final picked = await FilePicker.platform.pickFiles(
+        dialogTitle: '选择 spider.jar',
+        type: FileType.any,
+        withData: false,
+      );
+      path = picked?.files.single.path;
+    } catch (_) {
+      path = null;
+    }
+    if (!mounted) return;
+    if (path == null || path.trim().isEmpty) {
+      path = await _askPath();
+    }
+    final target = (path ?? '').trim();
+    if (target.isEmpty || !mounted) return;
     await _run(() async {
-      final status = await _jar.installFromPath(path);
+      final status = await _jar.installFromPath(target);
       _toast('jar 已安装（${status.shortMd5}）');
     });
   }
