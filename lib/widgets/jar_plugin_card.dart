@@ -146,7 +146,7 @@ class _JarPluginCardState extends State<JarPluginCard> {
     final path = await _askPath();
     if (path == null || path.trim().isEmpty || !mounted) return;
     await _run(() async {
-      final status = await _jar.installFromPath(path!);
+      final status = await _jar.installFromPath(path);
       _toast('jar 已安装（${status.shortMd5}）');
     });
   }

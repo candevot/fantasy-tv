@@ -1,4 +1,3 @@
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../services/app_settings.dart';
@@ -68,6 +67,37 @@ class _DownloadSettingsPageState extends State<DownloadSettingsPage> {
     ));
   }
 
+  /// 让用户输入缓存目录的绝对路径（替代 file_picker）。
+  Future<String?> _askDirPath() async {
+    final ctrl = TextEditingController(
+      text: '/storage/emulated/0/Download/幻想影视',
+    );
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('选择缓存目录'),
+        content: TextField(
+          controller: ctrl,
+          decoration: const InputDecoration(labelText: '目录绝对路径'),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    final v = ok == true ? ctrl.text.trim() : null;
+    ctrl.dispose();
+    return v;
+  }
+
+
   Future<void> _pickLocation() async {
     if (_switching) return;
     final action = await showModalBottomSheet<String>(
@@ -101,16 +131,8 @@ class _DownloadSettingsPageState extends State<DownloadSettingsPage> {
       return;
     }
 
-    // 调系统文件管理器选目录
-    String? picked;
-    try {
-      // file_picker 13.x 起是静态方法（没有 .platform 了）
-      picked = await FilePicker.getDirectoryPath(
-        dialogTitle: '选择缓存目录',
-      );
-    } catch (_) {
-      picked = null;
-    }
+    // 不用 file_picker（CI 解析不到该包），改成让用户填目录绝对路径。
+    final picked = await _askDirPath();
     if (picked == null || picked.trim().isEmpty || !mounted) return;
     if (!await _ensureStorageAccess(picked)) return;
     if (!mounted) return;
