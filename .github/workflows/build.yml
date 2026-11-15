@@ -118,15 +118,19 @@ jobs:
           fi
           echo 'media_kit 已完全移除，内核走 android_src/ 的 ExoPlayer 桥'
       - run: flutter pub get
-      - name: Run flutter analyze
+      - name: Run flutter analyze (--fatal-infos)
         run: |
+          # GATE_STRICT（2026-11-15）：门禁收紧到 `--fatal-infos`。
+          # 之前是 `--no-fatal-infos`，info 级问题（未用 import、死代码、
+          # 过时 API）可以一路绿着进包；用户要求「analyze --fatal-infos 全绿」，
+          # 这里就按 fatal-infos 判定，任何一级问题都让构建红。
           set +e
-          flutter analyze --no-fatal-infos > /tmp/analyze.txt 2>&1
+          flutter analyze --fatal-infos > /tmp/analyze.txt 2>&1
           code=$?
           cat /tmp/analyze.txt
-          # 把每条问题都变成 GitHub annotation：public 仓库拿不到 job log 时，
-          # 也能从 check-runs/annotations 读到具体文件和原因。
-          grep -E "(error|warning) •" /tmp/analyze.txt | head -60 | while IFS= read -r line; do
+          # 把**每一条**问题（含 info）都变成 GitHub annotation：public 仓库
+          # 拿不到 job log 时，也能从 check-runs/annotations 读到文件和原因。
+          grep -E " • " /tmp/analyze.txt | head -80 | while IFS= read -r line; do
             echo "::error::$line"
           done
           exit $code
