@@ -47,7 +47,9 @@ Widget _membersSheetBody(BuildContext ctx, List<TogetherMember> members) {
       margin: const EdgeInsets.fromLTRB(18, 0, 18, 18),
       padding: const EdgeInsets.fromLTRB(18, 16, 18, 10),
       constraints: BoxConstraints(
-        maxHeight: MediaQuery.sizeOf(ctx).height * .64,
+        // PANEL_COMPACT（2026-11-15）：弹层高度上限统一收到屏高 40%，
+        // 与主播放侧边面板同一档高度纪律（超出内部滚动）。
+        maxHeight: MediaQuery.sizeOf(ctx).height * .40,
       ),
       decoration: BoxDecoration(
         color: const Color(0xFFF9FBFF),
@@ -542,7 +544,7 @@ Future<String?> showTogetherLineSheet(
         margin: const EdgeInsets.fromLTRB(14, 0, 14, 14),
         padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
         constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(ctx).height * .6,
+          maxHeight: MediaQuery.sizeOf(ctx).height * .40,
         ),
         decoration: const BoxDecoration(
           color: Color(0xFFF9FBFF),
@@ -728,7 +730,7 @@ Future<String?> showTogetherRoomLineSheet(
         margin: const EdgeInsets.fromLTRB(14, 0, 14, 14),
         padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
         constraints: BoxConstraints(
-          maxHeight: MediaQuery.sizeOf(ctx).height * .62,
+          maxHeight: MediaQuery.sizeOf(ctx).height * .40,
         ),
         decoration: const BoxDecoration(
           color: Color(0xFFF9FBFF),

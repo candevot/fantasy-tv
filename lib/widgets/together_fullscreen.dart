@@ -52,6 +52,7 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.onExitRoom,
     required this.onInvite,
     required this.onMembers,
+    required this.onCast,
     required this.onSwitchLine,
     required this.onChangeDrama,
     required this.onTogglePlay,
@@ -63,6 +64,9 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.onQuality,
     required this.onRetry,
     required this.onSendChat,
+    this.loadingText = '',
+    this.onRotate,
+    this.rotatedToPortrait = false,
     this.isLive = false,
   });
 
@@ -80,6 +84,9 @@ class TogetherFullscreenView extends StatefulWidget {
   final bool isHost;
   final bool online;
   final bool loading;
+
+  /// 加载层文案：与主播放同一句「正在加载 线路名 · 第01集」。
+  final String loadingText;
   final String errorText;
 
   final String qualityLabel;
@@ -113,6 +120,13 @@ class TogetherFullscreenView extends StatefulWidget {
   final ValueChanged<String?> onQuality;
   final VoidCallback onRetry;
   final bool Function(String text) onSendChat;
+
+  /// 投屏（与主播放全屏同一颗按钮、同一个 CastSheet）。
+  final VoidCallback onCast;
+
+  /// 手动转屏（与主播放全屏同一个入口、同一个图标语义）。
+  final VoidCallback? onRotate;
+  final bool rotatedToPortrait;
 
   /// 直播房：隐藏进度 / 选集 / 倍速 / 换剧，显示 LIVE。
   final bool isLive;
@@ -489,13 +503,13 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             Positioned.fill(
               child: widget.player == null
                   ? FxLoadingOverlay(
-                      title: fxLoadingEpisodeText(widget.ep),
+                      title: _loadingTitle,
                       dim: widget.frozenFrame == null,
                     )
                   : AnimatedBuilder(
                       animation: widget.player!,
                       builder: (context, _) => FxLoadingOverlay(
-                        title: fxLoadingEpisodeText(widget.ep),
+                        title: _loadingTitle,
                         percent: widget.player!.value.bufferingPercent,
                         speedText: widget.player!.value.speedText,
                         // 有最后一帧时不再压暗，让切换过程继续看得到画面。
@@ -666,84 +680,47 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     );
   }
 
+  /// 顶栏：直接用主播放全屏那套 [FsTopBar]。
+  ///
+  /// 之前这里是自己手写的一份 Row：没有安全区留白（刘海 / 圆角屏上按钮会
+  /// 被裁）、没有电量 / 时钟胶囊、按钮 tint 也和主播放不一致。房间专属的
+  /// 入口（换源 / 换剧 / 成员 / 邀请 / 退出房间）通过 [FsTopBar.actions]
+  /// 插在投屏之后，视觉与主播放完全同一套。
   Widget _buildTopBar(EdgeInsets pad) {
-    return Container(
-      padding: EdgeInsets.fromLTRB(14, 8, 10, 18),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Colors.black.withValues(alpha: .52), Colors.black.withValues(alpha: 0)],
-        ),
-      ),
-      child: Row(
-        children: [
-          PGlassIcon(
-            icon: Icons.arrow_back_ios_new_rounded,
-            size: 34,
-            iconSize: 17,
-            tint: .16,
-            tooltip: '退出全屏',
-            onTap: widget.onExit,
-          ),
-          const SizedBox(width: 9),
-          Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.title.trim().isEmpty ? '一起看' : widget.title.trim(),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  _epLabel,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 11,
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 7),
+    final compact = MediaQuery.sizeOf(context).width < 700;
+    return AnimatedBuilder(
+      animation: widget.player ?? const AlwaysStoppedAnimation<double>(0),
+      builder: (context, _) => FsTopBar(
+        title: widget.title.trim().isEmpty ? '一起看' : widget.title.trim(),
+        epLabel: _epLabel,
+        compact: compact,
+        narrow: widget.rotatedToPortrait,
+        rotatedToPortrait: widget.rotatedToPortrait,
+        qualityLabel: widget.qualityLabel,
+        speedText: widget.player?.value.speedText ?? '',
+        onBack: widget.onExit,
+        onCast: widget.onCast,
+        // 顶栏不再有「更多」按钮，这里只是必填字段。
+        onMore: () {},
+        onRotate: widget.onRotate,
+        actions: <Widget>[
           PGlassIcon(
             icon: Icons.alt_route_rounded,
             size: 32,
             iconSize: 17,
+            tint: .18,
             tooltip: '换源',
             onTap: widget.onSwitchLine,
           ),
-          if (!widget.isLive) ...[
-            const SizedBox(width: 7),
+          if (!widget.isLive)
             PGlassIcon(
               icon: Icons.movie_filter_rounded,
               size: 32,
               iconSize: 17,
+              tint: .18,
               tooltip: '换剧',
               onTap: widget.onChangeDrama,
             ),
-          ],
-          if (widget.isLive) ...[
-            const SizedBox(width: 8),
-            const _LivePill(),
-          ],
-          if (widget.qualityLabel.isNotEmpty) ...[
-            const SizedBox(width: 12),
-            FsQualityPill(label: widget.qualityLabel),
-          ],
-          const SizedBox(width: 8),
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: widget.onMembers,
@@ -771,19 +748,19 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               ),
             ),
           ),
-          const SizedBox(width: 7),
           PGlassIcon(
             icon: Icons.person_add_alt_1_rounded,
             size: 32,
             iconSize: 17,
+            tint: .18,
             tooltip: '邀请好友',
             onTap: widget.onInvite,
           ),
-          const SizedBox(width: 7),
           PGlassIcon(
             icon: Icons.logout_rounded,
             size: 32,
             iconSize: 17,
+            tint: .18,
             tooltip: '退出房间',
             onTap: widget.onExitRoom,
           ),
@@ -791,6 +768,10 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       ),
     );
   }
+
+  String get _loadingTitle => widget.loadingText.isEmpty
+      ? fxLoadingEpisodeText(widget.ep)
+      : widget.loadingText;
 
   String get _epLabel {
     if (widget.isLive) return 'LIVE · 直播中';
@@ -827,6 +808,8 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               qualityActive:
                   widget.canChangeQuality && widget.qualityKey != null,
               compact: compact,
+              // 竖屏全屏（竖屏短剧）：右侧一组收紧，与主播放全屏一致。
+              narrow: widget.rotatedToPortrait,
               bottomInset: pad.bottom,
               onSeek: (target) => _seekTo(target.inMilliseconds / 1000.0),
               onTogglePlay: _togglePlay,
@@ -865,14 +848,14 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.cloud_off_rounded, color: Fx.sub, size: 28),
-            const SizedBox(height: 6),
+            const Icon(Icons.cloud_off_rounded, color: Fx.sub, size: 26),
+            const SizedBox(height: 4),
             Text(
               widget.errorText,
               textAlign: TextAlign.center,
               style: const TextStyle(
                 color: Fx.ink,
-                fontSize: 12.5,
+                fontSize: 12,
                 height: 1.5,
               ),
             ),
@@ -924,6 +907,9 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
 
   Widget _buildChatLayer(EdgeInsets pad, double keyboard) {
     if (!_chatOpen) {
+      // CHAT_COLLAPSE（2026-11-15）：收起后完全不留痕 —— 圆钮跟着控件层
+      // 一起显隐（控件藏起来时画面是干净的），点画面唤出控件它就回来。
+      if (!_controls) return const SizedBox.shrink();
       return Positioned(
         left: 14,
         bottom: 118 + pad.bottom,
@@ -966,17 +952,12 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             child: Container(
               width: maxWidth,
               height: panelHeight,
+              // CHAT_TRANSPARENT：全屏聊天不要实心底板 —— 底板一铺，
+              // 画面就被切掉一大块。只用一层极淡的暗色做「可读性底」，
+              // 真正的可读性交给每个气泡自己的半透明底色。
               decoration: BoxDecoration(
-                color: const Color(0xFFF7FAFF).withValues(alpha: .96),
+                color: Colors.black.withValues(alpha: .16),
                 borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.white.withValues(alpha: .92)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: .28),
-                    blurRadius: 24,
-                    offset: const Offset(0, 10),
-                  ),
-                ],
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(18),
@@ -991,19 +972,22 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                         ),
                         child: Row(
                           children: [
-                            const Icon(
-                              Icons.forum_rounded,
+                            Icon(
+                              Icons.drag_indicator_rounded,
                               size: 14,
-                              color: Fx.accent,
+                              color: Colors.white.withValues(alpha: .55),
                             ),
-                            const SizedBox(width: 5),
+                            const SizedBox(width: 4),
                             const Expanded(
                               child: Text(
                                 '聊天',
                                 style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w800,
-                                  color: Fx.ink,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0x99FFFFFF),
+                                  shadows: [
+                                    Shadow(color: Colors.black54, blurRadius: 3),
+                                  ],
                                 ),
                               ),
                             ),
@@ -1013,7 +997,10 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                                   : '重连中',
                               style: TextStyle(
                                 fontSize: 9,
-                                color: Fx.sub.withValues(alpha: .9),
+                                color: Colors.white.withValues(alpha: .66),
+                                shadows: const [
+                                  Shadow(color: Colors.black54, blurRadius: 3),
+                                ],
                               ),
                             ),
                             const SizedBox(width: 2),
@@ -1027,7 +1014,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                                 child: Icon(
                                   Icons.close_rounded,
                                   size: 15,
-                                  color: Fx.sub.withValues(alpha: .8),
+                                  color: Colors.white.withValues(alpha: .72),
                                 ),
                               ),
                             ),
@@ -1041,11 +1028,13 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                         builder: (context, messages, _) => TogetherChatList(
                           messages: messages,
                           compact: true,
+                          transparent: true,
                         ),
                       ),
                     ),
                     TogetherComposer(
                       compact: true,
+                      transparent: true,
                       enabled: true,
                       hint: widget.online ? '说点什么…' : '正在重连…',
                       onSend: widget.onSendChat,
@@ -1118,36 +1107,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-/// 顶部 / 中央短提示胶囊（3.0x 快进中）。
-/// 全屏一起看顶栏的 LIVE 胶囊。
-class _LivePill extends StatelessWidget {
-  const _LivePill();
-
-  @override
-  Widget build(BuildContext context) {
-    return PGlassPill(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.circle, size: 6, color: Color(0xFFFF5A5A)),
-          SizedBox(width: 4),
-          Text(
-            'LIVE',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 10.5,
-              fontWeight: FontWeight.w800,
-              letterSpacing: .5,
-              shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
-            ),
-          ),
-        ],
       ),
     );
   }

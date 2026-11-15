@@ -446,6 +446,7 @@ class PGlassIcon extends StatelessWidget {
     this.tooltip,
     this.tint = .14,
     this.iconColor = Colors.white,
+    this.hitSize = 0,
   });
 
   final IconData icon;
@@ -456,6 +457,13 @@ class PGlassIcon extends StatelessWidget {
   final String? tooltip;
   final double tint;
   final Color iconColor;
+
+  /// 最小点击热区（dp）。0 = 跟视觉尺寸一致（主播放页保持原样）。
+  ///
+  /// TOGETHER_TAP44（2026-11-15）：一起看视频区里的按钮视觉只有 30dp，
+  /// 手指点上去经常落空。这里只放大**不可见**的命中框，视觉圆钮尺寸不变，
+  /// 所以主播放页与一起看看起来完全一样，只是一起看更好点。
+  final double hitSize;
 
   @override
   Widget build(BuildContext context) {
@@ -485,8 +493,16 @@ class PGlassIcon extends StatelessWidget {
         child: Icon(icon, size: iconSize, color: iconColor),
       ),
     );
-    if (tooltip == null) return button;
-    return Tooltip(message: tooltip!, child: button);
+    // 命中框放大：只改可点区域，不改视觉尺寸（布局高度会跟着热区走，
+    // 所以调用方要确认这一行够高 —— 一起看的视频区控件行按 44 排）。
+    final hit = hitSize > size ? hitSize : size;
+    final sized = SizedBox(
+      width: hit,
+      height: hit,
+      child: Center(child: button),
+    );
+    if (tooltip == null) return sized;
+    return Tooltip(message: tooltip!, child: sized);
   }
 }
 
@@ -564,6 +580,7 @@ class PProgressBar extends StatefulWidget {
     required this.onSeek,
     this.buffered = Duration.zero,
     this.onScrub,
+    this.onScrubStart,
     this.height = 4,
     this.thumbSize = 16,
     this.touchHeight = 36,
@@ -584,6 +601,13 @@ class PProgressBar extends StatefulWidget {
 
   /// 拖动预览：目标时间；松手后为 null。
   final ValueChanged<Duration?>? onScrub;
+
+  /// 手指刚落下（还没拖动）时回调。
+  ///
+  /// TOGETHER_DRAG_CLAIM（2026-11-15）：一起看里用它「接手主导权」——
+  /// 拖动开始那一刻就把本地操作时间戳刷掉，别的成员的 1 秒心跳不会在
+  /// 拖动途中把人拽回去，松手时也不至于已经被拉偏了。
+  final VoidCallback? onScrubStart;
   final double height;
   final double thumbSize;
 
@@ -649,6 +673,7 @@ class _PProgressBarState extends State<PProgressBar> {
           // 单击松手才 seek；拖动过程中只跟手改高亮。
           onTapUp: widget.enabled
               ? (details) {
+                  widget.onScrubStart?.call();
                   if (width <= 0 || !_hasDuration) return;
                   final target = (details.localPosition.dx / width)
                       .clamp(0.0, 1.0)
@@ -658,6 +683,7 @@ class _PProgressBarState extends State<PProgressBar> {
               : null,
           onHorizontalDragStart: widget.enabled
               ? (details) {
+                  widget.onScrubStart?.call();
                   widget.onScrub?.call(_targetFor(_fraction));
                   setState(() => _drag = _fraction);
                 }
@@ -780,6 +806,7 @@ class FxSeekRow extends StatefulWidget {
     required this.duration,
     required this.onSeek,
     this.buffered = Duration.zero,
+    this.onScrubStart,
     this.height = 4,
     this.touchHeight = 36,
     this.thumbSize = 16,
@@ -797,6 +824,9 @@ class FxSeekRow extends StatefulWidget {
   final Duration duration;
   final ValueChanged<Duration> onSeek;
   final Duration buffered;
+
+  /// 手指落下（含单击）时回调：一起看拿它「接手主导权」。
+  final VoidCallback? onScrubStart;
   final double height;
   final double touchHeight;
   final double thumbSize;
@@ -877,6 +907,7 @@ class _FxSeekRowState extends State<FxSeekRow> {
             enabled: widget.enabled,
             activeColors: widget.activeColors,
             onSeek: widget.onSeek,
+            onScrubStart: widget.onScrubStart,
             onScrub: _onScrub,
           ),
         ),

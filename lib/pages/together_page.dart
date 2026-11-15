@@ -8,13 +8,18 @@ import 'package:flutter/services.dart';
 import '../auth.dart';
 import '../fx_globals.dart';
 import '../models.dart';
+import '../api.dart';
+import '../services/cast_service.dart';
 import '../services/cms_bridge.dart';
 import '../services/fx_player.dart';
 import '../services/iq_codec_gate.dart';
 import '../services/iqiyi_codec.dart';
 import '../services/fallback_match.dart';
 import '../services/play_log.dart';
+import '../services/play_orientation.dart';
+import '../services/screen_orientation.dart';
 import '../theme.dart';
+import '../widgets/cast_sheet.dart';
 import '../widgets/player_theme.dart';
 import '../widgets/together_chat.dart';
 import '../widgets/together_client.dart';
@@ -110,10 +115,11 @@ class TogetherPage extends StatefulWidget {
 
 class _TogetherPageState extends State<TogetherPage>
     with WidgetsBindingObserver {
-  static const List<DeviceOrientation> _landscape = <DeviceOrientation>[
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ];
+  /// 全屏当前按哪一档摆（竖屏片 / 横屏片）；null = 还没定过。
+  FxPlayOrientation? _layoutOrientation;
+
+  /// 用户手动点过转屏：之后的自动判断不再改方向。
+  bool _orientationForced = false;
 
   static const SystemUiOverlayStyle _appOverlay = SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
@@ -196,6 +202,15 @@ class _TogetherPageState extends State<TogetherPage>
 
   /// 应用别人操作后的短暂静默期：先让 play / pause / seek 落位，再开始纠偏。
   int _applyHoldUntil = 0;
+
+  /// 本地乐观主导权的截止时刻。
+  ///
+  /// 点下按钮的那一刻本地就当自己是主导者（不进纠偏、照常推心跳），
+  /// 但**只到这个时刻为止**：服务端如果没把主导权交过来（旧服务端仍拒绝
+  /// 非房主 / 房间已解散 / 消息没发出去），到点必须退回「跟随权威」，
+  /// 否则这个客户端会永远忽略别人的 room_state —— 用户看到的是一直
+  /// 不同步，而且怎么点都救不回来。
+  int _optimisticLeaderUntil = 0;
 
   /// 本地最近一次主动操作的时间戳：这段时间内不跟别人的权威状态抢位置。
   int _lastLocalControlAt = 0;
@@ -323,13 +338,14 @@ class _TogetherPageState extends State<TogetherPage>
   Timer? _ticker;
   Timer? _heartbeat;
 
-  /// 房主进度推送间隔（毫秒）。
+  /// 房主进度心跳间隔（毫秒）。
   ///
-  /// 之前房主只在 9 秒心跳和播放/暂停事件时上报进度，成员只能靠本地时钟
-  /// 外推 —— 网络一抖就偏，表现出来就是「成员慢半拍 / 一直原地循环」。
-  /// 咕噜咕噜把这件事做成服务器下发的 `room_play_push_interval_ms`，
-  /// 这里同样做成可调：默认 1.5 秒（够平滑，又不至于把房间消息刷爆）。
-  int _pushIntervalMs = 1500;
+  /// TOGETHER_SYNC_1S（2026-11-15）：验收口径是「心跳 1 秒一次」。
+  /// 之前是 1.5 秒，网络一抖成员就偏出几百毫秒，纠偏就得硬 seek，
+  /// 看起来就是「卡一下」。1 秒一次能把正常网络下的偏差压在百毫秒内，
+  /// 基本不用 seek —— 服务端只接受**主导者**的 quiet 心跳，所以
+  /// 多推一条不会把别人拽过去，只会让自己的权威值更新鲜。
+  int _pushIntervalMs = 1000;
 
   /// 上一次房主进度推送的时间戳（毫秒）。
   int _lastHostPushAt = 0;
@@ -571,7 +587,7 @@ class _TogetherPageState extends State<TogetherPage>
     }
   }
 
-  /// 自动重连耗尽（连续失败 5 次，约 45 秒）：**停止无限「正在重连」**，
+  /// 自动重连耗尽（连续失败 8 次，约 1 分钟）：**停止无限「正在重连」**，
   /// 把地址和失败原因说清楚，并给一个能点的「重试」。
   ///
   /// 之前这里只有 `_onDown` 里的一句「连接断开，正在自动重连…」，
@@ -898,7 +914,9 @@ class _TogetherPageState extends State<TogetherPage>
   /// 本地刚发出控制指令：立刻把自己当成主导者，别等服务端回声再跟随，
   /// 否则这几十毫秒里 `_applyRemoteState` 会把刚跳的位置又拽回去。
   void _claimControl() {
-    _lastLocalControlAt = DateTime.now().millisecondsSinceEpoch;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _lastLocalControlAt = now;
+    _optimisticLeaderUntil = now + togetherOptimisticLeaderMs;
     if (_isHost) return;
     if (mounted) {
       setState(() => _isHost = true);
@@ -907,13 +925,62 @@ class _TogetherPageState extends State<TogetherPage>
     }
   }
 
+  /// 乐观主导权的回收：到点还没被服务端确认，就退回「跟随权威状态」。
+  ///
+  /// 判定「确认」只看服务端下发的 leaderId 是不是我 —— 这是我操作
+  /// 真的被房间采纳的唯一证据。
+  void _expireOptimisticLeader(int now) {
+    if (_optimisticLeaderUntil <= 0 || now < _optimisticLeaderUntil) return;
+    _optimisticLeaderUntil = 0;
+    if (!_isHost) return;
+    final state = _remote;
+    if (state != null && _leaderIsMe(state)) return;
+    _logSync('乐观主导权到期且未被服务端确认 → 退回跟随');
+    if (mounted) {
+      setState(() => _isHost = false);
+    } else {
+      _isHost = false;
+    }
+  }
+
+  /// 有人动了播放（暂停 / 拖动 / 换集 / 换线路 / 换片 / 倍速）。
+  ///
+  /// OP_LOG（2026-11-15）：这条流水要写进聊天区，**单独成条**（不是气泡），
+  /// 自己的操作也插一条（把名字换成「你」），让所有人看到同一份操作流水。
+  /// 同一个动作 1 秒内连续触发（拖动途中的 seek）只保留最后一条。
   void _onOp(TogetherOp op) {
     if (!mounted || op.name.isEmpty) return;
     _lastOp = op;
     if (mounted) setState(() {});
-    if (op.id.isNotEmpty && op.id == _myId) return; // 自己的操作不用再提示一遍
-    fxShowTopTag(op.text);
-    _appendSystem(op.text);
+    final mine = op.id.isNotEmpty && op.id == _myId;
+    final text = togetherOperationText(
+      name: op.name,
+      label: op.label,
+      mine: mine,
+    );
+    _appendOperation(text, action: op.action);
+  }
+
+  /// 追加一条操作流水；同一个人 + 同一个动作 1 秒内只保留最后一条。
+  void _appendOperation(String text, {required String action}) {
+    final now = DateTime.now();
+    final last = _messages.isEmpty ? null : _messages.last;
+    if (last != null &&
+        last.isOperation &&
+        togetherShouldMergeOperation(
+          lastAction: last.action,
+          lastAt: last.time,
+          action: action,
+          now: now,
+        )) {
+      _messages[_messages.length - 1] =
+          TogetherChatMessage.operation(text, action: action, time: last.time);
+      _publishChat();
+      return;
+    }
+    _appendMessage(
+      TogetherChatMessage.operation(text, action: action, time: now),
+    );
   }
 
   void _onChat(TogetherChatIncoming chat) {
@@ -937,7 +1004,16 @@ class _TogetherPageState extends State<TogetherPage>
   void _onError(String code, String message) {
     if (!mounted) return;
     if (code == 'host_only') {
-      fxShowTopTag('跟随房主');
+      // 旧服务端 / 房间换了主导者：立刻放弃本地乐观主导权，退回跟随，
+      // 按服务端刚回发的权威状态对齐。否则这个客户端会一直忽略别人。
+      _optimisticLeaderUntil = 0;
+      _lastLocalControlAt = 0;
+      if (_isHost && mounted) {
+        setState(() => _isHost = false);
+      } else {
+        _isHost = false;
+      }
+      fxShowTopTag('正在跟随房间播放');
       _bounceToAuthority();
       return;
     }
@@ -1510,8 +1586,11 @@ class _TogetherPageState extends State<TogetherPage>
       const Duration(milliseconds: 500),
       (_) => _tick(),
     );
+    // 权威心跳 1 秒一次（quiet：只刷进度，不抢主导者）。
+    // 服务端会丢弃「非主导者」的 quiet 心跳，所以两个人都开着播放器时，
+    // 落后那一方的 tick 不会把房间进度拽回去。
     _heartbeat ??= Timer.periodic(
-      const Duration(seconds: 9),
+      togetherHeartbeatInterval,
       (_) => _hostHeartbeat(),
     );
   }
@@ -1550,19 +1629,15 @@ class _TogetherPageState extends State<TogetherPage>
     _tick(force: true);
   }
 
+  /// 1 秒一次的权威心跳。
+  ///
+  /// 和 [_pushHostProgressThrottled] 共用同一条路径（间隔判定也在那里），
+  /// 所以两个定时器不会各推一条；暂停 / 缓冲时不推，交给
+  /// [_watchHostBuffering] 的 1 秒停住上报。
   void _hostHeartbeat() {
     if (!mounted || !_isHost || !_online || !_foreground) return;
     if (_isLive) return; // 直播只广播 play/pause，不按秒同步进度。
-    final controller = _controller;
-    final state = _remote;
-    if (controller == null ||
-        !controller.value.isInitialized ||
-        state == null ||
-        !controller.value.isPlaying) {
-      return;
-    }
-    final position = controller.value.position.inMilliseconds / 1000.0;
-    _reportHostState('play', position, rate: _hostRate);
+    _pushHostProgressThrottled();
   }
 
   /* ------------------------------------------------------------ 同步 */
@@ -1632,9 +1707,11 @@ class _TogetherPageState extends State<TogetherPage>
   void _tick({bool force = false}) {
     if (!mounted || _stage != _TogetherStage.room) return;
     if (_isLive) {
+      _expireOptimisticLeader(DateTime.now().millisecondsSinceEpoch);
       _tickLive();
       return;
     }
+    _expireOptimisticLeader(DateTime.now().millisecondsSinceEpoch);
     final controller = _controller;
     final state = _remote;
     // Buffering can stop value notifications entirely; the timer must keep
@@ -2342,7 +2419,7 @@ class _TogetherPageState extends State<TogetherPage>
     if (value.hasError && _videoError.isEmpty) {
       _cancelLiveFirstFrameTimer();
       _clearFrozenFrame();
-      setState(() => _videoError = '播放中断，点重试即可恢复');
+      setState(() => _videoError = '播放中断，请重试或切换线路');
       return;
     }
     if (_isLive) return; // 直播流没有「播放结束」和观看进度。
@@ -2402,6 +2479,16 @@ class _TogetherPageState extends State<TogetherPage>
     if (mounted) setState(() {});
   }
 
+  /// 手指落在进度条上：立刻接手主导权。
+  ///
+  /// 拖动途中（松手前）不会发 seek，但别人的 1 秒心跳还在往这边推；
+  /// 这里把「本地正在操作」的时间戳提前刷掉，拖动过程就不会被拽回去，
+  /// 松手那一下也不会落在别的成员的进度上。
+  void _seekBegin() {
+    if (_isLive) return;
+    _claimControl();
+  }
+
   void _seekTo(double seconds) {
     if (_isLive) {
       return;
@@ -2418,17 +2505,16 @@ class _TogetherPageState extends State<TogetherPage>
     // 主动拖动进度：把锚点挪到目标，别让后续上报被当成读数回退冻结。
     _noteHostSeek(target);
     if (_online) {
-      // 房主自己拖动：立刻推一次权威 room_state，不等 9 秒心跳。
-      // 以前这里发的是只带 position 的 `seek`，成员要等下一次 state 才敢跳，
-      // 表现就是「房主拖完 1~3 秒，成员才跳过去」。
-      // 走 `state` 通道后服务端照常递增 rev，成员 seq gate 判重逻辑不变；
-      // 连续拖拽由客户端 200ms 合并窗口收口，只推最后一次。
+      // 谁拖都能推：立刻推一次权威 room_state，不等心跳。
+      // TOGETHER_SEEK_NOMERGE（2026-11-15）：这里**不再**走 300ms 合并窗口
+      // —— 验收口径是「别人 200ms 内看到变化」，合并窗口光排队就吃掉 300ms，
+      // 一定超标。进度条只在松手时回调一次（拖动途中只更新本地高亮），
+      // 所以也不会把房间消息刷爆。
       _reportHostState(
         _remote?.playing == true ? 'play' : 'pause',
         target,
         rate: _hostRate,
         fresh: true,
-        coalesce: true,
         op: 'seek',
       );
     }
@@ -2490,6 +2576,9 @@ class _TogetherPageState extends State<TogetherPage>
     }
     return key;
   }
+
+  /// 加载层文案：与主播放页同一句「正在加载 线路名 · 第01集」。
+  String get _loadingText => fxLoadingLineText(_ep, _currentLineLabel);
 
   String get _currentLineLabel {
     if (_roomLine.isNotEmpty) return _roomLine;
@@ -2858,6 +2947,88 @@ class _TogetherPageState extends State<TogetherPage>
     );
     _markRemote(playing ? 'play' : 'pause', position);
     if (mounted) setState(() {});
+  }
+
+  /* ------------------------------------------------------------ 投屏 */
+
+  /// 投屏入口：与主播放页完全同一套（CastService 解析直链 + CastSheet 面板）。
+  ///
+  /// 直播房不给入口（主播放的直播也没有）；还没拿到播放地址时静默返回，
+  /// 不在画面上弹任何遮挡提示。
+  Future<void> _openCast() async {
+    if (_isLive) return;
+    final info = _playInfo;
+    if (info == null || _videoLoading || _videoError.isNotEmpty) return;
+    final url = _castUrl(info);
+    if (url.isEmpty) return;
+    CastSource source;
+    try {
+      source = CastService.resolveSource(
+        url: url,
+        headers: _castHeaders(url, info),
+        title: '${_videoTitle.isEmpty ? '一起看' : _videoTitle} · $_epLabel',
+        direct: info.direct,
+        startAt: Duration(milliseconds: (_displayPosition() * 1000).round()),
+        serverBase: Api.base,
+      );
+    } on CastException {
+      return;
+    }
+    final wasPlaying = _controller?.value.isPlaying ?? false;
+    await showCastSheet(
+      context,
+      source: source,
+      owner: this,
+      onCastStarted: () async {
+        try {
+          await _controller?.pause();
+        } catch (_) {}
+      },
+      onCastStopped: () async {
+        if (!wasPlaying || !mounted) return;
+        try {
+          await _controller?.play();
+        } catch (_) {}
+      },
+    );
+  }
+
+  /// 投屏地址必须能落到绝对 URL（站内相对地址补服务器前缀）。
+  String _absoluteCastUrl(String raw) {
+    final url = raw.trim();
+    if (url.isEmpty) return url;
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    final base = Api.base.trim();
+    if (base.isEmpty) return url;
+    final root = base.replaceFirst(RegExp(r'/api/?$'), '');
+    if (url.startsWith('/')) return '$root$url';
+    return '$root/$url';
+  }
+
+  String _castUrl(PlayInfo info) {
+    final key = _qualityKey;
+    if (key != null) {
+      for (final quality in info.quality) {
+        if (quality.key == key && quality.url.trim().isNotEmpty) {
+          return _absoluteCastUrl(quality.url);
+        }
+      }
+    }
+    final main = info.url.trim();
+    if (main.isNotEmpty) return _absoluteCastUrl(main);
+    for (final url in info.backup) {
+      if (url.trim().isNotEmpty) return url.trim();
+    }
+    return '';
+  }
+
+  Map<String, String> _castHeaders(String url, PlayInfo info) {
+    for (final quality in info.quality) {
+      if (quality.url.trim() == url && quality.headers.isNotEmpty) {
+        return quality.headers;
+      }
+    }
+    return info.headers;
   }
 
   Future<void> _pickSpeed() async {
@@ -3548,7 +3719,8 @@ class _TogetherPageState extends State<TogetherPage>
     _clearFrozenFrame();
     setState(() {
       _videoLoading = false;
-      _videoError = '暂时无法播放，请重试或让房主切换线路';
+      // 与主播放同一句收尾文案：全部线路都试过了，不把问题推回给用户。
+      _videoError = fxFallbackAllFailedText;
     });
   }
 
@@ -3722,31 +3894,61 @@ class _TogetherPageState extends State<TogetherPage>
 
   /* ------------------------------------------------------------ 全屏 / 系统 UI */
 
+  /// 进全屏：方向按**视频自身分辨率**定（与主播放同一套规则）。
+  ///
+  /// ORIENT_AUTO（2026-11-15）：以前一起看一律锁横屏，竖屏短剧（1080×1920）
+  /// 进全屏就被拉成横的、两边一大片黑。主播放页是「竖屏片锁竖屏、其余锁
+  /// 横屏」（`fxResolvePlayOrientation` + `ScreenOrientation.applyPlayback`），
+  /// 这里对齐同一套。
   Future<void> _enterFullscreen() async {
     if (_fullscreen || _stage != _TogetherStage.room) return;
     FocusScope.of(context).unfocus();
     setState(() => _fullscreen = true);
+    await _applyPlaybackOrientation();
     try {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      await SystemChrome.setPreferredOrientations(_landscape);
       SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light);
     } catch (_) {
       // 桌面 / 模拟器不支持也无所谓。
     }
   }
 
+  /// 按当前视频真实宽高定档；拿不到就按横屏（老行为）。
+  Future<void> _applyPlaybackOrientation({bool force = false}) async {
+    final value = _controller?.value;
+    final target = fxResolvePlayOrientation(
+      width: (value?.width ?? 0) > 0 ? value!.width : value?.videoWidth,
+      height: (value?.height ?? 0) > 0 ? value!.height : value?.videoHeight,
+    );
+    if (!force && _orientationForced) return;
+    _layoutOrientation = target;
+    await ScreenOrientation.applyPlayback(portraitMode: target.isPortrait);
+  }
+
+  /// 手动转屏（全屏顶栏那个按钮）：切一次并把自动判断冻住，
+  /// 本次播放内不再跟着分辨率翻回来 —— 与主播放全屏完全一致。
+  Future<void> _toggleOrientation() async {
+    final next = _layoutOrientation?.isPortrait == true
+        ? FxPlayOrientation.landscape
+        : FxPlayOrientation.portrait;
+    _orientationForced = true;
+    _layoutOrientation = next;
+    await ScreenOrientation.applyPlayback(portraitMode: next.isPortrait);
+    if (mounted) setState(() {});
+  }
+
   Future<void> _exitFullscreen() async {
     if (!_fullscreen) return;
     FocusScope.of(context).unfocus();
     if (mounted) setState(() => _fullscreen = false);
+    _orientationForced = false;
+    _layoutOrientation = null;
     await _restoreSystemUi();
   }
 
   Future<void> _restoreSystemUi() async {
     try {
-      await SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
-        DeviceOrientation.portraitUp,
-      ]);
+      await ScreenOrientation.portrait();
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setSystemUIOverlayStyle(_appOverlay);
     } catch (_) {}
@@ -3833,6 +4035,9 @@ class _TogetherPageState extends State<TogetherPage>
       loading: _videoLoading,
       errorText: _videoError,
       isLive: _isLive,
+      loadingText: _loadingText,
+      onRotate: () => unawaited(_toggleOrientation()),
+      rotatedToPortrait: _layoutOrientation?.isPortrait ?? false,
       qualityLabel: _isLive
           ? (_liveLine?.qualityLabel ?? '')
           : fxPlayerQuality(_controller),
@@ -3860,6 +4065,7 @@ class _TogetherPageState extends State<TogetherPage>
       onExitRoom: () => unawaited(_confirmLeaveRoom()),
       onInvite: () => unawaited(_showInvite()),
       onMembers: () => unawaited(_showMembers()),
+      onCast: () => unawaited(_openCast()),
       onSwitchLine: () => unawaited(_pickLine()),
       onChangeDrama: () => unawaited(_pickDrama()),
       onTogglePlay: _togglePlay,
@@ -3891,6 +4097,7 @@ class _TogetherPageState extends State<TogetherPage>
       loading: _videoLoading,
       errorText: _videoError,
       isLive: _isLive,
+      loadingText: _loadingText,
       videoBoundaryKey: _videoBoundaryKey,
       videoEpoch: _videoEpoch,
       frozenFrame: _frozenFrame,
@@ -3903,11 +4110,13 @@ class _TogetherPageState extends State<TogetherPage>
       onInvite: () => unawaited(_showInvite()),
       onMembers: () => unawaited(_showMembers()),
       onMedia: () => unawaited(_showMediaSheet()),
+      onCast: () => unawaited(_openCast()),
       onSwitchLine: () => unawaited(_pickLine()),
       onChangeDrama: () => unawaited(_pickDrama()),
       onEpisodes: () => unawaited(_pickEpisode()),
       onTogglePlay: _togglePlay,
       onSeek: _seekTo,
+      onSeekBegin: _seekBegin,
       onEnterFullscreen: () => unawaited(_enterFullscreen()),
       onSendChat: _sendChat,
       onRetry: _retryVideo,

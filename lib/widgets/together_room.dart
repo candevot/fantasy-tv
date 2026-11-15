@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../models.dart';
 import '../services/fx_player.dart';
 import '../theme.dart';
+import 'fs_controls.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
 import 'together_floating_chat.dart';
@@ -37,12 +38,14 @@ class TogetherRoomView extends StatefulWidget {
     required this.isHost,
     required this.online,
     required this.loading,
+    required this.loadingText,
     required this.errorText,
     required this.onBack,
     required this.onCopyCode,
     required this.onInvite,
     required this.onMembers,
     required this.onMedia,
+    required this.onCast,
     required this.onSwitchLine,
     required this.onChangeDrama,
     required this.onEpisodes,
@@ -52,6 +55,7 @@ class TogetherRoomView extends StatefulWidget {
     required this.frozenFrameOpaque,
     required this.onTogglePlay,
     required this.onSeek,
+    required this.onSeekBegin,
     required this.onEnterFullscreen,
     required this.onSendChat,
     required this.onRetry,
@@ -78,6 +82,10 @@ class TogetherRoomView extends StatefulWidget {
   final bool isHost;
   final bool online;
   final bool loading;
+
+  /// 加载层文案：由页面用 [fxLoadingLineText] 生成（「正在加载 幻想蓝光 · 第01集」），
+  /// 与主播放页逐字一致；空串时退回不带线路名的写法。
+  final String loadingText;
   final String errorText;
 
   final VoidCallback onBack;
@@ -85,6 +93,9 @@ class TogetherRoomView extends StatefulWidget {
   final VoidCallback onInvite;
   final VoidCallback onMembers;
   final VoidCallback onMedia;
+
+  /// 投屏：与主播放页同一个 CastSheet（直播房页面层直接返回，不弹面板）。
+  final VoidCallback onCast;
 
   /// 顶栏「换源 / 换剧」和视频区「选集」；页面统一做房主校验。
   final VoidCallback onSwitchLine;
@@ -100,6 +111,10 @@ class TogetherRoomView extends StatefulWidget {
   /// 页面统一做房主校验：成员点击时提示「跟随房主」。
   final VoidCallback onTogglePlay;
   final ValueChanged<double> onSeek;
+
+  /// 手指按下进度条那一刻：页面拿它「接手主导权」，拖动途中不被别人的
+  /// 1 秒心跳拽回去。
+  final VoidCallback onSeekBegin;
   final VoidCallback onEnterFullscreen;
   final bool Function(String text) onSendChat;
   final VoidCallback onRetry;
@@ -138,6 +153,10 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   bool _controls = true;
   Timer? _hideTimer;
 
+  /// 画面上的「谁操作的」小条：出现 3 秒后自动收起，不常驻挡画面。
+  bool _opVisible = false;
+  Timer? _opTimer;
+
   @override
   void initState() {
     super.initState();
@@ -147,6 +166,9 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   @override
   void didUpdateWidget(covariant TogetherRoomView oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.opText != widget.opText && widget.opText.isNotEmpty) {
+      _showOpChip();
+    }
     if (oldWidget.loading && !widget.loading) _wake();
     if (oldWidget.errorText != widget.errorText &&
         widget.errorText.isNotEmpty) {
@@ -154,9 +176,19 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
     }
   }
 
+  /// 顶部操作提示：显示 3 秒后自己淡出。
+  void _showOpChip() {
+    _opTimer?.cancel();
+    if (mounted) setState(() => _opVisible = true);
+    _opTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _opVisible = false);
+    });
+  }
+
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _opTimer?.cancel();
     super.dispose();
   }
 
@@ -376,6 +408,18 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
             accent: true,
             onTap: widget.onInvite,
           ),
+          // 投屏：主播放竖屏顶栏同一颗（tv_rounded）入口，图标 / 尺寸一致，
+          // 只是房间页是浅色底，用同款的浅色玻璃圆钮承载。
+          if (!widget.isLive) ...[
+            const SizedBox(width: 6),
+            TogetherCircleButton(
+              icon: Icons.tv_rounded,
+              size: 30,
+              iconSize: 16,
+              tooltip: '投屏',
+              onTap: widget.onCast,
+            ),
+          ],
           // 手动对齐房主进度：成员侧才显示。偏差 >1 秒才高亮，
           // 平时保持低调，不抢「邀请 / 换源」的视觉位置。
           // SYNC_ALWAYS（2026-11-14）：同步状态对房主也要显示。
@@ -450,7 +494,9 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   subtitleBottom: 76,
                 ),
               )
-            else
+            // 加载中不挂占位层：加载层已经有圆环 + 一行文案，两层叠在一起
+            // 就是「两个加载动画」的观感（用户报过）。
+            else if (!widget.loading)
               _buildVideoPlaceholder(),
             // 切剧 / 切集 / 换线路：最后一帧顶住，首帧就绪后淡出。
             if (widget.frozenFrame != null)
@@ -478,8 +524,13 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
             if (widget.loading)
               Positioned.fill(
                 child: FxLoadingOverlay(
-                  title: widget.isLive ? '正在加载直播…' : '正在加载视频…',
-                  dim: false,
+                  // 与主播放同一句「正在加载 线路名 · 第01集」；直播沿用原句。
+                  title: widget.isLive
+                      ? '正在加载直播…'
+                      : (widget.loadingText.isEmpty
+                            ? fxLoadingEpisodeText(widget.ep)
+                            : widget.loadingText),
+                  dim: widget.frozenFrame == null,
                   compact: true,
                 ),
               )
@@ -538,31 +589,40 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               child: IgnorePointer(child: _buildSyncChip()),
             ),
             // 「谁操作的」：小明 换了线路 → 幻想4K
-            if (widget.opText.isNotEmpty)
+            //
+            // OP_CHIP（2026-11-15）：放到画面顶部**居中**、宽度只包住文字，
+            // 3 秒后自动淡出 —— 之前是左上角整行 8~屏宽，压住画面左上角
+            // 那片（人脸 / 字幕起始位置）不放。完整的操作流水在聊天区里。
+            if (_opVisible && widget.opText.isNotEmpty)
               Positioned(
-                left: 8,
-                right: 8,
-                top: 34,
+                left: 24,
+                right: 24,
+                top: 10,
                 child: IgnorePointer(
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: .40),
-                        borderRadius: BorderRadius.circular(9),
-                      ),
-                      child: Text(
-                        widget.opText,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 9.5,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xE6FFFFFF),
+                  child: Center(
+                    child: AnimatedOpacity(
+                      opacity: _opVisible ? 1 : 0,
+                      duration: const Duration(milliseconds: 200),
+                      child: Container(
+                        constraints: const BoxConstraints(maxWidth: 260),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: .55),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          widget.opText,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                            color: Color(0xFFE6E9EF),
+                          ),
                         ),
                       ),
                     ),
@@ -577,27 +637,33 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
     );
   }
 
+  /// 画面上的控件条：**完全对齐主播放竖屏控件**
+  /// （player_page 的 `_buildControls`）——
+  /// 播放/暂停 30dp、进度条 3dp 粗 + 40dp 热区 + 15dp 白色圆钮、
+  /// 全屏 30dp，同样的 tint .13、同样的 6dp 间距、同样的 tooltip 文案。
+  /// 唯一的不同是命中框按 44dp 放（一起看画面小、手指更容易点空）。
   Widget _buildOverlay(FxPlayer player) {
     final playing = player.value.isPlaying;
     return Stack(
       fit: StackFit.expand,
       children: [
         Positioned(
-          left: 8,
+          left: 10,
           right: 8,
-          bottom: 6,
+          bottom: 4,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
               PGlassIcon(
                 icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                size: 34,
-                iconSize: 20,
-                tint: .20,
+                size: 30,
+                iconSize: 19,
+                tint: .13,
+                hitSize: 44,
                 tooltip: playing ? '暂停' : '播放',
                 onTap: _togglePlay,
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               if (widget.isLive)
                 const Expanded(child: _RoomLiveBadge())
               else
@@ -605,30 +671,27 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   child: _RoomProgress(
                     position: widget.position,
                     duration: player.value.duration,
-                    // 进度条对所有人都可拖：拖动会广播给房间（服务端不校验身份）。
-                    enabled: true,
+                    // 谁都能拖：拖动会广播给房间（服务端只广播，不校验身份）。
                     onSeek: _seekTo,
-                    onBlocked: widget.onHostOnly,
+                    onSeekBegin: widget.onSeekBegin,
                   ),
                 ),
               const SizedBox(width: 6),
-              if (!widget.isLive) ...[
-                PGlassIcon(
+              if (!widget.isLive)
+                FsTextAction(
+                  text: '选集',
                   icon: Icons.list_alt_rounded,
-                  size: 32,
-                  iconSize: 19,
-                  tint: .20,
-                  tooltip: '选集',
+                  tapHeight: 44,
                   onTap: widget.onEpisodes,
                 ),
-                const SizedBox(width: 6),
-              ],
+              const SizedBox(width: 6),
               PGlassIcon(
                 icon: Icons.fullscreen_rounded,
-                size: 32,
-                iconSize: 19,
-                tint: .20,
-                tooltip: '全屏一起看',
+                size: 30,
+                iconSize: 20,
+                tint: .13,
+                hitSize: 44,
+                tooltip: '全屏',
                 onTap: () {
                   _wake();
                   widget.onEnterFullscreen();
@@ -691,10 +754,8 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           const SizedBox(height: 8),
           Text(
             widget.isLive
-                ? (loading ? '正在加载直播…' : '等待房主开始直播')
-                : (loading
-                    ? '正在加载视频…'
-                    : (widget.isHost ? '点击播放，和朋友一起看' : '跟着房间播放')),
+                ? '等待开始直播'
+                : (widget.isHost ? '点击播放，和朋友一起看' : '跟着房间播放'),
             style: TextStyle(
               fontSize: 11,
               color: Colors.white.withValues(alpha: .72),
@@ -705,35 +766,40 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
     );
   }
 
+  /// 失败卡片：与主播放竖屏的 `_buildError` 同一套（白玻璃卡片 /
+  /// 云朵图标 / 渐变胶囊按钮），不再用一起看自己的深色卡片。
   Widget _buildError(BuildContext context) {
     return Container(
-      color: Colors.black.withValues(alpha: .34),
+      color: Colors.black.withValues(alpha: .36),
       alignment: Alignment.center,
-      padding: const EdgeInsets.symmetric(horizontal: 28),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Container(
         constraints: const BoxConstraints(maxWidth: 330),
         padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
         decoration: BoxDecoration(
-          color: const Color(0xFF1B2430).withValues(alpha: .92),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.white.withValues(alpha: .16)),
+          color: Colors.white.withValues(alpha: .94),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.white),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: .18),
+              blurRadius: 24,
+              offset: const Offset(0, 10),
+            ),
+          ],
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
-              Icons.cloud_off_rounded,
-              size: 24,
-              color: Colors.white70,
-            ),
-            const SizedBox(height: 6),
+            const Icon(Icons.cloud_off_rounded, color: Fx.sub, size: 26),
+            const SizedBox(height: 4),
             Text(
               widget.errorText,
               textAlign: TextAlign.center,
               style: const TextStyle(
-                fontSize: 11.5,
-                height: 1.45,
-                color: Colors.white,
+                color: Fx.ink,
+                fontSize: 12,
+                height: 1.5,
               ),
             ),
             const SizedBox(height: 10),
@@ -741,13 +807,12 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 _errorAction('重试', widget.onRetry),
-                if (widget.isHost) ...[
-                  const SizedBox(width: 10),
-                  _errorAction(
-                    widget.isLive ? '换线路' : '换剧/选集',
-                    widget.isLive ? widget.onSwitchLine : widget.onMedia,
-                  ),
-                ],
+                // 现在谁都能换线路 / 换片，错误页的第二个动作对所有人都给。
+                const SizedBox(width: 10),
+                _errorAction(
+                  widget.isLive ? '换线路' : '换剧/选集',
+                  widget.isLive ? widget.onSwitchLine : widget.onMedia,
+                ),
               ],
             ),
           ],
@@ -761,17 +826,24 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
           gradient: Fx.brand,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: [
+            BoxShadow(
+              color: Fx.accent.withValues(alpha: .25),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
         child: Text(
           text,
           style: const TextStyle(
             color: Colors.white,
-            fontSize: 11.5,
-            fontWeight: FontWeight.w700,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
           ),
         ),
       ),
@@ -955,120 +1027,42 @@ class _RoomLiveBadge extends StatelessWidget {
   }
 }
 
-class _RoomProgress extends StatefulWidget {
+class _RoomProgress extends StatelessWidget {
   const _RoomProgress({
     required this.position,
     required this.duration,
-    required this.enabled,
     required this.onSeek,
-    required this.onBlocked,
+    required this.onSeekBegin,
   });
 
   final ValueListenable<double> position;
   final Duration duration;
-  final bool enabled;
   final ValueChanged<double> onSeek;
-  final VoidCallback onBlocked;
 
-  @override
-  State<_RoomProgress> createState() => _RoomProgressState();
-}
-
-class _RoomProgressState extends State<_RoomProgress> {
-  DateTime? _lastBlockedAt;
-
-  void _blocked() {
-    final now = DateTime.now();
-    final last = _lastBlockedAt;
-    if (last != null &&
-        now.difference(last) < const Duration(milliseconds: 900)) {
-      return;
-    }
-    _lastBlockedAt = now;
-    widget.onBlocked();
-  }
+  /// 手指落下：页面「接手主导权」，拖动途中不被别人的心跳拽回。
+  final VoidCallback onSeekBegin;
 
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<double>(
-      valueListenable: widget.position,
+      valueListenable: position,
       builder: (context, position, _) {
         final clamped = position.isFinite && position > 0 ? position : 0.0;
-        final total = widget.duration.inMilliseconds / 1000.0;
-        final duration = total.isFinite && total > 0 ? total : 0.0;
-        final shown = Duration(milliseconds: (clamped * 1000).round());
-        final all = Duration(milliseconds: (duration * 1000).round());
-        final bar = PProgressBar(
-          position: shown,
-          duration: all,
+        final total = duration.inMilliseconds / 1000.0;
+        final safeDuration = total.isFinite && total > 0 ? total : 0.0;
+        return FxSeekRow(
+          // 和主播放竖屏完全同一组参数（粗 3 / 热区 40 / 圆钮 15 / 时间宽 40）
+          position: Duration(milliseconds: (clamped * 1000).round()),
+          duration: Duration(milliseconds: (safeDuration * 1000).round()),
           height: 3,
-          touchHeight: 24,
-          thumbSize: 10,
-          showThumb: true,
-          enabled: widget.enabled,
-          onSeek: (value) => widget.onSeek(value.inMilliseconds / 1000.0),
-        );
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.enabled)
-              bar
-            else
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: _blocked,
-                onHorizontalDragStart: (_) => _blocked(),
-                onHorizontalDragUpdate: (_) {},
-                onHorizontalDragEnd: (_) {},
-                child: IgnorePointer(
-                  child: PProgressBar(
-                    position: shown,
-                    duration: all,
-                    height: 3,
-                    touchHeight: 24,
-                    thumbSize: 10,
-                    showThumb: true,
-                    enabled: false,
-                    onSeek: (_) {},
-                  ),
-                ),
-              ),
-            const SizedBox(height: 1),
-            Row(
-              children: [
-                Text(
-                  fxTime(shown),
-                  style: const TextStyle(
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xE6FFFFFF),
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
-                  ),
-                ),
-                const Spacer(),
-                if (!widget.enabled)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: Text(
-                      '跟随房主',
-                      style: TextStyle(
-                        fontSize: 8.5,
-                        color: Colors.white.withValues(alpha: .72),
-                      ),
-                    ),
-                  ),
-                Text(
-                  fxTime(all),
-                  style: const TextStyle(
-                    fontSize: 9,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xE6FFFFFF),
-                    shadows: [Shadow(color: Colors.black54, blurRadius: 3)],
-                  ),
-                ),
-              ],
-            ),
-          ],
+          // TAP44：热区按 44dp 给（主播放 34），画面小的时候更好拖。
+          touchHeight: 44,
+          thumbSize: 15,
+          labelWidth: 40,
+          gap: 6,
+          timeFontSize: 10.5,
+          onSeek: (value) => onSeek(value.inMilliseconds / 1000.0),
+          onScrubStart: onSeekBegin,
         );
       },
     );

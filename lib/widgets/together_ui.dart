@@ -19,8 +19,8 @@ const Duration togetherFullscreenControlsAutoHide = Duration(seconds: 5);
 const double togetherRoomVideoRatio = .32;
 const double togetherRoomVideoMin = 220;
 
-/// 房间聊天空态文案（规格固定）。
-const String togetherChatEmptyText = '暂无消息，说点什么吧';
+/// 房间聊天空态文案（淡灰一行，不占整块）。
+const String togetherChatEmptyText = '还没有人发言';
 
 /// 封面地址归一：服务器可能返回相对地址（/api/proxy?u=…），
 /// data URI 和已是绝对地址的保持原样。
@@ -484,6 +484,33 @@ Future<bool> showTogetherConfirm(
     ),
   );
   return result ?? false;
+}
+
+/// 操作流水文案：「小明 换了线路 → 幻想4K」；自己的操作把名字换成「你」。
+///
+/// 所有人都看到同一份流水：别人看到「小明 …」，小明自己看到「你 …」。
+String togetherOperationText({
+  required String name,
+  required String label,
+  required bool mine,
+}) {
+  final who = mine ? '你' : (name.trim().isEmpty ? '有人' : name.trim());
+  final what = label.trim().isEmpty ? '操作了播放' : label.trim();
+  return '$who $what';
+}
+
+/// 同一动作 1 秒内的操作流水要不要合并成一条（拖动途中会连着触发 seek）。
+bool togetherShouldMergeOperation({
+  required String lastAction,
+  required DateTime lastAt,
+  required String action,
+  required DateTime now,
+  Duration window = const Duration(seconds: 1),
+}) {
+  if (lastAction.isEmpty || action.isEmpty) return false;
+  if (lastAction != action) return false;
+  final gap = now.difference(lastAt);
+  return !gap.isNegative && gap <= window;
 }
 
 String togetherFmt(num seconds) {

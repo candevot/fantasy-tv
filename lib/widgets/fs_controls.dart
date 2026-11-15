@@ -20,6 +20,7 @@ class FsTextAction extends StatelessWidget {
     this.onTap,
     this.active = false,
     this.size = 1,
+    this.tapHeight = 0,
   });
 
   final String text;
@@ -27,12 +28,16 @@ class FsTextAction extends StatelessWidget {
   final VoidCallback? onTap;
   final bool active;
 
+  /// 最小点击热区高度（dp）。0 = 跟胶囊一样高（主播放保持原样）；
+  /// 一起看视频区传 44，胶囊视觉不变、热区变大。
+  final double tapHeight;
+
   /// 相对缩放：1 = 标准，紧凑布局传 .88
   final double size;
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    final pill = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: AnimatedContainer(
@@ -72,6 +77,11 @@ class FsTextAction extends StatelessWidget {
           ],
         ),
       ),
+    );
+    if (tapHeight <= 0) return pill;
+    return SizedBox(
+      height: tapHeight,
+      child: Center(child: pill),
     );
   }
 }
@@ -190,6 +200,7 @@ class FsTopBar extends StatelessWidget {
     this.onRotate,
     this.rotatedToPortrait = false,
     this.onLongPressQuality,
+    this.actions = const <Widget>[],
   });
 
   final String title;
@@ -221,6 +232,12 @@ class FsTopBar extends StatelessWidget {
 
   /// 当前是否竖屏布局：只决定转屏按钮的图标语义（点了会切到另一边）。
   final bool rotatedToPortrait;
+
+  /// 右侧附加按钮（按顺序排在投屏之后）。
+  ///
+  /// 一起看全屏要用同一套顶栏，但它多了「换源 / 换剧 / 成员 / 邀请 /
+  /// 退出房间」这些房间专属入口。主播放页不传，渲染结果与改动前完全一致。
+  final List<Widget> actions;
 
   /// 长按分辨率胶囊的回调：播放诊断浮层的入口。
   ///
@@ -364,6 +381,10 @@ class FsTopBar extends StatelessWidget {
                   tooltip: '投屏',
                   onTap: onCast,
                 ),
+              ],
+              for (final action in actions) ...[
+                const SizedBox(width: 6),
+                action,
               ],
             ],
           ),

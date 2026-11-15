@@ -528,9 +528,9 @@ class TogetherClient {
 
   /// 连续连接失败超过这个次数就停止自动重连，交给页面显示「重试」按钮。
   ///
-  /// 3+6+12+24 ≈ 45 秒；再往后每 30 秒一次的重连对用户没有任何意义，
-  /// 却会一直显示「正在重连」—— 这正是要修的那个体验问题。
-  static const int giveUpAfterFailures = 5;
+  /// 1+1+2+3+5+8+13+30 ≈ 63 秒；再往后每 30 秒一次的重连对用户没有任何
+  /// 意义，却会一直显示「正在重连」—— 这正是要修的那个体验问题。
+  static const int giveUpAfterFailures = 8;
 
   /// 自动重连失败次数（连上 hello 后清零）。
   int _failedAttempts = 0;
@@ -737,10 +737,22 @@ class TogetherClient {
     _startRetryTimer();
   }
 
+  /// 断线重连退避：先快后慢。
+  ///
+  /// RECONNECT_FAST_FIRST（2026-11-15）：以前是 3/6/12/24 秒 —— 掉线 10 秒
+  /// （进电梯、切飞行模式、地下车库）回来以后，最快也要等下一次退避才重连，
+  /// 实际观察是 10~20 秒才恢复同步，用户以为「一起看死了」。
+  /// 现在前两次 1 秒就重试（瞬时抖动一秒内接上），再逐步拉长到 30 秒，
+  /// 连续失败 8 次（约 80 秒）才交给页面显示「重试」按钮，
+  /// 比原来的 45 秒更宽容，也比原来更快接回。
+  static const List<int> _retryDelaysSeconds = <int>[
+    1, 1, 2, 3, 5, 8, 13, 30,
+  ];
+
   void _startRetryTimer() {
     if (_closed || _authFailed) return;
-    // 3 / 6 / 12 / 24 / 30 / 30…
-    final seconds = math.min(30, 3 * (1 << math.min(_retryAttempt, 4)));
+    final index = math.min(_retryAttempt, _retryDelaysSeconds.length - 1);
+    final seconds = _retryDelaysSeconds[index];
     _retryAttempt = math.min(_retryAttempt + 1, 8);
     _failedAttempts++;
     _retryDelaySec = seconds;

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -606,8 +607,18 @@ class _TogetherEpisodePicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FractionallySizedBox(
-      heightFactor: .55,
+    // PANEL_COMPACT（2026-11-15）：与主播放全屏的选集面板同一个高度规则 ——
+    // 屏高 35%（最低 240、最高 460），内部滚动，别占大半屏。
+    final size = MediaQuery.sizeOf(context);
+    final pad = MediaQuery.paddingOf(context);
+    final height = math
+        .min(460.0, math.max(240.0, size.height * .35))
+        .toDouble();
+    final available = math
+        .max(240.0, size.height - pad.top - pad.bottom - 24)
+        .toDouble();
+    return SizedBox(
+      height: math.min(height, available),
       child: Container(
         decoration: const BoxDecoration(
           color: Color(0xFFF9FBFF),

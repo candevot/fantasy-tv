@@ -660,7 +660,13 @@ class Api {
     final scheme = uri.scheme.toLowerCase();
     if (scheme != 'http' && scheme != 'https') return '';
     // 归一化协议 / 主机大小写并转义空格，ImageProvider 的缓存键才稳定。
-    return uri.toString();
+    final norm = uri.toString();
+    // IMG_PROXY（2026-11-15）：外站海报多是 webp，还有防盗链/证书问题，App 里
+    // 经常整块退回首字占位（首页、相关推荐、肥猫源都踩过）。
+    // 统一走我们自己的代理：服务端补 Referer、webp 转 jpeg、落盘缓存；失败会
+    // 302 回原始地址，最坏情况等于直连。
+    if (norm.contains('/pic?u=')) return norm;
+    return '$root/pic?u=${Uri.encodeComponent(norm)}';
   }
 }
 

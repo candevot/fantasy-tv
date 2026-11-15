@@ -2155,24 +2155,9 @@ class _DetailPageState extends State<DetailPage>
     ));
   }
 
-  Widget _sourceHint() {
-    final skin = FxDetailSkin.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 11, 16, 0),
-      child: Row(
-        children: [
-          Icon(Icons.info_outline_rounded, size: 13, color: skin.hint),
-          const SizedBox(width: 5),
-          Expanded(
-            child: Text(
-              '线路对手机性能和网络要求高，卡顿请更换线路',
-              style: TextStyle(fontSize: 11, height: 1.3, color: skin.hint),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  // NO_HINT（2026-11-15）：用户要求删掉这类线路提示文案，
+  // 不要把问题甩给用户；线路失败由自动切线/换源处理，不需要文案。
+  Widget _sourceHint() => const SizedBox.shrink();
 
   /// 补线中的占位骨架：与线路卡片同尺寸、同起点，平台线补到时直接原地
   /// 替换成真实卡片，页面不会先空一块再撑开。
