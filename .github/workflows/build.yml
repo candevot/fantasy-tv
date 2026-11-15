@@ -217,19 +217,49 @@ jobs:
           grep -q 'bgTitle' lib/services/exo_player.dart
           grep -q 'warmArtwork' lib/services/exo_player.dart
           grep -q 'fxHasAdjacentEpisode' lib/pages/player_page.dart
-          # 反向门禁：不许退回手绘通知 / 自己 startForeground（那样锁屏和媒体中心
-          # 都看不到，也拿不到上一集下一集）。
+          # 反向门禁：不许退回手绘通知（那样锁屏和媒体中心都看不到，也拿不到
+          # 上一集下一集）。注意 startForeground 不再禁止 —— BG_GATE 之后
+          # 前台由我们自己带类型进（media3 内部那条路是本次闪退的根因），
+          # 但必须经 BgSafe.run 包住，由 tools/check_bg_foreground.py 结构校验。
           if grep -q 'Notification.Builder' $K/PlaybackService.kt; then
             echo 'PlaybackService 不许手绘通知：用 media3 的 DefaultMediaNotificationProvider' >&2
             exit 1
           fi
-          if grep -q 'startForeground(' $K/PlaybackService.kt; then
-            echo 'startForeground 交给 media3（MediaNotificationManager），别自己抢' >&2
-            exit 1
-          fi
+          # BG_GATE：通知照旧由 media3 画，但前台必须由我们接管。
+          grep -q 'RecordingNotificationProvider' $K/PlaybackService.kt
+          grep -q 'override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean)' $K/PlaybackService.kt
+          grep -q 'super.onUpdateNotification(session, false)' $K/PlaybackService.kt
+          grep -q 'FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK' $K/PlaybackService.kt
+          grep -q 'PlaybackService.gateServiceStart(' $K/ExoPlayerPlugin.kt
           flutter test test/playback_regressions_test.dart
           # 上一集 / 下一集按钮的边界口径（第一集 / 最后一集 / 集号不连续 / 单片）。
           flutter test test/episode_step_test.dart
+
+      # BG_GATE（2026-11-15）：后台播放「点任意剧就闪退」的**结构性**门禁。
+      #
+      # 那次闪退不是某句代码写错，而是异常从 media3 库内部（它自己调
+      # startForeground）直接落到主线程 —— 我们的 try/catch 根本不在调用栈上。
+      # 所以这里的门禁必须能证明「那条路已经不存在」，而不是「文件里有
+      # startForeground 字样」：
+      #   · 结构校验：每一处 startForeground 都在 BgSafe.run 内、必带
+      #     FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK、绝不把 true 交给 media3、
+      #     MediaSession 只在主线程建、dispose 里先摘 session 再 release 播放器；
+      #   · 纯逻辑单测：Android 13/14/15/17 各档「能不能进前台」的判定；
+      #   · kotlinc 全量编译（本机有 jar 时；runner 上没有就 SKIP，最终仍由
+      #     Gradle 编译兜底）。
+      - name: BG_GATE (background playback crash containment) regressions
+        run: |
+          set -e
+          K=android_src/kotlin/com/huanxiang/fantasy_tv
+          python3 tools/check_bg_foreground.py
+          bash tools/check_bg_gate.sh
+          bash tools/check_kotlin_compile.sh
+          # 事故开关必须真的恢复成 true（这是本轮交付物之一）。
+          grep -q 'BG_SERVICE_ENABLED = true' $K/ExoPlayerPlugin.kt
+          # 崩因分析表必须在文档里（含 media3 那句会 rethrow 的 API）。
+          grep -q 'MissingForegroundServiceTypeException' docs/BACKGROUND-PLAYBACK.md
+          grep -q 'ForegroundServiceStartNotAllowedException' docs/BACKGROUND-PLAYBACK.md
+          grep -q '真机验收' docs/BACKGROUND-PLAYBACK.md
 
       # PROBE / FLOW_WATCH（2026-11-15）：把「慢网不算失败、真失败才切」钉死。
       #

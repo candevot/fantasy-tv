@@ -667,27 +667,60 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     override fun hasEpisodeStep(delta: Int): Boolean =
         if (delta < 0) bgHasPrev else bgHasNext
 
-    /** 起前台服务（可重复调用：已在前台时只刷新 session / 通知）。 */
-    private val BG_SERVICE_ENABLED = false
+    /**
+     * 后台保活总开关。
+     *
+     * BG_SERVICE_ENABLED（2026-11-15）：事故当晚它是 `false`（整段旁路，
+     * 先保证能播）。根因查清后恢复成 `true` —— 崩溃点不在「起服务」这件事，
+     * 而在 media3 库内部自己调 `startForeground` 时抛出的异常没人接
+     * （详见 docs/BACKGROUND-PLAYBACK.md §1）。现在前台由
+     * [PlaybackService.enterForegroundGuarded] 接管、其余全部 runCatching，
+     * 这条链路**再也没有能抛到主线程的路径**。留着这个开关是给真机兜底：
+     * 万一某台 ROM 还有别的惊喜，改回 `false` 就退回「能播但没后台保活」。
+     */
+    private val BG_SERVICE_ENABLED = true
 
-    fun startBackground() {
+    /**
+     * 起后台播放服务（可重复调用：已在跑时只刷新 session / 通知）。
+     *
+     * BG_GATE（2026-11-15）：两条调用路径的前置条件不一样 ——
+     *
+     *   · `open()` 之后那条：open 刚回来，App 一定在前台，可以直接起；
+     *   · `onIsPlayingChanged(true)` 那条：恢复播放可能发生在**后台**
+     *     （用户从通知栏 / 耳机按键里点继续），这时起服务会撞上 Android 12+
+     *     的「后台不允许启动前台服务」。所以那条路径传
+     *     `requireForeground = true`，先确认
+     *     `RunningAppProcessInfo.importance == IMPORTANCE_FOREGROUND`。
+     *
+     * 被门禁挡住 = 只是「这一拍没有后台保活」，播放本身完全不受影响：
+     * 下一次 open / 回到前台时自然会补上。
+     */
+    fun startBackground(requireForeground: Boolean = false) {
         if (bgTitle.isEmpty()) return // 没有片名 = 不是正式播放，不挂保活
-        // BG_SAFE（2026-11-15）：MediaSession 升级后出现「任意剧一点播放就闪退」。
-        // 先把服务调用整段关掉，优先保证能播；后台播放/媒体卡片等定位清楚再开回来。
-        if (!BG_SERVICE_ENABLED) { bgStarted = false; return }
-        bgStarted = true
-        try {
-            PlaybackService.start(context, bgTitle, bgEpisode, this)
-        } catch (e: Throwable) {
+        if (!BG_SERVICE_ENABLED) {
             bgStarted = false
-            Log.w("FxPlay", "startBackground failed: " + e.message)
+            return
         }
+        val block = PlaybackService.gateServiceStart(context, requireForeground)
+        if (block != BgBlock.NONE) {
+            bgStarted = false
+            Log.w(
+                BgSafe.TAG,
+                "后台服务跳过（播放继续）：$block " +
+                    BgGate.describe(PlaybackService.readEnv(context), block),
+            )
+            return
+        }
+        bgStarted = true
+        BgSafe.run("PlaybackService.start") {
+            PlaybackService.start(context, bgTitle, bgEpisode, this)
+        } ?: run { bgStarted = false }
     }
 
     /** 停前台服务（[PlaybackService.stop] 内部有实例身份校验）。 */
     fun stopBackground() {
         bgStarted = false
-        PlaybackService.stop(context, this)
+        BgSafe.run("PlaybackService.stop") { PlaybackService.stop(context, this) }
     }
 
     /**
@@ -1432,7 +1465,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 try {
                     // BG_SERVICE：第一次真的出声才算「在播放」→ 起前台服务；
                     // 之后每次状态变化只刷新通知（暂停 / 继续的按钮文案）。
-                    if (isPlaying) startBackground() else PlaybackService.sync()
+                    // BG_GATE：这条路径可能发生在后台（从通知栏 / 耳机恢复播放），
+                    // 必须先确认 App 在前台，否则 Android 12+ 不许起前台服务。
+                    if (isPlaying) startBackground(requireForeground = true)
+                    else PlaybackService.sync()
                     emit()
                 } catch (error: Throwable) {
                     Log.e(LOG_TAG, "listener playing 异常 ${error.javaClass.simpleName}", error)

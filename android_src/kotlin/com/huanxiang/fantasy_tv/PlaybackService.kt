@@ -1,23 +1,33 @@
 package com.huanxiang.fantasy_tv
 
+import android.app.ActivityManager
+import android.app.Notification
 import android.app.PendingIntent
 import android.content.ComponentCallbacks2
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.Process
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.CommandButton
 import androidx.media3.session.DefaultMediaNotificationProvider
+import androidx.media3.session.MediaNotification
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.google.common.collect.ImmutableList
 import java.io.File
 import java.security.MessageDigest
 import java.util.Collections
@@ -52,11 +62,16 @@ import java.util.concurrent.Executors
  *      所以用 [SessionPlayer]（ForwardingPlayer）把四个「上/下一集」命令
  *      声明成可用，并把它们**拦下来转给 Dart** —— 集数、线路、播放地址只有
  *      Dart 那边知道，原生不能自己切。
- *   4. **前台服务 / 通知的时机交给 media3**：它按「playWhenReady && READY /
- *      BUFFERING」决定进不进前台、通不通知。这正好和我们的语义一致
- *      （暂停时通知留着、进程不再占前台），并且它自己处理了
- *      `startForegroundService` 的 5 秒义务，比手写更不容易出
- *      ForegroundServiceDidNotStartInTimeException。
+ *   4. **通知交给 media3，前台由我们自己进**（BG_GATE，2026-11-15）：
+ *      media3 的 `MediaSessionService` 会在播放开始时**在库内部**调
+ *      `startForeground(...)`，那一段我们包不住 —— 它只吞
+ *      `ForegroundServiceStartNotAllowedException`，其余
+ *      （`MissingForegroundServiceTypeException` / `SecurityException`）
+ *      原样抛回主线程，就是「点播放就闪退」。所以这里覆写
+ *      `onUpdateNotification(session, false)`：**只让 media3 画通知**，
+ *      进前台由 [enterForegroundGuarded] 带
+ *      `FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK` 自己调，整句在 runCatching
+ *      里，失败只记日志。
  *   5. **不留僵尸 session / 通知**：播放结束、出错、退出播放页、播放器实例
  *      被重建（解码失败重试）时都会 [releaseSessionQuietly]；播放器
  *      `release()` 之前一定要先把 session 摘掉，否则 media3 会在已释放的
@@ -161,14 +176,97 @@ class PlaybackService : MediaSessionService() {
         /** 服务是否正在运行（session 可能在，也可能还没建）。 */
         fun isRunning(): Boolean = instance != null
 
+        // ------------------------------------------------ BG_GATE 前置条件采样
+
+        /** Android 13+ 运行时权限名（字符串常量，避免被当成 33 以下的死代码）。 */
+        const val PERMISSION_POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS"
+
+        /** Android 14+ 前台服务类型权限名。 */
+        const val PERMISSION_FGS_MEDIA_PLAYBACK =
+            "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+
+        /**
+         * App 现在是不是**前台**（决定 onIsPlayingChanged 那条路径能不能起服务）。
+         *
+         * 用 `RunningAppProcessInfo.importance`：Android 上只有它同时覆盖
+         * 「有可见 Activity」「有前台服务但界面不在」两种状态，而且读自己进程
+         * 不需要任何权限。读不到一律当「不在前台」——宁可晚一点起服务，
+         * 也不在后台去撞 Android 12+ 的前台服务启动限制。
+         */
+        fun isAppInForeground(context: Context): Boolean {
+            val app = context.applicationContext ?: context
+            val value = BgSafe.value("isAppInForeground") {
+                val manager = app.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                    ?: return@value false
+                val pid = Process.myPid()
+                manager.runningAppProcesses?.any {
+                    it.pid == pid &&
+                        it.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                } ?: false
+            }
+            return value == true
+        }
+
+        /** 真机环境快照：服务实例不在时也能读（起服务前的门禁要用）。 */
+        fun readEnv(context: Context): BgEnv {
+            val app = context.applicationContext ?: context
+            return BgSafe.value("readEnv") {
+                BgEnv(
+                    sdkInt = Build.VERSION.SDK_INT,
+                    appForeground = isAppInForeground(app),
+                    notificationPermission = hasNotificationPermission(app),
+                    declaredForegroundTypes = declaredForegroundTypes(app),
+                    mediaPlaybackPermission = hasPermission(app, PERMISSION_FGS_MEDIA_PLAYBACK),
+                )
+            } ?: BgEnv.UNKNOWN
+        }
+
+        /** 起服务前的门禁（ExoPlayerPlugin.startBackground 调用）。 */
+        fun gateServiceStart(context: Context, requireForeground: Boolean): BgBlock =
+            BgGate.checkServiceStart(readEnv(context), requireForeground)
+
+        private fun hasNotificationPermission(context: Context): Boolean =
+            if (Build.VERSION.SDK_INT < 33) {
+                true
+            } else {
+                hasPermission(context, PERMISSION_POST_NOTIFICATIONS)
+            }
+
+        private fun hasPermission(context: Context, name: String): Boolean {
+            if (Build.VERSION.SDK_INT < 23) return true
+            val value = BgSafe.value("checkSelfPermission($name)") {
+                context.checkSelfPermission(name)
+            }
+            return value == PackageManager.PERMISSION_GRANTED
+        }
+
+        /**
+         * manifest 里给本服务声明的 foregroundServiceType 位掩码。
+         *
+         * Android 10（29）以下没有「类型」这个概念，按「已声明」返回，
+         * 免得低版本被门禁挡住（BgGate 本身也只对 29+ 校验）。
+         */
+        private fun declaredForegroundTypes(context: Context): Int {
+            if (Build.VERSION.SDK_INT < 29) return BgEnv.MEDIA_PLAYBACK_TYPE
+            val value = BgSafe.value("getServiceInfo(PlaybackService)") {
+                context.packageManager
+                    .getServiceInfo(ComponentName(context, PlaybackService::class.java), 0)
+                    .foregroundServiceType
+            }
+            return value ?: 0
+        }
+
         /**
          * 起服务（可重复调用）。
          *
-         * 用 `startService` 而不是 `startForegroundService`：进前台 + 发通知由
-         * media3 按播放状态决定，我们这里只是把服务**实例化**出来好挂 session。
-         * 用 startForegroundService 的话，如果此刻是暂停态（media3 不会调
-         * startForeground），5 秒后就是 ForegroundServiceDidNotStartInTime
-         * 闪退。
+         * 用 `startService` 而不是 `startForegroundService`（BG_GATE，2026-11-15）：
+         *
+         *   · `startForegroundService` 带 5 秒义务 —— 起来之后 5 秒内没有
+         *     `startForeground` 就是 `ForegroundServiceDidNotStartInTimeException`
+         *     （不可捕获，直接闪退）。而「要不要进前台」取决于播放状态，
+         *     用户暂停着点进来就必然超时；
+         *   · 现在进前台由 [enterForegroundGuarded] 在**播放真的开始时**自己调，
+         *     用的是普通 `startService`，没有 5 秒义务，也就没有那条闪退路径。
          */
         fun start(context: Context, title: String, episode: Int, ctl: Controller) {
             try {
@@ -188,7 +286,7 @@ class PlaybackService : MediaSessionService() {
                 context.startService(intent)
             } catch (error: Throwable) {
                 // 起服务失败（后台启动限制 / 厂商 ROM 拦截）不影响播放本身。
-                Log.w(LOG_TAG, "start 失败：${error.javaClass.simpleName}: ${error.message}")
+                Log.w(BgSafe.TAG, "start 失败：${error.javaClass.simpleName}: ${error.message}")
             }
         }
 
@@ -213,7 +311,7 @@ class PlaybackService : MediaSessionService() {
                 releaseSessionNow()
                 context.stopService(Intent(context, PlaybackService::class.java))
             } catch (error: Throwable) {
-                Log.w(LOG_TAG, "stop 失败：${error.javaClass.simpleName}: ${error.message}")
+                Log.w(BgSafe.TAG, "stop 失败：${error.javaClass.simpleName}: ${error.message}")
             }
         }
 
@@ -229,7 +327,7 @@ class PlaybackService : MediaSessionService() {
                 if (instance?.mediaSession == null) return
                 Log.d(LOG_TAG, "sync 忽略：通知由 MediaSession 自己刷新")
             } catch (error: Throwable) {
-                Log.w(LOG_TAG, "sync 失败：${error.javaClass.simpleName}")
+                Log.w(BgSafe.TAG, "sync 失败：${error.javaClass.simpleName}")
             }
         }
 
@@ -238,7 +336,7 @@ class PlaybackService : MediaSessionService() {
             try {
                 instance?.ensureSession()
             } catch (error: Throwable) {
-                Log.w(LOG_TAG, "syncPlayer 失败：${error.javaClass.simpleName}")
+                Log.w(BgSafe.TAG, "syncPlayer 失败：${error.javaClass.simpleName}")
             }
         }
 
@@ -256,7 +354,7 @@ class PlaybackService : MediaSessionService() {
                 try {
                     service.releaseSessionQuietly()
                 } catch (error: Throwable) {
-                    Log.w(LOG_TAG, "releaseSession 失败：${error.javaClass.simpleName}")
+                    Log.w(BgSafe.TAG, "releaseSession 失败：${error.javaClass.simpleName}")
                 }
             }
             if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -357,13 +455,13 @@ class PlaybackService : MediaSessionService() {
                     try {
                         downloadArtwork(appContext, url, headers ?: emptyMap(), file)
                     } catch (error: Throwable) {
-                        Log.w(LOG_TAG, "封面下载失败：${error.javaClass.simpleName}: ${error.message}")
+                        Log.w(BgSafe.TAG, "封面下载失败：${error.javaClass.simpleName}: ${error.message}")
                     } finally {
                         artworkInflight.remove(url)
                     }
                 }
             } catch (error: Throwable) {
-                Log.w(LOG_TAG, "warmArtwork 失败：${error.javaClass.simpleName}")
+                Log.w(BgSafe.TAG, "warmArtwork 失败：${error.javaClass.simpleName}")
             }
         }
 
@@ -374,9 +472,9 @@ class PlaybackService : MediaSessionService() {
                     .edit()
                     .putBoolean(PREF_INTERRUPTED, true)
                     .apply()
-                Log.w(LOG_TAG, "interrupt 候选：$why")
+                Log.w(BgSafe.TAG, "interrupt 候选：$why")
             } catch (error: Throwable) {
-                Log.w(LOG_TAG, "markInterrupted 失败：${error.javaClass.simpleName}")
+                Log.w(BgSafe.TAG, "markInterrupted 失败：${error.javaClass.simpleName}")
             }
         }
 
@@ -413,18 +511,18 @@ class PlaybackService : MediaSessionService() {
             }
             PlayerHttp.client.newCall(request.build()).execute().use { response ->
                 if (!response.isSuccessful) {
-                    Log.w(LOG_TAG, "封面 HTTP ${response.code}：$url")
+                    Log.w(BgSafe.TAG, "封面 HTTP ${response.code}：$url")
                     return
                 }
                 val body = response.body ?: return
                 val length = body.contentLength()
                 if (length > ART_MAX_BYTES) {
-                    Log.w(LOG_TAG, "封面太大跳过 ${length}B：$url")
+                    Log.w(BgSafe.TAG, "封面太大跳过 ${length}B：$url")
                     return
                 }
                 val bytes = body.bytes()
                 if (bytes.isEmpty() || bytes.size > ART_MAX_BYTES) {
-                    Log.w(LOG_TAG, "封面内容为空或过大 ${bytes.size}B：$url")
+                    Log.w(BgSafe.TAG, "封面内容为空或过大 ${bytes.size}B：$url")
                     return
                 }
                 val dir = file.parentFile
@@ -446,6 +544,18 @@ class PlaybackService : MediaSessionService() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /** media3 的 provider 最近一次产出的通知（进前台要用它的 id + Notification）。 */
+    @Volatile
+    private var lastMediaNotification: MediaNotification? = null
+
+    /** 我们自己有没有进前台（media3 的 startedInForeground 不再被使用）。 */
+    @Volatile
+    private var foregroundStarted = false
+
+    /** 上一次拦住的判定：同一原因只打一条日志，别每次 buffer 事件刷屏。 */
+    @Volatile
+    private var lastLoggedBlock: BgBlock? = null
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -455,9 +565,25 @@ class PlaybackService : MediaSessionService() {
         // 播放照旧（通知晚一点出现而已），绝不因为保活把播放带崩。
         setListener(object : Listener {
             override fun onForegroundServiceStartNotAllowedException() {
-                Log.w(LOG_TAG, "前台服务启动被系统拒绝（Android 12+ 后台限制），播放继续")
+                Log.w(BgSafe.TAG, "前台服务启动被系统拒绝（Android 12+ 后台限制），播放继续")
             }
         })
+        // BG_GATE（2026-11-15）：把「这台机器到底能不能进前台」一次性打进日志。
+        // 真机出事时用户拉一份 `adb logcat -s FxPlay` 就能看出缺哪一项，
+        // 不用再猜是类型没声明、权限没给，还是 ROM 自己加的限制。
+        val env = readEnv(this)
+        Log.i(LOG_TAG, "前台服务自检：${BgGate.describe(env, BgGate.checkForeground(env))}")
+        if (Build.VERSION.SDK_INT >= 29 &&
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK != BgEnv.MEDIA_PLAYBACK_TYPE
+        ) {
+            // 只可能是平台常量变了（历史上没变过）：判定逻辑要跟着改。
+            Log.w(
+                LOG_TAG,
+                "平台 FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK=" +
+                    "${ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK} 与 BgEnv " +
+                    "(${BgEnv.MEDIA_PLAYBACK_TYPE}) 不一致",
+            )
+        }
         Log.i(LOG_TAG, "MediaSessionService 已创建")
     }
 
@@ -465,9 +591,15 @@ class PlaybackService : MediaSessionService() {
      * 通知样式：media3 默认的媒体通知（封面 + 片名 / 副标题 + 上一集 / 播放暂停 /
      * 下一集）。**不自己画布局** —— 系统会按版本把这条通知渲染成媒体卡片，
      * 自绘的 action 反而进不了锁屏 / 媒体中心。
+     *
+     * BG_GATE：provider 外面再包一层 [RecordingNotificationProvider]，目的只有
+     * 一个 —— 拿到 media3 画好的那条 Notification，并**接管它的异步回调**。
+     * 原生回调会走 `MediaSessionService.onNotificationUpdated()`，那条路在封面
+     * 加载完成后会自己调 `startForeground(...)`（库内部，异常接不住）；换成我们
+     * 自己的回调后，前台只由 [enterForegroundGuarded] 进。
      */
     private fun installNotificationProvider() {
-        try {
+        BgSafe.run("installNotificationProvider") {
             val provider = DefaultMediaNotificationProvider.Builder(this)
                 .setChannelId(CHANNEL_ID)
                 .setChannelName(R.string.fx_bg_channel)
@@ -476,10 +608,105 @@ class PlaybackService : MediaSessionService() {
             // 小图标沿用老的那张单色播放三角（Android 要求通知小图标必须是
             // 单色 vector，否则状态栏上是一块白方块）。
             provider.setSmallIcon(R.drawable.ic_stat_fx_play)
-            setMediaNotificationProvider(provider)
-        } catch (error: Throwable) {
-            // 通知配置失败只意味着「没有通知栏控件」，播放与 session 不受影响。
-            Log.w(LOG_TAG, "通知提供者配置失败：${error.javaClass.simpleName}")
+            setMediaNotificationProvider(
+                RecordingNotificationProvider(provider) { notification ->
+                    onProviderNotification(notification)
+                }
+            )
+        }
+    }
+
+    /**
+     * 永远不把 `startInForegroundRequired = true` 交给 media3（BG_GATE）。
+     *
+     * 这是本次闪退的**根因所在的那一行**：传 true 时 media3 会在
+     * `MediaNotificationManager.startForeground()` 里调
+     * `Util.setForegroundServiceNotification(..., FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)`，
+     * 而 `Util` 只 catch RuntimeException 之后**原样 rethrow**，
+     * `MediaSessionService.onUpdateNotificationInternal()` 又只吞
+     * `ForegroundServiceStartNotAllowedException` ——
+     * `MissingForegroundServiceTypeException` / `SecurityException` 会直接落到
+     * **主线程**，进程当场死。那一段在库内部，我们的 try/catch 包不到。
+     *
+     * 现在：通知仍然由 media3 的 provider 生成（封面 / 进度 / 上下一集不变），
+     * 但**只发通知、不进前台**；进不进前台由 [enterForegroundGuarded] 决定，
+     * 那里每一句系统调用都在 runCatching 里，失败只记日志。
+     */
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        BgSafe.run("onUpdateNotification") { super.onUpdateNotification(session, false) }
+        val notification = lastMediaNotification ?: return
+        if (startInForegroundRequired) {
+            enterForegroundGuarded(notification)
+        } else {
+            exitForegroundGuarded()
+        }
+    }
+
+    /** provider 产出的通知（首次 + 异步封面回填）：只负责记账 + 走我们自己的投递。 */
+    private fun onProviderNotification(notification: MediaNotification) {
+        lastMediaNotification = notification
+        if (foregroundStarted) {
+            // 已经在前台：用同一条通知刷新一次（内容 / 进度 / 封面回填）。
+            enterForegroundGuarded(notification)
+        }
+    }
+
+    /**
+     * **唯一**的进前台入口（BG_GATE）。
+     *
+     * 三件事：① 先用 [BgGate] 判定前置条件（类型 / 权限 / 通知权限），不满足
+     * 就一次都别调；② 显式带 `FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK`
+     * （Android 14+ 不带就是 MissingForegroundServiceTypeException）；
+     * ③ 整句包在 runCatching 里，失败只写 `Log.w("FxPlay", ...)`。
+     *
+     * 失败语义：**播放继续**，只是进程没有前台身份（切后台可能被系统回收）。
+     */
+    private fun enterForegroundGuarded(notification: MediaNotification) {
+        val env = readEnv(this)
+        val block = BgGate.checkForeground(env)
+        if (block != BgBlock.NONE) {
+            foregroundStarted = false
+            if (lastLoggedBlock != block) {
+                lastLoggedBlock = block
+                Log.w(BgSafe.TAG, "不进前台（播放继续）：${BgGate.describe(env, block)}")
+            }
+            return
+        }
+        lastLoggedBlock = null
+        val done = BgSafe.run("startForeground(type=mediaPlayback)") {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(
+                    notification.notificationId,
+                    notification.notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                startForeground(notification.notificationId, notification.notification)
+            }
+        }
+        val ok = done != null
+        if (ok != foregroundStarted) {
+            Log.i(
+                LOG_TAG,
+                if (ok) "已进前台（mediaPlayback）：$NOTIFICATION_ID"
+                else "进前台失败，播放继续（见 FxPlay 日志）",
+            )
+        }
+        foregroundStarted = ok
+    }
+
+    /** 退出前台（暂停 / 播放结束）：保留通知，只把前台身份摘掉。 */
+    private fun exitForegroundGuarded() {
+        if (!foregroundStarted) return
+        foregroundStarted = false
+        BgSafe.run("stopForeground(DETACH)") {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_DETACH)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(false)
+            }
         }
     }
 
@@ -490,12 +717,7 @@ class PlaybackService : MediaSessionService() {
      * 这时不要硬造一个空 session —— 那会挂出一条点什么都报错的僵尸通知。
      */
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
-        return try {
-            ensureSession()
-        } catch (error: Throwable) {
-            Log.w(LOG_TAG, "onGetSession 失败：${error.javaClass.simpleName}")
-            null
-        }
+        return BgSafe.value("onGetSession") { ensureSession() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -523,7 +745,7 @@ class PlaybackService : MediaSessionService() {
                     try {
                         ctl?.stopPlayback()
                     } catch (error: Throwable) {
-                        Log.w(LOG_TAG, "关闭播放失败：${error.javaClass.simpleName}")
+                        Log.w(BgSafe.TAG, "关闭播放失败：${error.javaClass.simpleName}")
                     }
                     stopSelfSafely()
                     return START_NOT_STICKY
@@ -550,7 +772,7 @@ class PlaybackService : MediaSessionService() {
             }
             return result
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "onStartCommand 异常：${error.javaClass.simpleName}", error)
+            Log.w(BgSafe.TAG, "onStartCommand 异常：${error.javaClass.simpleName}", error)
             stopSelfSafely()
         }
         return START_NOT_STICKY
@@ -558,17 +780,16 @@ class PlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         instance = null
+        foregroundStarted = false
         releaseSessionQuietly()
         releaseWakeLock()
-        try {
+        BgSafe.run("stopForeground(REMOVE)") {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
                 @Suppress("DEPRECATION")
                 stopForeground(true)
             }
-        } catch (error: Throwable) {
-            Log.w(LOG_TAG, "stopForeground 失败：${error.javaClass.simpleName}")
         }
         Log.i(LOG_TAG, "MediaSessionService 已销毁")
         super.onDestroy()
@@ -592,7 +813,7 @@ class PlaybackService : MediaSessionService() {
             if (!isPlayingNow()) return
             markInterrupted(this, "onTrimMemory level=$level")
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "onTrimMemory 失败：${error.javaClass.simpleName}")
+            Log.w(BgSafe.TAG, "onTrimMemory 失败：${error.javaClass.simpleName}")
         }
     }
 
@@ -618,6 +839,19 @@ class PlaybackService : MediaSessionService() {
      * 注意：必须是主线程（MediaSession 的 application looper 就是主线程）。
      */
     private fun ensureSession(): MediaSession? {
+        // BG_GATE（2026-11-15）：MediaSession 必须建在「和播放器同一个
+        // applicationLooper」的线程上（media3 会用 `player.applicationLooper`
+        // 建 Handler，并在这个 Looper 上回调）。它在 OkHttp / 预取 / 解码回调
+        // 线程上被创建过一次，就是 `IllegalStateException: Can't create handler
+        // inside thread that has not called Looper.prepare()` 的直接来源。
+        // 这里统一钉死主线程：不在主线程就把活转过去，本次返回现有 session。
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Log.w(BgSafe.TAG, "ensureSession 被背景线程调用（${Thread.currentThread().name}），已转主线程")
+            BgSafe.run("ensureSession(postMain)") {
+                mainHandler.post { BgSafe.run("ensureSession") { ensureSession() } }
+            }
+            return mediaSession
+        }
         val player = controller?.currentPlayer()
         if (player == null) {
             Log.i(LOG_TAG, "ensureSession 跳过：当前没有播放器实例")
@@ -632,7 +866,7 @@ class PlaybackService : MediaSessionService() {
                 Log.i(LOG_TAG, "MediaSession 已换绑到新的播放器实例")
                 existing
             } catch (error: Throwable) {
-                Log.w(LOG_TAG, "setPlayer 失败，重建 session：${error.javaClass.simpleName}")
+                Log.w(BgSafe.TAG, "setPlayer 失败，重建 session：${error.javaClass.simpleName}")
                 releaseSessionQuietly()
                 createSession(player)
             }
@@ -654,7 +888,7 @@ class PlaybackService : MediaSessionService() {
             Log.i(LOG_TAG, "MediaSession 已创建（绑定同一个 ExoPlayer 实例）")
             session
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "创建 MediaSession 失败：${error.javaClass.simpleName}", error)
+            Log.w(BgSafe.TAG, "创建 MediaSession 失败：${error.javaClass.simpleName}", error)
             null
         }
     }
@@ -670,7 +904,7 @@ class PlaybackService : MediaSessionService() {
             Log.i(LOG_TAG, "媒体控制：${if (delta < 0) "上一集" else "下一集"}")
             controller?.stepEpisode(delta)
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "切集转发失败：${error.javaClass.simpleName}")
+            Log.w(BgSafe.TAG, "切集转发失败：${error.javaClass.simpleName}")
         }
     }
 
@@ -680,13 +914,13 @@ class PlaybackService : MediaSessionService() {
         try {
             if (isSessionAdded(session)) removeSession(session)
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "removeSession 失败：${error.javaClass.simpleName}")
+            Log.w(BgSafe.TAG, "removeSession 失败：${error.javaClass.simpleName}")
         }
         try {
             session.release()
             Log.i(LOG_TAG, "MediaSession 已释放")
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "session.release 失败：${error.javaClass.simpleName}")
+            Log.w(BgSafe.TAG, "session.release 失败：${error.javaClass.simpleName}")
         }
     }
 
@@ -694,7 +928,7 @@ class PlaybackService : MediaSessionService() {
         try {
             stopSelf()
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "stopSelf 失败：${error.javaClass.simpleName}")
+            Log.w(BgSafe.TAG, "stopSelf 失败：${error.javaClass.simpleName}")
         }
     }
 
@@ -716,7 +950,7 @@ class PlaybackService : MediaSessionService() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "openAppIntent 失败：${error.javaClass.simpleName}")
+            Log.w(BgSafe.TAG, "openAppIntent 失败：${error.javaClass.simpleName}")
             null
         }
     }
@@ -736,7 +970,7 @@ class PlaybackService : MediaSessionService() {
             wakeLock = lock
             Log.i(LOG_TAG, "唤醒锁已获取：$WAKE_LOCK_TAG")
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "唤醒锁获取失败：${error.javaClass.simpleName}")
+            Log.w(BgSafe.TAG, "唤醒锁获取失败：${error.javaClass.simpleName}")
         }
     }
 
@@ -747,7 +981,7 @@ class PlaybackService : MediaSessionService() {
             wakeLock = null
             Log.i(LOG_TAG, "唤醒锁已释放：$WAKE_LOCK_TAG")
         } catch (error: Throwable) {
-            Log.w(LOG_TAG, "唤醒锁释放失败：${error.javaClass.simpleName}")
+            Log.w(BgSafe.TAG, "唤醒锁释放失败：${error.javaClass.simpleName}")
         }
     }
 
@@ -825,4 +1059,74 @@ class PlaybackService : MediaSessionService() {
             onStep(1)
         }
     }
+}
+
+/**
+ * 后台播放链路的**唯**异常出口（BG_GATE，2026-11-15）。
+ *
+ * 为什么要有它：这次「任意剧点播放就闪退」的教训不是「少写了一个 try」，
+ * 而是**异常最后落在哪个线程**。Service 的 onCreate / onStartCommand /
+ * 通知更新 / 播放器回调全在主线程，主线程上任何未捕获异常 = 进程当场死，
+ * 没有报错页、没有 toast，用户只看到闪退。所以后台播放链路里每一句系统
+ * 调用都必须经过这里：失败只写日志，返回值用 null 表示「没成功」。
+ *
+ * 日志 tag 固定 `FxPlay`，用户侧一条命令就能取证：
+ *   `adb logcat -s FxPlay FxBg FxCrash`
+ */
+internal object BgSafe {
+    const val TAG = "FxPlay"
+
+    /** 跑一段可能失败的逻辑；失败记日志并返回 null。 */
+    inline fun <T> run(where: String, block: () -> T): T? {
+        return try {
+            block()
+        } catch (error: Throwable) {
+            try {
+                Log.w(TAG, "$where 失败：${error.javaClass.simpleName}: ${error.message}", error)
+            } catch (_: Throwable) {
+                // 连日志都写不出去（极罕见）：也绝不外抛。
+            }
+            null
+        }
+    }
+
+    /** [run] 的别名，用在「读一个值」的地方（语义更清楚）。 */
+    inline fun <T> value(where: String, block: () -> T): T? = run(where, block)
+}
+
+/**
+ * 把 media3 的 [MediaNotification.Provider] 包一层（BG_GATE，2026-11-15）。
+ *
+ * 只做两件事：
+ *   1. 记住 media3 画好的那条 Notification —— 进前台时要原样交给
+ *      `startForeground(id, notification, type)`，这样通知栏 / 锁屏 / 车机
+ *      看到的仍然是 media3 的媒体卡片（封面、进度、上下一集），不是自绘的；
+ *   2. **接管异步回调**：封面是异步加载的，media3 默认会把「通知变了」回调给
+ *      `MediaSessionService.onNotificationUpdated()`，而那条路会自己
+ *      `startForeground(...)`（库内部，异常接不住）。换成我们的回调以后，
+ *      前台只从 [PlaybackService.enterForegroundGuarded] 进。
+ */
+@OptIn(UnstableApi::class)
+private class RecordingNotificationProvider(
+    private val delegate: MediaNotification.Provider,
+    private val onNotification: (MediaNotification) -> Unit,
+) : MediaNotification.Provider {
+
+    override fun createNotification(
+        session: MediaSession,
+        customLayout: ImmutableList<CommandButton>,
+        actionFactory: MediaNotification.ActionFactory,
+        callback: MediaNotification.Provider.Callback,
+    ): MediaNotification {
+        val created = delegate.createNotification(session, customLayout, actionFactory) { updated ->
+            BgSafe.run("providerCallback") { onNotification(updated) }
+        }
+        BgSafe.run("providerCreated") { onNotification(created) }
+        return created
+    }
+
+    override fun handleCustomCommand(session: MediaSession, action: String, extras: Bundle): Boolean =
+        BgSafe.value("providerCustomCommand") {
+            delegate.handleCustomCommand(session, action, extras)
+        } ?: false
 }
