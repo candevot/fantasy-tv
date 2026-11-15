@@ -157,6 +157,9 @@ jobs:
         run: |
           dart run tools/test_line_probe.dart
           dart run tools/probe_scenarios.dart
+          # ENRICH（2026-11-15）：搜索命中后补线路的规则层（福盈蓝光不补、
+          # 集数不硬凑、24 小时缓存键、日志格式）。
+          dart run tools/test_line_enrich.dart
       # ASPECT_REAL（2026-11-15）：画面比例几何回归。
       #
       # 用户实测「2.4:1 电影纵向拉长 / 1080×1920 竖屏短剧严重变形 / 4:3 老片

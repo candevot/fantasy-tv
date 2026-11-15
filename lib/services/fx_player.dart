@@ -9,6 +9,7 @@ import 'cms_bridge.dart';
 import 'exo_player.dart';
 import 'hls_segment_index.dart';
 import 'iqiyi_codec.dart';
+import 'line_enrich.dart';
 import 'line_probe.dart';
 import 'local_hls_proxy.dart';
 import 'playback_progress.dart';
@@ -2365,7 +2366,16 @@ class FxPlayCache {
     // 播放地址统一走 CmsBridge：CMS 影片按 vod_id 现解析，旧接口的影片
     // 照旧走 /api/play —— 两套编号不能互换（见 cms_bridge 的说明）。
     final resolveWatch = Stopwatch()..start();
-    final future = CmsBridge.play(id, ep, line).then((info) {
+    // ENRICH（2026-11-15）：客户端补出来的线路（`enrich:` 前缀）服务端不认识，
+    // 先去问 LineEnrich 现算地址；不是补的线路返回 null，照旧走 CmsBridge。
+    final future = () async {
+      final enriched = await LineEnrich.instance.resolvePlay(
+        ep: ep,
+        lineId: line,
+      );
+      if (enriched != null) return enriched;
+      return CmsBridge.play(id, ep, line);
+    }().then((info) {
       resolveWatch.stop();
       _lastResolveMs = resolveWatch.elapsedMilliseconds;
       _lastResolveAt = DateTime.now();

@@ -413,6 +413,29 @@ class CmsApi {
         },
       );
 
+  /// 爱奇艺**成品**地址（可直接播的 m3u8）：
+  /// `/hxparse/play/iqiyi/<ep>/index.m3u8?title=…&year=…&ep=…`。
+  ///
+  /// 和 [iqiyiUri]（解析入口，返回 JSON / 302）不是一回事：
+  /// 站点给「幻想爱奇艺」线路的就是这个形态，播放器拿到直接播，
+  /// **不要**再套 `/hxparse/parse/iqiyi`（套一层语义就变了）。
+  ///
+  /// ENRICH（2026-11-15）：客户端补「幻想爱奇艺」线路时，服务端库没有这部片
+  /// 的爱奇艺地址，我们按「片名 + 年份 + 第几集」向解析服务要这一条。
+  static Uri iqiyiPlayUri({
+    required String title,
+    int year = 0,
+    int ep = 1,
+    String base = '/play',
+  }) =>
+      Uri.parse('$parseRoot$base/iqiyi/${ep < 1 ? 1 : ep}/index.m3u8').replace(
+        queryParameters: <String, String>{
+          'title': title,
+          'year': year > 0 ? '$year' : '',
+          'ep': ep < 1 ? '1' : '$ep',
+        },
+      );
+
   /// 排序键 → 服务端的 `order` 字段名（纯函数，单测直接断言）。
   static String orderOf(String sort) => _orderOf(sort);
 

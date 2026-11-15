@@ -11,6 +11,7 @@ import '../services/download_service.dart';
 import '../services/fallback_match.dart';
 import '../services/fx_player.dart';
 import '../services/line_cooldown.dart';
+import '../services/line_enrich.dart';
 import '../services/line_health.dart';
 import '../services/play_log.dart';
 import '../services/source_fallback.dart';
@@ -293,6 +294,10 @@ class _DetailPageState extends State<DetailPage>
         // 才能高亮并滚动到对应集数。
         _groupIndex = _groupIndexOf(_episodeGroups, ep);
       });
+      // ENRICH（2026-11-15）：搜索命中后补线路（幻想爱奇艺 / SH4K）。
+      // 后台跑，不阻塞详情页；命中就追加到线路列表，并参与现有排序
+      // （付费线在前、按实测分辨率）与自动切线。
+      unawaited(_enrichLines(d));
       _scheduleLineRefresh();
       // PLATFORM_PENDING：平台线路进页面就先在后台解析一次（fire-and-forget），
       // 用户点之前大概率已经 ready，点下去不用等。
@@ -1552,6 +1557,45 @@ class _DetailPageState extends State<DetailPage>
 
   void _onCommentTap() {
     fxToast(context, '当前为游客模式，登录后即可发表评论');
+  }
+
+  /// ENRICH（2026-11-15）：按「片名 + 年份」补两条线路。
+  ///
+  /// 只补 `幻想爱奇艺` 与 `SH4K`（福盈蓝光 PAN1 的解析接口坏了，补上去是
+  /// 死线路，明确不补）。集数按对方实际集数，探不到就不补；命中缓存 24 小时。
+  /// 补进来的线路 id 带 `enrich:` 前缀，播放地址由 `LineEnrich.resolvePlay`
+  /// 现算 —— 服务端库一行都不改。
+  Future<void> _enrichLines(VideoDetail d) async {
+    final EnrichEntry? entry;
+    try {
+      entry = await LineEnrich.instance.enrich(
+        title: d.title,
+        year: d.year,
+        existing: d.lines,
+        episodes: d.lines.isEmpty ? null : d.lines.first.epNames.length,
+      );
+    } catch (e, st) {
+      debugPrint('enrich failed: $e\n$st');
+      return;
+    }
+    if (!mounted || entry == null || entry.hits.isEmpty) return;
+    final current = _detail;
+    if (current == null) return;
+    final extra = LineEnrich.instance.linesOf(entry);
+    final have = <String>{for (final line in current.lines) line.id};
+    final add = <LineInfo>[
+      for (final line in extra)
+        if (!have.contains(line.id)) line,
+    ];
+    if (add.isEmpty) return;
+    setState(() {
+      _detail = current.copyWith(
+        lines: LineHealth.instance.rankLines(widget.id, <LineInfo>[
+          ...current.lines,
+          ...add,
+        ]),
+      );
+    });
   }
 
   /* ---------------------------------------------------------------- ui */
