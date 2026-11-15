@@ -53,7 +53,9 @@ void main() {
       final s = ExoPlayerState.fromMap(<String, dynamic>{});
       expect(s.bytesLoaded, -1);
       expect(s.bytesLoadedPerSec, 0);
-      expect(s.isLoading, true);
+      // 两个键都没有时退化成 `buffering`，而 buffering 也没有 → false。
+      // （判卡死用的是「字节/缓冲都不动」，不依赖这个字段。）
+      expect(s.isLoading, false);
     });
   });
 }
