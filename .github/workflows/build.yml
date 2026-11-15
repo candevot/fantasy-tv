@@ -146,6 +146,32 @@ jobs:
           exit $code
       - name: Playback recovery regressions
         run: flutter test test/playback_regressions_test.dart
+      # NET_SPEED（2026-11-15）：实时网速。
+      #
+      # 用户实测「缓冲时转圈下面一直 0 KB/s，从来没变过」：计数器的字节数
+      # 一直在涨，坏在速率那一层 —— `PlayerHttp` 把「窗口起点快照」和
+      # 「本窗口新增字节」写进同一个 AtomicLong，差值恒 0。现在改成
+      # media3 官方的按块回调 + 每秒增量推送。这里钉住四件事，任何一处被
+      # 改回去都直接红：
+      #   · 播放数据源挂官方 TransferListener（按块回调，不依赖自建 HTTP 层）；
+      #   · 官方带宽估算 onBandwidthEstimate 作兜底；
+      #   · 原生每秒推一次快照给 Dart（缓冲阶段没有别的事件可推）；
+      #   · `[FxNet] bytes=+N/s (X MB/s)` 日志格式还在。
+      - name: Live network speed regressions
+        run: |
+          set -e
+          K=android_src/kotlin/com/huanxiang/fantasy_tv
+          grep -q 'TransferListener' $K/FxNet.kt
+          grep -q 'setTransferListener(FxNet.transferListener)' $K/PlayerHttp.kt
+          grep -q 'onBandwidthEstimate' $K/ExoPlayerPlugin.kt
+          grep -q 'NET_TICK_MS' $K/ExoPlayerPlugin.kt
+          grep -qF '[FxNet] bytes=+' $K/FxNet.kt
+          # 反向门禁：窗口快照只允许 bytesPerSec 写。
+          if grep -q 'speedWindowBytes.addAndGet' $K/PlayerHttp.kt; then
+            echo 'speedWindowBytes 只能由 bytesPerSec 写：计数回调再写它，网速会恒 0' >&2
+            exit 1
+          fi
+          flutter test test/fx_net_speed_test.dart
       # PROBE / FLOW_WATCH（2026-11-15）：把「慢网不算失败、真失败才切」钉死。
       #
       # 两个工具都是纯 dart:io（不依赖 Flutter SDK），所以用 dart run 直接跑：

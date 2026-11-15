@@ -75,12 +75,17 @@ object PlayerHttp {
     private val windowStartNanos = AtomicLong(System.nanoTime())
 
     /**
-     * 滚动 1 秒窗口：窗口起点 / 起点时的累计字节 / 上一次算出来的速度。
+     * 滚动 1 秒窗口：窗口起点时间 / **窗口起点那一刻的总字节快照**。
      *
      * SLOW_NET（2026-11-15）：界面上的「实时网速」和「慢网还是卡死」的判定
      * 都吃这个值。为什么不用「缓冲位置推进量 ÷ 时间」估算：HLS 分片是整块
      * 落盘的，一片 3MB 在 200KB/s 下要下 15 秒，这 15 秒里 bufferedPosition
      * 一动不动 —— 估算值是一直 0，看起来和卡死一样。字节数才是在真涨。
+     *
+     * NET_SPEED（2026-11-15）：[speedWindowBytes] 是**快照**，只在
+     * [bytesPerSec] 里写。之前它还兼任「本窗口新增字节累加器」——
+     * 计数回调和快照更新都写同一个变量，两者同步增长，差值永远是 0，
+     * 界面上的实时网速就恒为「0 KB/s」（用户实测的正是这个）。
      */
     private val speedWindowStartNanos = AtomicLong(0)
 
@@ -152,7 +157,6 @@ object PlayerHttp {
             override fun responseBodyEnd(call: Call, byteCount: Long) {
                 if (byteCount > 0 && !countingBodyUsed.get()) {
                     totalBytes.addAndGet(byteCount)
-                    speedWindowBytes.addAndGet(byteCount)
                 }
             }
         }
@@ -292,8 +296,9 @@ object PlayerHttp {
         response.newBuilder()
             .body(
                 CountingBody(body) { read ->
+                    // NET_SPEED：只累加总量。窗口快照（speedWindowBytes）由
+                    // [bytesPerSec] 独占写，这里再写一次就等于把差值抹平成 0。
                     totalBytes.addAndGet(read)
-                    speedWindowBytes.addAndGet(read)
                 },
             )
             .build()
@@ -358,6 +363,11 @@ object PlayerHttp {
         return OkHttpDataSource.Factory(client)
             .setUserAgent(merged["User-Agent"] ?: defaultUa())
             .setDefaultRequestProperties(merged)
+            // NET_SPEED（2026-11-15）：把 media3 官方的按块回调挂上
+            // （`DataSource.TransferListener.onBytesTransferred`）。
+            // 播放器每读到一块就回调一次，慢网下一个分片下十几秒时界面上的
+            // 数字也在动 —— 这是「实时网速」的第一数据源（见 [FxNet]）。
+            .setTransferListener(FxNet.transferListener)
     }
 
     // ------------------------------------------------------------ 连接计数
@@ -385,8 +395,12 @@ object PlayerHttp {
     /**
      * 实时网速（字节/秒）：最近约 1 秒窗口的真实增量。
      *
-     * 界面上的「1.8 MB/s」/「0 KB/s」就是它。0 表示这一秒没收到任何字节 ——
-     * 界面显示 0 KB/s，不要留着上一个数（用户会以为还在下）。
+     * 界面上的「1.8 MB/s」/「0 KB/s」主用 [FxNet]（media3 官方按块回调的口径）；
+     * 这个函数是同一条链路上的兜底：播放器实例还没建好 / 官方回调一个字节都
+     * 没报时，界面照样有数字可显示。
+     *
+     * 0 表示这一秒没收到任何字节 —— 界面显示 0 KB/s，不要留着上一个数
+     * （用户会以为还在下）。
      *
      * 不是每 1 秒强制采样：Dart 侧 250ms 轮询一次快照，这里按「距上个窗口
      * >= 400ms 就换一个窗口」滚动计算，取到的永远是最新一段的真实速率。

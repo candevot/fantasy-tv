@@ -213,15 +213,21 @@ class FxPlayerValue {
     return '';
   }
 
-  /// 真实网速文案（优先原生 1 秒采样的字节速度，退回缓冲估算）。
+  /// 真实网速文案（优先原生按块统计的真实速率，退回缓冲估算）；0 返回空串。
+  ///
+  /// NET_SPEED（2026-11-15）：格式和 `fxSpeedLabel`（player_theme）同一套
+  /// —— MB 保留一位小数（`1.8 MB/s`），10 KB/s 以下也保留一位（`3.2 KB/s`），
+  /// 以上取整（`320 KB/s`）。两处文案必须一致，否则顶栏和缓冲层会显示
+  /// 两个不同的数。
   String get realSpeedText {
     final b = bytesLoadedPerSec > 0
         ? bytesLoadedPerSec.toDouble()
         : bytesPerSecond;
     if (b <= 0) return '';
     if (b >= 1024 * 1024) return '${(b / 1024 / 1024).toStringAsFixed(1)} MB/s';
-    if (b >= 1024) return '${(b / 1024).round()} KB/s';
-    return '${b.toStringAsFixed(0)} B/s';
+    final kb = b / 1024;
+    if (kb < 10) return '${kb.toStringAsFixed(1)} KB/s';
+    return '${kb.round()} KB/s';
   }
 
   /// 画面尺寸，未就绪时宽高为 0。
@@ -253,14 +259,13 @@ class FxPlayerValue {
     return (have / total * 100).clamp(0.0, 100.0).toDouble();
   }
 
-  /// 把字节/秒格式化成「3.2 MB/s」这类文案；0 返回空串。
-  String get speedText {
-    final b = bytesPerSecond;
-    if (b <= 0) return '';
-    if (b >= 1024 * 1024) return '${(b / 1024 / 1024).toStringAsFixed(1)} MB/s';
-    if (b >= 1024) return '${(b / 1024).toStringAsFixed(0)} KB/s';
-    return '${b.toStringAsFixed(0)} B/s';
-  }
+  /// 把字节/秒格式化成「1.8 MB/s」/「320 KB/s」这类文案；0 返回空串。
+  ///
+  /// NET_SPEED（2026-11-15）：顶栏 / 一起看那条网速这里**必须**和缓冲层用
+  /// 同一个数（原生按块统计的真实速率）。以前它只读 [bytesPerSecond]
+  /// ——「缓冲位置推进量 ÷ 时间」的估算：HLS 分片整块落盘，缓冲阶段这个数
+  /// 一直是 0，顶栏就跟着恒 0。现在和 [realSpeedText] 完全同源。
+  String get speedText => realSpeedText;
 
   FxPlayerValue copyWith({
     bool? isInitialized,

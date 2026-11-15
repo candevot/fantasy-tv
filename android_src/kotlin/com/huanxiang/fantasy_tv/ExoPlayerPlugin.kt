@@ -106,6 +106,15 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         const val SEEK_AUDIO_GATE_TIMEOUT_MS = 1200L
 
         /**
+         * 实时网速的推送间隔：1 秒（NET_SPEED 2026-11-15）。
+         *
+         * 用户的要求是「每秒推一次到 Dart，Dart 只负责显示」。原来只有
+         * 事件驱动 + Dart 侧 250ms 轮询，缓冲中位置不动、也没有任何播放事件，
+         * 网速那一行就永远停在首帧前的 0 —— 现在由原生按秒推一次。
+         */
+        const val NET_TICK_MS = 1000L
+
+        /**
          * POST_NOTIFICATIONS 的请求码（BG_SERVICE，2026-11-15）。
          *
          * 只用来区分结果，不用管值；与 MainActivity 里存储权限的请求码
@@ -404,6 +413,29 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private val seekGateTimeout = Runnable { endSeekAudioGate() }
 
     /**
+     * 每秒推一次快照（NET_SPEED 2026-11-15）。
+     *
+     * 为什么需要它：缓冲阶段既没有播放事件，位置 / 缓冲时长也不动，光靠
+     * 「事件驱动 + Dart 250ms 轮询」时，网速那一行在首帧前长时间是同一个数
+     * （原来干脆恒 0）。这里由原生按秒算一次速率并推给 Dart —— 界面只负责显示。
+     *
+     * 只在有监听方时才自转：`onCancel` / [dispose] 会把它摘掉，不留空转。
+     */
+    private val netTicker = object : Runnable {
+        override fun run() {
+            try {
+                // 先算速率：即使没有 Dart 监听方，`[FxNet]` 日志也照打，
+                // 真机 `adb logcat -s FxExo` 能直接核对网速在动。
+                FxNet.speedPerSec()
+                if (player != null && events != null) emit()
+            } catch (error: Throwable) {
+                Log.w(LOG_TAG, "NET tick 失败：${error.javaClass.simpleName}")
+            }
+            mainHandler.postDelayed(this, NET_TICK_MS)
+        }
+    }
+
+    /**
      * 是否已经真正渲染出过一帧（FIRST_FRAME，2026-11-14）。
      *
      * 这个值是 Dart 侧加载层唯一的显隐判据。以前 Dart 用
@@ -475,6 +507,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // BG_SERVICE：播放器实例没了，前台服务也不能留着（留 = 空保活，费电）。
         stopBackground()
         mainHandler.removeCallbacks(seekGateTimeout)
+        // NET_SPEED：网速 ticker 随播放器一起收掉（没人看就不用每秒算）。
+        mainHandler.removeCallbacks(netTicker)
         seekGateActive = false
         pendingPreload = null
         // 下一集预载随播放器一起收掉（它只会往缓存里写，但线程要停）。
@@ -663,10 +697,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     override fun onListen(arguments: Any?, sink: EventChannel.EventSink?) {
         events = sink
         player?.let { bindListener(it) }
+        // NET_SPEED：开始按秒推快照（重复 onListen 时先摘掉旧的，避免多份）。
+        mainHandler.removeCallbacks(netTicker)
+        mainHandler.postDelayed(netTicker, NET_TICK_MS)
     }
 
     override fun onCancel(arguments: Any?) {
         events = null
+        mainHandler.removeCallbacks(netTicker)
     }
 
     // ---------------- MethodChannel ----------------
@@ -1202,6 +1240,18 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 )
             }
 
+            // NET_SPEED（2026-11-15）：media3 自己测出来的带宽（bit/s）。
+            // 只当 [FxNet] 的兜底：某一窗口一个字节都没数到、但播放器仍在
+            // 下载时用它，比界面挂着 0 更接近真实。
+            override fun onBandwidthEstimate(
+                eventTime: AnalyticsListener.EventTime,
+                elapsedMs: Int,
+                bytes: Long,
+                bitrateEstimate: Long,
+            ) {
+                FxNet.onBandwidthEstimate(bitrateEstimate)
+            }
+
             override fun onAudioInputFormatChanged(
                 eventTime: AnalyticsListener.EventTime,
                 format: androidx.media3.common.Format,
@@ -1333,7 +1383,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "iqCodec" to IqProbe.codec,
             "iqQuality" to IqProbe.quality,
             // SLOW_NET：没有播放器 = 一个字节都没收到。
-            "bytesLoaded" to PlayerHttp.bytesLoaded(),
+            "bytesLoaded" to FxNet.totalBytes(),
             "bytesLoadedPerSec" to 0,
             "isLoading" to true,
             "fatalError" to fatalErrorCode,
@@ -1406,10 +1456,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 的全部数据来源。
             //   bytesLoaded        本次 open 累计收到的正文字节（按块累加，
             //                      慢网下也是一直在涨的）
-            //   bytesLoadedPerSec  滚动 1 秒窗口的真实速率（B/s）
+            //   bytesLoadedPerSec  滚动 1 秒窗口的真实速率（B/s），口径见
+            //                      [FxNet]：media3 数据源按块回调 + 官方带宽估算兜底
             //   isLoading          正在缓冲**且**用户没按暂停
-            "bytesLoaded" to PlayerHttp.bytesLoaded(),
-            "bytesLoadedPerSec" to PlayerHttp.bytesPerSec(),
+            "bytesLoaded" to FxNet.totalBytes(),
+            "bytesLoadedPerSec" to FxNet.speedPerSec(),
             "isLoading" to (buffering && p.playWhenReady),
             "fatalError" to fatalErrorCode,
         )
@@ -1441,6 +1492,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         FxTiming.begin(url, resolveMs)
         // CONNECTS：清零连接计数 / 吞吐统计，首帧回来时打 connects=N。
         PlayerHttp.resetConnectCount()
+        // NET_SPEED：新的一次 open = 新的网速窗口，上一集的速率不能留在界面上。
+        FxNet.reset()
         // IQ_CODEC：新的一次 open = 新的一条码流，上一集的编码 / 分辨率
         // 不能留在诊断浮层上（否则降级之后那一行还写着上一集的 HEVC，
         // 看上去像「降级没生效」）。
@@ -1640,6 +1693,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 壳的 switchEpisode 同款序列换源。首帧回来时打 connects=N ——
             // 改造后起播应该只有 1 条（清单那条），分片和 variant 全部复用。
             PlayerHttp.resetConnectCount()
+            // NET_SPEED：换源 = 重新开始算网速（否则界面上是上一条线路的数）。
+            FxNet.reset()
             // SWITCH_INSTANCE_REUSE（改动 ④）：换集 / 换线路**不重建播放器**，
             // 也不解绑渲染器和纹理视图 —— 只按壳的 switchEpisode 同款序列
             // 换源。细节见 [switchToSource]。

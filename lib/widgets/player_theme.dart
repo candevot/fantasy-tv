@@ -128,9 +128,13 @@ String fxSpeedLabel(double bytesPerSecond) {
       ? bytesPerSecond
       : 0.0;
   if (b <= 0) return '0 KB/s';
+  // NET_SPEED（2026-11-15）：保留一位小数 —— `1.8 MB/s` / `0.4 KB/s`；
+  // 10 KB/s 以上取整（`320 KB/s`），带小数反而更难读。
+  // 和 `FxPlayerValue.realSpeedText` 保持同一套写法。
   if (b >= 1024 * 1024) return '${(b / 1024 / 1024).toStringAsFixed(1)} MB/s';
-  if (b >= 1024) return '${(b / 1024).round()} KB/s';
-  return '<1 KB/s';
+  final kb = b / 1024;
+  if (kb < 10) return '${kb.toStringAsFixed(1)} KB/s';
+  return '${kb.round()} KB/s';
 }
 
 /// 缓冲层标题：拿不到真实比例就说「缓冲中…」，绝不编数字。
