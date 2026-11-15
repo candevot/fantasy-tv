@@ -365,7 +365,13 @@ class _SearchPageState extends State<SearchPage> {
       });
     });
     var firstBatch = true;
-    _sub = CmsBridge.searchStream(text, 1).listen(
+    // SEARCH_MULTI_SOURCE（2026-11-16）：搜索结果**必须列出每个源各自的结果**，
+    // 不能按片名跨源合并。用户实测：搜「济公传」显示「已查 16/16 源 · 命中 123」，
+    // 但列出来的每条来源都是「咕噜」—— 咕噜和剧圈/苹果/布布/下饭 搜到的同名片
+    // 在去重时被合并成一条，其余 40 个源等于白搜。壳（OK/FongMi）是每个源各出一行。
+    // keepDuplicates=true → 外部源按卡片 id 去重（id 里带 @src:<源key>），
+    // 同源同片只留一条、不同源的同名片各占一行。
+    _sub = CmsBridge.searchStream(text, 1, keepDuplicates: true).listen(
       (batch) {
         _onBatch(batch, req, first: firstBatch);
         firstBatch = false;
@@ -455,6 +461,13 @@ class _SearchPageState extends State<SearchPage> {
   }
 
   /// 按 id 追加去重（同一批次重复、第 2 页与第 1 页重叠都走这里）。
+  /// 这张卡是不是来自外部源（肥猫 jar）。外部源的 id 带 `@src:<源key>`。
+  bool _isExternalCard(VideoCard card) {
+    final id = card.id.trim();
+    if (id.startsWith(SourceHub.idMark)) return true;
+    return _external.isNotEmpty && _external.contains(card);
+  }
+
   void _appendUnique(List<VideoCard> target, List<VideoCard> items) {
     if (items.isEmpty) return;
     final seen = <String>{for (final card in target) card.id};
@@ -465,7 +478,14 @@ class _SearchPageState extends State<SearchPage> {
       // 典型场景：主库先回了「济公传」（2 条线路），线路切片后回一条同名的
       // 「济公传」（1 条线路）。以前两条都在列表里，且切片那条点进去必失败；
       // 现在只留线路多的主库那条。
-      final at = target.indexWhere((c) => SourceHub.sameRecord(c, card));
+      // MULTI_SOURCE_DROP（2026-11-16）：外部源（肥猫）之间**不再合并** ——
+      // 咕噜、剧圈、苹果、布布、下饭 各自搜到的同名片要各占一行，和壳一致。
+      // 以前这里用 sameRecord（忽略来源）二次合并，刚在批量层按 id 分开的
+      // 结果到了列表层又被并成一条，用户只看到「咕噜」。
+      final mergeable = !_isExternalCard(card);
+      final at = mergeable
+          ? target.indexWhere((c) => SourceHub.sameRecord(c, card))
+          : -1;
       if (at < 0) {
         target.add(card);
       } else if (SourceHub.betterRecord(card, target[at])) {
