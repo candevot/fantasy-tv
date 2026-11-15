@@ -1723,9 +1723,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 每集只触发一次：失败也不重试（切集时照常回源，不差这一次）。
     if (_nativePreloadedEp == _ep) return;
     final v = c.value;
-    // 首帧 + 正在播 + 位置过了 3 秒 = 播放稳定，起播那几秒不抢带宽。
+    // 首帧 + 正在播 = 播放稳定。
     if (!v.hasRenderedFirstFrame || !v.isPlaying) return;
-    if (v.position < const Duration(seconds: 3)) return;
+    // PRELOAD_BUDGET（2026-11-15）：不能刚开始就抢带宽，否则起播那几秒要抢首片。
+    // 只有「缓冲水位够高」才预载下一集：
+    //   · 已播过 20 秒（起播高峰已过）
+    //   · 前方缓冲领先 ≥ 25 秒（当前播放不会被挤）
+    //   · 当前不在缓冲中
+    if (v.position < const Duration(seconds: 20)) return;
+    final ahead = v.buffered.length == 0
+        ? Duration.zero
+        : v.buffered.last.end - v.position;
+    if (ahead < const Duration(seconds: 25)) return;
+    if (v.buffered.isEmpty) return;
     final next = _nextEpNumber();
     if (next == null) return;
     _nativePreloadedEp = _ep;
