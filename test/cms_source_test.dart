@@ -167,4 +167,75 @@ void main() {
         })),
         isA<List<LineInfo>>());
   });
+
+  /* ------------------------------------------------------------ 分类分页 */
+
+  /// PAGE_META（2026-11-15）：分类 tab 的「已经到底啦」必须翻完
+  /// 服务端 `pagecount` 才出现。这里的数字是站点真实返回的：
+  /// `t=2&src=hx` → total=144、pagecount=8、limit=20。
+  group('分类分页元数据', () {
+    CmsVodPage page(int pg, {int pagecount = 8, int limit = 20, int got = 20}) =>
+        CmsVodPage.fromBody(<String, dynamic>{
+          'code': 1,
+          'page': pg,
+          'pagecount': pagecount,
+          'limit': limit,
+          'total': 144,
+          'list': <Map<String, dynamic>>[
+            for (var i = 0; i < got; i++) <String, dynamic>{'vod_id': i},
+          ],
+        });
+
+    test('144 部 / 8 页：前 7 页都还有下一页，第 8 页才到底', () {
+      for (var pg = 1; pg < 8; pg++) {
+        expect(page(pg).hasMore, isTrue, reason: '第 $pg 页后面还有');
+      }
+      // 最后一页只有 4 条：只要 pagecount 已到，就是到底，不看条数。
+      expect(page(8, got: 4).hasMore, isFalse);
+      expect(page(8).hasMore, isFalse);
+      expect(page(9).hasMore, isFalse, reason: '页码越界也不能说「还有」');
+    });
+
+    test('服务端没给 pagecount 时退回「这一页给满了没有」', () {
+      expect(page(1, pagecount: 0, got: 20).hasMore, isTrue);
+      expect(page(3, pagecount: 0, got: 19).hasMore, isFalse);
+      // limit 缺失按 20 算，不能让 0 把整页判成到底。
+      expect(page(1, pagecount: 0, limit: 0, got: 20).hasMore, isTrue);
+    });
+
+    test('列表字段缺失 / 类型不对时不炸', () {
+      final empty = CmsVodPage.fromBody(<String, dynamic>{});
+      expect(empty.vods, isEmpty);
+      expect(empty.page, 1);
+      expect(empty.hasMore, isFalse);
+    });
+  });
+
+  /* ------------------------------------------------------------ 卡片来源小字 */
+
+  /// CARD_SOURCE（2026-11-15）：卡片下方只写线路名（「幻想4K」），
+  /// 不能再出现「幻想 · 幻想4K」这种把源名写了两遍的样式。
+  group('卡片来源小字', () {
+    test('hx 片源 + 幻想4K 线路 → 只显示「幻想4K」', () {
+      final card = CmsApi.cardOf(_vod(<String, dynamic>{
+        'vod_from': 'hx',
+        'vod_play_from': '幻想4K\$\$\$量子',
+        'vod_play_url': '正片\$FY-SH4K-abc',
+      }));
+      expect(card.sourceLabel, '幻想4K');
+      expect(card.fromSource, 'hx');
+      expect(card.sourceGroupLabel, '幻想');
+      expect(card.sourceLabel.contains(' · '), isFalse);
+    });
+
+    test('xo 片源也按线路名显示', () {
+      final card = CmsApi.cardOf(_vod(<String, dynamic>{
+        'vod_from': 'xo',
+        'vod_play_from': 'SH4K',
+        'vod_play_url': '正片\$https://cdn.example.com/x.m3u8',
+      }));
+      expect(card.sourceLabel, 'SH4K');
+      expect(card.sourceGroupLabel, '官采切片');
+    });
+  });
 }

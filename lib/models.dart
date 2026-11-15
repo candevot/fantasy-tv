@@ -212,11 +212,12 @@ class VideoCard {
       rank: _asInt(j['rank']),
       tags: _asStrList(j['tags']),
       fromSource: fromSource,
-      // 分组名拼在来源标记前面（「幻想 · 量子」）：一次改动就让所有列表 /
-      // 搜索 / 详情页的卡片都带上片源，不用逐个 UI 去加徽标。
-      sourceLabel: group.isEmpty
-          ? base
-          : (base.isEmpty ? group : '$group · $base'),
+      // CARD_SOURCE（2026-11-15）：卡片下方的来源小字只写**线路名**
+      // （「幻想4K」），不再拼分组名 —— 之前是「幻想 · 幻想4K」，同一件事
+      // 写了两遍，用户一眼就看成重复。分组名并没有丢：`fromSource` /
+      // [sourceGroupLabel] 仍然带着它，去重、详情页分线路都继续用那个。
+      // 只有分组、没有线路名时（老数据）才退回显示分组。
+      sourceLabel: base.isEmpty ? group : base,
     );
   }
 }

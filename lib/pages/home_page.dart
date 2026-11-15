@@ -227,9 +227,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _channel = key;
       _bannerPage.value = 0;
       _error = null;
-      _loading = !_cache.containsKey(key);
+      // 分类 tab 的数据由它自己的分类网格去拉（不再请求「频道首页」——
+      // 那正是「点电视剧出来一个 banner + 4 条剧集分区」的原因）。
+      _loading = _isChannelFeed ? false : !_cache.containsKey(key);
     });
     _timer?.cancel();
+    if (_isChannelFeed) return;
     if (_cache.containsKey(key)) {
       _restartAuto();
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -240,6 +243,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     } else {
       _load();
     }
+  }
+
+  /// 当前 tab 是不是「某个一级栏目」（电影 / 电视剧 / 动漫 / 综艺 …）。
+  ///
+  /// TAB_GRID（2026-11-15）：这些 tab 应该是**该分类的完整片库**（网格 +
+  /// 无限滚动），不是又一个 banner + 分区首页。推荐（typeId=0）仍然是首页。
+  bool get _isChannelFeed {
+    final ch = CmsBridge.channelOf(_channel);
+    return ch != null && ch.typeId > 0;
   }
 
   void _openSearch({bool ai = false}) {
@@ -266,16 +278,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  /// 分区「更多」→ 分类页：标题直接对应 CMS 的一级栏目
-  /// （剧集 = 电视剧），认不出来的分区回落到当前频道。
+  /// 分区「更多」→ 对应的分类 tab（不再压一个新的分类页进导航栈）。
+  ///
+  /// TAB_GRID（2026-11-15）：用户点「电影 · 更多」就是要看这个分类的全部
+  /// 片子，切 tab 比开二级页更直接，返回键也能继续用。
+  /// 「今日热播 / 最新更新 / 高分好剧」不是一级栏目，落回完整分类页兜底。
   void _openSectionMore(HomeSection s) {
-    final target = CmsBridge.channelOfLabel(s.title) ??
-        CmsBridge.channelOf(_channel);
-    if (target == null || target.typeId <= 0) {
-      _openCategory('', '全部片库');
+    final target = CmsBridge.channelOfLabel(s.title);
+    if (target != null && target.typeId > 0) {
+      _selectChannel(target.key);
       return;
     }
-    _openCategory(target.key, target.label);
+    _openCategory('', '全部片库');
   }
 
   /// 服务端分区名较长，首页统一成短标题，保持分区节奏一致。
@@ -339,7 +353,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final data = _cache[_channel];
     // 频道切换时给内容一层淡入：之前是 setState 直接换列表，内容硬切，
     // 观感像「闪一下」。这里用 key 绑定频道，切换时旧内容淡出、新内容淡入，
     // 时长 180ms —— 够遮住跳变，又不会拖慢操作手感。
@@ -360,26 +373,59 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          RefreshIndicator(
-            color: Fx.accent,
-            backgroundColor: Colors.white,
-            onRefresh: () => _load(force: true),
-            child: CustomScrollView(
-              keyboardDismissBehavior:
-                  ScrollViewKeyboardDismissBehavior.onDrag,
-              physics: const AlwaysScrollableScrollPhysics(
-                parent: BouncingScrollPhysics(),
-              ),
-              slivers: [
-                SliverToBoxAdapter(child: _header()),
-                ..._body(data),
-                const SliverToBoxAdapter(child: SizedBox(height: 104)),
-              ],
-            ),
-          ),
+          if (_isChannelFeed) _channelFeed() else _recommendFeed(),
           // 没有历史记录 / 用户已关掉时它自己返回 SizedBox.shrink()，
           // 不占位、不拦手势；数据与预取都在它内部完成。
           const FxResumeBarHost(),
+        ],
+      ),
+    );
+  }
+
+  /// 分类 tab：顶部频道栏固定，下面是该分类的完整网格（无限滚动）。
+  ///
+  /// TAB_GRID（2026-11-15）：之前这里走的是 `CmsBridge.home(key)` —— 服务端
+  /// 给「单个栏目」的首页就是一张 banner + 一个分区（最多 10 条），于是用户
+  /// 点「电视剧」看到的是「走马上任」大图 + 一行 4 条剧集 + 「已经到底啦」，
+  /// 而库里其实有 144 部。现在整块交给 [CategoryPage]：
+  ///   · 不带 banner / 不带分区标题，进来就是影片网格；
+  ///   · 每页 20 条，`src=hx` + `order=vod_hits&by=desc`（按热度）；
+  ///   · 按服务端 pagecount 翻完才显示「已经到底啦」；
+  ///   · 换 tab 时 key 变化 → 旧 State 销毁，不会残留上一个分类的列表。
+  Widget _channelFeed() {
+    final ch = CmsBridge.channelOf(_channel)!;
+    return Column(
+      children: [
+        _header(),
+        Expanded(
+          child: CategoryPage(
+            key: ValueKey<String>('feed-${ch.key}'),
+            initialType: ch.key,
+            initialTitle: ch.label,
+            initialSort: 'hot',
+            embedded: true,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 推荐 tab：维持原样（banner + 多个分区，每个分区带「更多 >」）。
+  Widget _recommendFeed() {
+    final data = _cache[_channel];
+    return RefreshIndicator(
+      color: Fx.accent,
+      backgroundColor: Colors.white,
+      onRefresh: () => _load(force: true),
+      child: CustomScrollView(
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+        physics: const AlwaysScrollableScrollPhysics(
+          parent: BouncingScrollPhysics(),
+        ),
+        slivers: [
+          SliverToBoxAdapter(child: _header()),
+          ..._body(data),
+          const SliverToBoxAdapter(child: SizedBox(height: 104)),
         ],
       ),
     );

@@ -28,17 +28,20 @@ void main() {
       });
 
   group('片源分组展示', () {
-    test('hx → 「幻想 · 线路名」', () {
-      final c = card(id: '1', fromSource: 'hx', source: '量子');
+    // CARD_SOURCE（2026-11-15）：卡片小字只写线路名。以前拼成
+    // 「幻想 · 幻想4K」，源名和线路名重复，用户看成了两行同样的字。
+    test('hx → 只显示线路名（不再拼「幻想 · 」前缀）', () {
+      final c = card(id: '1', fromSource: 'hx', source: '幻想4K');
       expect(c.fromSource, 'hx');
       expect(c.sourceGroupLabel, '幻想');
-      expect(c.sourceLabel, '幻想 · 量子');
+      expect(c.sourceLabel, '幻想4K');
+      expect(c.sourceLabel.contains(' · '), isFalse);
     });
 
-    test('xo → 「官采切片 · 线路名」', () {
+    test('xo → 只显示线路名（分组名留在 sourceGroupLabel）', () {
       final c = card(id: '2', fromSource: 'xo', source: 'SH4K');
       expect(c.sourceGroupLabel, '官采切片');
-      expect(c.sourceLabel, '官采切片 · SH4K');
+      expect(c.sourceLabel, 'SH4K');
     });
 
     test('老数据 / 外部源没有分组时不加前缀', () {

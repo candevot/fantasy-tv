@@ -318,9 +318,9 @@ class CmsBridge {
     Object? failure;
     for (var i = 0; i < scan; i++) {
       final rawPage = (page - 1) * scan + i + 1;
-      List<VideoCard> rawChunk;
+      CmsVodPage rawChunk;
       try {
-        rawChunk = await CmsApi.list(
+        rawChunk = await CmsApi.listVodPage(
           type: typeId,
           page: rawPage,
           sort: sort,
@@ -330,15 +330,23 @@ class CmsBridge {
         failure = e;
         break;
       }
-      // PAGES_ALIGN（2026-11-15）：这一页「给满了」才算后面还有内容，
-      // 而且要用**过滤前**的长度判断 —— 用 `_withoutLive` 之后的数量时，
-      // 首页少一条直播卡就会让整条分类永久判定「到底」。
-      final full = rawChunk.length >= _pageSize;
-      final chunk = _withoutLive(rawChunk);
+      final cards = <VideoCard>[];
+      for (final vod in rawChunk.vods) {
+        final card = _cardOrNull(vod);
+        if (card != null) cards.add(card);
+      }
+      // PAGES_ALIGN（2026-11-15）：用**过滤前**的整页结果判断后面还有没有，
+      // 而不是 `_withoutLive` 之后的条数 —— 首页少一条直播卡就会让整条分类
+      // 永久判定「到底」。
+      //
+      // PAGE_META（2026-11-15）：服务端给了 `pagecount` 就直接按它算，
+      // 「第 8 页 / 共 8 页」之后才亮「已经到底啦」；没给 pagecount 时
+      // CmsVodPage.hasMore 退回「这一页给满了没有」。
+      final chunk = _withoutLive(cards);
       _markAll(chunk, _Origin.cms);
       raw.addAll(chunk);
-      hasMore = full;
-      if (!full) break;
+      hasMore = rawChunk.hasMore;
+      if (!hasMore) break;
     }
 
     if (failure == null) {
@@ -720,6 +728,18 @@ class CmsBridge {
     // 「整体 15 秒」，页面最多等 15 秒就一定有结果或错误，绝不允许无限转圈。
     Timer(const Duration(seconds: 15), finish);
     return ctrl.stream;
+  }
+
+  /// 单条记录转卡片；坏数据返回 null，**不能**让一条脏记录炸掉整页。
+  ///
+  /// 分类页现在直接吃 [CmsApi.listVodPage] 的原始记录（要拿分页元数据），
+  /// 转换就落在这一层，所以这里自己兜异常。
+  static VideoCard? _cardOrNull(Map<String, dynamic> vod) {
+    try {
+      return CmsApi.cardOf(vod);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 直播内容不进搜索 / 分类 / 排行（直播有独立入口）。

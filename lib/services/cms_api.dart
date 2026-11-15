@@ -215,6 +215,23 @@ class CmsApi {
     String sort = '',
     String src = '',
   }) async {
+    final result =
+        await listVodPage(type: type, page: page, sort: sort, src: src);
+    return result.vods;
+  }
+
+  /// 列表原始记录 + **分页元数据**（分类页「已经到底啦」的判据）。
+  ///
+  /// PAGE_META（2026-11-15）：服务端每一页都回 `page / pagecount / limit /
+  /// total`（实测 `t=2&src=hx`：total=144、pagecount=8、limit=20），
+  /// 分类页只要读 `hasMore` 就知道后面还有没有 —— 不用再拿「这一页够不够
+  /// 20 条」去猜，也就不会在第 3 页就提前亮出「已经到底啦」。
+  static Future<CmsVodPage> listVodPage({
+    int type = 0,
+    int page = 1,
+    String sort = '',
+    String src = '',
+  }) async {
     final body = await _vod(<String, String>{
       'ac': 'detail',
       if (type > 0) 't': '$type',
@@ -229,7 +246,7 @@ class CmsApi {
         'by': 'desc',
       },
     });
-    return _items(body);
+    return CmsVodPage.fromBody(body);
   }
 
   /// 这条记录有没有**真正能播**的地址（至少一集不是空 / 不是占位）。
@@ -858,5 +875,63 @@ String _orderOf(String sort) {
       return 'vod_hits';
     default:
       return 'vod_time';
+  }
+}
+
+/// 列表接口的一页：原始记录 + 服务端给的分页元数据。
+///
+/// PAGE_META（2026-11-15）：`Provide.php` 每页都回
+/// `page / pagecount / limit / total`（`t=2&src=hx` 实测 total=144、
+/// pagecount=8、limit=20）。分类页的「还有没有下一页」以前是拿
+/// 「这一页给没给满 20 条」猜的 —— 一旦服务端某页少给一条，就会在第 3 页
+/// 提前亮「已经到底啦」，后面的片子永远出不来。这里把 pagecount 直接带出来，
+/// 用到最后一页才判到底；接口没给 pagecount 时再退回条数判断。
+class CmsVodPage {
+  const CmsVodPage(
+    this.vods, {
+    this.page = 1,
+    this.pageCount = 0,
+    this.total = 0,
+    this.limit = 20,
+  });
+
+  final List<Map<String, dynamic>> vods;
+
+  /// 这一页的页码（服务端回显）。
+  final int page;
+
+  /// 总页数；0 = 接口没给，只能按条数判断。
+  final int pageCount;
+
+  /// 总条数；0 = 接口没给。
+  final int total;
+
+  /// 每页条数；0 / 异常值按 20 处理。
+  final int limit;
+
+  /// 后面还有没有下一页。
+  ///
+  /// 有 pagecount 就**只认它**（严格等于「pagecount 用完才算到底」），
+  /// 没有才退回「这一页给满了没有」。
+  bool get hasMore {
+    if (pageCount > 0) return page < pageCount;
+    return vods.length >= limit;
+  }
+
+  factory CmsVodPage.fromBody(Map<String, dynamic> body) {
+    final raw = body['list'];
+    final vods = <Map<String, dynamic>>[
+      for (final e in raw is List ? raw : const <Object>[])
+        if (e is Map) Map<String, dynamic>.from(e),
+    ];
+    final limit = _intOf(body['limit']);
+    final page = _intOf(body['page']);
+    return CmsVodPage(
+      vods,
+      page: page > 0 ? page : 1,
+      pageCount: _intOf(body['pagecount']),
+      total: _intOf(body['total']),
+      limit: limit > 0 ? limit : 20,
+    );
   }
 }

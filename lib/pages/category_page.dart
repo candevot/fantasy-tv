@@ -474,12 +474,30 @@ class CategoryPage extends StatefulWidget {
     super.key,
     this.initialType = '',
     this.initialTitle,
+    this.initialSort = 'latest',
     this.standalone = false,
+    this.embedded = false,
   });
 
   final String initialType;
   final String? initialTitle;
+
+  /// 首屏排序（`latest` 更新时间 / `hot` 热度 / `rating` 评分）。
+  ///
+  /// TAB_GRID（2026-11-15）：首页的分类 tab 传 `hot` —— 服务端
+  /// `order=vod_hits&by=desc` 实测严格递减，各分类先看热播比先看「刚入库」
+  /// 更符合用户预期。
+  final String initialSort;
+
   final bool standalone;
+
+  /// 嵌在首页分类 tab 里（TAB_GRID）。
+  ///
+  /// 这种模式下这个页面就是**该分类的完整片库**：不要 banner、不要分区标题，
+  /// 进来直接是网格 + 无限滚动。所以隐藏页面标题 / 副标题和「类型」胶囊
+  /// （类型由当前的 tab 决定，再让用户在这里改会和 tab 打架），
+  /// 只留地区 / 年份 / 排序三枚筛选。
+  final bool embedded;
 
   @override
   State<CategoryPage> createState() => _CategoryPageState();
@@ -532,7 +550,7 @@ class _CategoryPageState extends State<CategoryPage> {
   late String _type = widget.initialType;
   String _area = '';
   String _year = '';
-  String _sort = 'latest';
+  late String _sort = widget.initialSort;
   int _page = 1;
   int _req = 0;
   bool _loading = true;
@@ -734,11 +752,27 @@ class _CategoryPageState extends State<CategoryPage> {
     );
   }
 
+  /// 有没有**用户自己加的**筛选。
+  ///
+  /// TAB_GRID（2026-11-15）：嵌在首页分类 tab 里时，`_type` 是 tab 决定的
+  /// 默认值，不算筛选 —— 否则一进页面就顶着「重置」按钮，用户以为点了就能
+  /// 看全部片库。
   bool get _filtered =>
-      _type.isNotEmpty ||
+      (!widget.embedded && _type.isNotEmpty) ||
       _area.isNotEmpty ||
       _year.isNotEmpty ||
-      _sort != 'latest';
+      _sort != widget.initialSort;
+
+  /// 清掉用户筛选。
+  ///
+  /// 嵌在 tab 里时类型必须留在 `initialType`（否则「重置」会把这个分类
+  /// 变成全站片库，和 tab 名对不上）。
+  void _resetFilters() {
+    _type = widget.embedded ? widget.initialType : '';
+    _area = '';
+    _year = '';
+    _sort = widget.initialSort;
+  }
 
   String _valueOf(List<_Opt> list, String v) {
     for (final o in list) {
@@ -796,17 +830,12 @@ class _CategoryPageState extends State<CategoryPage> {
               hasScrollBody: false,
               child: FxEmptyView(
                 icon: Icons.video_library_outlined,
-                title: '这个筛选下还没有片子',
-                subtitle: '换个类型或年份试试',
+                title: _filtered ? '这个筛选下还没有片子' : '这个分类暂时没有内容',
+                subtitle: _filtered ? '换个类型或年份试试' : '换个分类看看吧',
                 actionText: _filtered ? '重置筛选' : null,
                 onAction: _filtered
                     ? () {
-                        setState(() {
-                          _type = '';
-                          _area = '';
-                          _year = '';
-                          _sort = 'latest';
-                        });
+                        setState(_resetFilters);
                         _scrollTop();
                         _reload();
                       }
@@ -884,6 +913,45 @@ class _CategoryPageState extends State<CategoryPage> {
   }
 
   Widget _header() {
+    // TAB_GRID（2026-11-15）：嵌在首页分类 tab 里 = 这个分类的片库本身。
+    // 没有图片 banner、没有分区标题，顶上只留一排筛选（地区 / 年份 / 排序），
+    // 下面立刻就是影片网格。
+    if (widget.embedded) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: _filterPill(
+                  '地区',
+                  _valueOf(_areas, _area),
+                  _area.isNotEmpty,
+                  () => _pick('选择地区', _areas, _area, (v) => _area = v)),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: _filterPill(
+                  '年份',
+                  _valueOf(_years, _year),
+                  _year.isNotEmpty,
+                  () => _pick('选择年份', _years, _year, (v) => _year = v)),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: _filterPill(
+                  '排序',
+                  _valueOf(_sorts, _sort),
+                  _sort != widget.initialSort,
+                  () => _pick('排序方式', _sorts, _sort, (v) => _sort = v)),
+            ),
+            if (_filtered) ...[
+              const SizedBox(width: 6),
+              _resetChip(),
+            ],
+          ],
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
       child: Column(
@@ -915,41 +983,7 @@ class _CategoryPageState extends State<CategoryPage> {
                       fontWeight: FontWeight.w600,
                       color: Fx.ink)),
               const Spacer(),
-              if (_filtered)
-                GestureDetector(
-                  onTap: () {
-                    setState(() {
-                      _type = '';
-                      _area = '';
-                      _year = '';
-                      _sort = 'latest';
-                    });
-                    _scrollTop();
-                    _reload();
-                  },
-                  child: Container(
-                    height: 32,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: .7),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.white),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.restart_alt_rounded,
-                            size: 14, color: Fx.sub),
-                        SizedBox(width: 3),
-                        Text('重置',
-                            style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w400,
-                                color: Fx.sub)),
-                      ],
-                    ),
-                  ),
-                ),
+              if (_filtered) _resetChip(),
             ],
           ),
           const SizedBox(height: 4),
@@ -990,12 +1024,44 @@ class _CategoryPageState extends State<CategoryPage> {
                 child: _filterPill(
                     '排序',
                     _valueOf(_sorts, _sort),
-                    _sort != 'latest',
+                    _sort != widget.initialSort,
                     () => _pick('排序方式', _sorts, _sort, (v) => _sort = v)),
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  /// 「重置」小胶囊：清掉用户加的筛选，回到这个分类的默认视图。
+  Widget _resetChip() {
+    return GestureDetector(
+      onTap: () {
+        setState(_resetFilters);
+        _scrollTop();
+        _reload();
+      },
+      child: Container(
+        height: widget.embedded ? 44 : 32,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: .7),
+          borderRadius: BorderRadius.circular(widget.embedded ? 14 : 16),
+          border: Border.all(color: Colors.white),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.restart_alt_rounded, size: 14, color: Fx.sub),
+            SizedBox(width: 3),
+            Text('重置',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w400,
+                    color: Fx.sub)),
+          ],
+        ),
       ),
     );
   }
