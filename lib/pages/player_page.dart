@@ -1310,7 +1310,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 日志固定 `[FxPlay] iqiyi downgrade hevc->avc`。
     await IqCodecGate.ensure();
     if (!mounted || token != _loadToken) return false;
-    final targets = IqCodecGate.plan(candidates);
+    // KNOWN_BAD：只把「不是死形态」的地址交给播放器（usable 见上）。
+    final targets = IqCodecGate.plan(usable);
     var openedHevc = false;
     var openedDegraded = false;
     for (final target in targets) {
