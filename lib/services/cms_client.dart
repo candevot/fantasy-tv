@@ -189,14 +189,18 @@ class CmsClient {
   /// PROTOCOL_FACE（2026-11-15 · 第 7 条）：壳是
   /// `site.ext.length() <= 1000 ? GET : POST(表单)`，且 `ac` 只有
   /// `videolist` / `detail` 两个取值 —— 见 `cms_request.dart`。
-  CmsRequest _request(CmsCall call, Map<String, String> params) {
+  CmsRequest _request(
+    CmsCall call,
+    Map<String, String> params, {
+    String? ac,
+  }) {
     if (api.trim().isEmpty) throw ApiException('片源地址为空');
     final site = profile;
     return CmsRequest.build(
       api: api,
       params: <String, String>{
         'at': 'json',
-        'ac': CmsRequest.acFor(call, directKind: site.directKind),
+        'ac': ac ?? CmsRequest.acFor(call, directKind: site.directKind),
         ...params,
       },
       profile: site,
@@ -208,9 +212,10 @@ class CmsClient {
 
   Future<Map<String, dynamic>> _fetch(
     CmsCall call,
-    Map<String, String> params,
-  ) async {
-    final request = _request(call, params);
+    Map<String, String> params, {
+    String? ac,
+  }) async {
+    final request = _request(call, params, ac: ac);
     final uri = request.uri;
     try {
       final r = request.isPost
@@ -244,12 +249,24 @@ class CmsClient {
 
   /* ------------------------------------------------------------ 列表 */
 
+  /// 分类列表。
+  ///
+  /// `ac` 按壳的取值（type 0 → `videolist`，其余 → `detail`）。少数老 CMS
+  /// 只认经典的 `ac=list`，用壳那套会回一个空列表 —— 这里做一次**兜底重试**
+  /// （仅当第一次真的一条都没有），免得协议对齐把老源整批打死。
   Future<List<VideoCard>> list({int type = 0, int page = 1}) async {
-    final map = await _fetch(CmsCall.categoryList, <String, String>{
+    final params = <String, String>{
       if (type > 0) 't': '$type',
       'pg': '$page',
-    });
-    return _cards(map);
+    };
+    final cards = _cards(await _fetch(CmsCall.categoryList, params));
+    if (cards.isNotEmpty || type <= 0) return cards;
+    try {
+      return _cards(await _fetch(CmsCall.categoryList, params, ac: 'list'));
+    } catch (_) {
+      // 重试也失败：按「这个分类没内容」处理，不把异常抛给页面。
+      return const <VideoCard>[];
+    }
   }
 
   /// 搜索：参数就是壳 `SearchTask` 那一套（`wd` + `quick` + `extend` + `pg`）。
