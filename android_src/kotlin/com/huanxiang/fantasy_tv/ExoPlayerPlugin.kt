@@ -1107,6 +1107,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "transport=okhttp ua=${PlayerHttp.userAgent(headers)} manifesto=$manifesto" +
                 " url=$target",
         )
+        // PLAY_LOG（2026-11-15）：Dart 侧那条 `[FxPlay] open …` 到这儿接上。
+        // 真机排查只要 `adb logcat -s FxPlay` 一条命令，就能同时看到
+        // 「Dart 判的 source/kind」和「原生最终交给 ExoPlayer 的地址
+        // 以及清单是 raw / merged / proxy 哪一路」，不用再翻两个 tag 对时间。
+        Log.i(
+            "FxPlay",
+            "native open manifesto=$manifesto url=$target",
+        )
     }
 
     /**

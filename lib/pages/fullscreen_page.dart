@@ -789,7 +789,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 统一补成绝对地址，让 mpv 直连（避免客户端代理整片下完才播）。
     final candidates = <String>[];
     for (final u in all) {
-      final abs = fxAbsolutePlayUrl(u);
+      final abs = CmsBridge.absolutePlayUrl(widget.videoId, u);
       if (!candidates.contains(abs)) candidates.add(abs);
     }
     if (candidates.isEmpty) {
@@ -1023,7 +1023,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         final fresh = await CmsBridge.play(widget.videoId, _ep, next.id);
         // 救援换线也要补成绝对地址：站内相对路径补全后 mpv 才能直连，
         // 否则这条新线路又退化成「走代理、整片下完才播」。
-        final freshUrl = fxAbsolutePlayUrl(fresh.url);
+        final freshUrl =
+            CmsBridge.absolutePlayUrl(widget.videoId, fresh.url);
         if (freshUrl.isEmpty) continue;
         FxPlayCache.invalidate(widget.videoId, _ep, _line);
         if (mounted) setState(() => _line = next.id);

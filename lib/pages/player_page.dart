@@ -12,7 +12,9 @@ import '../services/app_settings.dart';
 import '../services/exo_player.dart';
 import '../services/fx_player.dart';
 import '../services/hls_segment_index.dart';
+import '../services/play_log.dart';
 import '../services/play_orientation.dart';
+import '../services/play_path.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
@@ -127,6 +129,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 正在打开的组合（line|ep）：同一组合重复请求直接复用，防重复 open。
   String? _openingKey;
   Future<bool>? _opening;
+
+  /// 在跑的那次 open 的 `_loadToken`。
+  ///
+  /// OPEN_GATE（2026-11-15）：只按 key 去重会把「重试」吃掉 —— 页面点重试时
+  /// token 已经推进（旧的一次注定作废），如果仍然按 key 命中，重试就只是把
+  /// 那个旧 Future 又领回来，新的一次 open 从来没发出去，界面永远停在
+  /// 「正在加载 第01集」。所以去重要同时比对 token，规则在
+  /// `play_path.dart` 的 [shouldReuseOpen] 里，单测钉住。
+  int _openingToken = 0;
+
+  /// 播放器自己换过几次线路（外层没有失败回调时才用，见 [_autoSwitchNextLine]）。
+  int _autoSwitchTries = 0;
 
   /// 当前集播放 30 秒后已预解析的下一集，避免 10 秒定时器重复请求。
   bool _nextPrewarmed = false;
@@ -510,6 +524,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           playOverride: continuePlayback,
           commitLine: true,
           reportFailure: false,
+          // 换线 = 用户 / 自动兜底的明确动作：上一次同名请求即使还挂着
+          // 也必须真发一次（强制接管路径就是靠这个生效）。
+          force: true,
         );
         if (!mounted) return;
         if (ok) {
@@ -903,6 +920,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     bool commitLine = false,
     bool reportFailure = true,
     bool forcePlayInfo = false,
+    bool force = false,
   }) async {
     // 手机重新加载 / 切集 / 换线路时结束投屏：否则电视还在播上一集，
     // 手机同时播新的，就是双声。
@@ -915,8 +933,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 同一 url+line+ep 正在打开时忽略重复请求（防抖），
     // 避免 didUpdateWidget / 连点「下一集」并发 open 造成双播放器与内存翻倍。
     final key = '$line|$ep';
+    // 同一个组合正在打开时复用（防连点 / 防 didUpdateWidget 并发 open）。
+    // 但被更新的请求取代过的那一次不算（token 已推进），用户点重试 /
+    // 强制接管时必须真的重开一次 —— 规则见 [shouldReuseOpen]。
     final opening = _opening;
-    if (opening != null && _openingKey == key) return opening;
+    if (shouldReuseOpen(
+      hasPending: opening != null,
+      pendingKey: _openingKey,
+      key: key,
+      pendingToken: _openingToken,
+      currentToken: _loadToken,
+      force: force,
+    )) {
+      return opening!;
+    }
     final future = _bootstrapSource(
       seekToSaved: seekToSaved,
       saveOld: saveOld,
@@ -930,6 +960,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     );
     _opening = future;
     _openingKey = key;
+    // _bootstrapSource 的第一句就是 `++_loadToken`（同步执行到第一个 await），
+    // 所以此刻 _loadToken 已经是这次请求的代际。
+    _openingToken = _loadToken;
     try {
       return await future;
     } finally {
@@ -1044,7 +1077,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 而代理是整片下完再交给 mpv，4K 大分片会一直卡）。
     final candidates = <String>[];
     for (final u in all) {
-      final abs = fxAbsolutePlayUrl(u);
+      final abs = CmsBridge.absolutePlayUrl(widget.videoId, u);
       if (!candidates.contains(abs)) candidates.add(abs);
     }
     if (candidates.isEmpty) {
@@ -1067,6 +1100,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     final shouldPlay = playOverride ?? (widget.autoPlay && !_covered);
 
     var ok = false;
+    // PLAY_LOG / AUTO_LINE（2026-11-15）：起播计时 + 明确的失败日志。
+    // 用户报障时只要 `adb logcat | grep FxPlay` 就能看到
+    // `line=… url=… source=cms|legacy kind=direct|parse`，
+    // 以及失败时的 `FAIL … elapsed=…`，不用再猜走了哪条路。
+    final openWatch = Stopwatch()..start();
+    final openLineName =
+        fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], line);
+    final openSource = CmsBridge.isCms(widget.videoId) ? 'cms' : 'legacy';
     // SWITCH_INSTANCE_REUSE（改动 ④）：换集 / 换线路**复用同一个 FxPlayer**。
     //
     // 以前每次 open 都 `FxPlayer.create()`，成功后 `previous.dispose()`：
@@ -1083,6 +1124,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       final controller = reusable ?? FxPlayer.create();
       if (mounted) setState(() => _loadingPlayer = controller);
       try {
+        fxPlayLog(
+          'open line=$openLineName url=$url source=$openSource '
+          'kind=${needsParseAddress(url) ? 'parse' : 'direct'}',
+        );
         // 8 秒拿不到可播状态就判这条地址失败，避免黑屏一直转圈。
         await controller
             .open(
@@ -1131,7 +1176,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     final fresh =
                         await CmsBridge.play(widget.videoId, ep, next.id);
                     // 救援换线同样补成绝对地址，避免新线路退化成走代理。
-                    final freshUrl = fxAbsolutePlayUrl(fresh.url);
+                    final freshUrl =
+                        CmsBridge.absolutePlayUrl(widget.videoId, fresh.url);
                     if (freshUrl.isEmpty) continue;
                     FxPlayCache.invalidate(widget.videoId, ep, line);
                     if (mounted && token == _loadToken) {
@@ -1215,6 +1261,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _errorText = '';
         });
         _sourceFailNotified = false;
+        _autoSwitchTries = 0;
+        openWatch.stop();
+        fxPlayLog(
+          'OK line=$openLineName url=$url source=$openSource '
+          'elapsed=${openWatch.elapsedMilliseconds}ms',
+        );
         ok = true;
         // 新画面已挂上：等这一帧绘制完再淡出快照，避免露出还没上纹理的黑帧。
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1249,6 +1301,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
     if (!ok) {
       if (!mounted || token != _loadToken) return false;
+      openWatch.stop();
+      fxPlayLog(
+        'FAIL line=$openLineName ep=$ep source=$openSource '
+        'reason=candidates-exhausted elapsed=${openWatch.elapsedMilliseconds}ms',
+      );
       setState(() {
         _loading = false;
         _suppressLoading = false;
@@ -1260,10 +1317,37 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (reportFailure) {
         _clearFrozenFrame();
         _notifySourceFailed();
+        // AUTO_LINE（2026-11-15）：外层没接过失败回调时（全屏页 / 一起看 /
+        // 独立播放页），播放器自己换下一条线路 —— 需求是「起播失败要有明确
+        // 提示并且能自动换下一条」，这几种页面没有外层可换，只能这里换。
+        if (widget.onSourceFailed == null) _autoSwitchNextLine();
       }
       return false;
     }
     return true;
+  }
+
+  /// 起播失败后自己换下一条线路（**只在外层没有失败回调时**使用）。
+  ///
+  /// 详情页有自己的换线预算（`_reportLineIssue` → `_switchNextLine`），
+  /// 两边同时换会互相打架；所以这里用 `onSourceFailed == null` 当开关。
+  /// 换过的次数有上限（每条线路最多一次），避免 A/B 无限乒乓。
+  void _autoSwitchNextLine() {
+    final lines = widget.detail?.lines ?? const <LineInfo>[];
+    if (lines.length < 2) return;
+    if (_autoSwitchTries >= lines.length - 1) return;
+    final index = lines.indexWhere((l) => l.id == _line);
+    for (var k = 1; k <= lines.length; k++) {
+      final next = lines[(index + k) % lines.length];
+      if (next.id == _line || next.id.trim().isEmpty) continue;
+      _autoSwitchTries++;
+      fxPlayLog(
+        'auto-switch line=${next.displayName} (${next.id}) '
+        'try=$_autoSwitchTries/${lines.length - 1}',
+      );
+      unawaited(_switchLine(next.id, _ep));
+      return;
+    }
   }
 
   /// 平台线路（腾讯 / 芒果等）签名失效：重新请求 /api/play 拿新签名地址。
@@ -1331,7 +1415,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 复用下一集预解析缓存（和 30 秒预热的 _maybePrewarmNext 同一份）。
         final info = await FxPlayCache.resolve(widget.videoId, next, _line);
         if (!mounted || _loading || _error || _ep != loaded) return;
-        final url = fxAbsolutePlayUrl(info.url);
+        final url = CmsBridge.absolutePlayUrl(widget.videoId, info.url);
         if (url.isEmpty) return;
         // PRELOAD_ONCE（2026-11-15）：一次性令牌清单（`/hxparse` 的
         // `FY-*` / `/share/` 这类）只能被拉一次，预载会把它烧掉，
@@ -1531,6 +1615,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   }
 
   /// 详情页「刷新」/错误重试可以调用
+  ///
+  /// OPEN_GATE（2026-11-15）：这个方法是「一直转圈」的直接修复点。
+  ///
+  /// 失败上报（[onSourceFailed]）是从 [_bootstrapSource] **内部**发出的，
+  /// 那一刻 `_opening` 还挂着这次（注定失败的）Future。原来的重试没有绕过去重，
+  /// `_bootstrap` 于是把同一个 Future 原样还回来：
+  ///   · 新的 open 一次都没发出去；
+  ///   · 旧那次随后判定失败，但它已经因为 token 推进而「静默返回」；
+  /// 两条路都不写状态，`_loading` 就永远停在 true —— 用户看到的就是
+  /// 「正在加载 幻想爱奇艺 · 第01集」一动不动，既不出画也不报错。
+  ///
+  /// 现在重试带 `force: true`（真发一次，代价最多一次接口），并且在这次
+  /// 重试自己失败时**收尾**：亮明确错误 + 通知外层换线路，绝不留悬空 loading。
   Future<void> reload() async {
     if (_switchingLine) return;
     // 重试一进来就进入缓冲态并清掉错误层：失败上报与重试在同一个事件循环
@@ -1546,11 +1643,30 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     await _saveProgress();
     if (!mounted) return;
     // 重试时强制刷新播放地址，避免复用已经失效的直链。
-    await _bootstrap(
+    final ok = await _bootstrap(
       seekToSaved: true,
       saveOld: false,
       forcePlayInfo: true,
+      force: true,
     );
+    // 这次重试自己也没成：必须有明确结果，绝不留悬空 loading。
+    //
+    // 两个前置判断都必要：
+    //   · `_switchingLine`：外层已经决定换线路了（失败回调里同步开始的），
+    //     换线自己会收尾，这里再亮错误层会和它抢状态；
+    //   · `!_loading`：本次失败已经写过了（[_bootstrapSource] 的失败分支），
+    //     或者被更新的请求取代。
+    if (!mounted || ok || !_loading || _switchingLine) return;
+    fxPlayLog('FAIL line=${_loadingLineName} ep=$_ep reason=retry-failed');
+    _clearFrozenFrame();
+    setState(() {
+      _loading = false;
+      _suppressLoading = false;
+      _error = true;
+      _errorText = '线路不可用，请重试或切换下方线路';
+    });
+    // 不再重复通知外层：本次失败在 [_bootstrapSource] 里已经报过一次
+    // （[_sourceFailNotified] 守着），这里再报会让详情页多换一次线路。
   }
 
   /// 详情页试完全部线路仍不可播时调用，展示错误与重试/换线路按钮。

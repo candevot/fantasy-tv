@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../tools/test_hls_segment_index.dart' as hlsIndex;
 import '../tools/test_local_hls_proxy.dart' as proxy;
 import '../tools/test_play_orientation.dart' as orientation;
+import '../tools/test_play_path.dart' as playPath;
 import '../tools/test_playback_recovery.dart' as recovery;
 import '../tools/test_together_sync.dart' as sync;
 
@@ -27,6 +28,11 @@ void main() {
   test('HLS manifest index, segment size check and origin fallback',
       hlsIndex.main);
   test('recovery protects progress and verifies seek landing', recovery.main);
+  // PLAY_PATH（2026-11-15）：起播路径的三条判定 —— 直链 / 解析归属 /
+  // 旧后端闸门，外加「重试必须真的重发」的 open 去重。
+  // 判定错一处的表现都是「正在加载 第01集」一直不动，所以单独钉住。
+  test('play path: direct/parse kind, legacy gate and open dedupe',
+      playPath.main);
   test('room member drift, stall hold and offline synchronization', sync.main);
   // 全屏播放方向：竖屏短剧锁竖屏、横屏片锁横屏、分辨率抖 300ms 防抖、
   // 手动切过后不再自动切（纯 Dart，不需要设备）。

@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import '../models.dart' show fxAbsolutePlayUrl;
+import 'cms_bridge.dart' show CmsBridge;
 import '../widgets/player_theme.dart' show fxLoadProgress, fxResumeMinSeconds;
 import 'app_settings.dart';
 import 'exo_player.dart';
@@ -161,7 +161,8 @@ class ResumePrefetch {
       target.episode,
       target.line,
     );
-    final playlist = fxAbsolutePlayUrl(info.url);
+    // 根跟着记录来源走（CMS 补站点根，旧接口才补 8787）。
+    final playlist = CmsBridge.absolutePlayUrl(target.videoId, info.url);
     if (playlist.isEmpty || !_isHls(playlist, info.isHls)) {
       _log('不是 HLS 播放地址，跳过 ${target.signature}');
       return;

@@ -756,16 +756,19 @@ bool fxNeedsClientProxy(String lineId) {
 /// 这种没有主机名的相对路径。App 能靠 Api.base 补全，但**如果先交给
 /// 客户端代理，代理就会整片下完再给 mpv** —— 4K 分片 10~40MB 时
 /// 这就是卡顿来源。补全后 mpv 自己就能边下边播。
-String fxAbsolutePlayUrl(String url) {
+String fxAbsolutePlayUrl(String url, {String? root}) {
   final raw = url.trim();
   if (raw.isEmpty) return raw;
   if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
-  final base = Api.base.trim();
+  // DELEGACY（2026-11-15）：根跟着**记录来源**走，见
+  // `CmsBridge.absolutePlayUrl` —— CMS 记录的相对地址必须补 CMS 站点根，
+  // 不能补 8787（补错宿主 = 地址有了但 404，表现是「一直正在加载」）。
+  final base = (root ?? Api.base).trim();
   if (base.isEmpty) return raw;
-  // Api.base 形如 http://host:8787/api → 取根 http://host:8787
-  final root = base.replaceFirst(RegExp(r'/api/?$'), '');
-  if (raw.startsWith('/')) return '$root$raw';
-  return '$root/$raw';
+  // base 形如 http://host:8787/api → 取根 http://host:8787
+  final site = base.replaceFirst(RegExp(r'/api/?$'), '');
+  if (raw.startsWith('/')) return '$site$raw';
+  return '$site/$raw';
 }
 
 /// 这条播放地址是否仍然需要客户端代理。

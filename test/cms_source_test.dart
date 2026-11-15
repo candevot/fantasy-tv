@@ -238,4 +238,72 @@ void main() {
       expect(card.sourceGroupLabel, '官采切片');
     });
   });
+
+  /* -------------------------------------------------- 播放路径（真机实测） */
+
+  /// PLAY_PATH（2026-11-15）：《济公传》id=202369 两条线路的**真实**返回。
+  ///
+  /// 站点现在给「幻想爱奇艺」的是成品地址：
+  ///   `…/hxparse/play/iqiyi/1/index.m3u8?title=济公传&year=2016&ep=1`
+  ///   → 302 `/hxparse/iqiyi.m3u8?tvid=…` → 200，429087 B，mpegurl。
+  /// 它既不是令牌也不是 `iqiyi:` 占位，**不需要任何解析**。
+  ///
+  /// 之前 `parseLines` 里那句 `parseKindOf(name, urls.first) == 'iqiyi'`
+  /// 只看线路名，把它强行标成 `parse`：详情页先弹「正在解析 幻想爱奇艺」，
+  /// 凡信任 `LineInfo.type` 的路径（下载 / 一起看 / 全屏）还会再套一层
+  /// `/hxparse/parse/iqiyi` —— 二次解析后的地址语义已经变了。
+  group('播放路径：济公传两条线路', () {
+    // 两条线路各留前 2 集（真实字符串，其余是同一形态的重复）。
+    Map<String, dynamic> jigong() => _vod(<String, dynamic>{
+          'vod_id': 202369,
+          'vod_name': '济公传',
+          'vod_year': '2016',
+          'vod_total': 0,
+          'vod_play_from': '幻想爱奇艺\$\$\$红牛',
+          'vod_play_url':
+              '第1集\$http://125.94.244.87/hxparse/play/iqiyi/1/index.m3u8'
+                  '?title=%E6%B5%8E%E5%85%AC%E4%BC%A0&year=2016&ep=1'
+                  '#第2集\$http://125.94.244.87/hxparse/play/iqiyi/2/index.m3u8'
+                  '?title=%E6%B5%8E%E5%85%AC%E4%BC%A0&year=2016&ep=2'
+                  '\$\$\$'
+                  '第1集\$https://hn.bfvvs.com/play/Xe07G9vd/index.m3u8'
+                  '#第2集\$https://hn.bfvvs.com/play/RdGr397b/index.m3u8',
+        });
+
+    test('幻想爱奇艺的成品地址是直链，不再套解析', () {
+      final lines = parseLines(jigong());
+      expect(lines.length, 2);
+      final iqiyi = lines[0];
+      expect(iqiyi.info.name, '幻想爱奇艺');
+      expect(iqiyi.info.type, 'hls',
+          reason: '成品 m3u8 地址不能再被标成 parse（否则会二次解析）');
+      expect(iqiyi.count, 2);
+      final url = iqiyi.urlAt(1)!;
+      expect(url, contains('/hxparse/play/iqiyi/1/index.m3u8'));
+      expect(needsParse(url), isFalse, reason: '带 .m3u8?查询串 就是直链');
+      expect(parseKindOf(iqiyi.info.name, url), 'direct',
+          reason: '线路名带「爱奇艺」不能再把成品地址判成需要解析');
+    });
+
+    test('红牛直链原样播放，不被改写', () {
+      final hongniu = parseLines(jigong())[1];
+      expect(hongniu.info.name, '红牛');
+      expect(hongniu.info.type, 'hls');
+      expect(hongniu.count, 2);
+      final url = hongniu.urlAt(1)!;
+      expect(url, 'https://hn.bfvvs.com/play/Xe07G9vd/index.m3u8');
+      expect(needsParse(url), isFalse);
+      expect(parseKindOf(hongniu.info.name, url), 'direct');
+    });
+
+    test('两条线路的地址都保留查询串，没有被解析规则改写', () {
+      for (final line in parseLines(jigong())) {
+        for (var ep = 1; ep <= line.count; ep++) {
+          final url = line.urlAt(ep)!;
+          expect(url.startsWith('http'), isTrue);
+          expect(isMediaUrl(url), isTrue);
+        }
+      }
+    });
+  });
 }

@@ -3188,10 +3188,11 @@ class _TogetherPageState extends State<TogetherPage>
       // 统一补成绝对地址：站内相对路径补全后 mpv 能直连，
       // 不必再过客户端代理（代理是整片下完才播，4K 大分片会卡）。
       final urls = <String>[];
-      final primary = fxAbsolutePlayUrl(_qualityUrl(play));
+      final primary =
+          CmsBridge.absolutePlayUrl(videoId, _qualityUrl(play));
       if (primary.isNotEmpty) urls.add(primary);
       for (final raw in play.backup) {
-        final url = fxAbsolutePlayUrl(raw);
+        final url = CmsBridge.absolutePlayUrl(videoId, raw);
         if (url.isNotEmpty && !urls.contains(url)) urls.add(url);
       }
       if (urls.isEmpty) continue;
@@ -3386,11 +3387,11 @@ class _TogetherPageState extends State<TogetherPage>
         for (final quality in play.quality) {
           if (quality.key == qualityKey && quality.url.trim().isNotEmpty) {
             // 换签后也要补成绝对地址，保持直连（否则新地址会退化成走代理）。
-            return fxAbsolutePlayUrl(quality.url);
+            return CmsBridge.absolutePlayUrl(videoId, quality.url);
           }
         }
       }
-      final url = fxAbsolutePlayUrl(play.url);
+      final url = CmsBridge.absolutePlayUrl(videoId, play.url);
       return url.isEmpty ? null : url;
     } catch (_) {
       return null;
@@ -3421,7 +3422,8 @@ class _TogetherPageState extends State<TogetherPage>
         final play = await CmsBridge.play(videoId, ep, next.id);
         if (!mounted || seq != _videoSeq) return null;
         if (play.type.trim().toLowerCase() == 'parse') continue;
-        final url = fxAbsolutePlayUrl(_qualityUrlFor(play, qualityKey));
+        final url =
+            CmsBridge.absolutePlayUrl(videoId, _qualityUrlFor(play, qualityKey));
         if (url.isEmpty) continue;
         return FxLineSource(
           url: url,

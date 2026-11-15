@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../api.dart';
 import '../models.dart';
 import 'cms_source.dart';
+import 'play_log.dart';
 import 'search_rank.dart';
 
 /// 苹果CMS（maccms10）数据层 —— CMS_LAYER（2026-11-14 第一阶段）。
@@ -374,11 +375,21 @@ class CmsApi {
     }
     if (!needsParse(address)) {
       // 真 m3u8 直链：直接用，少一次解析请求。
+      //
+      // PLAY_LOG（2026-11-15）：这一行是「用户/我们自己能不能看懂走了哪条路」
+      // 的唯一凭据 —— logcat 里 grep FxPlay 就能看到线路名、地址、判定结果。
+      fxPlayLog(
+        'line=${line.info.displayName} url=$address source=cms kind=direct',
+      );
       return _playInfo(address, line.info.displayName);
     }
     // 令牌 / 页面地址 / 爱奇艺占位：现场找 hxparse 换直链。
     final url = await _resolve(entry, line.info, address, index);
     if (url.isEmpty) throw _parseFailed();
+    fxPlayLog(
+      'line=${line.info.displayName} url=$url source=cms kind=parse '
+      '(from=$address)',
+    );
     return _playInfo(url, line.info.displayName);
   }
 
@@ -649,7 +660,17 @@ class CmsApi {
     String page,
     int ep,
   ) async {
-    final iqiyi = parseKindOf(line.name, page) == 'iqiyi';
+    // RESOLVE_GUARD（2026-11-15）：直链绝不再进解析。
+    //
+    // 调用方（[_play]）已经判过一次，这里再兜一层：解析服务是「把令牌 / 页面
+    // 换成 m3u8」，把一个已经是 m3u8 的地址交给它，换回来的是另一条链路
+    // （`/hxparse/parse/iqiyi` 的 302 → 另一套地址），原本能播的地址反而没了。
+    if (!needsParse(page)) return page;
+    final kind = parseKindOf(line.name, page);
+    final iqiyi = kind == 'iqiyi';
+    fxPlayLog(
+      'resolve line=${line.displayName} kind=$kind addr=$page ep=$ep',
+    );
     final bases = <String>[parsePath, parsePathShort];
     Object? lastError;
     for (final base in bases) {

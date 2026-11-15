@@ -5,6 +5,8 @@ import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
 import 'jar_spider.dart';
+import 'play_log.dart';
+import 'play_path.dart';
 import 'search_rank.dart';
 import 'source_hub.dart';
 
@@ -216,7 +218,7 @@ class CmsBridge {
       }
     }
     final clean = _withoutLive(list);
-    _markAll(clean, _Origin.cms);
+    _markAll(clean, CmsOrigin.cms);
     return clean;
   }
 
@@ -240,8 +242,8 @@ class CmsBridge {
     final data = await Api.home(ch?.legacy ?? 'recommend');
     _markAll(<VideoCard>[
       for (final s in data.sections) ...s.items,
-    ], _Origin.legacy);
-    _markIds(<String>[for (final b in data.banners) b.id], _Origin.legacy);
+    ], CmsOrigin.legacy);
+    _markIds(<String>[for (final b in data.banners) b.id], CmsOrigin.legacy);
     final sections = <HomeSection>[];
     for (final section in data.sections) {
       if (section.title.contains('直播')) continue;
@@ -343,7 +345,7 @@ class CmsBridge {
       // 「第 8 页 / 共 8 页」之后才亮「已经到底啦」；没给 pagecount 时
       // CmsVodPage.hasMore 退回「这一页给满了没有」。
       final chunk = _withoutLive(cards);
-      _markAll(chunk, _Origin.cms);
+      _markAll(chunk, CmsOrigin.cms);
       raw.addAll(chunk);
       hasMore = rawChunk.hasMore;
       if (!hasMore) break;
@@ -372,7 +374,7 @@ class CmsBridge {
         sort: sort,
         page: page,
       ));
-      _markAll(legacy, _Origin.legacy);
+      _markAll(legacy, CmsOrigin.legacy);
     } catch (_) {
       // 两边都不通：把主站的错误抛给页面（页面有自己的重试入口）。
       throw failure;
@@ -495,14 +497,37 @@ class CmsBridge {
       '${CmsApi.root}${CmsApi.vodPath}?line=${Uri.encodeQueryComponent(line)}';
 
   /// 主站采集库（本地 CMS）：失败不抛，交给上层按「这个源没结果」处理。
+  ///
+  /// 来源标注统一成「幻想」（[SourceHub.ownResultLabel]）：主站采集库就是
+  /// 我们自己的 hx 库，和云端下发的幻想线路是同一个站，搜索结果里不能一半
+  /// 标「云端」一半标「幻想」（SOURCE_LABEL 2026-11-15）。
   static Future<List<VideoCard>> _primarySearch(String q, int page) async {
     try {
-      final list = _withoutLive(await CmsApi.search(q, page));
-      _markAll(list, _Origin.cms);
-      return list;
+      return _ownLabeled(_withoutLive(await CmsApi.search(q, page)));
     } catch (_) {
       return const <VideoCard>[];
     }
+  }
+
+  /// 我们自己那批卡片统一标「幻想」。
+  ///
+  /// [stripSourceId] = true 时把 `@src:<key>::` 前缀去掉 —— 线路切片查的是
+  /// 同一个主站，卡片必须用裸 `vod_id` 走主站接口，不能带着外部源前缀。
+  static List<VideoCard> _ownLabeled(
+    List<VideoCard> cards, {
+    bool stripSourceId = false,
+  }) {
+    final out = <VideoCard>[];
+    for (final card in cards) {
+      final id = stripSourceId ? SourceHub.rawIdOf(card.id) : card.id;
+      _mark(id, CmsOrigin.cms);
+      out.add(SourceHub.relabel(
+        card,
+        label: SourceHub.ownResultLabel,
+        id: id,
+      ));
+    }
+    return out;
   }
 
   /// 渐进检索：谁先回来谁先渲染，不再等 48 个源全部返回。
@@ -628,9 +653,8 @@ class CmsBridge {
         try {
           final list = _withoutLive(await CmsApi.search(q, page));
           firstPageCount = list.length;
-          _markAll(list, _Origin.cms);
           done++;
-          emit(list, external: false);
+          emit(_ownLabeled(list), external: false);
         } catch (e) {
           primaryFailure = e;
         }
@@ -655,20 +679,10 @@ class CmsBridge {
               )
               .catchError((Object _) => const <VideoCard>[]);
           done++;
-          // 线路切片查的是**同一个主站**：id 还原成裸 vod_id，
+          // 线路切片查的是**同一个主站**：id 必须是裸 vod_id（`rawIdOf` 兜底，
           // 否则卡片带着 `@src:line_xxx::` 前缀，点进详情会被当成外部源、
-          // 路由不到任何源 → 「没有找到这部影片」。
-          emit(
-            <VideoCard>[
-              for (final card in cards)
-                SourceHub.relabel(
-                  card,
-                  label: card.sourceLabel,
-                  id: SourceHub.rawIdOf(card.id),
-                ),
-            ],
-            external: false,
-          );
+          // 路由不到任何源 → 「没有找到这部影片」），标签统一标「幻想」。
+          emit(_ownLabeled(cards, stripSourceId: true), external: false);
         }());
       }
 
@@ -702,9 +716,8 @@ class CmsBridge {
         try {
           final more = _withoutLive(await CmsApi.search(q, page + 1));
           if (more.isNotEmpty && !closed) {
-            _markAll(more, _Origin.cms);
             done++;
-            emit(more, external: false, page: page + 1);
+            emit(_ownLabeled(more), external: false, page: page + 1);
           }
         } catch (_) {
           // 第二页失败不影响第一批结果。
@@ -773,7 +786,7 @@ class CmsBridge {
 
     try {
       final list = await CmsApi.list(sort: 'hot', src: CmsApi.ownSrc);
-      _markAll(list, _Origin.cms);
+      _markAll(list, CmsOrigin.cms);
       take(list);
     } catch (_) {
       // 下面回落旧接口。
@@ -781,7 +794,7 @@ class CmsBridge {
     if (out.isNotEmpty) return out;
     if (!legacyEnabled) return out;
     final legacy = await Api.rank('hot');
-    _markAll(legacy, _Origin.legacy);
+    _markAll(legacy, CmsOrigin.legacy);
     take(legacy);
     return out;
   }
@@ -818,7 +831,7 @@ class CmsBridge {
       final out = <VideoCard>[];
       final seen = <String>{};
       for (final list in lists) {
-        _markAll(list, _Origin.cms);
+        _markAll(list, CmsOrigin.cms);
         for (final card in list) {
           if (SourceHub.isLiveCard(card)) continue;
           if (!seen.add(card.id)) continue;
@@ -835,7 +848,7 @@ class CmsBridge {
       throw failure ?? ApiException('榜单暂时没有数据，稍后刷新试试');
     }
     final legacy = _withoutLive(await Api.rank(type));
-    _markAll(legacy, _Origin.legacy);
+    _markAll(legacy, CmsOrigin.legacy);
     return _sortRank(legacy);
   }
 
@@ -886,23 +899,23 @@ class CmsBridge {
             vodId: SourceHub.rawIdOf(id),
           ),
         );
-        _mark(id, _Origin.cms);
+        _mark(id, CmsOrigin.cms);
         return detail;
       }
       final detail = await CmsClient.of(external.api).detail(
         SourceHub.rawIdOf(id),
       );
-      _mark(id, _Origin.cms);
+      _mark(id, CmsOrigin.cms);
       return detail;
     }
     final origin = _originOf(id);
-    if (origin == _Origin.legacy) return _legacyDetail(id);
+    if (origin == CmsOrigin.legacy) return _legacyDetail(id);
     try {
       final detail = await CmsApi.detail(id);
-      _mark(id, _Origin.cms);
+      _mark(id, CmsOrigin.cms);
       return detail;
     } catch (e) {
-      if (origin == _Origin.unknown) {
+      if (origin == CmsOrigin.unknown) {
         if (!legacyEnabled) {
           // 来源未知的 id 才可能是旧接口编号（老历史 / 老收藏）。CMS 里
           // 查不到就说明这条记录已经没有对应片源了，用 404 语义让详情页
@@ -930,8 +943,44 @@ class CmsBridge {
   static Future<VideoDetail> _legacyDetail(String id) async {
     if (!legacyEnabled) throw _legacyGone();
     final detail = await Api.detail(id);
-    _mark(id, _Origin.legacy);
+    _mark(id, CmsOrigin.legacy);
     return detail;
+  }
+
+  /// 按「片名 + 年份」重新找一条记录：id 失效后的自愈入口（ID_RETRY）。
+  ///
+  /// 为什么需要：服务端刚做完去重合并（旧副本被并进主记录并删掉），App 的
+  /// 历史 / 收藏里还存着已经不存在的 `vod_id`。详情 404 时先用这里重查，
+  /// 查到就直接跳到新记录，而不是甩一句「该视频已失效」让用户自己重搜。
+  ///
+  /// 匹配规则：
+  ///   · 片名归一化后必须完全一致（不做模糊，宁可不跳也不跳错片子）；
+  ///   · 年份已知时优先同年的那条（翻拍版不会串）；
+  ///   · 同名记录里只有年份未知的那一条时也认它（服务端年份常空着）；
+  ///   · 一条都没有 → null，页面才显示「该视频已失效」。
+  static Future<VideoCard?> findByTitle(String title, {int year = 0}) async {
+    _boot();
+    final name = title.trim();
+    if (name.isEmpty) return null;
+    final want = SourceHub.normTitle(name);
+    if (want.isEmpty) return null;
+    List<VideoCard> list;
+    try {
+      list = _withoutLive(await CmsApi.search(name, 1));
+    } catch (_) {
+      // 重查失败只是不能自愈，页面照常走「已失效」，不抛给调用方。
+      return null;
+    }
+    if (list.isEmpty) return null;
+    _markAll(list, CmsOrigin.cms);
+    VideoCard? yearUnknown;
+    for (final card in list) {
+      if (SourceHub.normTitle(card.title) != want) continue;
+      if (year > 0 && card.year == year) return card;
+      if (year > 0 && card.year > 0) continue;
+      yearUnknown ??= card;
+    }
+    return yearUnknown;
   }
 
   /* ------------------------------------------------------------ 播放 */
@@ -961,7 +1010,7 @@ class CmsBridge {
             ep: ep,
           ),
         );
-        _mark(vodId, _Origin.cms);
+        _mark(vodId, CmsOrigin.cms);
         return info;
       }
       final info = await CmsClient.of(external.api).play(
@@ -969,31 +1018,29 @@ class CmsBridge {
         line,
         ep,
       );
-      _mark(vodId, _Origin.cms);
+      _mark(vodId, CmsOrigin.cms);
       return info;
     }
     final origin = _originOf(vodId);
-    if (origin == _Origin.legacy) {
-      if (!legacyEnabled) throw _legacyGone();
+    // DELEGACY（2026-11-15）：**只有明确来自旧接口的记录**才允许问 8787。
+    //
+    // 原来这里对「来源未知」的 id 还有一条回落：CMS 播放失败 → `Api.play`。
+    // 那条路是起播卡死的直接原因之一：8787 上的 Node 服务根本不认识
+    // 「幻想爱奇艺 / 量子 / 红牛 / SH4K」这批新线路，请求要么失败、要么挂到
+    // 超时（8 秒 × 2 次重试），而用户在这十几秒里看到的就是「正在加载」
+    // 一动不动；CMS 那边真正的原因（比如「该线路解析失败」）也被这条回落
+    // 盖住了。CMS 的 vod_id 与旧接口的编号还是两套，拿 CMS id 去问 8787
+    // 本来就不可能查对。
+    //
+    // 现在的规则：CMS 记录（含来源未知）**只走 CMS**，失败就把 CMS 的错误
+    // 原样抛给页面；`Api.play` 只服务 `CmsOrigin.legacy`（历史遗留记录）。
+    if (legacyPlayAllowed(legacyEnabled: legacyEnabled, origin: origin)) {
+      fxPlayLog('line=$line source=legacy url=8787/api/play ep=$ep');
       return Api.play(vodId, ep, line, fresh: fresh);
     }
-    try {
-      final info = await CmsApi.playEpisode(vodId, line, ep);
-      _mark(vodId, _Origin.cms);
-      return info;
-    } catch (e) {
-      if (origin == _Origin.unknown) {
-        if (!legacyEnabled) throw _isNotFound(e) ? _legacyGone() : e;
-        try {
-          final info = await Api.play(vodId, ep, line, fresh: fresh);
-          _mark(vodId, _Origin.legacy);
-          return info;
-        } catch (_) {
-          // 旧接口也没有：抛 CMS 的错误。
-        }
-      }
-      rethrow;
-    }
+    final info = await CmsApi.playEpisode(vodId, line, ep);
+    _mark(vodId, CmsOrigin.cms);
+    return info;
   }
 
   /// 只要直链（下载 / 投屏 / 外挂播放）。
@@ -1019,6 +1066,13 @@ class CmsBridge {
       );
       return info.url;
     }
+    // PLAY_URL 走同一条闸门：旧接口记录才问 8787，其它一律 CMS。
+    if (legacyPlayAllowed(
+      legacyEnabled: legacyEnabled,
+      origin: _originOf(vodId),
+    )) {
+      return Api.play(vodId, ep, line).then((info) => info.url);
+    }
     return CmsApi.playUrl(vodId, line, ep);
   }
 
@@ -1028,12 +1082,21 @@ class CmsBridge {
   /// 也不要让用户对着「查了 0 个源」的结果发呆。
   static String get sourceNotice => SourceHub.instance.jarNotice;
 
+  /// 把站内相对地址补成绝对地址（播放 / 投屏 / 下载共用）。
+  ///
+  /// DELEGACY（2026-11-15）：根必须跟着**记录来源**走。
+  /// `fxAbsolutePlayUrl` 原来只会补 `Api.base`（8787），CMS 记录一旦拿到
+  /// 相对地址就会被补到旧后端宿主上 —— 地址看起来正常，实际 404，
+  /// 用户看到的就是「一直正在加载」。CMS 记录一律补 CMS 站点根。
+  static String absolutePlayUrl(String id, String url) =>
+      fxAbsolutePlayUrl(url, root: isCms(id) ? CmsApi.root : Api.base);
+
   /// 这个 id 是不是 CMS 的 `vod_id`（详情页据此跳过旧接口的平台线路逻辑）。
   ///
   /// 外部源（云端 / 自加）的卡片 id 带 `@src:` 前缀，同样按 CMS 处理，
   /// 否则详情页会为它去查旧接口的平台线路。
   static bool isCms(String id) =>
-      id.trim().startsWith(SourceHub.idMark) || _originOf(id) == _Origin.cms;
+      id.trim().startsWith(SourceHub.idMark) || _originOf(id) == CmsOrigin.cms;
 
   /* ------------------------------------------------------ jar 源兜底 */
 
@@ -1097,13 +1160,13 @@ class CmsBridge {
     unawaited(LearnedResolution.load());
   }
 
-  static final Map<String, _Origin> _origins = <String, _Origin>{};
+  static final Map<String, CmsOrigin> _origins = <String, CmsOrigin>{};
 
   static const int _originLimit = 4000;
 
-  static _Origin _originOf(String id) => _origins[id.trim()] ?? _Origin.unknown;
+  static CmsOrigin _originOf(String id) => _origins[id.trim()] ?? CmsOrigin.unknown;
 
-  static void _mark(String id, _Origin origin) {
+  static void _mark(String id, CmsOrigin origin) {
     final key = id.trim();
     if (key.isEmpty) return;
     if (_origins.length >= _originLimit && !_origins.containsKey(key)) {
@@ -1112,13 +1175,13 @@ class CmsBridge {
     _origins[key] = origin;
   }
 
-  static void _markAll(List<VideoCard> cards, _Origin origin) {
+  static void _markAll(List<VideoCard> cards, CmsOrigin origin) {
     for (final card in cards) {
       _mark(card.id, origin);
     }
   }
 
-  static void _markIds(List<String> ids, _Origin origin) {
+  static void _markIds(List<String> ids, CmsOrigin origin) {
     for (final id in ids) {
       _mark(id, origin);
     }
@@ -1200,7 +1263,6 @@ class CmsChannel {
   String toString() => key;
 }
 
-enum _Origin { unknown, cms, legacy }
 
 /// 跨源去重的记账本：片名分桶 + 年份比对。
 ///

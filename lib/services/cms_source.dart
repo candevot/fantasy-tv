@@ -5,30 +5,24 @@
 ///   · 判断一条地址是「能直接播的 m3u8」还是「要交给 hxparse 现解析的页面 / 令牌」
 ///   · 线路名 / 线路 id 的查找（播放页只拿线路名也能定位线路）
 ///
-/// 站点实际数据形态（2026-11-14 实测全量 919 部）：
+/// 站点实际数据形态（2026-11-15 实测）：
 ///   · `幻想4K`   → 地址是令牌 `FY-SH4K-<md5>`，必须走 hxparse/fuying
 ///   · `量子`     → 地址是 `https://lzv34.com/share/<md5>` 页面，也走 hxparse/fuying
-///   · 有的采集源给的是真 m3u8 直链 → 直接播，不解析
-///   · `幻想爱奇艺` 不来自采集，没有任何集地址 → 按「剧名 + 年份 + 第几集」现查
+///   · `幻想爱奇艺` → **已经给的是成品地址**
+///     `http://…/hxparse/play/iqiyi/1/index.m3u8?title=…&ep=1`（302 → 429KB 清单），
+///     直接播，不要再套 `/hxparse/parse/iqiyi`
+///   · `红牛`     → `https://hn.bfvvs.com/play/<id>/index.m3u8` 直链
 ///
 /// 所以判断依据是**地址本身**，不是线路名：同一条线路换采集源后地址形态会变，
-/// 按名字硬编码一定会在某天全部误判。
+/// 按名字硬编码一定会在某天全部误判（「幻想爱奇艺」就是这么被误判成要解析的）。
+/// 具体规则集中在 `play_path.dart`（纯函数、可独立核验）。
 library;
 
 import '../models.dart';
-
-/// 爱奇艺线路的占位地址前缀。
-///
-/// 爱奇艺线路不是采集来的，`vod_play_url` 里根本没有地址；为了让「集数 / 集名」
-/// 和其它线路一样参与展示，给每一集填一个占位标记，播放时再按集号现查。
-const String kIqiyiMark = 'iqiyi:';
+import 'play_path.dart';
 
 /// 线路 / 集的分隔符（苹果CMS 固定用这三个）。
 const String kLineSep = r'$$$';
-
-/// 静态资源后缀：命中就是能直接播的地址，不是平台页面。
-final RegExp _mediaExt =
-    RegExp(r'\.(m3u8|mp4|mkv|flv|mov|ts)(\?|#|$)', caseSensitive: false);
 
 /// 一条 CMS 线路：线路身份（交给 UI）+ 它**自己**的集名 / 集地址（交给播放）。
 ///
@@ -121,46 +115,25 @@ List<List<String>> epPairs(String block) {
 
 /* ------------------------------------------------------------ 地址判定 */
 
-/// 本站解析服务已经生好的播放地址（`/hxparse/xo?u=…`、`/hxparse/play/…`）。
+/// 能不能直接播：http(s) 且带媒体后缀，或已经是本站解析产物。
 ///
-/// PARSE_ONCE（2026-11-15）：这些地址是**解析的产物**，不是待解析的令牌 / 页面。
-/// 以前 `isMediaUrl` 只认媒体后缀，于是 `/hxparse/xo?u=SH4K-xxx` 被判成
-/// 「还需要解析」，又被套进 `/hxparse/parse/fuying?u=…` 转了一层：
-///   · 多一次 302 + 中转解析，起播白多 0.9~2 秒；
-///   · 中转站（hc.fuyingapi.top）和直连（api.wki8.com）并不等价；
-///   · 平台页面地址（qq 那条）本身带 `&t=&y=`，套两层后参数语义已经变了。
-/// 认出这层包装就直接当直链播，交给播放器的清单代理去跟 302。
-final RegExp _wrappedPlaylist =
-    RegExp(r'/hxparse/(?:xo|play|parse)(?:/|\?|$)', caseSensitive: false);
-
-/// 能不能直接播：http(s) 且带媒体后缀。
-///
-/// 注意 `幻想4K` 的地址是 `FY-SH4K-<md5>` 令牌，连 http 都不是；
-/// `量子` 是 `https://lzv34.com/share/<md5>` 页面 —— 两者都要走 hxparse。
-bool isMediaUrl(String address) {
-  final text = address.trim().toLowerCase();
-  if (!text.startsWith('http://') && !text.startsWith('https://')) return false;
-  if (_mediaExt.hasMatch(text)) return true;
-  // 已经由本站解析服务包装好的清单地址：直接播，不再二次解析。
-  return _wrappedPlaylist.hasMatch(text);
-}
+/// 规则本体在 `play_path.dart`（纯函数，可独立核验）。这一层保留同名入口，
+/// 是因为详情页 / 播放页 / 下载 / 单测都在用它，改名没有收益。
+bool isMediaUrl(String address) => isDirectAddress(address);
 
 /// 需要现场解析（不是直链）。
-bool needsParse(String address) => !isMediaUrl(address);
+bool needsParse(String address) => needsParseAddress(address);
 
-/// 页面 / 令牌该找哪个解析器：爱奇艺线路按「剧名 + 年份 + 集号」查，
-/// 其余（幻想4K / 幻想蓝光 / 量子 / 红牛 …）都交给福盈。
-String parseKindOf(String lineName, String address) {
-  final name = lineName.toLowerCase();
-  final host = (Uri.tryParse(address.trim())?.host ?? '').toLowerCase();
-  if (name.contains('爱奇艺') ||
-      name.contains('iqiyi') ||
-      host.contains('iqiyi') ||
-      address.trim().startsWith(kIqiyiMark)) {
-    return 'iqiyi';
-  }
-  return 'fuying';
-}
+/// 页面 / 令牌该找哪个解析器：`direct` / `iqiyi` / `fuying`。
+///
+/// PARSE_ONCE2（2026-11-15）：**地址优先，线路名兜底**。站点现在给
+/// 「幻想爱奇艺」的是成品地址 `/hxparse/play/iqiyi/1/index.m3u8?…`，
+/// 之前只按线路名里带「爱奇艺」就判 `iqiyi`，等于告诉播放链路「这条还要
+/// 解析」——详情页会先弹「正在解析 幻想爱奇艺」，任何信任 `LineInfo.type`
+/// 的路径（下载 / 一起看 / 全屏）都会把它再套一层 `/hxparse/parse/iqiyi`，
+/// 套出来的地址语义已经变了，而原地址本来就能播。
+String parseKindOf(String lineName, String address) =>
+    parseKindFor(lineName, address);
 
 /* ------------------------------------------------------------ 线路解析 */
 
@@ -224,8 +197,16 @@ List<CmsLine> parseLines(Map<String, dynamic> vod) {
             // 电影照搬「第01集」会被用户当成剧集。
             : (pairs.length == 1 ? '正片' : '第${k + 1}集'),
     ];
-    final parse =
-        urls.any(needsParse) || parseKindOf(name, urls.first) == 'iqiyi';
+    // PARSE_ONCE2（2026-11-15）：线路「要不要解析」只看**它自己的地址**。
+    //
+    // 这里原来还 or 了一个 `parseKindOf(name, urls.first) == 'iqiyi'`，等于
+    // 只要线路名里带「爱奇艺」就强行标成 parse —— 站点现在给「幻想爱奇艺」
+    // 的是成品地址 `/hxparse/play/iqiyi/1/index.m3u8?…`（302 → 429KB 清单），
+    // 于是整条链路都被这句标记带偏：详情页先弹「正在解析」，凡信任
+    // `LineInfo.type` 的地方还会再套一层解析。
+    // 地址是直链就是 hls，是令牌 / 页面 / `iqiyi:` 占位才叫 parse —— 占位
+    // 地址本身过不了 [needsParse]，所以这一句已经覆盖了爱奇艺那种情况。
+    final parse = urls.any(needsParse);
     out.add(CmsLine(
       info: LineInfo(
         'cms_${vodId.isEmpty ? '0' : vodId}_${out.length + 1}',
