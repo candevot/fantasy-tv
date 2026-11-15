@@ -1426,8 +1426,7 @@ class _OfflinePlayerPageState extends State<OfflinePlayerPage>
       onRotate: _toggleOrientationByUser,
       qualityLabel: fxPlayerQuality(_player),
       onBack: () => unawaited(_leave()),
-      onCast: () {},
-      // 离线播放没有投屏：直接不渲染那颗按钮（之前是用渐变色块盖住，
+      // 离线播放没有投屏：不传 onCast 即整颗不渲染（之前是用渐变色块盖住，
       // 位置一改就会露出来，而且挡不住长按提示）。
       showCast: false,
       onMore: () => unawaited(_openSettingsSheet()),

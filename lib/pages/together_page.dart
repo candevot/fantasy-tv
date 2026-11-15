@@ -8,8 +8,6 @@ import 'package:flutter/services.dart';
 import '../auth.dart';
 import '../fx_globals.dart';
 import '../models.dart';
-import '../api.dart';
-import '../services/cast_service.dart';
 import '../services/cms_bridge.dart';
 import '../services/fx_player.dart';
 import '../services/iq_codec_gate.dart';
@@ -19,7 +17,6 @@ import '../services/play_log.dart';
 import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
 import '../theme.dart';
-import '../widgets/cast_sheet.dart';
 import '../widgets/player_theme.dart';
 import '../widgets/together_chat.dart';
 import '../widgets/together_client.dart';
@@ -3093,88 +3090,6 @@ class _TogetherPageState extends State<TogetherPage>
     if (mounted) setState(() {});
   }
 
-  /* ------------------------------------------------------------ 投屏 */
-
-  /// 投屏入口：与主播放页完全同一套（CastService 解析直链 + CastSheet 面板）。
-  ///
-  /// 直播房不给入口（主播放的直播也没有）；还没拿到播放地址时静默返回，
-  /// 不在画面上弹任何遮挡提示。
-  Future<void> _openCast() async {
-    if (_isLive) return;
-    final info = _playInfo;
-    if (info == null || _videoLoading || _videoError.isNotEmpty) return;
-    final url = _castUrl(info);
-    if (url.isEmpty) return;
-    CastSource source;
-    try {
-      source = CastService.resolveSource(
-        url: url,
-        headers: _castHeaders(url, info),
-        title: '${_videoTitle.isEmpty ? '一起看' : _videoTitle} · $_epLabel',
-        direct: info.direct,
-        startAt: Duration(milliseconds: (_displayPosition() * 1000).round()),
-        serverBase: Api.base,
-      );
-    } on CastException {
-      return;
-    }
-    final wasPlaying = _controller?.value.isPlaying ?? false;
-    await showCastSheet(
-      context,
-      source: source,
-      owner: this,
-      onCastStarted: () async {
-        try {
-          await _controller?.pause();
-        } catch (_) {}
-      },
-      onCastStopped: () async {
-        if (!wasPlaying || !mounted) return;
-        try {
-          await _controller?.play();
-        } catch (_) {}
-      },
-    );
-  }
-
-  /// 投屏地址必须能落到绝对 URL（站内相对地址补服务器前缀）。
-  String _absoluteCastUrl(String raw) {
-    final url = raw.trim();
-    if (url.isEmpty) return url;
-    if (url.startsWith('http://') || url.startsWith('https://')) return url;
-    final base = Api.base.trim();
-    if (base.isEmpty) return url;
-    final root = base.replaceFirst(RegExp(r'/api/?$'), '');
-    if (url.startsWith('/')) return '$root$url';
-    return '$root/$url';
-  }
-
-  String _castUrl(PlayInfo info) {
-    final key = _qualityKey;
-    if (key != null) {
-      for (final quality in info.quality) {
-        if (quality.key == key && quality.url.trim().isNotEmpty) {
-          return _absoluteCastUrl(quality.url);
-        }
-      }
-    }
-    final main = info.url.trim();
-    if (main.isNotEmpty) return _absoluteCastUrl(main);
-    for (final url in info.backup) {
-      if (url.trim().isNotEmpty) return url.trim();
-    }
-    return '';
-  }
-
-  Map<String, String> _castHeaders(String url, PlayInfo info) {
-    for (final quality in info.quality) {
-      if (quality.url.trim() == url && quality.headers.isNotEmpty) {
-        return quality.headers;
-      }
-    }
-    return info.headers;
-  }
-
   Future<void> _pickSpeed() async {
     final picked = await showTogetherSpeedSheet(context, current: _hostRate);
     if (!mounted || picked == null) return;
@@ -4184,14 +4099,12 @@ class _TogetherPageState extends State<TogetherPage>
       position: _position,
       chat: _chat,
       members: _members,
-      roomCode: _roomCode,
       title: _videoTitle.isNotEmpty
           ? _videoTitle
           : (_roomTitle.isNotEmpty ? _roomTitle : '一起看'),
       cover: _videoCover,
       ep: _ep,
       episodes: _episodes,
-      isHost: _isHost,
       online: _online,
       loading: _videoLoading,
       errorText: _videoError,
@@ -4199,43 +4112,18 @@ class _TogetherPageState extends State<TogetherPage>
       loadingText: _loadingText,
       onRotate: () => unawaited(_toggleOrientation()),
       rotatedToPortrait: _layoutOrientation?.isPortrait ?? false,
-      qualityLabel: _isLive
-          ? (_liveLine?.qualityLabel ?? '')
-          : fxPlayerQuality(_controller),
-      qualityKey: _isLive ? _liveLineId : _qualityKey,
-      canChangeQuality: _isLive
-          ? (_liveChannel?.lines.length ?? 0) >= 2
-          : (_playInfo?.quality.length ?? 0) >= 2,
-      qualities: _isLive
-          ? <QualityItem>[
-              for (var i = 0; i < (_liveChannel?.lines.length ?? 0); i++)
-                QualityItem(
-                  _liveChannel!.lines[i].id,
-                  '${_liveChannel!.lines[i].qualityLabel} · '
-                  '${_liveChannel!.lines[i].subtitle(i)}',
-                  _liveChannel!.lines[i].url,
-                ),
-            ]
-          : (_playInfo?.quality ?? const <QualityItem>[]),
       rate: _isHost ? _hostRate : (_remote?.rate ?? 1.0),
       videoBoundaryKey: _videoBoundaryKey,
       videoEpoch: _videoEpoch,
       frozenFrame: _frozenFrame,
       frozenFrameOpaque: _frozenFrameOpaque,
       onExit: () => unawaited(_exitFullscreen()),
-      onExitRoom: () => unawaited(_confirmLeaveRoom()),
-      onInvite: () => unawaited(_showInvite()),
-      onMembers: () => unawaited(_showMembers()),
-      onCast: () => unawaited(_openCast()),
-      onSwitchLine: () => unawaited(_pickLine()),
-      onChangeDrama: () => unawaited(_pickDrama()),
       onTogglePlay: _togglePlay,
       onSeek: _seekTo,
       onSeekBy: _seekBy,
       onNext: _nextEpisode,
       onEpisodes: () => unawaited(_pickEpisode()),
       onRate: _setHostRate,
-      onQuality: (key) => unawaited(_setQuality(key)),
       onRetry: _retryVideo,
       onSendChat: _sendChat,
     );
@@ -4271,7 +4159,6 @@ class _TogetherPageState extends State<TogetherPage>
       onInvite: () => unawaited(_showInvite()),
       onMembers: () => unawaited(_showMembers()),
       onMedia: () => unawaited(_showMediaSheet()),
-      onCast: () => unawaited(_openCast()),
       onSwitchLine: () => unawaited(_pickLine()),
       onChangeDrama: () => unawaited(_pickDrama()),
       onEpisodes: () => unawaited(_pickEpisode()),

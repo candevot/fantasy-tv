@@ -21,6 +21,7 @@ import 'together_ui.dart';
 /*  结构：顶部栏（返回/房间号/成员/邀请/换源/换剧）→ 固定高度视频区 →          */
 /*        剧名·集数·成员头像 → 聊天列表（占剩余高度）→ 底部输入条。            */
 /*  视频区高度只由屏幕高度决定，不随键盘变化；键盘只压缩聊天列表。             */
+/*  投屏不在一起看：入口已在页面层与两个视图里全部移除（2026-11-16）。          */
 /* ========================================================================== */
 
 class TogetherRoomView extends StatefulWidget {
@@ -46,7 +47,6 @@ class TogetherRoomView extends StatefulWidget {
     required this.onInvite,
     required this.onMembers,
     required this.onMedia,
-    required this.onCast,
     required this.onSwitchLine,
     required this.onChangeDrama,
     required this.onEpisodes,
@@ -94,9 +94,6 @@ class TogetherRoomView extends StatefulWidget {
   final VoidCallback onInvite;
   final VoidCallback onMembers;
   final VoidCallback onMedia;
-
-  /// 投屏：与主播放页同一个 CastSheet（直播房页面层直接返回，不弹面板）。
-  final VoidCallback onCast;
 
   /// 顶栏「换源 / 换剧」和视频区「选集」；页面统一做房主校验。
   final VoidCallback onSwitchLine;
@@ -359,10 +356,14 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   /// —— 左边「房间 320551」占着一大片空白，右边 6 个胶囊被
   /// `FittedBox(scaleDown)` 硬压成一串小字（7~9sp、热区十几 dp），点不准。
   ///
+  /// FS_MATCH_MAIN（2026-11-16）：**一起看不需要投屏** —— 竖屏那颗「投屏」
+  /// 已整颗移除（CastService / CastSheet 本身不动，主播放页照旧在用），
+  /// 全屏那边同样不出现。
+  ///
   /// 现在的版式：
   ///   · 左：返回 + 房间号（复制图标同行）+ **内联状态**（我在操作 / 已同步 /
   ///     落后 x s）—— 状态本来就不是按钮，内联到左边就不再占一个按钮位；
-  ///   · 右：只有真正要点的动作，邀请 / 换源 / 换剧常驻，1人 / 投屏 按 priority
+  ///   · 右：只有真正要点的动作，邀请 / 换源 / 换剧常驻，1人按 priority
   ///     收进「更多」；每项热区 ≥44dp、字号 ≥12.5sp、图标 15dp；
   ///   · 放不下就**换行**（Wrap），绝不缩放 —— 见 [TogetherTopActionBar]。
   Widget _buildHeader(BuildContext context) {
@@ -513,7 +514,9 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
     );
   }
 
-  /// 顶栏动作：邀请 / 换源 / 换剧常驻，1人 / 投屏按 priority 收进「更多」。
+  /// 顶栏动作：邀请 / 换源 / 换剧常驻，1人按 priority 收进「更多」。
+  ///
+  /// 投屏不在这里：一起看整体没有投屏入口（用户明确要求）。
   List<TogetherActionItem> _headerActions() {
     return <TogetherActionItem>[
       TogetherActionItem(
@@ -524,14 +527,6 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
         priority: 2,
         onTap: widget.onMembers,
       ),
-      if (!widget.isLive)
-        TogetherActionItem(
-          id: 'cast',
-          label: '投屏',
-          icon: Icons.tv_rounded,
-          priority: 3,
-          onTap: widget.onCast,
-        ),
       TogetherActionItem(
         id: 'invite',
         label: '邀请',

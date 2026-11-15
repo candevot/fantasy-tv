@@ -13,7 +13,6 @@ import 'fs_panels.dart';
 import 'player_gestures.dart';
 import 'player_theme.dart';
 import 'together_chat.dart';
-import 'together_top_actions.dart';
 import 'together_ui.dart';
 
 /* ========================================================================== */
@@ -22,6 +21,16 @@ import 'together_ui.dart';
 /*  与播放器全屏同一套控件规范（顶栏 / 左右侧锁屏与 ±10s / 底部进度条 / 3 秒    */
 /*  自动隐藏 / 锁屏 / 手势层）。聊天只保留左下角 32dp 圆钮（未读红点），点开    */
 /*  是 ≤40%×45% 的小面板，消息和输入都在面板内，没有横条输入框。               */
+/*                                                                            */
+/*  FS_MATCH_MAIN（2026-11-16）：**全屏 = 只看画面和基本播放控制**。           */
+/*                                                                            */
+/*  用户原话：「一起看里面不需要投屏，一起看的全屏里面也不需要多余设置，和     */
+/*  自己在线看是一样的，要想还原就切竖屏，要想操作就切竖屏」。                  */
+/*                                                                            */
+/*  所以顶栏只保留主播放全屏那一套 + 人数（只读）：                            */
+/*    返回 / 片名·第N集 / 网速 / 分辨率 / 电量 / 时钟 / 转屏                   */
+/*  投屏、换源、换剧、邀请、退出房间全部**不在全屏出现**，回竖屏房间页做。      */
+/*  底栏同样对齐主播放（进度条 / 播放暂停 / 下一集 / 倍速 / 清晰度 / 选集）。  */
 /* ========================================================================== */
 
 class TogetherFullscreenView extends StatefulWidget {
@@ -31,38 +40,25 @@ class TogetherFullscreenView extends StatefulWidget {
     required this.position,
     required this.chat,
     required this.members,
-    required this.roomCode,
     required this.title,
     required this.cover,
     required this.ep,
     required this.episodes,
-    required this.isHost,
     required this.online,
     required this.loading,
     required this.errorText,
-    required this.qualityLabel,
-    required this.qualityKey,
-    required this.canChangeQuality,
-    required this.qualities,
     required this.rate,
     required this.videoBoundaryKey,
     required this.videoEpoch,
     required this.frozenFrame,
     required this.frozenFrameOpaque,
     required this.onExit,
-    required this.onExitRoom,
-    required this.onInvite,
-    required this.onMembers,
-    required this.onCast,
-    required this.onSwitchLine,
-    required this.onChangeDrama,
     required this.onTogglePlay,
     required this.onSeek,
     required this.onSeekBy,
     required this.onNext,
     required this.onEpisodes,
     required this.onRate,
-    required this.onQuality,
     required this.onRetry,
     required this.onSendChat,
     this.loadingText = '',
@@ -74,15 +70,16 @@ class TogetherFullscreenView extends StatefulWidget {
   final FxPlayer? player;
   final ValueListenable<double> position;
   final ValueListenable<List<TogetherChatMessage>> chat;
+
+  /// 房间成员：全屏里只用于**只读**的人数显示（不点、不弹面板）。
+  /// 看成员 / 邀请 / 换源 / 换剧 / 退出房间都在竖屏房间页做。
   final List<TogetherMember> members;
 
-  final String roomCode;
   final String title;
   final String cover;
   final int ep;
   final List<Episode> episodes;
 
-  final bool isHost;
   final bool online;
   final bool loading;
 
@@ -90,10 +87,6 @@ class TogetherFullscreenView extends StatefulWidget {
   final String loadingText;
   final String errorText;
 
-  final String qualityLabel;
-  final String? qualityKey;
-  final bool canChangeQuality;
-  final List<QualityItem> qualities;
   final double rate;
 
   /// 视频最后一帧：切剧 / 切集 / 换线路时顶住黑屏，首帧就绪后淡出。
@@ -103,13 +96,6 @@ class TogetherFullscreenView extends StatefulWidget {
   final bool frozenFrameOpaque;
 
   final VoidCallback onExit;
-  final VoidCallback onExitRoom;
-  final VoidCallback onInvite;
-  final VoidCallback onMembers;
-
-  /// 顶栏换源 / 换剧；页面统一做房主校验，成员点击提示「跟随房主」。
-  final VoidCallback onSwitchLine;
-  final VoidCallback onChangeDrama;
 
   /// 页面统一做房主校验；成员点击时页面提示「跟随房主」。
   final VoidCallback onTogglePlay;
@@ -118,12 +104,8 @@ class TogetherFullscreenView extends StatefulWidget {
   final VoidCallback onNext;
   final VoidCallback onEpisodes;
   final ValueChanged<double> onRate;
-  final ValueChanged<String?> onQuality;
   final VoidCallback onRetry;
   final bool Function(String text) onSendChat;
-
-  /// 投屏（与主播放全屏同一颗按钮、同一个 CastSheet）。
-  final VoidCallback onCast;
 
   /// 手动转屏（与主播放全屏同一个入口、同一个图标语义）。
   final VoidCallback? onRotate;
@@ -145,7 +127,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
   Timer? _unlockTimer;
 
   bool _showSpeed = false;
-  bool _showQuality = false;
 
   bool _holding = false;
   double? _rateBeforeHold;
@@ -241,7 +222,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     _hideTimer?.cancel();
     _hideTimer = Timer(togetherFullscreenControlsAutoHide, () {
       if (!mounted) return;
-      if (_locked || _chatOpen || _showSpeed || _showQuality) return;
+      if (_locked || _chatOpen || _showSpeed) return;
       if (_controls) setState(() => _controls = false);
     });
   }
@@ -259,7 +240,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       setState(() {
         _controls = false;
         _showSpeed = false;
-        _showQuality = false;
       });
     }
   }
@@ -308,7 +288,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       _controls = false;
       _chatOpen = false;
       _showSpeed = false;
-      _showQuality = false;
     });
     _endHold();
     _startUnlockTimer();
@@ -353,7 +332,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       _holding = true;
       _controls = false;
       _showSpeed = false;
-      _showQuality = false;
     });
   }
 
@@ -378,34 +356,14 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     _hideTimer?.cancel();
     setState(() {
       _showSpeed = !_showSpeed;
-      _showQuality = false;
       _controls = true;
     });
     if (!_showSpeed) _scheduleHide();
   }
 
-  void _toggleQuality() {
-    if (!widget.canChangeQuality) {
-      return;
-    }
-    _hideTimer?.cancel();
-    setState(() {
-      _showQuality = !_showQuality;
-      _showSpeed = false;
-      _controls = true;
-    });
-    if (!_showQuality) _scheduleHide();
-  }
-
   void _openSpeedPanel(double value) {
     widget.onRate(value);
     setState(() => _showSpeed = false);
-    _wake();
-  }
-
-  void _openQualityPanel(String? key) {
-    widget.onQuality(key);
-    setState(() => _showQuality = false);
     _wake();
   }
 
@@ -423,7 +381,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       _chatOpen = true;
       _controls = false;
       _showSpeed = false;
-      _showQuality = false;
       _unread = 0;
     });
   }
@@ -644,19 +601,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (_showQuality)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: FsQualityPanel(
-                      items: widget.qualities,
-                      currentKey: widget.qualityKey,
-                      showSource: !widget.isLive,
-                      onPick: _openQualityPanel,
-                    ),
-                  ),
-                ),
               if (_showSpeed && !widget.isLive)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -676,89 +620,28 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     );
   }
 
-  /// 顶栏：直接用主播放全屏那套 [FsTopBar]。
+  /// 顶栏：**就是主播放全屏那一套** [FsTopBar]，只多一个只读人数。
   ///
-  /// 之前这里是自己手写的一份 Row：没有安全区留白（刘海 / 圆角屏上按钮会
-  /// 被裁）、没有电量 / 时钟胶囊、按钮 tint 也和主播放不一致。房间专属的
-  /// 入口（换源 / 换剧 / 成员 / 邀请 / 退出房间）通过 [FsTopBar.actions]
-  /// 插在投屏之后，视觉与主播放完全同一套。
+  /// FS_MATCH_MAIN（2026-11-16）：用户要求一起看的全屏「和自己在线看是一样
+  /// 的」。之前这里通过 [FsTopBar.actions] 又塞了「换源 / 换剧 / 1人 / 邀请 /
+  /// 退出房间」5 个房间按钮，横屏一排直接溢出屏幕（「邀请」被裁到边上）。
+  ///
+  /// 现在的口径是硬的：**全屏只放画面和基本播放控制**（见
+  /// [TogetherFullscreenTopBar]）。`test/together_fullscreen_topbar_test.dart`
+  /// 会把渲染出来的 action 集合与主播放逐项比对，往回加按钮会直接红。
   Widget _buildTopBar(EdgeInsets pad) {
-    final compact = MediaQuery.sizeOf(context).width < 700;
     return AnimatedBuilder(
       animation: widget.player ?? const AlwaysStoppedAnimation<double>(0),
-      builder: (context, _) => FsTopBar(
+      builder: (context, _) => TogetherFullscreenTopBar(
         title: widget.title.trim().isEmpty ? '一起看' : widget.title.trim(),
         epLabel: _epLabel,
-        compact: compact,
+        qualityLabel: fxPlayerQuality(widget.player),
+        speedText: widget.player?.value.speedText ?? '',
         narrow: widget.rotatedToPortrait,
         rotatedToPortrait: widget.rotatedToPortrait,
-        qualityLabel: widget.qualityLabel,
-        speedText: widget.player?.value.speedText ?? '',
+        memberCount: widget.members.length,
         onBack: widget.onExit,
-        onCast: widget.onCast,
-        // 顶栏不再有「更多」按钮，这里只是必填字段。
-        onMore: () {},
         onRotate: widget.onRotate,
-        // TOPBAR_44（2026-11-16）：房间动作不再塞 5 个独立小件进顶栏。
-        //
-        // 现场：横屏顶部「1人 / 邀请 / 投屏 / 我在操作 / 换源 / 换剧」挤成一排，
-        // 被 FittedBox 等比压小到点不准。现在交给 [TogetherTopActionBar]：
-        // 每项热区 44dp、字号 12.5sp，按屏宽自适应 —— 「换源 / 换剧」永远
-        // 直接可见，其余放不下就收进「更多」，绝不缩放。
-        actions: <Widget>[
-          TogetherTopActionBar(
-            dark: true,
-            // 留出标题 / 返回 / 状态胶囊的位置，避免动作区把标题挤没。
-            maxWidth: math.min(
-              MediaQuery.sizeOf(context).width * .58,
-              520.0,
-            ),
-            actions: <TogetherActionItem>[
-              TogetherActionItem(
-                id: 'members',
-                label: '${widget.members.length}人',
-                icon: Icons.people_alt_outlined,
-                showLabel: true,
-                priority: 2,
-                onTap: widget.onMembers,
-              ),
-              TogetherActionItem(
-                id: 'invite',
-                label: '邀请',
-                icon: Icons.person_add_alt_1_rounded,
-                showLabel: true,
-                priority: 3,
-                onTap: widget.onInvite,
-              ),
-              TogetherActionItem(
-                id: 'line',
-                label: widget.isLive ? '换线' : '换源',
-                icon: Icons.alt_route_rounded,
-                showLabel: true,
-                always: true,
-                priority: 0,
-                onTap: widget.onSwitchLine,
-              ),
-              if (!widget.isLive)
-                TogetherActionItem(
-                  id: 'drama',
-                  label: '换剧',
-                  icon: Icons.movie_filter_rounded,
-                  showLabel: true,
-                  always: true,
-                  priority: 0,
-                  onTap: widget.onChangeDrama,
-                ),
-              TogetherActionItem(
-                id: 'exit',
-                label: '退出房间',
-                icon: Icons.logout_rounded,
-                priority: 4,
-                onTap: widget.onExitRoom,
-              ),
-            ],
-          ),
-        ],
       ),
     );
   }
@@ -798,9 +681,9 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               playing: value?.isInitialized == true && value!.isPlaying,
               rate: widget.rate,
               live: widget.isLive,
-              qualityLabel: widget.canChangeQuality ? '清晰度' : '',
-              qualityActive:
-                  widget.canChangeQuality && widget.qualityKey != null,
+              // 清晰度 / 线路就是「换源」：按用户口径回竖屏做，全屏不出现。
+              // 主播放这里的口径同样是空串（倍速 / 定时等都收进 ⋯ 面板）。
+              qualityLabel: '',
               compact: compact,
               // 竖屏全屏（竖屏短剧）：右侧一组收紧，与主播放全屏一致。
               narrow: widget.rotatedToPortrait,
@@ -809,7 +692,6 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               onTogglePlay: _togglePlay,
               onNext: () => _runHost(widget.onNext),
               onSpeed: _toggleSpeed,
-              onQuality: _toggleQuality,
               onEpisodes: () => _runHost(widget.onEpisodes),
               onExit: widget.onExit,
             );
@@ -1111,6 +993,89 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 一起看全屏顶栏：**与主播放全屏逐项相同，只多一个只读人数**。
+///
+/// FS_MATCH_MAIN（2026-11-16）—— 用户原话：
+///   「一起看里面不需要投屏，一起看的全屏里面也不需要多余设置，和自己在线
+///    看是一样的，要想还原就切竖屏，要想操作就切竖屏。」
+///
+/// 所以这里**不是**再造一套顶栏，只是把 [FsTopBar] 的参数按主播放页
+/// （`lib/pages/fullscreen_page.dart`）那套填好：
+///
+///   · 与主播放相同：返回 / 片名·第N集 / 网速 / 分辨率 / 电量 / 时钟 / 转屏；
+///     主播放传 compact / narrow / rotatedToPortrait 的地方，这里同样传；
+///   · 唯一的加法：人数（[memberCount]），**纯展示**，不挂 onTap ——
+///     成员面板 / 邀请都在竖屏房间页；
+///   · 投屏（[FsTopBar.showCast] = false）、换源、换剧、邀请、退出房间
+///     **一律不出现**。
+///
+/// 单独抽出来是为了能被组件测试直接渲染并与主播放对拍：顶栏的 action 集合
+/// 必须是「主播放那一套 + 人数」，多一个都不行。
+class TogetherFullscreenTopBar extends StatelessWidget {
+  const TogetherFullscreenTopBar({
+    super.key,
+    required this.title,
+    required this.epLabel,
+    required this.onBack,
+    this.qualityLabel = '',
+    this.speedText = '',
+    this.compact,
+    this.narrow = false,
+    this.rotatedToPortrait = false,
+    this.memberCount = 0,
+    this.onRotate,
+  });
+
+  final String title;
+  final String epLabel;
+
+  /// 真实分辨率（`1920x1080`）：与主播放同一来源 [fxPlayerQuality]。
+  final String qualityLabel;
+
+  /// 实时网速；空串隐藏（主播放同规则）。
+  final String speedText;
+
+  /// 紧凑缩放；null = 按屏宽自动判断（< 700dp 用紧凑，与主播放同阈值）。
+  final bool? compact;
+
+  /// 竖屏全屏：网速 / 时钟让位，与主播放同规则。
+  final bool narrow;
+  final bool rotatedToPortrait;
+
+  /// 房间在线人数：只读展示。
+  final int memberCount;
+
+  final VoidCallback onBack;
+
+  /// 手动转屏；null 时不渲染（与主播放同一颗按钮、同一个图标语义）。
+  final VoidCallback? onRotate;
+
+  @override
+  Widget build(BuildContext context) {
+    final isCompact = compact ?? MediaQuery.sizeOf(context).width < 700;
+    final size = isCompact ? .9 : 1.0;
+    return FsTopBar(
+      title: title,
+      epLabel: epLabel,
+      compact: isCompact,
+      narrow: narrow,
+      rotatedToPortrait: rotatedToPortrait,
+      qualityLabel: qualityLabel,
+      speedText: speedText,
+      onBack: onBack,
+      // 一起看不需要投屏：不传 onCast 即整颗不渲染（不是盖住、不是置灰）。
+      showCast: false,
+      // 顶栏没有「更多」按钮，这里只是必填字段。
+      onMore: () {},
+      onRotate: onRotate,
+      // 唯一的房间信息：人数。只读，不挂 onTap。
+      actions: <Widget>[
+        TogetherMemberCountPill(count: memberCount, size: size),
+      ],
     );
   }
 }

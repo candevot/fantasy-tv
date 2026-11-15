@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../api.dart';
 import '../theme.dart';
 import 'fx_cards.dart';
+import 'player_theme.dart';
 
 /// 一起看房间页统一的时间常量。
 ///
@@ -230,6 +231,56 @@ class TogetherPill extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 一起看全屏顶栏的**只读人数**胶囊（如「2 人」）。
+///
+/// FS_MATCH_MAIN（2026-11-16）：全屏顶栏要和主播放全屏逐项一致，唯一的加法
+/// 就是人数。它只是信息位 —— **不挂 onTap**，不弹成员面板、不发邀请，
+/// 点上去什么都不发生（成员 / 邀请都在竖屏房间页做）。
+///
+/// 规格与顶栏其它胶囊完全同源：[PGlassPill] 30dp 高 / r15 / 白玻璃 tint .13，
+/// 图标 13dp、文字 11sp，和网速 / 分辨率 / 时钟胶囊并排不会高低不一。
+class TogetherMemberCountPill extends StatelessWidget {
+  const TogetherMemberCountPill({super.key, required this.count, this.size = 1});
+
+  /// 房间当前在线人数。
+  final int count;
+
+  /// 相对缩放：1 = 标准（横屏），紧凑布局传 .9（与 [FsTopBar.compact] 同值）。
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = size;
+    return PGlassPill(
+      height: kFsPillHeight * s,
+      padding: EdgeInsets.symmetric(horizontal: 8 * s),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(
+            Icons.people_alt_outlined,
+            size: 13 * s,
+            color: Colors.white.withValues(alpha: .92),
+          ),
+          SizedBox(width: 3 * s),
+          Text(
+            '$count 人',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: .92),
+              fontSize: 11 * s,
+              fontWeight: FontWeight.w700,
+              height: 1.2,
+              shadows: const <Shadow>[
+                Shadow(color: Colors.black54, blurRadius: 3),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

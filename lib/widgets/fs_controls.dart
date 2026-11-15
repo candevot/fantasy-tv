@@ -199,12 +199,12 @@ class FsTopBar extends StatelessWidget {
     required this.title,
     required this.epLabel,
     required this.onBack,
-    required this.onCast,
     required this.onMore,
     this.compact = false,
     this.narrow = false,
     this.qualityLabel = '',
     this.speedText = '',
+    this.onCast,
     this.showCast = true,
     this.onRotate,
     this.rotatedToPortrait = false,
@@ -222,9 +222,14 @@ class FsTopBar extends StatelessWidget {
   final String speedText;
 
   final VoidCallback onBack;
-  final VoidCallback onCast;
 
-  /// 是否显示投屏按钮。离线播放没有投屏入口，传 false 直接不渲染，
+  /// 投屏回调；null 或 [showCast] 为 false 时这颗按钮整颗不渲染。
+  ///
+  /// 本来只有一起看没有投屏（用户明确要求），后来离线播放也只需要隐藏，
+  /// 现在统一成「不传 = 不渲染」，调用方不必再传一个空的 `() {}` 占位。
+  final VoidCallback? onCast;
+
+  /// 是否显示投屏按钮。离线播放 / 一起看都没有投屏入口，传 false 直接不渲染，
   /// 不再靠外层盖一层渐变遮罩（那种做法位置一挪就会漏出来）。
   final bool showCast;
 
@@ -393,7 +398,7 @@ class FsTopBar extends StatelessWidget {
                       onTap: onRotate,
                     ),
                   ],
-                  if (showCast) ...[
+                  if (showCast && onCast != null) ...[
                     const SizedBox(width: 6),
                     PGlassIcon.fs(
                       icon: Icons.cast_rounded,

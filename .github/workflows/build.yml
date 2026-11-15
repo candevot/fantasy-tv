@@ -487,6 +487,36 @@ jobs:
           else
             echo 'SKIP 服务端副本不在仓库里，跳过（客户端闸门已覆盖同一口径）'
           fi
+      # FS_MATCH_MAIN（2026-11-16）：一起看的全屏 = 主播放的全屏。
+      #
+      # 用户原话：「一起看里面不需要投屏，一起看的全屏里面也不需要多余设置，
+      # 和自己在线看是一样的，要想还原就切竖屏，要想操作就切竖屏」。
+      #
+      # 现场是一排塞满（返回/片名·第N集/网速/分辨率/时钟/投屏/换源/换剧/
+      # 1人/邀请），「邀请」已经贴边溢出。现在钉死：
+      #   · 顶栏 action 集合 = 主播放那一套 + 人数（只读），多一个都不许；
+      #   · 投屏 / 换源 / 换剧 / 邀请 / 退出房间 一律不在全屏出现；
+      #   · 投屏在一起看里整颗移除（竖屏也没有），CastService 本身保留。
+      - name: together fullscreen matches main playback
+        run: |
+          set -e
+          # 全屏顶栏用的就是主播放那套 FsTopBar，投屏整颗关掉。
+          grep -q 'TogetherFullscreenTopBar' lib/widgets/together_fullscreen.dart
+          grep -q 'showCast: false' lib/widgets/together_fullscreen.dart
+          # 房间动作不许回到全屏顶栏。
+          ! grep -q "label: '邀请'" lib/widgets/together_fullscreen.dart
+          ! grep -q "label: '换源'" lib/widgets/together_fullscreen.dart
+          ! grep -q "label: '换剧'" lib/widgets/together_fullscreen.dart
+          ! grep -q 'TogetherTopActionBar' lib/widgets/together_fullscreen.dart
+          # 一起看整体没有投屏入口（竖屏也没有）；投屏服务本身必须还在。
+          ! grep -q 'onCast' lib/widgets/together_fullscreen.dart
+          ! grep -q 'onCast' lib/widgets/together_room.dart
+          ! grep -q 'CastService' lib/pages/together_page.dart
+          test -f lib/services/cast_service.dart
+          test -f lib/widgets/cast_sheet.dart
+          # 主播放不能被牵连。
+          grep -q 'onCast: () => unawaited(_openCastSheet())' lib/pages/fullscreen_page.dart
+          flutter test test/together_fullscreen_topbar_test.dart
       - name: Build release APKs (split per ABI)
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"
