@@ -498,7 +498,7 @@ class CmsBridge {
 
   /// 主站采集库（本地 CMS）：失败不抛，交给上层按「这个源没结果」处理。
   ///
-  /// 来源标注统一成「幻想」（[SourceHub.ownResultLabel]）：主站采集库就是
+  /// 来源标注统一成「幻想」（[KSource.ownResultLabel]）：主站采集库就是
   /// 我们自己的 hx 库，和云端下发的幻想线路是同一个站，搜索结果里不能一半
   /// 标「云端」一半标「幻想」（SOURCE_LABEL 2026-11-15）。
   static Future<List<VideoCard>> _primarySearch(String q, int page) async {
@@ -523,7 +523,7 @@ class CmsBridge {
       _mark(id, CmsOrigin.cms);
       out.add(SourceHub.relabel(
         card,
-        label: SourceHub.ownResultLabel,
+        label: KSource.ownResultLabel,
         id: id,
       ));
     }
