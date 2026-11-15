@@ -81,6 +81,12 @@ class FxCover extends StatelessWidget {
           // 列表 / 详情 / 收藏 / 历史全都会拿到空封面。空封面不再显示灰块 +
           // 小图标，改成「片名首字 + 渐变底」的占位块：一眼能看出是哪部片，
           // 也不引入任何第三方图床（后端补上 `vod_pic` 后自动换成真图）。
+          //
+          // COVER_FIX（2026-11-15）：外站封面（肥猫 jar 的 `vod_pic`）经常是
+          // 空串 / 源站相对地址 —— 老逻辑把它补成我们旧后端的地址，图永远
+          // 回不来，用户看到的是一块**空白**（灰底 shimmer 卡满 10 秒）。
+          // 现在这块首字占位贯穿三态：加载中（loading）、失败（fallback）、
+          // 空地址（直接显示），任何情况下都不再是空白块。
           final placeholder = title.trim().isEmpty
               ? null
               : _FxCoverInitial(title: title, big: big);
@@ -92,6 +98,7 @@ class FxCover extends StatelessWidget {
               cacheWidth: cacheWidth,
               filterQuality: big ? FilterQuality.medium : FilterQuality.low,
               fallback: placeholder,
+              loading: placeholder,
               fallbackIconSize: big ? 44 : 30,
               semanticLabel: title.trim().isEmpty ? null : title,
             ),

@@ -596,13 +596,24 @@ class _SearchPageState extends State<SearchPage> {
     }
   }
 
-  void _openDetail(String id, {String title = '', int year = 0}) {
+  void _openDetail(
+    String id, {
+    String title = '',
+    int year = 0,
+    String cover = '',
+    String sourceLabel = '',
+  }) {
     Navigator.of(context).push(
       FxPageRoute(
         builder: (_) => DetailPage(
           id: id,
           title: title,
           year: year,
+          // DETAIL_SKELETON（2026-11-15）：把搜索阶段已经知道的封面 / 来源
+          // 带进详情页 —— 外部源详情要 9～15 秒，先把海报和片名画出来，
+          // 用户不会对着空白页等；失败文案也才说得出「<源名> 暂时没响应」。
+          cover: cover,
+          sourceLabel: sourceLabel,
           // DEAD_CARD（2026-11-15）：这条记录在详情里被判定失效（404 /
           // 主库查不到）时，把它从搜索结果里摘掉 —— 不能让它继续占位置，
           // 用户下一次还会点到同一条打不开的卡片。
@@ -625,8 +636,13 @@ class _SearchPageState extends State<SearchPage> {
   ///
   /// 片名 + 年份一起带进详情页：id 万一已经失效（服务端去重合并过），
   /// 详情页能用它们重查，不会直接报「该视频已失效」（ID_RETRY）。
-  void _openResult(VideoCard item) =>
-      _openDetail(item.id, title: item.title, year: item.year);
+  void _openResult(VideoCard item) => _openDetail(
+        item.id,
+        title: item.title,
+        year: item.year,
+        cover: item.cover,
+        sourceLabel: item.sourceLabel,
+      );
 
   @override
   Widget build(BuildContext context) {

@@ -1105,6 +1105,10 @@ class CmsBridge {
             ext: external.ext,
             vodId: SourceHub.rawIdOf(id),
           ),
+          // DETAIL_TIMEOUT：详情的手速比搜索慢得多（握手 + 3 次退避重试），
+          // 给 20 秒，别再让「刚好在最后一次重试前被杀掉」重现。
+          wait: jarDetailTimeout,
+          label: external.resultLabel,
         );
         _mark(id, CmsOrigin.cms);
         return detail;
@@ -1222,6 +1226,7 @@ class CmsBridge {
             lineName: line,
             ep: ep,
           ),
+          label: external.resultLabel,
         );
         _mark(vodId, CmsOrigin.cms);
         return info;
@@ -1278,6 +1283,7 @@ class CmsBridge {
             lineName: line,
             ep: ep,
           ),
+          label: external.resultLabel,
         );
         return info.url;
       }
@@ -1333,43 +1339,125 @@ class CmsBridge {
 
   /* ------------------------------------------------------ jar 源兜底 */
 
-  /// jar 源的一次调用：**8 秒硬超时 + 可读文案**（JAR_TIMEOUT 2026-11-15）。
+  /// jar 源的一次调用：**硬超时 + 可读文案**（JAR_TIMEOUT 2026-11-15）。
   ///
-  /// 为什么必须有这一层：jar 是第三方 dex，原生那边虽然也有 8 秒 guard，
+  /// 为什么必须有这一层：jar 是第三方 dex，原生那边虽然也有 guard，
   /// 但通道本身不保证一定回话（jar 没装时早年版本、原生插件没注册、dex
   /// 加载卡在类初始化上，都会让 `invokeMethod` 的 Future 永远挂着）。
   /// 详情页原来就等着这一个 Future，表现是「点进详情 → 转圈 → 8 秒后
   /// 加载失败，请求超时」。这里统一兜成 [ApiException]，文案说清是「源」
-  /// 不可用、而不是「网络」不好，用户可以换本站线路继续看。
-  static const Duration jarTimeout = Duration(seconds: 8);
+  /// 不可用、而不是「网络」不好。
+  ///
+  /// 单次调用默认 12 秒（搜索 / 播放共用）。
+  static const Duration jarTimeout = Duration(seconds: 12);
 
-  static Future<T> _jarGuard<T>(Future<T> Function() task) async {
+  /// **外部源详情**的单次上限：20 秒（DETAIL_TIMEOUT 2026-11-15）。
+  ///
+  /// 现场：点进肥猫（咕噜）那条 → 整整 8 秒后直接报「该源暂不可用」。
+  /// 8 秒从来不够 —— 咕噜的 `detailContent` 和搜索一样要 `GuluCrypto` 握手，
+  /// 自身还带「3 次重试 + 500/1000/2000ms 退避」（光睡眠 3.5 秒），
+  /// 一次成功的详情经常落在 9～15 秒。搜索那条已经从 8 秒提到 12 秒了，
+  /// 详情没跟上。这里给到 20 秒。
+  static const Duration externalDetailTimeout = Duration(seconds: 20);
+
+  /// jar 通道调用本身的 guard：比页面级少 2 秒。
+  ///
+  /// 和 `JarSpider.searchBudget < JarSpider.timeout` 同一个口径：**源级超时
+  /// 必须比页面级先到期**，页面才会收到「咕噜暂时没响应」这种说得清原因的
+  /// 错误，而不是一句笼统的页面超时；同时通道那侧也能先释放原生 worker
+  /// 线程，自动重试不会被上一次的僵尸调用堵住。
+  static const Duration jarDetailTimeout = Duration(seconds: 18);
+
+  /// 本站 CMS 详情的上限：保持 12 秒（它快，慢了就是真有问题）。
+  static const Duration ownDetailTimeout = Duration(seconds: 12);
+
+  /// 详情整条链的**页面级**总超时：外部源 20 秒 / 本站 12 秒。
+  ///
+  /// 页面用这个值包 `CmsBridge.detail`，保证「外部源有它自己的耐心」，
+  /// 而本站源不会被拖到 20 秒 —— 用户点开站内片子还是 12 秒内出结果。
+  static Duration detailTimeout(String id) =>
+      isExternalId(id) ? externalDetailTimeout : ownDetailTimeout;
+
+  static Future<T> _jarGuard<T>(
+    Future<T> Function() task, {
+    Duration? wait,
+    String label = '',
+  }) async {
+    final who = label.trim();
     if (!JarSpider.supported) {
-      throw ApiException('jar 源只在 Android 客户端上可用，换本站线路试试');
+      throw ApiException('jar 源只在 Android 客户端上可用，换条线路试试');
     }
     final hub = SourceHub.instance;
     await hub.ensureJarStatus();
     if (!hub.jarReady) {
+      // 装不装 jar 是**设置问题**，不是源超时：这条提示必须留着
+      // 「需要 spider.jar」，否则用户会一直以为是那个源挂了。
       throw ApiException(
-        '这个源需要 jar 插件（spider.jar），当前还没安装，换本站线路试试',
+        who.isEmpty
+            ? '这个源需要 jar 插件（spider.jar），当前还没安装，换条线路试试'
+            : '$who 需要先安装 jar 插件（spider.jar）',
         code: 503,
       );
     }
+    final limit = wait ?? jarTimeout;
     try {
       return await task().timeout(
-        jarTimeout,
+        limit,
         onTimeout: () => throw ApiException(
-          '该源暂不可用（${jarTimeout.inSeconds} 秒无响应），换本站线路试试',
+          _jarUnavailable(who),
           kind: ApiErrorKind.timeout,
         ),
       );
-    } on ApiException {
-      rethrow;
+    } on ApiException catch (e) {
+      // 裸通道超时（jar 内部先超时）也按「源没响应」的文案交给页面。
+      if (e.kind != ApiErrorKind.timeout) rethrow;
+      throw ApiException(_jarUnavailable(who), kind: ApiErrorKind.timeout);
     } catch (e) {
       // jar 内部抛出来的东西五花八门（NoClassDefFoundError / 反射异常…），
       // 一律收敛成一句话，别把 Java 栈丢到用户脸上。
-      throw ApiException('该源暂不可用，换本站线路试试');
+      throw ApiException(_jarUnavailable(who));
     }
+  }
+
+  /// jar / 外部源没响应时的一句话（SOURCE_TEXT 2026-11-15）。
+  ///
+  /// 「换本站线路试试」在**外部源**身上是错的：肥猫的片子没有「本站线路」，
+  /// 用户照着文案去找只会更迷惑。外部源一律说「<源名> 暂时没响应，
+  /// 换一个源试试」；只有站点内部源（没有源名）才留「换条线路试试」。
+  /// 内部超时秒数（8/20 秒）属于实现细节，不写进用户文案。
+  static String _jarUnavailable(String label) {
+    if (label.isEmpty) return '该源暂时取不到，换条线路试试';
+    return '$label 暂时没响应，换一个源试试';
+  }
+
+  /// 这个 id 是不是**外部源**（肥猫 jar / 自加源）的记录。
+  ///
+  /// 外部源没有「本站线路」这个退路，页面文案和超时预算都要跟本站区别开。
+  static bool isExternalId(String id) =>
+      id.trim().startsWith(SourceHub.idMark);
+
+  /// 外部源的展示名（咕噜 / 玩偶 / 自加源名）；本站记录或配置还没载入时
+  /// 返回空串。页面把它拼进「<源名> 暂时没响应，换一个源试试」。
+  static String externalLabelOf(String id) {
+    if (!isExternalId(id)) return '';
+    try {
+      return SourceHub.instance.decodeSource(id)?.resultLabel ?? '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// 详情页「取不到」时的文案（按来源区分，SOURCE_TEXT 2026-11-15）。
+  ///
+  /// - 本站源：`该线路暂时取不到，换条线路试试` —— 用户手里还有别的线路；
+  /// - 外部源：`<源名> 暂时没响应，换一个源试试` —— 用户手里还有别的源，
+  ///   没有「本站线路」这回事。
+  static String detailErrorText(String id, {String label = ''}) {
+    if (!isExternalId(id)) return '该线路暂时取不到，换条线路试试';
+    final who = label.trim().isEmpty ? externalLabelOf(id) : label.trim();
+    return who.isEmpty
+        ? '这个源暂时没响应，换一个源试试'
+        : '$who 暂时没响应，换一个源试试';
   }
 
   /// 带 `@src:` 前缀的 id → 它所属的源；不是外部 id 返回 null。

@@ -1263,7 +1263,17 @@ class SourceHub extends ChangeNotifier {
     List<VideoCard> prepared(List<VideoCard> cards) => <VideoCard>[
           for (final card in cards)
             if (!isLiveCard(card))
-              relabel(card, label: label, id: source.cardIdOf(card.id)),
+              relabel(
+                card,
+                label: label,
+                id: source.cardIdOf(card.id),
+                // COVER_FIX（2026-11-15）：外部源的 `vod_pic` 经常是**源站
+                // 相对地址**（`upload/vod/1.jpg`）或空串。这里按这个源自己的
+                // 站点根补全；补不出来（jar 源只给类名 `csp_Gulu`，没有站点
+                // 根）就交给 UI 显示首字占位 —— 关键是**不许**再补成我们旧
+                // 后端的地址，那种图永远 404，用户看到的是一块空白。
+                cover: Api.coverOf(card.cover, root: source.api),
+              ),
         ];
 
     if (source.kind == KSourceKind.jar) {
@@ -1524,11 +1534,12 @@ class SourceHub extends ChangeNotifier {
     VideoCard card, {
     required String label,
     String? id,
+    String? cover,
   }) =>
       VideoCard(
         id: id ?? card.id,
         title: card.title,
-        cover: card.cover,
+        cover: cover ?? card.cover,
         rating: card.rating,
         year: card.year,
         status: card.status,

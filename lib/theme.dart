@@ -236,6 +236,7 @@ class FxNetworkImage extends StatefulWidget {
     this.cacheHeight,
     this.filterQuality = FilterQuality.low,
     this.fallback,
+    this.loading,
     this.fallbackIcon = Icons.movie_outlined,
     this.fallbackIconSize = 30,
     this.semanticLabel,
@@ -249,6 +250,14 @@ class FxNetworkImage extends StatefulWidget {
   final int? cacheHeight;
   final FilterQuality filterQuality;
   final Widget? fallback;
+
+  /// 首帧到达前的占位（默认灰底微光 [FxShimmer]）。
+  ///
+  /// COVER_FIX（2026-11-15）：传了片名首字占位进来后，慢图床 / 黑洞图床
+  /// 在加载的那几秒显示的是「济」而不是一块灰白 —— 用户不会再把它看成
+  /// 「这条没封面」。
+  final Widget? loading;
+
   final IconData fallbackIcon;
   final double fallbackIconSize;
   final String? semanticLabel;
@@ -342,7 +351,7 @@ class _FxNetworkImageState extends State<FxNetworkImage> {
             _loaded = true;
             return child;
           }
-          if (frame == null) return const FxShimmer();
+          if (frame == null) return widget.loading ?? const FxShimmer();
           _loaded = true;
           return FxFadeIn(child: child);
         },

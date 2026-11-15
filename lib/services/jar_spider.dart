@@ -887,10 +887,14 @@ class JarSpider {
   }
 
   /// `{"list":[{…vod…}]}` → 详情（线路 / 选集全走 cms_source 的既有规则）。
-  static VideoDetail detailOf(Object? body, {String fallbackId = ''}) {
+  static VideoDetail detailOf(
+    Object? body, {
+    String fallbackId = '',
+    String root = '',
+  }) {
     final vod = _firstVod(body);
     if (vod == null) throw ApiException('这个源没有返回影片信息');
-    final normalized = _normalizeVod(vod, fallbackId: fallbackId);
+    final normalized = _normalizeVod(vod, fallbackId: fallbackId, root: root);
     final lines = parseLines(normalized);
     if (lines.isEmpty) {
       throw ApiException('这个源没给播放地址（可能是需要网页解析的线路）');
@@ -985,7 +989,7 @@ class JarSpider {
       fxJarLog('detail api=$api vodId=$id → 没有解析到 vod 记录', tag: fxJarDetailTag);
       throw ApiException('这个源没有返回影片信息');
     }
-    final normalized = _normalizeVod(vod, fallbackId: id);
+    final normalized = _normalizeVod(vod, fallbackId: id, root: api);
     final lines = parseLines(normalized);
     fxJarLog(
       'detail api=$api vodId=$id play_from="${_text(normalized['vod_play_from'])}" '
@@ -1136,6 +1140,7 @@ class JarSpider {
   static Map<String, dynamic> _normalizeVod(
     Map<String, dynamic> vod, {
     required String fallbackId,
+    String root = '',
   }) {
     final out = Map<String, dynamic>.from(vod);
     var id = _text(out['vod_id']);
@@ -1145,6 +1150,12 @@ class JarSpider {
       if (id.isEmpty) id = fallbackId;
     }
     out['vod_id'] = id;
+    // COVER_FIX（2026-11-15）：`vod_pic` 一律先归一化 —— 空串 / 源站相对地址
+    // 在 UI 上会变成一块**空白封面**（老逻辑把它补成我们已下线的旧后端）。
+    // 这里能补就补成绝对地址，补不出来就置空串，让 UI 走「首字占位」。
+    if (out.containsKey('vod_pic')) {
+      out['vod_pic'] = Api.coverOf(_text(out['vod_pic']), root: root);
+    }
     for (final key in <String>['vod_play_from', 'vod_play_url', 'vod_name']) {
       final value = out[key];
       if (value == null) {

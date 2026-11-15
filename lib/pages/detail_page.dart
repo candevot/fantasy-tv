@@ -18,6 +18,7 @@ import '../services/source_fallback.dart';
 import '../services/source_hub.dart';
 import '../services/fx_video_geometry.dart';
 import '../widgets/detail_widgets.dart';
+import '../widgets/fx_cards.dart' show FxCover, FxSkeletonPulse;
 import '../widgets/download_sheet.dart';
 import '../widgets/player_theme.dart';
 import 'category_page.dart'
@@ -39,6 +40,8 @@ class DetailPage extends StatefulWidget {
     this.line = '',
     this.title = '',
     this.year = 0,
+    this.cover = '',
+    this.sourceLabel = '',
     this.retried = false,
     this.startSeconds,
     this.fallbackHops = 0,
@@ -56,6 +59,19 @@ class DetailPage extends StatefulWidget {
   /// 收藏都带）；没带时详情页会退回本地缓存记录里的片名/年份。
   final String title;
   final int year;
+
+  /// 搜索阶段已经知道的封面（DETAIL_SKELETON 2026-11-15）。
+  ///
+  /// 外部源（肥猫的 jar 源）详情要握手 + 重试，第一次成功经常在 9～15 秒。
+  /// 这段时间里页面原来是一整块转圈的白/黑屏；把搜索结果里的封面带进来，
+  /// 首帧就能画出「海报 + 片名 + 骨架」，用户不会以为页面死了。
+  final String cover;
+
+  /// 搜索阶段那条记录的来源名（咕噜 / 玩偶 / 幻想 …）。
+  ///
+  /// SOURCE_TEXT（2026-11-15）：外部源失败时文案要说「<源名> 暂时没响应，
+  /// 换一个源试试」——「换本站线路试试」在肥猫的片子上是不成立的。
+  final String sourceLabel;
 
   /// 已经按片名重查过一次（换到新记录的那个页面不再重查，避免来回跳）。
   final bool retried;
@@ -181,6 +197,26 @@ class _DetailPageState extends State<DetailPage>
   /// 正在按「片名 + 年份」重查（ID_RETRY）：同一时刻只查一次。
   bool _retrying = false;
 
+  /// 这次加载已经自动重试过一次（DETAIL_RETRY 2026-11-15）。
+  ///
+  /// 用户实测「点进咕噜那条直接就是错误页，得自己点重试才有结果」——
+  /// 一次超时不该让用户看到一个错误页。规则：**超时 / 网络类失败自动再试
+  /// 一次**（第二次跳过详情缓存），仍然失败才把错误页交出去；
+  /// 手点「重试」/ 下拉刷新会把额度重新充满。
+  bool _autoRetried = false;
+
+  /// 自动重试前的间隔：给握手 / 上一次未收尾的通道调用留一点时间。
+  static const Duration _autoRetryDelay = Duration(milliseconds: 400);
+
+  /// 来源名：入口带进来的优先，没有就按 id 从片源表里查。
+  ///
+  /// SOURCE_TEXT（2026-11-15）：外部源失败文案需要它。
+  String get _sourceName {
+    final seeded = widget.sourceLabel.trim();
+    if (seeded.isNotEmpty) return seeded;
+    return CmsBridge.externalLabelOf(widget.id);
+  }
+
   List<CommentItem> _comments = const <CommentItem>[];
   final Set<String> _liked = <String>{};
   bool _commentsLoading = false;
@@ -262,15 +298,21 @@ class _DetailPageState extends State<DetailPage>
     // 平台线路都能被「回退」掉）。和分类页 `_req` 一个口径。
     final req = ++_detailReq;
     if (!silent && mounted) setState(() => _error = null);
+    // DETAIL_TIMEOUT（2026-11-15）：详情整条链都必须有一个总上限 ——
+    // 页面不能一直转圈。
+    //
+    // 上限**按来源区分**：
+    //   · 外部源（肥猫 jar）：20 秒。8 秒 / 12 秒都不够 —— 咕噜的
+    //     `detailContent` 要先 `GuluCrypto` 握手，本身还带「3 次重试 +
+    //     500/1000/2000ms 退避」（光睡眠 3.5 秒），一次成功的详情经常落在
+    //     9～15 秒。用户看到的「8 秒无响应」就是被这个上限杀掉的。
+    //   · 本站 CMS：保持 12 秒（它快，慢了说明真有问题，不该让用户干等）。
+    final budget = CmsBridge.detailTimeout(widget.id);
     try {
-      // DETAIL_TIMEOUT（2026-11-15）：详情整条链（主站 8 秒 ×2 重试、
-      // 外部源、jar 源）都必须有一个总上限 —— 页面不能一直转圈。
-      // jar 源自己已经有 8 秒硬超时（CmsBridge._jarGuard），这里是最后一道，
-      // 12 秒还没回来就按「加载失败」给文案 + 重试入口。
       final d = await CmsBridge.detail(widget.id, fresh: fresh).timeout(
-        const Duration(seconds: 12),
+        budget,
         onTimeout: () => throw ApiException(
-          '加载超时了，换个网络或稍后重试',
+          _detailErrorText(),
           kind: ApiErrorKind.timeout,
         ),
       );
@@ -374,6 +416,8 @@ class _DetailPageState extends State<DetailPage>
       if (!_commentsLoaded && !_commentsLoading) {
         await _loadComments(reset: true, silent: true);
       }
+      // 成功了就把自动重试额度还回去（下次下拉刷新 / 重新进页面照样能自愈）。
+      _autoRetried = false;
     } catch (e) {
       if (!mounted) return;
       if (_isGoneError(e)) {
@@ -398,10 +442,60 @@ class _DetailPageState extends State<DetailPage>
         }
         return;
       }
-      final msg = fxErrorText(e);
+      // DETAIL_RETRY（2026-11-15）：超时 / 网络类失败**自动再试一次**。
+      //
+      // 用户要的体验是「能进详情」，不是「看到一个错误页再去点重试」。
+      // 只重试一次（第二次 fresh=true，绕开详情缓存），而且只在还没拿到
+      // 任何详情时重试 —— 页面已经有内容时重试会白闪；这时直接把这次的
+      // 失败提示成 toast，页面继续可用。
+      if (_detail == null && !_autoRetried && _retryableError(e)) {
+        _autoRetried = true;
+        await Future<void>.delayed(_autoRetryDelay);
+        if (!mounted || req != _detailReq) return;
+        return _loadDetail(silent: silent, fresh: true);
+      }
+      final msg = _detailErrorText(e);
       setState(() => _error = msg);
       if (_detail != null) fxToast(context, msg);
     }
+  }
+
+  /// 这次失败值不值得自动重试：超时 / 网络 / 5xx 抖动是可以重试的；
+  /// 「作品不存在」「没给播放地址」这类业务结论重试一万次也一样。
+  bool _retryableError(Object e) {
+    if (e is TimeoutException) return true;
+    if (e is ApiException) {
+      switch (e.kind) {
+        case ApiErrorKind.timeout:
+        case ApiErrorKind.network:
+        case ApiErrorKind.server:
+          return true;
+        case ApiErrorKind.business:
+          return false;
+      }
+    }
+    // 非 ApiException 的多半是解析 / 通道异常，值得一次重试。
+    return true;
+  }
+
+  /// 详情取不到时的文案（SOURCE_TEXT 2026-11-15）。
+  ///
+  /// 超时 / 网络类一律用**按来源区分**的引导语：
+  ///   · 本站源 → `该线路暂时取不到，换条线路试试`
+  ///   · 外部源 → `<源名> 暂时没响应，换一个源试试`
+  /// 业务类错误（源没给播放地址 / 需要网页解析…）保留源站原话，
+  /// 那句话比我们的通用文案更有用。
+  String _detailErrorText([Object? error]) {
+    final friendly = CmsBridge.detailErrorText(widget.id, label: _sourceName);
+    if (error == null) return friendly;
+    if (error is ApiException && error.kind == ApiErrorKind.business) {
+      final raw = error.message.trim();
+      return raw.isEmpty ? friendly : raw;
+    }
+    if (error is ApiException) return friendly;
+    if (error is TimeoutException) return friendly;
+    final raw = fxErrorText(error);
+    return raw.isEmpty ? friendly : raw;
   }
 
   /// 详情 404 后的自愈：用「片名 + 年份」重查，命中就直接换到新记录。
@@ -1568,6 +1662,8 @@ class _DetailPageState extends State<DetailPage>
     _lineRefreshTimer?.cancel();
     _lineRefreshTimer = null;
     _lineRefreshTries = 0;
+    // 手动刷新同样把「自动重试一次」的额度还回去（DETAIL_RETRY）。
+    _autoRetried = false;
     // 下拉刷新必须绕过主站详情缓存，否则线路 / 集数永远刷不出来。
     await _loadDetail(silent: true, fresh: true);
     if (!mounted) return;
@@ -1764,8 +1860,10 @@ class _DetailPageState extends State<DetailPage>
             child: FxErrorView(
               message: _error!,
               onRetry: () {
+                // 手点重试 = 重新给满额度（自动重试还能再来一次）。
+                _autoRetried = false;
                 setState(() => _error = null);
-                _loadDetail();
+                _loadDetail(fresh: true);
               },
             ),
           ),
@@ -1805,17 +1903,146 @@ class _DetailPageState extends State<DetailPage>
             ),
           ),
         ),
-        Expanded(
-          child: Center(
-            child: CircularProgressIndicator(
-              strokeWidth: 2.4,
-              color: FxDetailSkin.of(context).body,
-            ),
-          ),
-        ),
+        Expanded(child: _loadingBody()),
       ],
     );
   }
+
+  /// 详情还没回来时的下半屏（DETAIL_SKELETON 2026-11-15）。
+  ///
+  /// 原来这里只有一个居中的转圈：外部源的详情要 9～15 秒，用户面前就是
+  /// 一整片空白 + 一个圈，看起来和「页面卡死」没区别。搜索阶段已经知道的
+  /// 封面 / 片名直接带进来先画出来（[DetailPage.cover] / [DetailPage.title]），
+  /// 下面接骨架块 —— 第一帧就知道「点对了片子、正在取详情」。
+  Widget _loadingBody() {
+    final skin = FxDetailSkin.of(context);
+    final title = widget.title.trim();
+    final cover = widget.cover.trim();
+    final meta = <String>[
+      if (widget.year > 0) '${widget.year}',
+      if (_sourceName.isNotEmpty) _sourceName,
+    ].join(' · ');
+    return SingleChildScrollView(
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: 96,
+                height: 128,
+                // 空封面时 FxCover 自己画「片名首字 + 渐变底」占位，
+                // 不会留一块空白（COVER_FIX）。
+                child: FxCover(url: cover, title: title, radius: 12),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title.isEmpty ? '正在取详情…' : title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 17,
+                        height: 1.25,
+                        fontWeight: FontWeight.w700,
+                        color: skin.ink,
+                      ),
+                    ),
+                    if (meta.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        meta,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 12, color: skin.body),
+                      ),
+                    ],
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: skin.body,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _sourceName.isEmpty
+                                ? '正在取线路和选集…'
+                                : '正在从$_sourceName取线路和选集…',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 12, color: skin.body),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          FxSkeletonPulse(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _skeletonBar(skin, width: 120),
+                const SizedBox(height: 10),
+                _skeletonBar(skin),
+                const SizedBox(height: 8),
+                _skeletonBar(skin),
+                const SizedBox(height: 16),
+                _skeletonBar(skin, height: 34, radius: 10),
+                const SizedBox(height: 14),
+                _skeletonBar(skin, width: 96),
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 52,
+                  child: Row(
+                    children: [
+                      for (var i = 0; i < 4; i++) ...[
+                        Expanded(child: _skeletonBar(skin, height: 52, radius: 10)),
+                        if (i != 3) const SizedBox(width: 8),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 骨架条：用皮肤里的浅灰胶囊色，深色主题下也看得见。
+  ///
+  /// （[FxSkeletonBox] 是半透明白色，压在白色详情页上等于隐形。）
+  Widget _skeletonBar(
+    FxDetailSkin skin, {
+    double? width,
+    double height = 12,
+    double radius = 4,
+  }) =>
+      Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: skin.chip,
+          borderRadius: BorderRadius.circular(radius),
+        ),
+      );
 
   Widget _buildPage(VideoDetail d) {
     final skin = FxDetailSkin.of(context);

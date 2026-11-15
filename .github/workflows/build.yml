@@ -283,6 +283,31 @@ jobs:
       # 「画面框比例 = 视频真实比例」以及 适应 / 填充 / 拉伸 三档的语义。
       - name: Video aspect geometry regressions
         run: flutter test test/fx_video_geometry_test.dart
+      # DETAIL_FIX（2026-11-15）：现场两件事的回归 ——
+      #   · 点进肥猫（咕噜）那条详情，8 秒整报「该源暂不可用（8 秒无响应）」；
+      #     咕噜的 detailContent 要先握手、自身还有 3 次重试 + 500/1000/2000ms
+      #     退避（光睡眠 3.5 秒），详情经常落在 9～15 秒。现在「详情超时按来源
+      #     区分」：外部源 20 秒、本站 CMS 12 秒；失败还会自动重试一次。
+      #   · 肥猫结果的第 2、3 条封面空白：jar 的 vod_pic 是空串 / 源站相对
+      #     地址，老逻辑把它补成我们已下线的旧后端 → 图永远回不来。现在按源站
+      #     根补全，补不出来就显示「片名首字 + 渐变底」，加载中也是首字。
+      # 文案也按来源分开：本站「换条线路试试」，外部源「<源名> 暂时没响应，
+      # 换一个源试试」——外部源没有「本站线路」这回事。
+      - name: Detail timeout / source text / cover regressions
+        run: |
+          set -e
+          # 结构性断言：详情超时必须是「外部源 20 秒 / 本站 12 秒」两个常量，
+          # 任何一处被改回写死 8 秒 / 12 秒都会在这里红。
+          grep -q 'externalDetailTimeout = Duration(seconds: 20)' lib/services/cms_bridge.dart
+          grep -q 'ownDetailTimeout = Duration(seconds: 12)' lib/services/cms_bridge.dart
+          grep -q 'CmsBridge.detailTimeout(widget.id)' lib/pages/detail_page.dart
+          # 反面门禁：文案里不许再出现「N 秒无响应」这种把内部超时数字报给
+          # 用户的写法（现场那句「该源暂不可用（8 秒无响应）」就是这么来的）。
+          if grep -F -- '秒无响应）' lib/services/cms_bridge.dart; then
+            echo '文案不许再写死「N 秒无响应」' >&2
+            exit 1
+          fi
+          flutter test test/detail_source_fix_test.dart
       # LINES_ALL / HOT_ORDER（2026-11-15）：多线路解析 + 热播排序映射的回归。
       # 用真实接口数据（test/fixtures/detail_romelia.json，四条线路）钉住
       # 「详情页只显示一条线路」这个用户实测问题不再回来。

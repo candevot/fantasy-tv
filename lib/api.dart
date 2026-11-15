@@ -635,6 +635,49 @@ class Api {
     return '$root$url';
   }
 
+  /// 外部源（肥猫 jar / 自加源）返回的 `vod_pic` 归一化（COVER_FIX 2026-11-15）。
+  ///
+  /// 现场症状：搜「济公传」时肥猫那一段的第 2、3 条**封面是空白块**，第一条
+  /// 正常。jar 侧的 `vod_pic` 有三种坑，[imgProxy] 一种都处理不了：
+  ///   1. 空串 / 只有空白的 `" "` —— 老代码把它交给 [abs] 补成
+  ///      `http://<我们的旧后端>/`，一个必然 404 的地址，于是灰色 shimmer
+  ///      卡满 10 秒才换占位，看起来就是「空白封面」；
+  ///   2. 协议相对地址 `//img.xx/a.jpg` —— 要补 `https:`；
+  ///   3. **源站自己的相对地址** `upload/vod/1.jpg` / `/upload/vod/1.jpg`
+  ///      —— 必须按这个源自己的站点根补全（[root]），不能补到我们服务器上。
+  /// 补不出绝对地址（jar 源只给类名、没有可用的 root）时返回空串，
+  /// UI 直接显示「片名首字 + 渐变底」占位，绝不出现空白块。
+  static String coverOf(String url, {String root = ''}) {
+    var u = url.trim();
+    if (u.isEmpty || u.startsWith('data:')) return '';
+    final lower = u.toLowerCase();
+    if (lower.startsWith('//')) return 'https:$u';
+    if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+      final origin = originOf(root);
+      if (origin.isEmpty) return '';
+      u = '$origin/${u.startsWith('/') ? u.substring(1) : u}';
+    }
+    final uri = Uri.tryParse(u);
+    if (uri == null || uri.host.isEmpty) return '';
+    return uri.toString();
+  }
+
+  /// `https://a.b/api.php?x=1` → `https://a.b`（相对地址补全用的站点根）。
+  ///
+  /// 取不出 host（空串 / 类名 `csp_Gulu` / 中文域名解析失败）时返回空串，
+  /// 调用方据此判定「这个地址补不了」。
+  static String originOf(String url) {
+    final raw = url.trim();
+    if (raw.isEmpty) return '';
+    final withScheme = raw.toLowerCase().startsWith('http')
+        ? raw
+        : (raw.startsWith('//') ? 'https:$raw' : '');
+    if (withScheme.isEmpty) return '';
+    final uri = Uri.tryParse(withScheme);
+    if (uri == null || uri.host.isEmpty) return '';
+    return '${uri.scheme}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+  }
+
   /// 封面 / 头像 / 直播图最终使用的地址。
   ///
   /// 空串 / data URI / 非 http(s) 地址返回空串，调用方显示灰底 + 首字占位。
