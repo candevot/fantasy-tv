@@ -127,10 +127,7 @@ void main() {
     fxFallbackSearchingText == '当前源播放失败，正在尝试其他源…',
     '切源提示文案固定',
   );
-  check(
-    fxFallbackAllFailedText == '所有线路都尝试过了，暂时无法播放',
-    '全失败提示文案固定',
-  );
+
   check(fxFallbackSwitchedText('咕噜') == '已切换到咕噜', '切源成功 toast');
   check(fxFallbackSwitchedText(' ') == '已切换到其他源', '源名未知时的 toast');
   check(fxFallbackShortEpText(8) == '该源只有 8 集', '集数不够的提示');
@@ -161,6 +158,86 @@ void main() {
     fxFallbackResumeLog(ep: 5, posMs: -1, from: '', to: '') ==
         'resume ep=5 pos=0ms from=未知 to=未知',
     '日志里的空值写「未知」，负位置归零',
+  );
+  check(
+    fxFallbackSourceLog(source: '咕噜', hit: true) ==
+        'fallback source=咕噜 hit=true',
+    '逐源日志格式（命中）',
+  );
+  check(
+    fxFallbackSourceLog(source: '', hit: false) ==
+        'fallback source=未知 hit=false',
+    '逐源日志格式（源名未知）',
+  );
+
+  // 第 3 段先查咕噜：名字带「咕噜」的源算优先源（TVBox 名字常带「 • 类型」后缀）。
+  check(fxIsPreferredSource('咕噜'), '咕噜是优先源');
+  check(fxIsPreferredSource('咕噜 • APP'), '带类型后缀的咕噜仍是优先源');
+  check(!fxIsPreferredSource('剧圈'), '别的源不是优先源');
+  check(!fxIsPreferredSource('  '), '空名字不是优先源');
+
+  // ------------------------------------------------------- 8 秒 / 失败原因
+  check(
+    fxOpenFirstFrameTimeout == const Duration(seconds: 8),
+    '每条线路最多等 8 秒（用户定稿，不要 30 秒）',
+  );
+  check(
+    fxOpenFailReason(elapsedMs: 8000) == 'no_first_frame',
+    '8 秒没出首帧 → no_first_frame',
+  );
+  check(
+    fxOpenFailReason(elapsedMs: 120, error: 'HttpException 403') == 'http_403',
+    '403 立即判失败（不等 8 秒）',
+  );
+  check(
+    fxOpenFailReason(elapsedMs: 120, error: '404 Not Found') == 'http_404',
+    '404 立即判失败（不等 8 秒）',
+  );
+  check(
+    fxOpenFailReason(elapsedMs: 90, error: '该线路解析失败') == 'parse_error',
+    '解析错误立即判失败',
+  );
+  check(
+    fxOpenFailReason(elapsedMs: 1500, error: 'boom') == 'open_failed',
+    '其它失败归 open_failed',
+  );
+  check(
+    fxBufferingFailTimeout == const Duration(seconds: 10),
+    '首帧后连续缓冲 10 秒判失败',
+  );
+
+  // ------------------------------------------------------------ 冷却期
+  final now = DateTime(2026, 11, 15, 12, 0).millisecondsSinceEpoch;
+  check(fxLineCooldownWindow == const Duration(minutes: 10), '冷却期 10 分钟');
+  check(fxCoolingActive(0, now) == false, '没记录 → 不在冷却');
+  check(fxCoolingActive(now - 60 * 1000, now), '1 分钟前失败 → 仍在冷却');
+  check(
+    fxCoolingActive(now - 9 * 60 * 1000, now),
+    '9 分钟前失败 → 仍在冷却',
+  );
+  check(
+    !fxCoolingActive(now - 11 * 60 * 1000, now),
+    '11 分钟前失败 → 冷却已过期（恢复原权重）',
+  );
+
+  // --------------------------------------------------- 自动换线日志 / 进度
+  check(
+    fxAutoLineLog(attempt: 2, total: 11, name: '红牛', ok: false, reason: 'no_first_frame') ==
+        'auto line=2/11 name=红牛 result=fail reason=no_first_frame',
+    '自动换线日志格式',
+  );
+  check(
+    fxAutoLineLog(attempt: 3, total: 11, name: '量子', ok: true) ==
+        'auto line=3/11 name=量子 result=ok reason=ok',
+    '自动换线成功日志',
+  );
+  check(
+    fxTryingLineText(2, 11) == '正在尝试其他线路（2/11）',
+    '换线进度文案（让用户知道在动）',
+  );
+  check(
+    fxFallbackAllFailedText == '这部片暂时播不了，已帮你试过全部线路',
+    '最终失败文案要软，不甩锅给用户',
   );
 
   print('');

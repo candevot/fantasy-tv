@@ -1,4 +1,4 @@
-import 'dart:ui' show BoxFit, Size;
+import 'package:flutter/painting.dart' show BoxFit, Size;
 
 /// 视频真实宽高比（`宽 / 高`）；宽或高缺失、为 0 / 负数时返回 null。
 ///

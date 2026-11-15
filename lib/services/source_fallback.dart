@@ -100,10 +100,15 @@ class FxExternalHit {
     required this.card,
     required this.sourceName,
     required this.sourceKey,
+    this.priority = 0,
   });
 
   final VideoCard card;
   final String sourceName;
+
+  /// 源的优先序号（0 = 最优先）。第 3 段先查「咕噜」，其次才是别的源，
+  /// 所以排序时 priority 先于年份差 —— 咕噜有同名就先用咕噜的。
+  final int priority;
 
   /// 源的身份 key（jar 源是 `api|ext`，CMS 源是 `api`）：进 [triedSources]。
   final String sourceKey;
@@ -191,8 +196,17 @@ class FxSourceFallback {
   /// 单个源的检索超时（和搜索页一致：超时按「这个源没结果」算）。
   static const Duration sourceTimeout = SourceHub.sourceTimeout;
 
-  /// 最多并行查几个外部源（一次降级只查一轮，别把 41 个源全拉起来）。
-  static const int maxExternalSources = 12;
+  /// 第 3 段最多查几个「优先源」（咕噜那一类）。正常情况下就是 1 个。
+  static const int maxPreferredSources = 1;
+
+  /// 优先源没命中时，按配置顺序最多再补几个外部源。
+  ///
+  /// 不按 41 个源的顺序挨个试：用户已经等了一轮换线路，跨源这一轮必须快。
+  /// 1 + 2 = 3 个源、每个 8 秒超时，最坏也就二十几秒，并且是并行发。
+  static const int maxExtraSources = 2;
+
+  /// 一轮外部检索最多几个源（兜底上限，防止配置异常时把源全拉起来）。
+  static const int maxExternalSources = 3;
 
   /// 最多给几条命中结果拉详情（详情是逐个串行的，串太多就慢）。
   static const int maxDetailProbes = 4;
@@ -354,7 +368,9 @@ class FxSourceFallback {
         reason: 'external_empty',
       );
     }
+    // 源优先级先于年份差：咕噜（priority 0）有同名就先用咕噜的。
     picks.sort((a, b) {
+      if (a.priority != b.priority) return a.priority.compareTo(b.priority);
       final ga = fxYearGap(year, a.card.year);
       final gb = fxYearGap(year, b.card.year);
       final ra = ga < 0 ? 1 : ga;
@@ -373,6 +389,13 @@ class FxSourceFallback {
         sourceName: hit.sourceName,
         ep: ep,
         level: 3,
+      );
+      // 逐源留痕：`fallback source=咕噜 hit=true/false`。
+      fxPlayLog(
+        fxFallbackSourceLog(
+          source: hit.sourceName,
+          hit: probe.candidate != null,
+        ),
       );
       if (probe.candidate != null) {
         final got = probe.candidate!;
@@ -403,11 +426,11 @@ class FxSourceFallback {
     }
     await hub.ensureJarStatus();
     final plan = hub.searchPlan;
-    final queue = <KSource>[];
     // jarMissing：源列表里有 jar 源、但插件没装。这种源会被 searchPlan 提前
     // 过滤掉（连队列都进不来），所以要先记下「第 3 段是被跳过」，
     // 否则页面会当成「外部源里没有这部片」，用户不知道该装插件。
     var jarSkipped = hub.jarMissing;
+    final usable = <KSource>[];
     for (final source in plan.external) {
       // 这个源上一轮已经查过了：不再查第二遍（「不要在源之间来回跳」）。
       if (tried.contains(sourceKeyOf(source))) continue;
@@ -416,16 +439,37 @@ class FxSourceFallback {
         jarSkipped = true;
         continue;
       }
-      queue.add(source);
-      if (queue.length >= maxExternalSources) break;
+      usable.add(source);
     }
-    if (queue.isEmpty) {
+    if (usable.isEmpty) {
       return FxExternalHits(
         jarSkipped: jarSkipped,
         reason: jarSkipped ? 'jar_missing' : 'no_external_source',
       );
     }
-    // 并行查一轮（每个源自己 8 秒超时），全部回来后统一交给上层挑。
+
+    // 顺序：**先查「咕噜」**（内容最全、速度也快），咕噜没有 / 失败再按配置
+    // 顺序最多补 2 个别的外部源。不按 41 个源的顺序挨个试 —— 那是搜索页的活，
+    // 换源要的是「尽快找到一部能播的同名片」。
+    final preferred = <KSource>[
+      for (final source in usable)
+        if (fxIsPreferredSource(source.resultLabel) ||
+            fxIsPreferredSource(source.shortName))
+          source,
+    ].take(maxPreferredSources).toList(growable: false);
+    final others = <KSource>[
+      for (final source in usable)
+        if (!preferred.contains(source)) source,
+    ].take(maxExtraSources).toList(growable: false);
+    final queue = <KSource>[...preferred, ...others]
+        .take(maxExternalSources)
+        .toList(growable: false);
+    if (queue.isEmpty) {
+      return const FxExternalHits(reason: 'no_external_source');
+    }
+
+    // 并行查这一轮（每个源自己 8 秒超时），全部回来后统一交给上层挑；
+    // 上层按 priority（咕噜在前）再排一次。
     final lists = await Future.wait(<Future<List<VideoCard>>>[
       for (final source in queue)
         hub
@@ -442,6 +486,7 @@ class FxSourceFallback {
             card: card,
             sourceName: sourceLabelOf(card, source),
             sourceKey: sourceKeyOf(source),
+            priority: i,
           ),
         );
       }

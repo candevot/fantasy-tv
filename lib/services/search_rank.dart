@@ -11,6 +11,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models.dart';
+import 'line_cooldown.dart';
 import 'stream_resolution.dart';
 
 export 'stream_resolution.dart';
@@ -226,6 +227,14 @@ class SearchRank {
     indexed.sort((a, b) {
       final byScore = scoreValue(b.value).compareTo(scoreValue(a.value));
       if (byScore != 0) return byScore;
+      // LINE_COOLDOWN（2026-11-15）：**同分辨率**时，10 分钟内播放失败过的
+      // 那条排后面（10 分钟后自动恢复原权重）。只做次级排序位 ——
+      // 把「1080P 但刚才抖了一下」排到 480P 后面，用户更不满意。
+      final byCooldown =
+          FxLineCooldown.sortPenalty(a.value).compareTo(
+        FxLineCooldown.sortPenalty(b.value),
+      );
+      if (byCooldown != 0) return byCooldown;
       final byHeat = _heat(b.value.heat).compareTo(_heat(a.value.heat));
       if (byHeat != 0) return byHeat;
       final byTime = b.value.time.compareTo(a.value.time);

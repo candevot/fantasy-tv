@@ -1,5 +1,3 @@
-import 'dart:ui' show BoxFit, Size;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -14,7 +12,7 @@ import 'package:fantasy_tv/widgets/player_theme.dart';
 ///   1. 比例只从视频真实宽高来，拿不到才退回 16:9；
 ///   2. 三档语义：适应 = 等比完整显示、填充 = 等比裁满、拉伸 = 铺满（会变形）；
 ///   3. 播放区高度：宽片收窄、竖屏 / 4:3 停在 16:9 高度（铺满高度左右留黑）。
-Future<void> main() {
+void main() {
   group('视频比例', () {
     test('真实宽高', () {
       expect(fxVideoAspectOf(1920, 800), closeTo(2.4, 1e-9));

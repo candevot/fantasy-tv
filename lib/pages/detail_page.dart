@@ -10,6 +10,7 @@ import '../services/cms_bridge.dart';
 import '../services/download_service.dart';
 import '../services/fallback_match.dart';
 import '../services/fx_player.dart';
+import '../services/line_cooldown.dart';
 import '../services/play_log.dart';
 import '../services/source_fallback.dart';
 import '../services/source_hub.dart';
@@ -249,7 +250,11 @@ class _DetailPageState extends State<DetailPage>
         if (lines.any((l) => l.id == widget.line)) {
           lineId = widget.line;
         } else {
-          lineId = lines.isEmpty ? '' : lines.first.id;
+          // LINE_COOLDOWN（2026-11-15）：10 分钟内失败过的线路沉到最后 ——
+          // 「下次打开同一部剧，最近失败过的排在同分辨率后面，10 分钟后
+          // 恢复原权重」。这里只是默认值，用户手动点哪条仍然尊重。
+          final ordered = FxLineCooldown.sortLines(widget.id, lines);
+          lineId = ordered.isEmpty ? '' : ordered.first.id;
         }
       }
 
@@ -1043,20 +1048,11 @@ class _DetailPageState extends State<DetailPage>
       final target = next;
       setState(() => _lineId = target.id);
       _saveHistory();
-      fxToast(context, _autoSwitchText(issue, target.name));
+      // 自动换线全程静默：进度由画面上的「正在尝试其他线路（n/total）」表达，
+      // 只在最终失败时提示一次（AUTO_LINE_FULL 2026-11-15）。
     } else {
       _selectLine(next);
     }
-  }
-
-  String _autoSwitchText(SourceIssue? issue, String name) {
-    final label = name.isEmpty ? '下一线路' : '「$name」';
-    return switch (issue) {
-      SourceIssue.parse => '该线路暂不可直接播放，已为你切换$label',
-      SourceIssue.empty => '该线路暂无播放地址，已为你切换$label',
-      SourceIssue.expired => '该平台线路已失效，请切换线路',
-      _ => '线路播放失败，已自动切换$label',
-    };
   }
 
   /* ---------------------------------------------- 三段降级（FX_FALLBACK） */
@@ -1141,8 +1137,8 @@ class _DetailPageState extends State<DetailPage>
     final position = snap?.seconds ?? 0;
 
     // UI：切源时明确告诉用户在干什么（不是一直转圈）。
+    // 只盖一层画面提示，不弹 toast —— 起播过程中除了最终失败不给任何打扰。
     player?.showResolving(fxFallbackSearchingText);
-    if (mounted) fxToast(context, fxFallbackSearchingText);
 
     FxFallbackOutcome outcome = const FxFallbackOutcome.miss();
     try {
@@ -1234,20 +1230,42 @@ class _DetailPageState extends State<DetailPage>
     _stableTimer?.cancel();
     final lineId = _lineId;
     final player = _playerKey.currentState;
-    // 第一次失败：原线重试。reload() 一进来就置 _loading=true、清掉错误层，
-    // 重试期间显示缓冲态，不瞬间判死也不闪错误页；重试单独计数，
-    // 不占用 _autoLineTries 的换线预算。
+    // 第一次失败：原线静默重试（**不弹 toast**：起播失败的过程不该打断用户）。
+    // reload() 一进来就置 _loading=true、清掉错误层，重试期间显示缓冲态。
     if (lineId.isNotEmpty &&
         !_failedLines.contains(lineId) &&
         _retriedLine != lineId &&
         player != null) {
       _retriedLine = lineId;
-      fxToast(context, '线路播放失败，正在原线路重试…');
       unawaited(player.reload());
       return;
     }
     if (lineId.isNotEmpty) _failedLines.add(lineId);
+    // 之后全自动：把本片**所有**线路依次试一遍，画面显示
+    // 「正在尝试其他线路（2/11）」，用户不用点任何东西。
+    if (player != null) {
+      unawaited(player.autoTryAllLines());
+      return;
+    }
     _switchNextLine(auto: true, issue: issue);
+  }
+
+  /// 本片所有线路都试完仍不可播：继续第 2 / 3 段（同源其他版本 → 跨源同名）。
+  void _onAllLinesFailed() {
+    if (!mounted) return;
+    unawaited(_attemptSourceFallback());
+  }
+
+  /// 用户点了最终失败页的「重试」：**重新从第一条线路开始**，并允许再跨源找一次。
+  void _onRetryAllLines() {
+    if (!mounted) return;
+    _fallback = null;
+    _fallbackDone = false;
+    _fallbackBusy = false;
+    _failedLines.clear();
+    _autoLineTries = 0;
+    _retriedLine = null;
+    _stableTimer?.cancel();
   }
 
   /// 播放稳定 3 秒后才清空失败集合与自动重试预算，避免「能 open 但立刻报错」
@@ -1708,6 +1726,10 @@ class _DetailPageState extends State<DetailPage>
               },
               onVideoAspect: _onVideoAspect,
               onPlaybackStarted: _onPlaybackStarted,
+              // AUTO_LINE_FULL：本片线路全试完 → 继续第 2 / 3 段（跨源）。
+              onAllLinesFailed: _onAllLinesFailed,
+              // 用户点最终失败页的「重试」：重置降级状态，重新从第一条开始。
+              onRetryAllLines: _onRetryAllLines,
               autoPlay: true,
               // FX_FALLBACK：跨源换源带过来的起播位置（保持原集号与原进度）。
               startSeconds: widget.startSeconds,

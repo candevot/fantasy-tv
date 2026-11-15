@@ -12,7 +12,9 @@ import '../services/app_settings.dart';
 import '../services/exo_player.dart';
 import '../services/fx_player.dart';
 import '../services/fx_video_geometry.dart';
+import '../services/fallback_match.dart';
 import '../services/hls_segment_index.dart';
+import '../services/line_cooldown.dart';
 import '../services/iq_codec_gate.dart';
 import '../services/iqiyi_codec.dart';
 import '../services/play_log.dart';
@@ -79,6 +81,8 @@ class PlayerView extends StatefulWidget {
     this.onLineFallback,
     this.onSwitchingChanged,
     this.onVideoAspect,
+    this.onAllLinesFailed,
+    this.onRetryAllLines,
     this.autoPlay = true,
     this.startSeconds,
   });
@@ -111,6 +115,17 @@ class PlayerView extends StatefulWidget {
   /// 线路切换开关状态：为 true 时外层应禁用线路卡片，避免重复点击并发 open。
   final ValueChanged<bool>? onSwitchingChanged;
 
+  /// 本片**所有线路**都试完仍不可播（AUTO_LINE_FULL 2026-11-15）。
+  ///
+  /// 播放器自己把每条线路轮流试了一遍，全失败才回调这里；外层（详情页）
+  /// 接着走第 2 / 3 段（同源其他版本 → 跨源同名）。没有外层时（独立播放页 /
+  /// 全屏）播放器自己给最终提示，不把「换线路」这件事推给用户。
+  final VoidCallback? onAllLinesFailed;
+
+  /// 最终失败后用户点了「重试」：外层要重置降级状态（重新从第一条线路开始试，
+  /// 并且允许再跨源找一次）。
+  final VoidCallback? onRetryAllLines;
+
   /// 视频真实宽高比就绪 / 变化时回调（如 2.4:1 = 2.4、竖屏 9:16 ≈ 0.5625）。
   ///
   /// 外层页面拿它算播放区高度，让容器跟着视频比例变（ASPECT_REAL
@@ -132,7 +147,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 错误态，可内核还在继续 open，10~12 秒后真的出画了；而 `_onVideoValue`
   /// 在 `_error` 时直接 return，既不 setState 也不挂 Video 纹理，用户看到的是
   /// 「有声音没画面、错误页还不消失」。宁可等内核自己判失败。
-  static const Duration _openReadyTimeout = Duration(seconds: 30);
+  static const Duration _openReadyTimeout = fxOpenFirstFrameTimeout;
 
   /// 切线路时最多尝试的线路数（含用户选中的目标线路）。
   /// 换线时最多依次尝试几条线路（含目标线路）。
@@ -178,9 +193,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 「正在加载 第01集」。所以去重要同时比对 token，规则在
   /// `play_path.dart` 的 [shouldReuseOpen] 里，单测钉住。
   int _openingToken = 0;
-
-  /// 播放器自己换过几次线路（外层没有失败回调时才用，见 [_autoSwitchNextLine]）。
-  int _autoSwitchTries = 0;
 
   /// 当前集播放 30 秒后已预解析的下一集，避免 10 秒定时器重复请求。
   bool _nextPrewarmed = false;
@@ -1085,6 +1097,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         force: forcePlayInfo,
       );
     } catch (e) {
+      _lastOpenError = '$e';
       if (!mounted || token != _loadToken) return false;
       // CMS 需要解析的线路：解析服务失败时把真实原因透出来
       // （「该线路解析失败」），别一律说成「检查网络」。
@@ -1338,7 +1351,6 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _errorText = '';
         });
         _sourceFailNotified = false;
-        _autoSwitchTries = 0;
         openedHevc = target.hevc;
         openedDegraded = target.degradeFromHevc;
         _iqHevc = openedHevc;
@@ -1371,7 +1383,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _showControls();
         // 续播静默处理：直接停在上次位置，不弹「已跳到上次位置」提示。
         break;
-      } catch (_) {
+      } catch (e) {
+        _lastOpenError = '$e';
         // 复用实例失败时**不能** dispose：原生那边还要靠它接着试下一个
         // 候选地址（open 会自己重置状态）。只有本次新建的实例才回收。
         if (!identical(controller, reusable)) {
@@ -1407,34 +1420,179 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // AUTO_LINE（2026-11-15）：外层没接过失败回调时（全屏页 / 一起看 /
         // 独立播放页），播放器自己换下一条线路 —— 需求是「起播失败要有明确
         // 提示并且能自动换下一条」，这几种页面没有外层可换，只能这里换。
-        if (widget.onSourceFailed == null) _autoSwitchNextLine();
+        // AUTO_LINE_FULL（2026-11-15）：外层没接失败回调时（独立播放页 / 一起看）
+    // 播放器自己把本片所有线路轮一遍；接了回调的（详情页）由外层统一驱动，
+    // 免得两边同时开轮、互相打断。
+    if (widget.onSourceFailed == null) _autoSwitchNextLine();
       }
       return false;
     }
     return true;
   }
 
+  /// 全部线路都试完仍不可播（挡住重复回调）。
+  bool _linesExhausted = false;
+
+  /// 自动换线路轮正在跑（防止「失败回调」和「用户操作」同时开两轮）。
+  bool _autoChainBusy = false;
+
+  /// **自动把本片所有线路依次试一遍**（AUTO_LINE_FULL 2026-11-15）。
+  ///
+  /// 用户明确要求「失败不能直接报错让用户自己切线路」：这里从当前线路的下一
+  /// 条开始，一条一条试到底（每条最多 [fxOpenFirstFrameTimeout]），
+  /// 过程中画面上显示「正在尝试其他线路（2/11）」——用户看得见在动，
+  /// 不用点任何按钮；**全程不弹错误 toast**。
+  ///
+  /// 返回 true = 有一条线路接上了（集号与进度沿用换线前的现场）。
+  /// 全部失败时复位到第一条线路并交给外层（[PlayerView.onAllLinesFailed]），
+  /// 没有外层时自己给最终提示（[fxFallbackAllFailedText]）。
+  Future<bool> autoTryAllLines({bool restart = false}) async {
+    final lines = <LineInfo>[
+      for (final line in widget.detail?.lines ?? const <LineInfo>[])
+        if (line.id.trim().isNotEmpty) line,
+    ];
+    if (lines.isEmpty || !mounted) return false;
+    if (_autoChainBusy) return false;
+    await FxLineCooldown.load();
+    if (!mounted) return false;
+    _autoChainBusy = true;
+    _linesExhausted = false;
+    final total = lines.length;
+    final startLine = restart ? '' : _line;
+    // 已试过的线路：本轮不再重复（restart 时从第一条开始）。
+    final tried = <String>{if (!restart && _line.isNotEmpty) _line};
+    final snap = playbackSnapshot();
+    final resumeAt = restart ? 0.0 : snap.seconds;
+    final playState = restart ? true : snap.playing;
+    final ep = _ep;
+    final videoId = widget.videoId;
+    // LINE_COOLDOWN：10 分钟内失败过的线路沉到最后；本轮里它们先跳过，
+    // 但如果全都还在冷却期（上一次刚全试完），就把冷却清掉重来一遍 ——
+    // 宁可多试一次，也不能对着用户说「没线路」。
+    var ordered = FxLineCooldown.sortLines(videoId, lines);
+    if (ordered.every(
+      (l) => FxLineCooldown.isCooling(videoId, l.displayName),
+    )) {
+      FxLineCooldown.clearFor(videoId);
+      ordered = lines;
+    }
+    var attempt = 0;
+    var ok = false;
+    var skippedCooling = 0;
+    try {
+      var index = startLine.isEmpty
+          ? -1
+          : ordered.indexWhere((l) => l.id == startLine);
+      for (var step = 0; step < ordered.length; step++) {
+        if (!mounted) return false;
+        final candidate = ordered[(index + 1 + step) % ordered.length];
+        if (!tried.add(candidate.id)) continue;
+        // 冷却中的线路本轮直接跳过（10 分钟内不再试它）。
+        if (FxLineCooldown.isCooling(videoId, candidate.displayName)) {
+          skippedCooling++;
+          continue;
+        }
+        var skip = false;
+        try {
+          attempt++;
+          // 进度提示：让用户知道在动，而不是卡死。
+          showResolving(fxTryingLineText(attempt, total));
+          _lastOpenError = '';
+          final watch = Stopwatch()..start();
+          final opened = await _bootstrap(
+            seekToSaved: false,
+            saveOld: false,
+            lineOverride: candidate.id,
+            epOverride: ep,
+            resumeSeconds: resumeAt,
+            playOverride: playState,
+            commitLine: true,
+            reportFailure: false,
+            force: true,
+          );
+          watch.stop();
+          ok = opened && mounted;
+          // 失败原因：8 秒没首帧 / 403 / 404 / 解析错误 / 其它。
+          final reason = ok
+              ? ''
+              : fxOpenFailReason(
+                  elapsedMs: watch.elapsedMilliseconds,
+                  error: _lastOpenError,
+                );
+          fxPlayLog(
+            fxAutoLineLog(
+              attempt: attempt,
+              total: total,
+              name: candidate.displayName,
+              ok: ok,
+              reason: reason,
+            ),
+          );
+          if (ok) {
+            _line = candidate.id;
+            FxLineCooldown.markHealthy(videoId, candidate.displayName);
+            widget.onLineFallback?.call(candidate.id);
+            break;
+          }
+          // 失败：立刻记 10 分钟临时不可用，并马上试下一条（不等用户）。
+          FxLineCooldown.markFailed(videoId, candidate.displayName);
+        } catch (e) {
+          skip = true;
+          _lastOpenError = '$e';
+          FxLineCooldown.markFailed(videoId, candidate.displayName);
+          fxPlayLog(
+            fxAutoLineLog(
+              attempt: attempt,
+              total: total,
+              name: candidate.displayName,
+              ok: false,
+              reason: 'exception',
+            ),
+          );
+        }
+        if (skip) continue;
+      }
+      if (skippedCooling > 0) {
+        fxPlayLog(
+          'auto line skip=$skippedCooling reason=cooldown '
+          'window=${fxLineCooldownWindow.inMinutes}min',
+        );
+      }
+    } finally {
+      _autoChainBusy = false;
+      if (mounted) clearResolving();
+    }
+    if (!mounted) return ok;
+    if (ok) return true;
+
+    // 全部线路都试完：回到第一条线路，给最终提示（或交给外层继续跨源）。
+    _linesExhausted = true;
+    _line = lines.first.id;
+    _clearFrozenFrame();
+    setState(() {
+      _loading = false;
+      _loadedEp = null;
+      _error = true;
+      _errorText = fxFallbackAllFailedText;
+      _uiPosition = null;
+      _uiDuration = null;
+    });
+    _showControls();
+    if (widget.onAllLinesFailed != null) {
+      widget.onAllLinesFailed!();
+    } else {
+      // 没有外层（独立播放页 / 一起看）：停在可重试的错误层，文案不甩锅。
+      showSourceError(fxFallbackAllFailedText);
+    }
+    return false;
+  }
+
   /// 起播失败后自己换下一条线路（**只在外层没有失败回调时**使用）。
   ///
-  /// 详情页有自己的换线预算（`_reportLineIssue` → `_switchNextLine`），
-  /// 两边同时换会互相打架；所以这里用 `onSourceFailed == null` 当开关。
-  /// 换过的次数有上限（每条线路最多一次），避免 A/B 无限乒乓。
+  /// 有了 [autoTryAllLines] 之后这条只剩「没有外层」的场景要兜：
+  /// 直接把整轮跑完，而不是一条一条等下一轮失败回调。
   void _autoSwitchNextLine() {
-    final lines = widget.detail?.lines ?? const <LineInfo>[];
-    if (lines.length < 2) return;
-    if (_autoSwitchTries >= lines.length - 1) return;
-    final index = lines.indexWhere((l) => l.id == _line);
-    for (var k = 1; k <= lines.length; k++) {
-      final next = lines[(index + k) % lines.length];
-      if (next.id == _line || next.id.trim().isEmpty) continue;
-      _autoSwitchTries++;
-      fxPlayLog(
-        'auto-switch line=${next.displayName} (${next.id}) '
-        'try=$_autoSwitchTries/${lines.length - 1}',
-      );
-      unawaited(_switchLine(next.id, _ep));
-      return;
-    }
+    unawaited(autoTryAllLines());
   }
 
   /// 平台线路（腾讯 / 芒果等）签名失效：重新请求 /api/play 拿新签名地址。
@@ -1551,6 +1709,56 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 上一次报给外层的真实宽高比（判重用，见 [_reportVideoAspect]）。
   double? _lastStableAspect;
 
+  /// 最近一次 open 的原始错误文本（AUTO_LINE_FULL）。
+  ///
+  /// 失败原因要分得清 403/404/解析错误（立即判失败）与「8 秒没出首帧」，
+  /// 日志和冷却判定都靠它：`reason=http_403` / `no_first_frame`。
+  String _lastOpenError = '';
+
+  /// 首帧之后连续缓冲的起点与「本轮已判过缓冲超时」的线路名。
+  DateTime? _bufferingSince;
+  String _bufferingFailedLine = '';
+
+  /// 首帧之后连续缓冲（位置不动）超过 [fxBufferingFailTimeout] → 判这条线路失败。
+  ///
+  /// 「首帧出了但一直转圈」是换线路最常见的失败形态：open 成功了，
+  /// 用户却一直在看缓冲圈。这里按 10 秒判定，判过之后立刻换下一条，
+  /// 并把这条线路记 10 分钟临时不可用。
+  void _watchBuffering(FxPlayerValue v) {
+    // 全屏期间由全屏页自己的链路判定（同一个播放器，两边都切会打架）。
+    if (_loading || _error || _fullscreenActive) {
+      _bufferingSince = null;
+      return;
+    }
+    if (!v.isInitialized || !v.hasRenderedFirstFrame || !v.isBuffering) {
+      _bufferingSince = null;
+      return;
+    }
+    if (v.isPlaying) {
+      // 位置还在走就说明管线是通的，不算失败。
+      _bufferingSince = null;
+      return;
+    }
+    final since = _bufferingSince ??= DateTime.now();
+    if (DateTime.now().difference(since) < fxBufferingFailTimeout) return;
+    // 同一条线路只判一次，避免自动轮里重复触发。
+    if (_bufferingFailedLine == _lineName) return;
+    _bufferingFailedLine = _lineName;
+    _bufferingSince = null;
+    fxPlayLog(
+      fxAutoLineLog(
+        attempt: 1,
+        total: widget.detail?.lines.length ?? 1,
+        name: _lineName,
+        ok: false,
+        reason: 'buffering_timeout',
+      ),
+    );
+    FxLineCooldown.markFailed(widget.videoId, _lineName);
+    // 立刻切下一条（不等用户，也不弹错误提示）。
+    unawaited(autoTryAllLines());
+  }
+
   /// 每集最后一次「位置可信」的进度（FX_FALLBACK）。
   ///
   /// 播放器报错 / 换源后 `value.position` 会归零或乱跳，拿它当换源起点就会
@@ -1560,6 +1768,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
+    // BUFFER_WATCH（2026-11-15）：首帧出了但一直缓冲（播放位置不动）
+    // 超过 10 秒就判这条线路失败，立刻换下一条 —— 用户定稿的规则，
+    // 不等 FxPlayer 的 30 秒停摆判定。
+    _watchBuffering(c.value);
     // 位置可信时才记（换成另一条线路失败时，这里保留的还是上一次正常的位置）。
     final live = c.value;
     if (live.isInitialized && !live.hasError && live.position > Duration.zero) {
@@ -1797,6 +2009,25 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 重试自己失败时**收尾**：亮明确错误 + 通知外层换线路，绝不留悬空 loading。
   Future<void> reload() async {
     if (_switchingLine) return;
+    // AUTO_LINE_FULL：上一次已经把全部线路试完 —— 点「重试」等于重新开始：
+    // 从第一条线路重新轮一轮，并且让外层重置降级状态（这次可以再跨源找一次）。
+    if (_linesExhausted) {
+      _linesExhausted = false;
+      // 用户点了「重试」= 重新开始：清掉这部剧的冷却记录，从第一条线路再试。
+      FxLineCooldown.clearFor(widget.videoId);
+      widget.onRetryAllLines?.call();
+      if (mounted) {
+        setState(() {
+          _loading = true;
+          _error = false;
+          _errorText = '';
+        });
+      }
+      // 外层重置完会把第一条线路设回来；这里直接跑整轮，用户不用再点。
+      final ok = await autoTryAllLines(restart: true);
+      if (ok || !mounted) return;
+      return;
+    }
     // 重试一进来就进入缓冲态并清掉错误层：失败上报与重试在同一个事件循环
     // 里完成，UI 不会先闪一下错误页再变回加载。
     if (mounted) {

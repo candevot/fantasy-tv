@@ -54,13 +54,35 @@ void main() {
     );
   });
 
+  test('第 3 段先查咕噜：优先源判定与逐源日志', () {
+    expect(match.fxIsPreferredSource('咕噜 • APP'), isTrue);
+    expect(match.fxIsPreferredSource('剧圈'), isFalse);
+    expect(
+      match.fxFallbackSourceLog(source: '咕噜', hit: true),
+      'fallback source=咕噜 hit=true',
+    );
+  });
+
+  test('单条线路的失败判定：8 秒无首帧 / 403 / 404 / 解析错误', () {
+    expect(match.fxOpenFirstFrameTimeout, const Duration(seconds: 8));
+    expect(match.fxOpenFailReason(elapsedMs: 8000), 'no_first_frame');
+    expect(match.fxOpenFailReason(elapsedMs: 100, error: '403'), 'http_403');
+    expect(match.fxOpenFailReason(elapsedMs: 100, error: '404'), 'http_404');
+    expect(
+      match.fxOpenFailReason(elapsedMs: 100, error: '解析失败'),
+      'parse_error',
+    );
+    expect(match.fxBufferingFailTimeout, const Duration(seconds: 10));
+  });
+
   test('降级日志与用户提示文案固定', () {
     expect(
       match.fxFallbackLog(level: 2, from: '幻想', to: '咕噜'),
       'fallback level=2 from=幻想 to=咕噜 reason=all_lines_failed',
     );
     expect(match.fxFallbackSearchingText, '当前源播放失败，正在尝试其他源…');
-    expect(match.fxFallbackAllFailedText, '所有线路都尝试过了，暂时无法播放');
+    expect(match.fxFallbackAllFailedText, '这部片暂时播不了，已帮你试过全部线路');
+    expect(match.fxTryingLineText(2, 11), '正在尝试其他线路（2/11）');
     expect(match.fxFallbackSwitchedText('咕噜'), '已切换到咕噜');
   });
 }

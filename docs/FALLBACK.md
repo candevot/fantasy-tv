@@ -18,11 +18,20 @@
   里 `_fallbackDone` 也保证「搜过一次就不再搜」，不会在源之间来回跳成死循环。
 - **每个源只试一次**：`triedSources` 记已查过的源 key（jar 源是 `api|ext`，
   CMS 源是 `api`），第 3 段只查不在集合里的源。
+- **第 3 段的顺序：先查「咕噜」**（内容最全、速度也快），咕噜没有 / 失败再按
+  配置顺序最多补 2 个别的外部源（`maxPreferredSources = 1`,
+  `maxExtraSources = 2`）。不按 41 个源的顺序挨个试 —— 用户已经等过一轮换线路，
+  跨源这一轮必须快。命中候选按「源优先级 → 年份差」排序，咕噜有同名就先用咕噜的。
 
 ## 2. 匹配规则（必须严）
 
 规则本体在 `lib/services/fallback_match.dart`（纯函数、无 import），
 单测 `tools/test_fallback_match.dart` + `test/fallback_match_test.dart` 逐条钉住。
+
+决策流程（走哪一段 / 排除自己 / 集数不够不换 / 只切一次 / triedSources 生效 /
+jar 没装如实上报）在 `lib/services/source_fallback.dart`，三个网络钩子
+（`searchOwn` / `fetchDetail` / `searchExternal`）可注入，单测
+`test/source_fallback_test.dart` 用假替身把流程跑在内存里。
 
 | 规则 | 口径 |
 | --- | --- |
@@ -32,6 +41,43 @@
 | 直播 | `SourceHub.isLiveCard` 的结果不要 |
 | 线路 | `degraded` 排最后，要现场解析的 `parse` 次之，集数未知的再往后 |
 | 集数 | 对方集数 < 当前集号 → **不换这条**，提示「该源只有 N 集」，停在原处 |
+
+## 2.5 单条线路的判定与冷却（AUTO_LINE_FULL）
+
+```
+8 秒没出首帧                 判失败（fxOpenFirstFrameTimeout）
+首帧出了但缓冲超过 10 秒      判失败（fxBufferingFailTimeout，播放页 _watchBuffering）
+403 / 404 / 解析错误          立即判失败，不等 8 秒（fxOpenFailReason 归类）
+```
+
+处理：
+
+| 规则 | 落地 |
+| --- | --- |
+| 立刻切下一条，不等用户 | `PlayerViewState.autoTryAllLines()` 一条条轮完 |
+| 这条线路记「临时不可用」10 分钟 | `FxLineCooldown.markFailed` → `fx_line_cooldown_v1` |
+| 界面显示「正在尝试其他线路（3/11）」 | `fxTryingLineText` 盖在画面上（不是 toast） |
+| 不弹错误提示、不打断播放界面 | 自动轮全程无 toast，只在最终失败时提示一次 |
+
+排序影响：
+
+- **本次播放内**：冷却中的线路沉到最后、并且整轮直接跳过（`sortCoolingLast` +
+  `isCooling`）；全部都在冷却（上一轮刚全试完）时清掉冷却重来一遍，不会对着
+  用户说「没线路」。
+- **下次打开同一部剧**：详情页默认线路用 `sortLines` 选，最近失败过的沉底；
+  搜索结果按实测分辨率排序时，「最近失败过」只做**同分辨率之后的次级位**
+  （`SearchRank` × `FxLineCooldown.sortPenalty`）——把 1080P 排到 480P 后面
+  用户更不满意。
+- **10 分钟**后自动恢复原权重；播成功或点「重试」都会清记录。
+
+日志：
+
+```
+[FxPlay] auto line=2/11 name=红牛 result=fail reason=no_first_frame
+[FxPlay] auto line=3/11 name=量子 result=ok reason=ok
+[FxPlay] auto line skip=2 reason=cooldown window=10min
+[FxPlay] cooldown mark video=202369 line=红牛 window=10min
+```
 
 ## 3. 集号与进度对齐
 
@@ -47,7 +93,8 @@
 
 | 时机 | 表现 |
 | --- | --- |
-| 进入第 2 / 3 段 | 画面提示 + toast「当前源播放失败，正在尝试其他源…」 |
+| 第 1 段自动换线路 | 画面显示「正在尝试其他线路（2/11）」，不弹 toast、不打断 |
+| 进入第 2 / 3 段 | 画面提示「当前源播放失败，正在尝试其他源…」（同样是画面提示，不弹 toast） |
 | 命中 | toast「已切换到 咕噜」（附带「（该源只有 N 集）」之类的补充） |
 | 全失败 | 错误层「所有线路都尝试过了，暂时无法播放」，可重试 / 换线路 |
 | jar 没装 | 第 3 段如实跳过，最终提示后缀「装好 jar 插件（spider.jar）后可跨源再找一次」 |
@@ -60,6 +107,8 @@
 [FxPlay] fallback level=2 from=幻想 to=咕噜 reason=all_lines_failed     命中（第 2 段）
 [FxPlay] fallback level=3 from=幻想 to=剧圈 reason=all_lines_failed     命中（第 3 段）
 [FxPlay] fallback level=2 skip from=幻想 reason=own_empty               没命中（留痕）
+[FxPlay] fallback source=咕噜 hit=true                                  第 3 段逐源留痕（先咕噜）
+[FxPlay] fallback source=剧圈 hit=false                                 这一条没有同名
 [FxPlay] fallback level=3 skip from=幻想 reason=jar_missing             jar 没装，第 3 段跳过
 [FxPlay] resume ep=5 pos=754000ms from=幻想 to=咕噜                     换源起播（集号 + 位置）
 ```

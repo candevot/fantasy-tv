@@ -26,8 +26,27 @@ library;
 /// 切源时盖在画面上的提示。
 const String fxFallbackSearchingText = '当前源播放失败，正在尝试其他源…';
 
+/// 自动换线路时的进度前缀，后面接「（2/11）」。
+const String fxTryingLinePrefix = '正在尝试其他线路';
+
+/// 起播无首帧就判失败的时间上限（每条线路最多等这么久）。
+///
+/// 用户明确要求「每条线路只等 8 秒，不要 30 秒」：30 秒 × 十几条线路等于让
+/// 用户对着黑屏等好几分钟，中间还以为卡死了。
+const Duration fxOpenFirstFrameTimeout = Duration(seconds: 8);
+
+/// 「正在尝试其他线路（2/11）」——自动换线路时画面上显示这一句。
+String fxTryingLineText(int attempt, int total) {
+  final a = attempt < 1 ? 1 : attempt;
+  final t = total < a ? a : total;
+  return '$fxTryingLinePrefix（$a/$t）';
+}
+
 /// 三段全部失败后的最终提示（不能一直转圈）。
-const String fxFallbackAllFailedText = '所有线路都尝试过了，暂时无法播放';
+///
+/// 文案故意写软：不出现「掉线」「请切换线路」这种把问题推回给用户的说法 ——
+/// 用户不用自己点任何线路，App 已经把全部线路和全部源都试过了。
+const String fxFallbackAllFailedText = '这部片暂时播不了，已帮你试过全部线路';
 
 /// 切源成功后的 toast 前缀，后面接源名。
 const String fxFallbackSwitchedPrefix = '已切换到';
@@ -50,6 +69,52 @@ String fxFallbackSwitchedText(String sourceName) {
       ? '$fxFallbackSwitchedPrefix其他源'
       : '$fxFallbackSwitchedPrefix$name';
 }
+
+/* ------------------------------------------------------------ 线路冷却期 */
+
+/// 一条线路失败后的「临时不可用」时长（用户定稿：10 分钟）。
+///
+/// 10 分钟内不再试它（可能是当时网络抖动，也可能是真坏了），10 分钟后
+/// 自动恢复原来的权重 —— 不给用户留一条永久拉黑的线路。
+const Duration fxLineCooldownWindow = Duration(minutes: 10);
+
+/// 冷却期是否仍然有效：[failedAtMs] 是失败时刻（毫秒时间戳，0 = 没记录）。
+bool fxCoolingActive(int failedAtMs, int nowMs) {
+  if (failedAtMs <= 0) return false;
+  final gap = nowMs - failedAtMs;
+  if (gap < 0) return true;
+  return gap < fxLineCooldownWindow.inMilliseconds;
+}
+
+/// 单条线路的失败原因归类（日志里的 `reason=`，也是冷却判定的依据）。
+///
+/// 判定规则（用户定稿）：
+/// ```
+/// 8 秒没出首帧             → no_first_frame
+/// 首帧出了但缓冲超过 10 秒  → buffering_timeout
+/// 直接 403 / 404 / 解析错误 → http_403 / http_404 / parse_error（不等 8 秒）
+/// 其它                     → open_failed
+/// ```
+String fxOpenFailReason({
+  required int elapsedMs,
+  String error = '',
+}) {
+  final text = error.trim().toLowerCase();
+  if (text.contains('403') || text.contains('forbidden')) return 'http_403';
+  if (text.contains('404') || text.contains('not found')) return 'http_404';
+  if (text.contains('解析') ||
+      text.contains('parse') ||
+      text.contains('unsupported')) {
+    return 'parse_error';
+  }
+  if (elapsedMs >= fxOpenFirstFrameTimeout.inMilliseconds - 500) {
+    return 'no_first_frame';
+  }
+  return 'open_failed';
+}
+
+/// 首帧之后连续缓冲多久算失败（用户定稿：10 秒）。
+const Duration fxBufferingFailTimeout = Duration(seconds: 10);
 
 /* -------------------------------------------------------------- 片名归一化 */
 
@@ -249,6 +314,41 @@ String fxFallbackSkipLog({
   final a = from.trim().isEmpty ? '未知' : from.trim();
   return 'fallback level=$level skip from=$a reason=$reason';
 }
+
+/// 自动换线路的一步日志：
+/// `auto line=2/11 name=红牛 result=fail reason=no_first_frame`。
+///
+/// `reason`：`no_first_frame`（8 秒没出首帧）/ `open_failed`（其它失败）/ `ok`。
+String fxAutoLineLog({
+  required int attempt,
+  required int total,
+  required String name,
+  required bool ok,
+  String reason = '',
+}) {
+  final a = attempt < 1 ? 1 : attempt;
+  final t = total < a ? a : total;
+  final label = name.trim().isEmpty ? '未知线路' : name.trim();
+  final tail = ok ? 'ok' : (reason.trim().isEmpty ? 'open_failed' : reason.trim());
+  return 'auto line=$a/$t name=$label result=${ok ? 'ok' : 'fail'} '
+      'reason=$tail';
+}
+
+/// 第 3 段里「这一轮查了哪个源、有没有命中」。
+///
+/// 咕噜内容最全、速度也快，所以它是**第一个**要查的外部源；这一条日志回答
+/// 「到底先查了谁、结果如何」：`fallback source=咕噜 hit=true`。
+String fxFallbackSourceLog({required String source, required bool hit}) {
+  final name = source.trim().isEmpty ? '未知' : source.trim();
+  return 'fallback source=$name hit=$hit';
+}
+
+/// 第 3 段优先查的源名（肥猫那一批里内容最全、速度最快的那一条）。
+const String fxFallbackPreferredSource = '咕噜';
+
+/// 这个名字是不是「优先查」的那条源。
+bool fxIsPreferredSource(String name) =>
+    name.trim().isNotEmpty && name.contains(fxFallbackPreferredSource);
 
 /// 换源起播日志：`resume ep=5 pos=754000ms from=幻想 to=咕噜`。
 String fxFallbackResumeLog({

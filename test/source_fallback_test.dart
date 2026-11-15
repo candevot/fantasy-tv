@@ -218,6 +218,40 @@ void main() {
     expect(out.reason, 'jar_missing');
   });
 
+  test('第 3 段：咕噜优先于其它源（即使别的源年份更接近）', () async {
+    final fb = FxSourceFallback(
+      title: '济公传',
+      year: 2016,
+      currentId: '100',
+      sourceName: '幻想',
+      searchOwn: (kw) async => const <VideoCard>[],
+      fetchDetail: (id) async => _detail(id: id, title: '济公传', year: 2016),
+      searchExternal: (kw, tried) async => FxExternalHits(
+        triedKeys: const <String>['other|http://a', 'gl|http://b'],
+        hits: <FxExternalHit>[
+          // 配置顺序里排在前面、年份也正好对上的「别的源」
+          FxExternalHit(
+            card: _card(id: '@src:other::1', title: '济公传', year: 2016),
+            sourceName: '剧圈',
+            sourceKey: 'other|http://a',
+            priority: 1,
+          ),
+          // 咕噜：priority 0，必须先用它
+          FxExternalHit(
+            card: _card(id: '@src:gl::2', title: '济公传', year: 2015),
+            sourceName: fxFallbackPreferredSource,
+            sourceKey: 'gl|http://b',
+            priority: 0,
+          ),
+        ],
+      ),
+    );
+    final out = await fb.find(ep: 2);
+    expect(out.hit, isTrue);
+    expect(out.candidate!.sourceName, fxFallbackPreferredSource);
+    expect(out.candidate!.videoId, '@src:gl::2');
+  });
+
   test('降级只发生在集号合法时', () async {
     final fb = FxSourceFallback(
       title: '济公传',

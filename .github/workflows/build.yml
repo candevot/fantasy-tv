@@ -192,7 +192,16 @@ jobs:
       # 全部逐条钉住。
       - name: Playback source fallback regressions
         run: |
+          # 规则层（纯函数）与决策层（注入假源）分开跑：
+          #   · fallback_match：片名归一化 / 年份上限 / 解说预告排除 /
+          #     集号对齐 / 进度接续 / 日志格式；
+          #   · source_fallback：走哪一段、排除自己、集数不够不换、
+          #     只切一次、triedSources 生效、jar 没装如实上报。
           flutter test test/fallback_match_test.dart
+          flutter test test/source_fallback_test.dart
+          # LINE_COOLDOWN：失败线路 10 分钟不再试、本次播放内沉底、
+          # 下次排序同分辨率下排后面、重试/播成功清记录。
+          flutter test test/line_cooldown_test.dart
           dart run tools/test_fallback_match.dart
       # JAR_PLUGIN（2026-11-15）：肥猫那 41 个 csp_ 源的 jar 插件链路。
       # 原生侧进度 / 自检回传的结构 -> Dart 模型；失败原因必须能翻译成
