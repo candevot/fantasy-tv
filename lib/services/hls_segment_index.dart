@@ -154,9 +154,7 @@ class HlsSegmentIndex {
   /// 所以它**绝对不能**被第二次抓取：否则索引这一路把令牌用掉，
   /// 播放器随后那条请求就是 403，用户看到的是「清单拿到了、0 KB/s」。
   static final RegExp _wrappedPlaylist = RegExp(
-    // lz = 量子分享页解析（/hxparse/lz?u=...），同样是一次一解析，
-    // 预载或重复抓清单会把这一次配额烧掉。
-    r'/hxparse/(?:xo|play|parse|lz)(?:/|\?|$)',
+    r'/hxparse/(?:xo|play|parse)(?:/|\?|$)',
     caseSensitive: false,
   );
 
