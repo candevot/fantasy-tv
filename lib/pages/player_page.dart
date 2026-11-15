@@ -16,6 +16,7 @@ import '../services/fallback_match.dart';
 import '../services/playback_progress.dart';
 import '../services/hls_segment_index.dart';
 import '../services/line_cooldown.dart';
+import '../services/line_health.dart';
 import '../services/line_probe.dart';
 import '../services/iq_codec_gate.dart';
 import '../services/iqiyi_codec.dart';
@@ -1234,6 +1235,24 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // `.timeout(8s)` —— 慢网必误杀（几十 KB/s 拉 4K 清单 + 首片，
         // 20 秒才出首帧很正常）。现在交给 [_awaitOpenWithProgress]：
         // 有进展就一直等，连续 8 秒三项全不动才判失败。
+        // PROBE_PARALLEL（2026-11-15）：预检结果只写进线路健康档案
+        // （详情页排序用），不再参与起播判定 —— 播放器那边已经改成和 open
+        // 并行跑，这里只负责把「这条线路好/坏」记下来给下次排序参考。
+        controller.onProbeResult = (result) {
+          // 预检结果单独一条日志（格式固定，排障用 grep）：
+          //   [FxPlay] probe line=幻想4K ok=true stage=segment
+          //   [FxPlay] probe line=mgtv ok=false stage=manifest reason=http_404
+          // 预检现在是并行的，日志在这里出（拿到线路名 + 一定只出一次），
+          // 不再依赖「open 返回时 lastProbe 已经就绪」。
+          fxPlayLog(fxProbeLogMessage(line: openLineName, probe: result));
+          unawaited(
+            LineHealth.instance.record(
+              vodId: widget.videoId,
+              lineName: openLineName,
+              ok: result.ok,
+            ),
+          );
+        };
         final openFuture = controller
             .open(
               url,
@@ -1572,15 +1591,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                   elapsedMs: watch.elapsedMilliseconds,
                   error: _lastOpenError,
                 );
-          // PROBE（2026-11-15）：预检结果单独一条日志，格式固定：
-          //   [FxPlay] probe line=幻想4K ok=true stage=segment
-          //   [FxPlay] probe line=mgtv ok=false stage=manifest reason=http_404 → switch
-          final probe = _controller?.lastProbe;
-          if (probe != null && !probe.skipped) {
-            fxPlayLog(
-              fxProbeLogMessage(line: candidate.displayName, probe: probe),
-            );
-          }
+          // PROBE（2026-11-15）：预检日志已经挪到 `onProbeResult` 回调里
+          // （预检改成并行后，这里读 `lastProbe` 时它多半还没回来）。
           fxPlayLog(
             fxAutoLineLog(
               attempt: attempt,

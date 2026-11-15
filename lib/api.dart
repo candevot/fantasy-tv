@@ -6,7 +6,6 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
-import 'services/cms_api.dart';
 
 /// 服务器接口。
 ///
@@ -662,15 +661,11 @@ class Api {
     if (scheme != 'http' && scheme != 'https') return '';
     // 归一化协议 / 主机大小写并转义空格，ImageProvider 的缓存键才稳定。
     final norm = uri.toString();
-    // IMG_PROXY（2026-11-15）：外站海报多是 webp，还有防盗链/证书问题，App 里
-    // 经常整块退回首字占位（首页、相关推荐、肥猫源都踩过）。
-    // 统一走 CMS 站点的图片代理：补 Referer、webp 转 jpeg、落盘缓存 30 天；
-    // 任何环节失败都会 302 回原图，最坏情况等于直连。
-    //
-    // 端点必须用 [CmsApi.root] + `/pic`：代理部署在 CMS 站点（80 端口）上，
-    // 而 [Api.base] 指的是 8787 后端，拼出来是 404（会把全站海报打挂）。
-    if (norm.contains('/pic?u=')) return norm;
-    return '${CmsApi.root}/pic?u=${Uri.encodeComponent(norm)}';
+    // IMG_DIRECT（2026-11-15）：正常一律直连——CMS 的 vod_pic 本来就是第三方图床
+    // 的绝对地址，直连最快，也不依赖我们服务器。
+    // 直连失败时由 FxNetworkImage 用 [fxImageProxyUrl] 走后端 `/api/img` 再试一次，
+    // 这样既不会让所有海报都绕一圈服务器，也不会因为 webp/防盗链整块退回首字。
+    return norm;
   }
 }
 

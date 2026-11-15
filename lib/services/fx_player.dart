@@ -398,6 +398,14 @@ class FxPlayer implements Listenable {
 
   FxLineProbeResult? _lastProbe;
 
+  /// 预检结果回调（**只用于更新线路健康度 / 排序参考**，不参与起播判定）。
+  ///
+  /// PROBE_PARALLEL（2026-11-15）：预检已经改成和 open 并行跑，结果到得比
+  /// open 早也早不早都无所谓 —— 页面拿它写 `LineHealth`（"播放页的预检也会
+  /// 写进来，两边共用同一份档案"），下次详情页排序就会把这条线路降权。
+  /// 播放器本身不碰这份档案：它不知道 vodId / 线路名，只有页面有。
+  void Function(FxLineProbeResult result)? onProbeResult;
+
   /// 看门狗采样间隔。ExoPlayer 的状态事件本来就不密，4 秒够。
   static const Duration _watchdogTick = Duration(seconds: 4);
 
@@ -882,23 +890,20 @@ class FxPlayer implements Listenable {
         if (identical(_ready, ready)) _ready = null;
         return;
       }
-      // PROBE（2026-11-15）：起播前先确认这条线路本身是好的。
-      // 预检失败 = 线路坏了（不是网慢）→ 立刻判失败，页面马上换下一条，
-      // 不用等 8 秒无进展窗口；预检通过才交给播放器去等首帧（慢网最多 30 秒）。
-      final probe = await _probeSource(source, token, startPositionMs);
-      if (probe == null) {
-        if (identical(_ready, ready)) _ready = null;
-        return;
-      }
-      if (!probe.ok) {
-        _noteStartupFailure(
-          probe.failureCode,
-          resolveFailure: fxIsResolveFailureCode(probe.failureCode),
-        );
-        _fail('线路预检失败（${probe.stage}:${probe.reason}）');
-        if (identical(_ready, ready)) _ready = null;
-        throw FxPlayerException('线路预检失败(${probe.failureCode})');
-      }
+      // PROBE_PARALLEL（2026-11-15）：预检改为**并行**，不再阻塞起播。
+      //
+      // 用户口径：秒开是硬指标，预检只做「健康度评分 + 排序参考」。
+      // 原来是 `await _probeSource(...)` 之后再 open —— 移动网下等于在起播前
+      // 多等一次清单往返（最长 8 秒），而且预检拉的首片和播放器要的首片是
+      // 同一个地址，两路请求互相抢带宽，与「秒开」直接冲突。
+      //
+      // 现在：
+      //   · 预检和 open 同时发起，**不等它**；
+      //   · open 真失败（fatalError：404/DNS/TLS/清单非法/0 分片）→ 照常立刻
+      //     判失败并换线，不等 8 秒无进展窗口；
+      //   · open 还在正常加载时预检回「线路坏」→ 不打断，只把结果回调给页面
+      //     写进健康度档案（下次排序降权）。
+      unawaited(_probeInBackground(source, token, startPositionMs));
       opened = source;
       await _openMedia(
         source,
@@ -1048,6 +1053,29 @@ class FxPlayer implements Listenable {
         _fail('网速太慢，已自动换下一条线路');
         throw const FxPlayerException('慢网超时(30s)');
       }
+    }
+  }
+
+  /// 后台预检：跑完只把结果交出去，**不改变播放状态**。
+  ///
+  /// PROBE_PARALLEL（2026-11-15）：从 `_openInternal` 里 fire-and-forget 调用。
+  /// 结果要么写进健康度档案（页面回调），要么写进日志 —— 绝不 `_fail`，
+  /// 也不 dispose 播放器：这时画面可能已经在正常播了，预检说坏只是参考。
+  Future<void> _probeInBackground(
+    _PlaybackSource source,
+    int token,
+    int startPositionMs,
+  ) async {
+    final result = await _probeSource(source, token, startPositionMs);
+    if (result == null || result.skipped) return;
+    if (_disposed || token != _openToken) return;
+    final sink = onProbeResult;
+    if (sink == null) return;
+    try {
+      sink(result);
+    } catch (error) {
+      // 回调只更新排序参考，出错也不能影响播放。
+      _logFx('PROBE 结果回调异常（忽略）: $error');
     }
   }
 

@@ -85,6 +85,14 @@ const Color _fxImageHighlight = Color(0xFFF4F6FA);
 ///
 /// 与 [FxNetworkImage] 使用完全相同的 URL 和 cacheWidth，首页
 /// [precacheImage] 才能命中同一份缓存，不会重复请求。
+/// 图片代理地址：直连失败时用它再试一次。走 8787 后端自带的 `/api/img`。
+String fxImageProxyUrl(String url) {
+  final u = url.trim();
+  if (u.isEmpty || u.startsWith('data:')) return '';
+  if (u.contains('/img?u=') || u.contains('/pic?u=')) return '';
+  return '${Api.base}/img?u=${Uri.encodeComponent(u)}';
+}
+
 ImageProvider<Object>? fxImageProvider(
   String url, {
   int? cacheWidth,
@@ -278,9 +286,15 @@ class _FxNetworkImageState extends State<FxNetworkImage> {
     if (oldWidget.url != widget.url) {
       _loaded = false;
       _timedOut = false;
+      _viaProxy = false;
       _arm();
     }
   }
+
+  /// IMG_RETRY（2026-11-15）：外站海报直连失败时（webp/防盗链/证书），
+  /// 用后端的图片代理再试一次，而不是直接退回首字占位。
+  /// 只在失败后切一次，不会来回打；代理也失败才显示占位。
+  bool _viaProxy = false;
 
   void _arm() {
     _watchdog?.cancel();
@@ -308,7 +322,7 @@ class _FxNetworkImageState extends State<FxNetworkImage> {
   @override
   Widget build(BuildContext context) {
     final provider = fxImageProvider(
-      widget.url,
+      _viaProxy ? fxImageProxyUrl(widget.url) : widget.url,
       cacheWidth: widget.cacheWidth,
       cacheHeight: widget.cacheHeight,
     );
@@ -332,7 +346,15 @@ class _FxNetworkImageState extends State<FxNetworkImage> {
           _loaded = true;
           return FxFadeIn(child: child);
         },
-        errorBuilder: (context, error, stackTrace) => _fallback(),
+        errorBuilder: (context, error, stackTrace) {
+          if (!_viaProxy && fxImageProxyUrl(widget.url).isNotEmpty) {
+            // 直连失败 → 换代理再试一次（下一帧生效）
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) setState(() => _viaProxy = true);
+            });
+          }
+          return _fallback();
+        },
       );
     }
     if (widget.width == null && widget.height == null) return image;
