@@ -9,6 +9,7 @@ import '../services/cms_bridge.dart';
 import '../services/search_rank.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
+import '../services/episode_step.dart';
 import '../services/exo_player.dart';
 import '../services/fx_player.dart';
 import '../services/fx_video_geometry.dart';
@@ -342,6 +343,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     return fxEpisodeLabel(n);
   }
+
+  /// 通知栏 / 锁屏媒体卡片的封面地址（MEDIA_SESSION，2026-11-15）。
+  ///
+  /// 用的是详情接口的竖版封面：系统媒体卡片是竖排的（和 B 站 / 影视壳一致），
+  /// 横版 backdrop 放在那儿会被裁成中间一条。
+  String get _coverUrl => (widget.detail?.cover ?? '').trim();
 
   /// 当前线路名：优先用接口返回的线路名，其次从详情线路表里按 id 查。
   String get _lineName {
@@ -1011,6 +1018,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     final line = lineOverride ?? _line;
     final ep = epOverride ?? _ep;
+    // MEDIA_SESSION（2026-11-15）：封面提前暖到原生缓存。
+    //
+    // 通知 / 锁屏的封面读的是 MediaMetadata.artworkUri，而 MediaMetadata 在
+    // prepare 之前就定死了 —— 等通知要显示封面再下载已经来不及（那会儿还在
+    // 抢起播带宽）。放在这里：解析地址那几百毫秒正好够把这张图下完，
+    // open 时原生就能直接给 file:// 地址。失败只是通知上少张图，不影响播放。
+    unawaited(ExoPlayerEngine.warmArtwork(_coverUrl));
     // 同一 url+line+ep 正在打开时忽略重复请求（防抖），
     // 避免 didUpdateWidget / 连点「下一集」并发 open 造成双播放器与内存翻倍。
     final key = '$line|$ep';
@@ -1220,10 +1234,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       final url = target.url;
       if (target.degradeFromHevc) fxPlayLog(iqDegradeLog(url));
       final controller = reusable ?? FxPlayer.create();
-      // BG_SERVICE（2026-11-15）：通知栏标题「片名 · 第N集」。
-      // 在 open 之前登记：原生是「首次真的出声」才 startForeground，
+      // BG_SERVICE / MEDIA_SESSION（2026-11-15）：通知栏 + 锁屏的
+      // 「片名 / 第N集 · 线路名 / 封面」。在 open 之前登记：原生会把这份
+      // 元数据挂到 MediaItem 上（prepare 之后再改就得重新起播），
       // 换集 / 换线路时这里会带着新集号重登记一次。
-      controller.setBackgroundMedia(_title, ep);
+      controller.setBackgroundMedia(
+        _title,
+        ep,
+        line: openLineName,
+        cover: _coverUrl,
+        hasPrev: _hasEpStep(ep, -1),
+        hasNext: _hasEpStep(ep, 1),
+      );
+      // 媒体按键（通知栏 / 锁屏 / 耳机线控 / 车机）的上一集 / 下一集。
+      // 每次 open 都重挂一次：复用同一个 FxPlayer 实例时旧的闭包可能已经
+      // 指向上一轮的页面状态。
+      controller.onEpisodeStep = _handleMediaStep;
       if (mounted) setState(() => _loadingPlayer = controller);
       try {
         fxPlayLog(
@@ -2144,6 +2170,36 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       playOverride: !_covered && _shouldContinuePlayback(),
     );
   }
+
+  /// 系统媒体控件（通知栏 / 锁屏 / 耳机线控 / 车机）的上一集 / 下一集。
+  ///
+  /// MEDIA_SESSION（2026-11-15）：原生只把「用户按了、方向是啥」抛过来，
+  /// 真正的切集在这里做 —— 走的还是页面上那条 `_switchEpisode`，
+  /// 和用户自己点「下一集」完全同一条路径（存进度、换线路、续播位置、
+  /// 上报 onEpChange 全都在里面）。
+  void _handleMediaStep(int delta) {
+    if (!mounted) return;
+    final next = delta > 0 ? _nextEpNumber() : _prevEpNumber();
+    if (next == null) {
+      // 已经是第一集 / 最后一集：保持当前画面，不动播放。
+      fxPlayLog('媒体按键：没有${delta > 0 ? "下一集" : "上一集"}了');
+      return;
+    }
+    fxPlayLog('媒体按键：切到第$next集');
+    unawaited(_switchEpisode(next));
+  }
+
+  /// 第 [ep] 集有没有相邻集（[delta] = -1 上一集 / +1 下一集）。
+  ///
+  /// MEDIA_SESSION（2026-11-15）：系统媒体控件是**按可用性**渲染上一集 /
+  /// 下一集按钮的 —— 最后一集上还挂一个按了没反应的「下一集」，比没有更糟。
+  /// 口径和 [_nextEpNumber] / [_prevEpNumber] 保持一致：有明确集数表就按表，
+  /// 只有总集数就按总集数算（总集数为 0 = 单片，两个方向都没有）。
+  bool _hasEpStep(int ep, int delta) =>
+      fxHasAdjacentEpisode(_episodeList, ep, delta, _episodeCount);
+
+  /// 上一集（和 [_nextEpNumber] 同一套口径：明确集数表优先，否则按总集数算）。
+  int? _prevEpNumber() => fxAdjacentEpisode(_episodeList, _ep, -1, _episodeCount);
 
   int? _nextEpNumber() {
     final list = _episodeList;

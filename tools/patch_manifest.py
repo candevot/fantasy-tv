@@ -67,7 +67,17 @@ POST_NOTIFICATIONS = 'android.permission.POST_NOTIFICATIONS'
 IGNORE_BATTERY = 'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
 PLAYBACK_SERVICE = '.PlaybackService'
 PLAYBACK_SERVICE_TYPE = 'mediaPlayback'
+# MEDIA_SESSION（2026-11-15）：服务从「裸 Service」升级成 media3 的
+# MediaSessionService。系统靠这个 intent-filter 认出「本应用提供媒体会话」，
+# 通知栏媒体卡片、锁屏控件、负一屏媒体中心、蓝牙耳机按键、车机全都通过它
+# 找到我们；少了这一行，session 建得起来但系统不认，通知退回普通样式。
+MEDIA_SESSION_SERVICE_ACTION = 'androidx.media3.session.MediaSessionService'
 PLAYBACK_ICON_RES = 'android/app/src/main/res/drawable/ic_stat_fx_play.xml'
+# 通知渠道名（media3 的 DefaultMediaNotificationProvider 要求传 string 资源 id）。
+STRINGS_RES = 'android/app/src/main/res/values/strings.xml'
+CHANNEL_STRING_NAME = 'fx_bg_channel'
+CHANNEL_STRING_TEXT = '后台播放'
+
 PLAYBACK_ICON_XML = '''<?xml version="1.0" encoding="utf-8"?>
 <!-- 通知栏小图标：必须单色（系统会整体染色），所以只画一个白色播放三角。 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
@@ -185,7 +195,7 @@ def ensure_file_provider(app):
 
 
 def ensure_playback_service(app):
-    """确保 <application> 里声明后台播放服务；返回说明文字。"""
+    """确保 <application> 里声明后台播放服务（MediaSessionService）；返回说明文字。"""
     target = None
     created = False
     for el in app.findall('service'):
@@ -201,12 +211,54 @@ def ensure_playback_service(app):
     if target.get(attr('foregroundServiceType')) != PLAYBACK_SERVICE_TYPE:
         target.set(attr('foregroundServiceType'), PLAYBACK_SERVICE_TYPE)
         changed = changed or 'foregroundServiceType'
-    # exported=false：这个服务只由本应用的广播 / PendingIntent 唤起，
-    # 不接受外部应用绑定。
+    # exported=false：这个服务只由本应用的 PendingIntent / 线控唤起，
+    # 不接受外部应用直接 bind。系统媒体控件走的是 framework MediaSession，
+    # 不需要 bind 我们的服务。
     if target.get(attr('exported')) != 'false':
         target.set(attr('exported'), 'false')
         changed = changed or 'exported'
+    # MEDIA_SESSION：intent-filter 必须声明 media3 的服务 action。
+    wanted_filter = None
+    for flt in target.findall('intent-filter'):
+        for action in flt.findall('action'):
+            if (action.get(attr('name')) or '').strip() == \
+                    MEDIA_SESSION_SERVICE_ACTION:
+                wanted_filter = flt
+                break
+        if wanted_filter is not None:
+            break
+    if wanted_filter is None:
+        wanted_filter = ET.SubElement(target, 'intent-filter')
+        action = ET.SubElement(wanted_filter, 'action')
+        action.set(attr('name'), MEDIA_SESSION_SERVICE_ACTION)
+        changed = (changed + '+intent-filter') if changed else 'intent-filter'
     return changed
+
+
+def ensure_channel_string():
+    """写 res/values/strings.xml 里的通知渠道名；返回是否新建 / 补写。"""
+    directory = os.path.dirname(STRINGS_RES)
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+    body = ''
+    if os.path.exists(STRINGS_RES):
+        with io.open(STRINGS_RES, encoding='utf-8') as handle:
+            body = handle.read()
+        if ('name="%s"' % CHANNEL_STRING_NAME) in body:
+            return False
+    entry = '    <string name="%s">%s</string>\n' % (
+        CHANNEL_STRING_NAME, CHANNEL_STRING_TEXT)
+    if not body.strip():
+        body = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                '<resources>\n%s</resources>\n' % entry)
+    elif '</resources>' in body:
+        body = body.replace('</resources>', entry + '</resources>')
+    else:
+        body = body + '\n<resources>\n' + entry + '</resources>\n'
+    with io.open(STRINGS_RES, 'w', encoding='utf-8') as handle:
+        handle.write(body)
+    return True
+
 
 
 def ensure_playback_icon():
@@ -273,6 +325,8 @@ def patch(root):
         notes.append('PlaybackService %s' % service)
     if ensure_playback_icon():
         notes.append('%s written' % PLAYBACK_ICON_RES)
+    if ensure_channel_string():
+        notes.append('%s written' % STRINGS_RES)
 
     if app.get(attr('usesCleartextTraffic')) != 'true':
         app.set(attr('usesCleartextTraffic'), 'true')
@@ -340,9 +394,33 @@ def validate(root):
                                               attr('foregroundServiceType'))))
         if playback.get(attr('exported')) != 'false':
             problems.append('PlaybackService android:exported must be false')
+        # MEDIA_SESSION：没有这个 intent-filter，系统不会把我们当媒体应用，
+        # 通知退回普通样式（无封面 / 无进度 / 不锁屏），这也是本轮的验收点。
+        has_session_filter = False
+        for flt in playback.findall('intent-filter'):
+            for action in flt.findall('action'):
+                if (action.get(attr('name')) or '').strip() == \
+                        MEDIA_SESSION_SERVICE_ACTION:
+                    has_session_filter = True
+                    break
+            if has_session_filter:
+                break
+        if not has_session_filter:
+            problems.append('PlaybackService missing <intent-filter> action %s'
+                            % MEDIA_SESSION_SERVICE_ACTION)
 
     if not os.path.isfile(PLAYBACK_ICON_RES):
         problems.append('missing %s (notification icon)' % PLAYBACK_ICON_RES)
+    # 通知渠道名是 DefaultMediaNotificationProvider 唯一的字符串参数：
+    # R.string.fx_bg_channel 不存在时 Kotlin 编译直接失败（不是运行时）。
+    if not os.path.isfile(STRINGS_RES):
+        problems.append('missing %s (notification channel name)' % STRINGS_RES)
+    else:
+        with io.open(STRINGS_RES, encoding='utf-8') as handle:
+            strings_body = handle.read()
+        if ('name="%s"' % CHANNEL_STRING_NAME) not in strings_body:
+            problems.append('%s must declare <string name="%s">'
+                            % (STRINGS_RES, CHANNEL_STRING_NAME))
 
     provider = None
     for el in app.findall('provider'):
@@ -477,6 +555,8 @@ def validate_ok_lines(root):
     yield 'service=%s foregroundServiceType=%s' % (PLAYBACK_SERVICE,
                                                    PLAYBACK_SERVICE_TYPE)
     yield 'notification_icon=%s' % PLAYBACK_ICON_RES
+    yield 'channel_string=%s name=%s' % (STRINGS_RES, CHANNEL_STRING_NAME)
+    yield 'media_session_action=%s' % MEDIA_SESSION_SERVICE_ACTION
     yield 'usesCleartextTraffic=%s' % app.get(attr('usesCleartextTraffic'))
     yield 'label=%s' % app.get(attr('label'))
     yield 'icon=%s' % app.get(ICON_ATTR)

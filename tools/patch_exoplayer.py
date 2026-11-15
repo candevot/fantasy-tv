@@ -31,29 +31,42 @@ OKHTTP_VERSION = '4.12.0'
 # 播放传输层：OkHttpDataSource（HTTP/2 + 全局连接池 + trust-all + 兜底 UA）。
 # DefaultHttpDataSource 走 HttpURLConnection，每次 302 换域都重开 TCP+TLS，
 # 移动网一次 100~600ms —— 那是起播慢的主因，见 PlayerHttp.kt。
-TRANSPORT_DEPS = (
-    "    implementation 'androidx.media3:media3-datasource-okhttp:%s'\n"
-    "    implementation 'com.squareup.okhttp3:okhttp:%s'\n"
-) % (MEDIA3_VERSION, OKHTTP_VERSION)
+#
+# MEDIA_SESSION（2026-11-15）：**media3-session 是新增的主力**。
+# 后台播放从「裸 Service + 手绘通知」换成 MediaSessionService + MediaSession，
+# 系统媒体卡片（封面 / 进度条 / 上一集下一集）、锁屏控件、负一屏媒体中心、
+# 耳机线控、车机全靠它。它和 media3-exoplayer 同一个版本号，不额外引依赖。
+MEDIA3_MODULES = (
+    'media3-exoplayer',
+    'media3-exoplayer-hls',
+    'media3-ui',
+    'media3-datasource',
+    'media3-datasource-okhttp',
+    'media3-session',
+)
 
-TRANSPORT_DEPS_KTS = (
-    '    implementation("androidx.media3:media3-datasource-okhttp:%s")\n'
-    '    implementation("com.squareup.okhttp3:okhttp:%s")\n'
-) % (MEDIA3_VERSION, OKHTTP_VERSION)
 
-DEPS = (
-    "    implementation 'androidx.media3:media3-exoplayer:%s'\n"
-    "    implementation 'androidx.media3:media3-exoplayer-hls:%s'\n"
-    "    implementation 'androidx.media3:media3-ui:%s'\n"
-    "    implementation 'androidx.media3:media3-datasource:%s'\n"
-) % (MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION, MEDIA3_VERSION) + TRANSPORT_DEPS
+def dep_lines(is_kts):
+    """(坐标, 该行 Gradle 文案) —— 按需补：已有的一条都不重复插。"""
+    lines = []
+    for module in MEDIA3_MODULES:
+        coord = 'androidx.media3:%s' % module
+        if is_kts:
+            text = '    implementation("%s:%s")\n' % (coord, MEDIA3_VERSION)
+        else:
+            text = "    implementation '%s:%s'\n" % (coord, MEDIA3_VERSION)
+        lines.append((coord, text))
+    okhttp = [
+        ('com.squareup.okhttp3:okhttp', OKHTTP_VERSION),
+    ]
+    for coord, version in okhttp:
+        if is_kts:
+            text = '    implementation("%s:%s")\n' % (coord, version)
+        else:
+            text = "    implementation '%s:%s'\n" % (coord, version)
+        lines.append((coord, text))
+    return lines
 
-DEPS_KTS = '\n'.join([
-    '    implementation("androidx.media3:media3-exoplayer:%s")' % MEDIA3_VERSION,
-    '    implementation("androidx.media3:media3-exoplayer-hls:%s")' % MEDIA3_VERSION,
-    '    implementation("androidx.media3:media3-ui:%s")' % MEDIA3_VERSION,
-    '    implementation("androidx.media3:media3-datasource:%s")' % MEDIA3_VERSION,
-]) + '\n' + TRANSPORT_DEPS_KTS
 
 REGISTER_MARK = '// FX_EXOPLAYER_REGISTER'
 
@@ -83,12 +96,13 @@ def copy_sources():
 
 
 def patch_gradle():
-    """给 app/build.gradle(.kts) 加 Media3 + OkHttp 依赖
+    """给 app/build.gradle(.kts) 加 Media3（含 session）+ OkHttp 依赖
 
     三种情况都要能收敛：
-      · 全新模板（CI 每次 flutter create）→ 4 条 media3 + 2 条传输层一起插；
-      · 已经打过 media3、但没有 okhttp（旧缓存模板）→ 只补传输层那 2 条；
-      · 两条都在 → 跳过。
+      · 全新模板（CI 每次 flutter create）→ 全部依赖一起插；
+      · 已经打过 media3、但没有 media3-session / okhttp（旧缓存模板）→
+        只补缺的那几条（**MEDIA_SESSION 就是靠这条补齐的**）；
+      · 全都在 → 跳过。
     """
     cands = ['android/app/build.gradle.kts', 'android/app/build.gradle']
     path = next((p for p in cands if os.path.exists(p)), None)
@@ -97,21 +111,15 @@ def patch_gradle():
     src = io.open(path, encoding='utf-8').read()
 
     is_kts = path.endswith('.kts')
-    have_media3 = 'media3-exoplayer' in src
-    have_okhttp = 'com.squareup.okhttp3' in src or 'okhttp3:okhttp' in src
-    if have_media3 and have_okhttp:
-        print('  Media3 / OkHttp 依赖已存在，跳过')
+    missing = [(coord, text) for coord, text in dep_lines(is_kts)
+               if coord not in src]
+    if not missing:
+        print('  Media3(含 session) / OkHttp 依赖已存在，跳过')
         return path
 
-    if have_media3:
-        block = TRANSPORT_DEPS_KTS if is_kts else TRANSPORT_DEPS
-        print('  Media3 已在，补 OkHttp 传输层依赖：%s / %s' % (MEDIA3_VERSION, OKHTTP_VERSION))
-    else:
-        block = DEPS_KTS if is_kts else DEPS
-        print('  加 Media3 %s + OkHttp %s 依赖' % (MEDIA3_VERSION, OKHTTP_VERSION))
-
-    if not block.endswith('\n'):
-        block += '\n'
+    block = ''.join(text for _coord, text in missing)
+    print('  补 %d 条依赖：%s' % (
+        len(missing), ', '.join(coord for coord, _ in missing)))
 
     m = re.search(r'dependencies\s*\{', src)
     if not m:

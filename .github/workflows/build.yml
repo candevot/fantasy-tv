@@ -172,6 +172,65 @@ jobs:
             exit 1
           fi
           flutter test test/fx_net_speed_test.dart
+      # MEDIA_SESSION（2026-11-15）：后台播放从「裸 Service + 手绘通知」升级成
+      # media3 的 MediaSessionService + MediaSession，做到和 B 站 / 影视壳一样
+      # 的系统媒体卡片（封面 + 片名/第N集 + 进度条 + 上一集下一集，锁屏 / 负一屏 /
+      # 耳机线控 / 车机都能控制）。
+      #
+      # 这里钉死「掉了就会静默退化」的几件事 —— 任何一条缺失，APK 都能正常装、
+      # 正常播，只是通知退回普通样式，用户不投诉就发现不了：
+      #   · 服务基类是 MediaSessionService，provider 用 media3 默认那套（不自绘布局）；
+      #   · 元数据挂在 MediaItem 上（title / artist+albumTitle=第N集·线路名 / artworkUri），
+      #     且 session 绑的是**同一个** ExoPlayer 实例（currentPlayer，不新建）；
+      #   · 「上一集/下一集」靠 ForwardingPlayer 声明命令并转给 Dart（单集列表天然没有）；
+      #   · 播放器 release 之前必须先摘 session（否则 media3 读已释放 player 会崩）；
+      #   · 反面：PlaybackService 里不许再出现手绘 Notification.Builder / startForeground。
+      # 构建后还会在 APK 里查 dex 与 manifest（verify_apk.py 的 media session 段）。
+      - name: MediaSession (system media card) regressions
+        run: |
+          set -e
+          K=android_src/kotlin/com/huanxiang/fantasy_tv
+          grep -q 'class PlaybackService : MediaSessionService()' $K/PlaybackService.kt
+          grep -q 'MediaSession.Builder' $K/PlaybackService.kt
+          grep -q 'DefaultMediaNotificationProvider' $K/PlaybackService.kt
+          grep -q 'setMediaNotificationProvider' $K/PlaybackService.kt
+          grep -q 'setSessionActivity' $K/PlaybackService.kt
+          grep -q 'setArtworkUri' $K/PlaybackService.kt
+          grep -q 'setAlbumTitle' $K/PlaybackService.kt
+          grep -q 'COMMAND_SEEK_TO_NEXT_MEDIA_ITEM' $K/PlaybackService.kt
+          grep -q 'ForwardingPlayer' $K/PlaybackService.kt
+          grep -q 'override fun currentPlayer(): Player' $K/ExoPlayerPlugin.kt
+          grep -q 'override fun stepEpisode(delta: Int)' $K/ExoPlayerPlugin.kt
+          # 集数边界：最后一集不该有「下一集」按钮、第一集不该有「上一集」。
+          grep -q 'override fun hasEpisodeStep(delta: Int)' $K/ExoPlayerPlugin.kt
+          grep -q 'hasPreviousMediaItem(): Boolean = stepAllowed(-1)' $K/PlaybackService.kt
+          grep -q 'PlaybackService.buildMetadata' $K/ExoPlayerPlugin.kt
+          grep -q 'PlaybackService.releaseSessionNow' $K/ExoPlayerPlugin.kt
+          grep -q 'PlaybackService.syncPlayer' $K/ExoPlayerPlugin.kt
+          # 依赖只有 media3-session（media3 的一部分，不额外引库）。
+          grep -q 'media3-session' tools/patch_exoplayer.py
+          # 清单：media3 的服务 action 必须写进 AndroidManifest。
+          grep -q 'androidx.media3.session.MediaSessionService' tools/patch_manifest.py
+          # Dart 侧：媒体按键要能落到切集，元数据要跟着 open 走。
+          grep -q 'onEpisodeStep' lib/services/fx_player.dart
+          grep -q '_handleMediaStep' lib/pages/player_page.dart
+          grep -q 'bgTitle' lib/services/exo_player.dart
+          grep -q 'warmArtwork' lib/services/exo_player.dart
+          grep -q 'fxHasAdjacentEpisode' lib/pages/player_page.dart
+          # 反向门禁：不许退回手绘通知 / 自己 startForeground（那样锁屏和媒体中心
+          # 都看不到，也拿不到上一集下一集）。
+          if grep -q 'Notification.Builder' $K/PlaybackService.kt; then
+            echo 'PlaybackService 不许手绘通知：用 media3 的 DefaultMediaNotificationProvider' >&2
+            exit 1
+          fi
+          if grep -q 'startForeground(' $K/PlaybackService.kt; then
+            echo 'startForeground 交给 media3（MediaNotificationManager），别自己抢' >&2
+            exit 1
+          fi
+          flutter test test/playback_regressions_test.dart
+          # 上一集 / 下一集按钮的边界口径（第一集 / 最后一集 / 集号不连续 / 单片）。
+          flutter test test/episode_step_test.dart
+
       # PROBE / FLOW_WATCH（2026-11-15）：把「慢网不算失败、真失败才切」钉死。
       #
       # 两个工具都是纯 dart:io（不依赖 Flutter SDK），所以用 dart run 直接跑：

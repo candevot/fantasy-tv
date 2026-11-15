@@ -188,6 +188,68 @@ def verify_manifest(gate, apk):
     icon = icon_match.group(1).strip() if icon_match else ''
     gate.require('application icon in APK', bool(icon), icon or 'not found')
 
+    # MEDIA_SESSION（2026-11-15）：后台播放服务必须声明成媒体会话服务。
+    #
+    # 这三条任何一条掉了，装到真机上就是「通知栏没有封面 / 进度条 / 上一集下一集、
+    # 锁屏不显示媒体控件」—— 而且不会有任何报错，只能靠用户来投诉。
+    # 所以在 APK 这一层直接卡住：
+    #   · FOREGROUND_SERVICE_MEDIA_PLAYBACK 权限（Android 14+ 前台播放必需）
+    #   · <service android:foregroundServiceType="mediaPlayback">
+    #   · <intent-filter><action android:name="androidx.media3.session.MediaSessionService"/>
+    media_perm = re.search(
+        r"uses-permission:\s*name='android\.permission\."
+        r"FOREGROUND_SERVICE_MEDIA_PLAYBACK'", perms.stdout)
+    gate.require('FOREGROUND_SERVICE_MEDIA_PLAYBACK permission in APK',
+                 media_perm is not None,
+                 media_perm.group(0).strip() if media_perm else 'not found')
+    xml = xmltree.stdout
+    gate.require('PlaybackService declared in APK manifest',
+                 'PlaybackService' in xml, 'service not found')
+    gate.require('PlaybackService foregroundServiceType=mediaPlayback',
+                 'foregroundServiceType' in xml, 'attribute not found')
+    gate.require(
+        'MediaSessionService intent-filter in APK manifest',
+        'androidx.media3.session.MediaSessionService' in xml,
+        'intent-filter action not found')
+
+
+def verify_media_session(gate, apk):
+    """dex 里必须真的有 media3-session（通知样式 / 锁屏控件全靠它）。
+
+    Gradle 依赖少一条、R8 把它整个裁掉，APK 都能正常装、正常播，
+    只是通知变回「普通通知」—— 这种退化在真机上才会被发现。
+    这里直接扫 dex 字符串池（class descriptor 在 dex 里就是明文字符串），
+    三条都在才算过：
+
+      · MediaSessionService       —— 我们的服务基类
+      · DefaultMediaNotificationProvider —— 封面 / 上一集下一集的通知样式
+      · PlaybackService           —— 我们自己的实现被真的打进包了
+    """
+    try:
+        zf = zipfile.ZipFile(apk)
+    except zipfile.BadZipFile as exc:
+        gate.fail('APK openable for dex scan', str(exc))
+        return
+    wanted = [
+        b'Landroidx/media3/session/MediaSessionService;',
+        b'Landroidx/media3/session/DefaultMediaNotificationProvider;',
+        b'Lcom/huanxiang/fantasy_tv/PlaybackService;',
+    ]
+    names = [n for n in zf.namelist() if n.endswith('.dex')]
+    gate.require('classes*.dex inside APK', bool(names),
+                 '%d dex files' % len(names))
+    found = {w: False for w in wanted}
+    for name in names:
+        blob = zf.read(name)
+        for w in wanted:
+            if not found[w] and w in blob:
+                found[w] = True
+    zf.close()
+    for w in wanted:
+        label = w.decode('utf-8').strip('L;')
+        gate.require('dex contains %s' % label, found[w],
+                     '' if found[w] else 'descriptor not found in any dex')
+
 
 def verify_zip(gate, apk):
     try:
@@ -361,6 +423,7 @@ def main():
         verify_elf(gate, zf, zf.namelist())
         zf.close()
     verify_manifest(gate, apk)
+    verify_media_session(gate, apk)
     verify_signature(gate, apk)
     verify_zipalign(gate, apk)
 

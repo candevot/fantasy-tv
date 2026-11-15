@@ -505,6 +505,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
 
     fun dispose() {
         // BG_SERVICE：播放器实例没了，前台服务也不能留着（留 = 空保活，费电）。
+        // MEDIA_SESSION：先同步把 MediaSession 摘掉 —— 它强引用着下面这台
+        // 播放器，播放器先释放、session 后释放的话，media3 会去读一个已释放
+        // 的 player 并抛 IllegalStateException，直接把主线程带走。
+        PlaybackService.releaseSessionNow()
         stopBackground()
         mainHandler.removeCallbacks(seekGateTimeout)
         // NET_SPEED：网速 ticker 随播放器一起收掉（没人看就不用每秒算）。
@@ -525,22 +529,64 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         mediaCache = null
     }
 
-    // ---------------------------------------- 后台播放保活（BG_SERVICE）
+    // ------------------------------- 后台播放保活 / 媒体会话（BG_SERVICE）
 
     /**
      * 为什么在原生侧持有 player 引用，而不是让通知走广播回 Dart：
      *   · 通知按钮必须在 0.1 秒内响应，绕一圈 MethodChannel 回来会晚一拍；
      *   · 切后台后 Dart 侧可能被冻结（Android 12+ 的 App Freeze），
      *     广播回去的 pause 有可能没人接；
-     *   · 播放器本来就在这个类里，直接调 `player.pause()` 最简单，
-     *     也最不容易出错（不新增依赖，不引 MediaSessionCompat）。
+     *   · 播放器本来就在这个类里，直接调 `player.pause()` 最简单。
      *
-     * 只做「播放 / 暂停」和「关闭」两件事，不新增任何暂停逻辑 ——
-     * 切后台继续播的行为完全没变，这里只是给进程挂了个前台服务。
+     * MEDIA_SESSION（2026-11-15）：通知不再由我们手画，而是 media3 的
+     * [PlaybackService]（MediaSessionService）把**这台播放器**包成 MediaSession
+     * 交给系统 —— 通知栏媒体卡片、锁屏、负一屏媒体中心、耳机线控、车机
+     * 读的都是它。播放/暂停仍然直连 player；只有「上一集 / 下一集」需要
+     * 绕回 Dart（集数与线路只有 Dart 知道），走 [stepEpisode] 的请求号。
+     *
+     * 切后台继续播的行为完全没变：这里不改任何暂停逻辑。
      */
     private var bgTitle = ""
     private var bgEpisode = 0
+
+    /** 当前线路名（通知副标题「第N集 · 线路名」的后半段，由 Dart 传）。 */
+    private var bgLine = ""
+
+    /** 封面地址（通知 / 锁屏的封面图，由 Dart 传；封面缓存见 PlaybackService）。 */
+    private var bgCover = ""
+
+    /**
+     * 当前这一集还有没有上一集 / 下一集（由 Dart 传，默认都有）。
+     *
+     * 系统据此决定通知栏 / 锁屏上要不要显示那两个按钮：第一集不显示上一集、
+     * 最后一集不显示下一集、电影两个都不显示。否则最后一集上的「下一集」
+     * 是个按了没反应的死按钮。
+     */
+    @Volatile
+    private var bgHasPrev = true
+
+    @Volatile
+    private var bgHasNext = true
+
     private var bgStarted = false
+
+    /**
+     * 上一集 / 下一集请求号（MEDIA_SESSION，2026-11-15）。
+     *
+     * 通知栏按钮、锁屏控件、耳机线控、车机方向盘的「上一集 / 下一集」落到
+     * 原生之后，切集本身只能在 Dart 侧做（它才知道集数列表、线路、播放地址）。
+     * 这里沿用 [retryResolveToken] 那套约定：请求号 +1 并推一次快照，
+     * Dart 看到 `bgStepSeq` 变化就按 `bgStepDelta`（-1 / +1）切集。
+     *
+     * 为什么不用广播 / 新通道：事件通道本来就是「原生 → Dart」的唯一出路，
+     * 而且快照里混一个计数器比多开一条通道更容易排查（ADB 上一眼能看）。
+     */
+    @Volatile
+    private var bgStepSeq = 0L
+
+    @Volatile
+    private var bgStepDelta = 0
+
 
     override fun isPlaying(): Boolean = try {
         player?.isPlaying == true
@@ -574,19 +620,56 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         stopBackground()
     }
 
-    /** Dart 在 open 之前把片名 / 集号交进来（通知标题 =「片名 · 第N集」）。 */
-    fun setBackgroundMedia(title: String, episode: Int) {
-        bgTitle = title.trim()
-        bgEpisode = episode
+    /** Dart 在 open 之前把片名 / 集号 / 线路名 / 封面交进来（通知与锁屏的元数据）。 */
+    fun setBackgroundMedia(
+        title: String,
+        episode: Int,
+        line: String = "",
+        cover: String = "",
+        hasPrev: Boolean = true,
+        hasNext: Boolean = true,
+    ) {
+        bgHasPrev = hasPrev
+        bgHasNext = hasNext
+        val name = title.trim()
+        // 换片（片名变了）时集号必须归零：电影 / 上一部片的「第5集」
+        // 不该留在这一部片的通知副标题里。同一部片换集则保留传入的集号。
+        if (name.isNotEmpty() && name != bgTitle) {
+            bgTitle = name
+            bgEpisode = 0
+        }
+        if (episode > 0) bgEpisode = episode
+        bgLine = line.trim()
+        bgCover = cover.trim()
     }
 
-    /** 起前台服务（可重复调用：已在前台时只刷新通知）。 */
+    /**
+     * 通知栏 / 锁屏 / 耳机线控 / 车机的「上一集 / 下一集」。
+     *
+     * 这里只记一次请求并把事件推给 Dart，**不**动播放器：ExoPlayer 里只有
+     * 一个 MediaItem（一集），原生既不知道下一集在哪条线路，也没有它的地址。
+     * 播放页收到后走原来的 `_switchEpisode`，换集流程和手动点下一集完全一致。
+     */
+    override fun stepEpisode(delta: Int) {
+        bgStepDelta = if (delta < 0) -1 else 1
+        bgStepSeq += 1
+        Log.i(
+            LOG_TAG,
+            "媒体控制：${if (bgStepDelta < 0) "上一集" else "下一集"}（seq=$bgStepSeq）",
+        )
+        mainHandler.post { emit() }
+    }
+
+    /** session 要绑的就是这台播放器（不新建实例）。 */
+    override fun currentPlayer(): Player? = player
+
+    /** 还有没有上一集 / 下一集（系统据此显示或隐藏通知栏那两个按钮）。 */
+    override fun hasEpisodeStep(delta: Int): Boolean =
+        if (delta < 0) bgHasPrev else bgHasNext
+
+    /** 起前台服务（可重复调用：已在前台时只刷新 session / 通知）。 */
     fun startBackground() {
         if (bgTitle.isEmpty()) return // 没有片名 = 不是正式播放，不挂保活
-        if (bgStarted && PlaybackService.isRunning()) {
-            PlaybackService.sync()
-            return
-        }
         bgStarted = true
         PlaybackService.start(context, bgTitle, bgEpisode, this)
     }
@@ -764,6 +847,21 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 // 换签名）花掉的时间。它发生在 open 之前，但属于用户等待，
                 // 必须并进同一条时间线，否则首帧那 1.x 秒会被低估。
                 val resolveMs = call.argument<Number>("resolveMs")?.toLong() ?: 0L
+                // MEDIA_SESSION（2026-11-15）：通知 / 锁屏要的片名、集号、线路名、
+                // 封面跟着 open 一起进来。必须在 open 之前登记 ——
+                // MediaMetadata 要在 prepare 之前挂到 MediaItem 上，
+                // prepare 之后再改就得换 source（等于重新起播），改不了。
+                val bgName = (call.argument<String>("bgTitle") ?: "").trim()
+                if (bgName.isNotEmpty()) {
+                    setBackgroundMedia(
+                        bgName,
+                        call.argument<Number>("bgEp")?.toInt() ?: 0,
+                        call.argument<String>("bgLine") ?: "",
+                        call.argument<String>("bgCover") ?: "",
+                        call.argument<Boolean>("bgHasPrev") ?: true,
+                        call.argument<Boolean>("bgHasNext") ?: true,
+                    )
+                }
                 open(url, headers, isHls, startMs, result, resolveMs = resolveMs)
             }
             "play" -> { player?.play(); result.success(true) }
@@ -838,12 +936,35 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "bgStart" -> {
                 val title = (call.argument<String>("title") ?: "").trim()
                 val ep = call.argument<Number>("ep")?.toInt() ?: 0
-                setBackgroundMedia(title, ep)
+                setBackgroundMedia(
+                    title,
+                    ep,
+                    call.argument<String>("line") ?: "",
+                    call.argument<String>("cover") ?: "",
+                    call.argument<Boolean>("hasPrev") ?: true,
+                    call.argument<Boolean>("hasNext") ?: true,
+                )
                 requestNotificationPermissionIfNeeded()
                 result.success(true)
             }
             "bgStop" -> {
                 stopBackground()
+                result.success(true)
+            }
+            // MEDIA_SESSION：通知 / 锁屏的封面提前暖到本地。
+            //
+            // 为什么要单独一个方法：MediaMetadata 的 artworkUri 在 prepare 之前
+            // 就定死了，等通知要显示封面再去下载已经来不及（而且抢起播带宽）。
+            // Dart 在进播放页 / 换集前调一次，开播时封面文件通常已经在了。
+            "warmArtwork" -> {
+                val cover = (call.argument<String>("url") ?: "").trim()
+                if (cover.isNotEmpty()) {
+                    PlaybackService.warmArtwork(
+                        context,
+                        cover,
+                        call.argument<Map<String, String>>("headers") ?: emptyMap(),
+                    )
+                }
                 result.success(true)
             }
             // 电池优化白名单：只在「设置」里由用户点，不发系统对话框骚扰。
@@ -920,6 +1041,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // 「预取随播放器创建即启动」，拿到源地址（open）后立刻开始灌分片，
         // 不等 prepare 完成、不等用户点播放。
         ensurePreloader()
+        // MEDIA_SESSION：播放器实例（可能刚被重建）同步给 session。
+        // 服务没跑时是个空调用；服务在跑但绑的还是上一台实例时这里换绑。
+        PlaybackService.syncPlayer()
     }
 
     // ------------------------------------------- 渲染器 / 解码器降级（改动 ⑦）
@@ -958,6 +1082,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private fun rebuildRenderersAndReopen(item: OpenedItem) {
         val old = player
         val positionMs = lastKnownPositionMs.coerceAtLeast(0)
+        // MEDIA_SESSION：这台播放器实例马上要被释放，session 必须先摘下来
+        // （它强引用着 player）。重建之后 ensurePlayer → syncPlayer 会用一个
+        // 绑到新实例的新 session 顶上，通知不会一直是死的。
+        PlaybackService.releaseSessionNow()
         try { old?.stop() } catch (_: Throwable) {}
         try { old?.clearVideoSurface() } catch (_: Throwable) {}
         try { old?.release() } catch (_: Throwable) {}
@@ -1369,6 +1497,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "retryAttempt" to retryCount,
             "retryReason" to retryReason,
             "retryResolveToken" to retryResolveToken,
+            // MEDIA_SESSION：通知栏 / 锁屏 / 耳机线控的上一集下一集
+            // （bgStepSeq 变化 = 用户按了，bgStepDelta 是方向）。
+            "bgStepSeq" to bgStepSeq,
+            "bgStepDelta" to bgStepDelta,
             "connectCount" to 0,
             "bufferedAheadMs" to 0L,
             "droppedFrames" to 0L,
@@ -1429,6 +1561,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "retryAttempt" to retryCount,
             "retryReason" to retryReason,
             "retryResolveToken" to retryResolveToken,
+            // MEDIA_SESSION：通知栏 / 锁屏 / 耳机线控的上一集下一集
+            // （bgStepSeq 变化 = 用户按了，bgStepDelta 是方向）。
+            "bgStepSeq" to bgStepSeq,
+            "bgStepDelta" to bgStepDelta,
             // DIAGNOSTICS（2026-11-15）：播放诊断浮层的全部数据来源。
             // 都是「这一段（本次 open）」的统计，换源会归零。
             "connectCount" to PlayerHttp.connectCount(),
@@ -1680,7 +1816,26 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } else {
                 cacheDataSourceFactory(dataSource, writeToCache = false)
             }
-            val item = MediaItem.fromUri(playUrl)
+            // MEDIA_SESSION（2026-11-15）：MediaItem 带着**通知 / 锁屏要显示的
+            // 全部元数据**一起交给播放器。
+            //
+            // 为什么必须在这里挂：系统卡片读的 `player.getMediaMetadata()` 就是
+            // 当前 MediaItem 的 metadata。prepare 之后再去改只能 replace 掉整个
+            // MediaSource（等于重新起播），所以「片名 / 第N集 · 线路名 / 封面」
+            // 必须在建 source 这一刻就定下来。换集 = 新的 open = 新的 MediaItem，
+            // 元数据自然跟着集数一起变（封面不变时 artworkUri 指向同一个文件）。
+            val itemBuilder = MediaItem.Builder().setUri(playUrl)
+            if (bgTitle.isNotEmpty()) {
+                itemBuilder.setMediaMetadata(
+                    PlaybackService.buildMetadata(
+                        bgTitle,
+                        bgEpisode,
+                        bgLine,
+                        PlaybackService.artworkUriFor(context, bgCover, headers),
+                    )
+                )
+            }
+            val item = itemBuilder.build()
             // ALIGN_FONGMI：不挂自定义 LoadErrorHandlingPolicy（壳是空实现，
             // 跑 media3 默认：3 次重试 + 0/1s/2s 退避），死地址交给
             // onPlayerError → Dart 救援链。

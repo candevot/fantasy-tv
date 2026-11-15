@@ -411,6 +411,17 @@ class FxPlayer implements Listenable {
   /// 播放器本身不碰这份档案：它不知道 vodId / 线路名，只有页面有。
   void Function(FxLineProbeResult result)? onProbeResult;
 
+  /// 「上一集 / 下一集」回调（MEDIA_SESSION，2026-11-15）：delta = -1 / +1。
+  ///
+  /// 触发源全是**系统媒体控件**：通知栏媒体卡片的上一集/下一集按钮、锁屏
+  /// 控件、耳机线控（双击切集）、车机方向盘、负一屏媒体中心。
+  /// 播放器本身不切集（它只有一集的一条流），切集必须回页面做（页面才知道
+  /// 集数列表、线路、播放地址），所以这里只把方向抛给页面。
+  void Function(int delta)? onEpisodeStep;
+
+  /// 已处理过的切集请求号（原生每次 +1）。
+  int _lastBgStepSeq = 0;
+
   /// 看门狗采样间隔。ExoPlayer 的状态事件本来就不密，4 秒够。
   static const Duration _watchdogTick = Duration(seconds: 4);
 
@@ -592,20 +603,52 @@ class FxPlayer implements Listenable {
   /// 前台服务是不是已经被我们拉起来过（避免每次状态回调都重发一次 start）。
   bool _bgRunning = false;
 
-  /// 登记当前这一集的名字：原生据此拼通知标题「片名 · 第N集」。
+  /// 通知副标题的后半段（线路名，「第N集 · 线路名」里的后半段）。
+  String _bgLine = '';
+
+  /// 封面地址（通知栏 / 锁屏的封面图）。
+  String _bgCover = '';
+
+  /// 这一集还有没有上一集 / 下一集（系统据此显示或隐藏通知栏那两个按钮）。
+  bool _bgHasPrev = true;
+  bool _bgHasNext = true;
+
+  /// 登记当前这一集的名字：原生据此拼「片名 / 第N集 · 线路名」和封面。
   ///
   /// 换集 / 换线路前都要重新调一次（页面在 open 之前调），否则通知会一直
   /// 显示上一集的名字。
-  void setBackgroundMedia(String title, int episode) {
+  ///
+  /// MEDIA_SESSION（2026-11-15）：[line] / [cover] 是这轮新增的 —— 系统媒体
+  /// 卡片的副标题和封面就靠它们。**必须在 open 之前登记**：原生把元数据
+  /// 挂在 MediaItem 上，prepare 之后再改就得换 source（等于重新起播）。
+  void setBackgroundMedia(
+    String title,
+    int episode, {
+    String line = '',
+    String cover = '',
+    bool hasPrev = true,
+    bool hasNext = true,
+  }) {
     _bgTitle = title.trim();
     _bgEpisode = episode;
+    _bgLine = line.trim();
+    _bgCover = cover.trim();
+    _bgHasPrev = hasPrev;
+    _bgHasNext = hasNext;
   }
 
   /// 交给原生：首次真的出声时由原生 startForeground（见 ExoPlayerPlugin）。
   Future<void> _startBackground() async {
     if (_bgTitle.isEmpty) return;
     _bgRunning = true;
-    await ExoPlayerEngine.backgroundStart(title: _bgTitle, episode: _bgEpisode);
+    await ExoPlayerEngine.backgroundStart(
+      title: _bgTitle,
+      episode: _bgEpisode,
+      line: _bgLine,
+      cover: _bgCover,
+      hasPrev: _bgHasPrev,
+      hasNext: _bgHasNext,
+    );
   }
 
   /// 收掉前台服务（幂等：没起过就什么都不做）。
@@ -1242,6 +1285,15 @@ class FxPlayer implements Listenable {
       startPositionMs: startPositionMs,
       // 解析段并进原生时间线，界面上的「起播总」才是用户真正等的时间。
       resolveMs: resolveMs,
+      // MEDIA_SESSION：通知 / 锁屏的片名、集号、线路名、封面跟着 open 走。
+      // 元数据必须在 prepare 之前挂在 MediaItem 上，所以不能等
+      // `_startBackground`（那是 open 之后才发的）。
+      bgTitle: _bgTitle,
+      bgEpisode: _bgEpisode,
+      bgLine: _bgLine,
+      bgCover: _bgCover,
+      bgHasPrev: _bgHasPrev,
+      bgHasNext: _bgHasNext,
     );
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
@@ -1507,6 +1559,24 @@ class FxPlayer implements Listenable {
   void _onEngineState() {
     if (_disposed) return;
     final st = _engine.state.value;
+
+    // MEDIA_SESSION：系统媒体控件按了「上一集 / 下一集」。
+    // 原生只把请求号 +1 推上来（它不知道集数 / 线路 / 地址），这里转给页面。
+    if (st.bgStepSeq != _lastBgStepSeq) {
+      _lastBgStepSeq = st.bgStepSeq;
+      if (st.bgStepSeq > 0) {
+        final delta = st.bgStepDelta < 0 ? -1 : 1;
+        _logFx('媒体按键：${delta < 0 ? "上一集" : "下一集"}（seq=${st.bgStepSeq}）');
+        final sink = onEpisodeStep;
+        if (sink != null) {
+          try {
+            unawaited(Future<void>.sync(() => sink(delta)));
+          } catch (error) {
+            _logFx('媒体按键处理失败：$error');
+          }
+        }
+      }
+    }
 
     // BG_SERVICE：播到结尾就收掉前台服务（没东西可放了，留着就是空保活）。
     // 自动连播下一集会重新 open → play，服务自己会再起来。

@@ -168,6 +168,10 @@ class ExoPlayerEngine {
   static Future<void> backgroundStart({
     required String title,
     required int episode,
+    String line = '',
+    String cover = '',
+    bool hasPrev = true,
+    bool hasNext = true,
   }) async {
     final name = title.trim();
     if (name.isEmpty || !isSupported) return;
@@ -175,10 +179,36 @@ class ExoPlayerEngine {
       await _prefetchChannel.invokeMethod<bool>('bgStart', {
         'title': name,
         'ep': episode,
+        'line': line,
+        'cover': cover,
+        'hasPrev': hasPrev,
+        'hasNext': hasNext,
       });
     } catch (_) {
       // 保活起不来只是「可能被系统回收」，绝不打断播放。
     }
+  }
+
+  /// 把封面提前下载到原生缓存（MEDIA_SESSION，2026-11-15）。
+  ///
+  /// 为什么需要提前暖：通知 / 锁屏的封面读的是 MediaMetadata.artworkUri，
+  /// 而 MediaMetadata 在 `prepare()` 之前就定死了。等通知要显示封面时再下载
+  /// 已经来不及（那时还在抢起播带宽），所以进播放页 / 换集前先把它落到
+  /// 本地缓存，开播时直接用 file:// —— 不依赖网络、不怕防盗链。
+  ///
+  /// 失败静默：没有封面只是通知上少一张图，不影响播放。
+  static Future<void> warmArtwork(
+    String coverUrl, {
+    Map<String, String> headers = const {},
+  }) async {
+    final url = coverUrl.trim();
+    if (url.isEmpty || !isSupported) return;
+    try {
+      await _prefetchChannel.invokeMethod<bool>('warmArtwork', {
+        'url': url,
+        'headers': headers,
+      });
+    } catch (_) {}
   }
 
   /// 收掉前台服务（退出播放页 / 播放结束 / 播放器释放）。
@@ -261,6 +291,19 @@ class ExoPlayerEngine {
     /// 为什么由 Dart 传进来：这一步发生在 `open` 之前，原生根本看不到，
     /// 不并进原生时间线的话界面上的「解析 + 首帧」永远对不上「起播总」。
     int resolveMs = 0,
+    /// 通知栏 / 锁屏媒体卡片要显示的片名（MEDIA_SESSION，2026-11-15）。
+    ///
+    /// 跟着 open 一起交给原生：MediaMetadata 必须在 `prepare()` 之前挂到
+    /// MediaItem 上（之后再改就得换 source，等于重新起播），所以片名 /
+    /// 集号 / 线路名 / 封面不能等「播起来了再 tell 原生」。
+    String bgTitle = '',
+    int bgEpisode = 0,
+    String bgLine = '',
+    String bgCover = '',
+    /// 这一集还有没有上一集 / 下一集：系统据此显示或隐藏通知栏 / 锁屏上
+    /// 那两个按钮（第一集没有上一集、最后一集没有下一集、电影两个都没有）。
+    bool bgHasPrev = true,
+    bool bgHasNext = true,
   }) async {
     if (_disposed || !isSupported) return false;
     _error = null;
@@ -272,6 +315,12 @@ class ExoPlayerEngine {
         'startPositionMs': startPositionMs < 0 ? 0 : startPositionMs,
         // 负数按 0 处理：原生那边把它当「本段耗时」直接累加进时间线。
         'resolveMs': resolveMs < 0 ? 0 : resolveMs,
+        'bgTitle': bgTitle,
+        'bgEp': bgEpisode,
+        'bgLine': bgLine,
+        'bgCover': bgCover,
+        'bgHasPrev': bgHasPrev,
+        'bgHasNext': bgHasNext,
       });
       return r ?? false;
     } on PlatformException catch (e) {
@@ -454,6 +503,8 @@ class ExoPlayerState {
     this.bytesLoadedPerSec = 0,
     this.isLoading = true,
     this.fatalError = '',
+    this.bgStepSeq = 0,
+    this.bgStepDelta = 0,
   });
 
   final Duration position;
@@ -568,6 +619,18 @@ class ExoPlayerState {
   /// 它不可能是「网慢」，等下去也没有意义。
   final String fatalError;
 
+  /// 「上一集 / 下一集」请求号（MEDIA_SESSION，2026-11-15）。
+  ///
+  /// 通知栏媒体卡片、锁屏控件、耳机线控、车机方向盘的上一集/下一集落到原生后，
+  /// 原生既不知道集数列表也没有下一集的播放地址 —— 只有 Dart 知道。
+  /// 所以原生只把请求号 +1 推上来，这里看到 `bgStepSeq` 变大就按
+  /// [bgStepDelta]（-1 = 上一集，+1 = 下一集）切集。
+  /// 0 = 这次播放还没收到过媒体按键。
+  final int bgStepSeq;
+
+  /// 切集方向：-1 上一集，+1 下一集（配合 [bgStepSeq] 一起看）。
+  final int bgStepDelta;
+
   factory ExoPlayerState.fromMap(Map<String, dynamic> m) {
     Duration d(String k) =>
         Duration(milliseconds: (m[k] as num?)?.toInt() ?? 0);
@@ -617,6 +680,9 @@ class ExoPlayerState {
           ? (m['buffering'] == true)
           : m['isLoading'] == true,
       fatalError: _str(m['fatalError']),
+      // 老原生包没有这两个键：0 = 没收到过媒体按键（行为不变）。
+      bgStepSeq: (m['bgStepSeq'] as num?)?.toInt() ?? 0,
+      bgStepDelta: (m['bgStepDelta'] as num?)?.toInt() ?? 0,
     );
   }
 
