@@ -113,7 +113,6 @@ void main() {
 
   // —— 慢网不是失败：8 秒窗口只看「有没有动」——
   final window = FxProgressWindow();
-  const step = Duration(milliseconds: 500);
   // 200KB/s 的慢网：每 500ms 涨 100KB，20 秒内一直没有首帧。
   for (var ms = 0; ms <= 20000; ms += 500) {
     window.add(

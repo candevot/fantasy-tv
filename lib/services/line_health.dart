@@ -259,7 +259,7 @@ class LineHealth {
         final target = pending[index++];
         final result = await probeLine(
           target.url,
-          testOnlyManifest: manifestOnly,
+          manifestOnly: manifestOnly,
         );
         if (result.ok) {
           ok++;
