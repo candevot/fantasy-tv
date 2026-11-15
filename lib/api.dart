@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
+import 'services/cms_api.dart';
 
 /// 服务器接口。
 ///
@@ -663,14 +664,13 @@ class Api {
     final norm = uri.toString();
     // IMG_PROXY（2026-11-15）：外站海报多是 webp，还有防盗链/证书问题，App 里
     // 经常整块退回首字占位（首页、相关推荐、肥猫源都踩过）。
-    // 统一走我们自己的代理：服务端补 Referer、webp 转 jpeg、落盘缓存；失败会
-    // 302 回原始地址，最坏情况等于直连。
+    // 统一走 CMS 站点的图片代理：补 Referer、webp 转 jpeg、落盘缓存 30 天；
+    // 任何环节失败都会 302 回原图，最坏情况等于直连。
     //
-    // 代理端点必须是 `/api/img?u=`：线上实测 `/pic?u=` 是 404（42 字节 JSON），
-    // `/api/img?u=` 才返回 200 image/jpeg。这里直接用 [base]（已经以 /api 结尾）
-    // 拼，不要再自己算 root 前缀 —— 之前那版少了一个变量，编译都过不去。
-    if (norm.contains('/img?u=') || norm.contains('/pic?u=')) return norm;
-    return '$base/img?u=${Uri.encodeComponent(norm)}';
+    // 端点必须用 [CmsApi.root] + `/pic`：代理部署在 CMS 站点（80 端口）上，
+    // 而 [Api.base] 指的是 8787 后端，拼出来是 404（会把全站海报打挂）。
+    if (norm.contains('/pic?u=')) return norm;
+    return '${CmsApi.root}/pic?u=${Uri.encodeComponent(norm)}';
   }
 }
 
