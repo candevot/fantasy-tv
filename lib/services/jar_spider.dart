@@ -484,6 +484,21 @@ class JarSpider {
 
   /* ------------------------------------------------------------ 取数据 */
 
+  /// `homeContent` 的原始 JSON：`{"class":[…],"filters":{…},"list":[…]}`。
+  ///
+  /// FATCAT_HOME（2026-11-15）：首页推荐现在直接铺肥猫 jar 源的首页，
+  /// 所以要把**整个** homeContent 交给上层（既要 `class` 做分类映射，
+  /// 也要 `list` 做推荐位），不能只留分类。
+  static Future<Map<String, dynamic>> home({
+    required String api,
+    required String ext,
+  }) =>
+      _spider('home', <String, Object?>{
+        'api': api,
+        'ext': ext,
+        'filter': false,
+      });
+
   /// 首页分类（category 需要 type_id，`type_id` 和我们的频道键不是一套）。
   static Future<List<JarClass>> homeClasses({
     required String api,
@@ -492,11 +507,7 @@ class JarSpider {
     final key = _key(api, ext);
     final hit = _classes[key];
     if (hit != null) return hit;
-    final body = await _spider('home', <String, Object?>{
-      'api': api,
-      'ext': ext,
-      'filter': false,
-    });
+    final body = await home(api: api, ext: ext);
     final list = classesOf(body);
     if (_classes.length >= _classCacheLimit && !_classes.containsKey(key)) {
       _classes.remove(_classes.keys.first);

@@ -262,7 +262,31 @@ class HomeSection {
 class HomeData {
   final List<BannerItem> banners;
   final List<HomeSection> sections;
-  HomeData(this.banners, this.sections);
+
+  /// jar 插件（spider.jar）没装：首页要显示「先装 jar 插件」的提示 + 入口。
+  ///
+  /// FATCAT_HOME（2026-11-15）：首页 / 分类的内容来自肥猫的 jar 源，
+  /// 少了 spider.jar 那些源一条都出不来，页面必须说清楚是「缺插件」，
+  /// 而不是让用户对着空白首页以为 App 坏了。
+  final bool jarMissing;
+
+  /// 顶部提示文案（jar 缺失 / 肥猫这次没内容），空串表示不提示。
+  final String notice;
+
+  /// 这一份是回落内容（肥猫拿不到时用我们自己的热播）。
+  final bool fallback;
+
+  /// 流式首页：false 表示后面还会补更多分区。
+  final bool finished;
+
+  HomeData(
+    this.banners,
+    this.sections, {
+    this.jarMissing = false,
+    this.notice = '',
+    this.fallback = false,
+    this.finished = true,
+  });
 }
 
 /// 直播线路：同一频道可能有 4K / 1080P / 720P 多条流。

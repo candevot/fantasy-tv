@@ -6,6 +6,7 @@ import '../services/cms_bridge.dart';
 import '../theme.dart';
 import '../widgets/fx_cards.dart';
 import 'detail_page.dart';
+import 'source_settings_page.dart' show SourceSettingsPage;
 import '../utils/fx_route.dart';
 
 // 通用海报 / 分区 / 骨架组件已抽到 widgets/fx_cards.dart；
@@ -545,6 +546,15 @@ class _CategoryPageState extends State<CategoryPage> {
   /// 也不阻塞继续上拉加载。
   String? _refreshError;
 
+  /// 顶部提示（肥猫的 jar 插件没装 / 这一页肥猫没内容），空串不显示。
+  ///
+  /// FATCAT_HOME（2026-11-15）：分类页的内容也来自肥猫的 jar 源，
+  /// 少了 spider.jar 就只能回落我们自己的采集库 —— 必须说清楚原因。
+  String _notice = '';
+
+  /// 提示条要不要给「去装 jar 插件」的入口。
+  bool _jarMissing = false;
+
   @override
   void initState() {
     super.initState();
@@ -578,6 +588,8 @@ class _CategoryPageState extends State<CategoryPage> {
         _moreError = false;
         _hasMore = true;
         _page = 1;
+        _notice = '';
+        _jarMissing = false;
         if (clear) _items.clear();
       });
       try {
@@ -595,6 +607,8 @@ class _CategoryPageState extends State<CategoryPage> {
           // 用后端「这一页给满了没有」判断，而不是过滤后的条数：
           // 带年份筛选时一页可能只剩两三条，按条数算会直接判死「没有更多」。
           _hasMore = page1.hasMore;
+          _notice = page1.notice;
+          _jarMissing = page1.jarMissing;
         });
       } catch (e) {
         if (!mounted || req != _req) return;
@@ -766,6 +780,7 @@ class _CategoryPageState extends State<CategoryPage> {
             parent: BouncingScrollPhysics()),
         slivers: [
           SliverToBoxAdapter(child: _header()),
+          if (_notice.isNotEmpty) SliverToBoxAdapter(child: _noticeBar()),
           if (_refreshError != null && _items.isNotEmpty)
             SliverToBoxAdapter(child: _refreshBanner()),
           if (_items.isEmpty && _loading)
@@ -838,6 +853,75 @@ class _CategoryPageState extends State<CategoryPage> {
         ],
       ),
     );
+  }
+
+  /// 顶部提示条：肥猫的源需要 jar 插件 / 这次没内容。
+  Widget _noticeBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF3E6),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFFFD9AE)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.extension_off,
+                size: 15, color: Color(0xFFB26A1F)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _notice,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  height: 1.4,
+                  color: Color(0xFF8A5A1E),
+                ),
+              ),
+            ),
+            if (_jarMissing) ...[
+              const SizedBox(width: 6),
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _openJarPlugin,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFB26A1F),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: const Text(
+                    '去装 jar',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 跳「片源管理 → 安装 jar 插件」，回来后重拉这一页。
+  Future<void> _openJarPlugin() async {
+    await Navigator.of(context).push(
+      FxPageRoute(builder: (_) => const SourceSettingsPage()),
+    );
+    if (!mounted) return;
+    // 装好 jar 之后，当日缓存里的「肥猫没内容」就不成立了，清掉重拉，
+    // 别让用户回来还看见回落的那批片。
+    CmsBridge.clearCache();
+    _reload();
   }
 
   Widget _refreshBanner() {
