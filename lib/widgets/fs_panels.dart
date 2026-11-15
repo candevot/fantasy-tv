@@ -1061,8 +1061,11 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
     // EPISODE_SHEET_FIT（2026-11-12）：按「实际可用高度」算，不是按屏幕高度。
     // 全屏播放是横屏，size.height 拿到的是竖屏高度，减掉安全区后
     // 弹窗会超出可见区域 → 底部集数被裁掉。这里改用 constraints 的实际高度。
+    // PANEL_COMPACT（2026-11-15）：用户反馈选集面板占了大半屏。
+    // 上限压到屏高的 35%（最低 240，最高 460），内部滚动，默认只露 2~3 行。
+    final limit = (size.height * 0.35).clamp(240.0, 460.0).toDouble();
     final avail = (size.height - pad.top - pad.bottom - 24)
-        .clamp(220.0, 560.0)
+        .clamp(240.0, limit)
         .toDouble();
     final height = avail;
     final width = size.width;
