@@ -82,8 +82,12 @@ class _JarPluginCardState extends State<JarPluginCard> {
     } catch (e) {
       if (mounted) _toast('$e');
     } finally {
-      if (mounted) setState(() => _busy = false);
-      _notify();
+      // 用户中途返回上一页时 State 已经 dispose：这时再 _notify 会让父页
+      // 在已销毁的 State 上 setState（setState after dispose）。
+      if (mounted) {
+        setState(() => _busy = false);
+        _notify();
+      }
     }
   }
 

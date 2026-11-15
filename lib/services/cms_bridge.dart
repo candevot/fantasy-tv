@@ -197,7 +197,15 @@ class CmsBridge {
     // 热播榜只写 `vod_hits`，按它排出来的第一批里混着 `vod_play_url` 为空 /
     // 只有占位的记录 —— 点进去必然没有线路，用户看到的是「点开播不了」。
     // 这里在转模型之前就滤掉，宁可少一条卡片，也不给一条点不开的。
-    final vods = await CmsApi.listVod(type: typeId, page: 1, sort: 'hot');
+    // RULE_SRC（2026-11-15）：首页只铺我们自己的片源（hx）。
+    // 不带 `src` 时服务端把 hx / xo 两条同名片一起给回来，首页第一行就会
+    // 出现「八仙（幻想）」和「八仙（官采切片）」并排。
+    final vods = await CmsApi.listVod(
+      type: typeId,
+      page: 1,
+      sort: 'hot',
+      src: CmsApi.ownSrc,
+    );
     final list = <VideoCard>[];
     for (final vod in vods) {
       if (!CmsApi.hasPlayUrl(vod)) continue;
@@ -294,9 +302,14 @@ class CmsBridge {
   }) async {
     _boot();
     final typeId = CmsApi.typeIdOf(type);
-    // 外部源（云端 / 自加）与主站并行查：外部源内部也是并行的，
-    // 这里先发车再等主站，两边的耗时取长的那个，不是相加。
-    final extraFuture = SourceHub.instance.categoryAll(type, page);
+    // RULE_SRC（2026-11-15）：分类页只用**我们自己的片源**。
+    //
+    // 产品规则：首页 / 各分类 = 我们自己的片源（hx），肥猫只在搜索里出现。
+    // 这里原来还把 `SourceHub.categoryAll`（肥猫 41 个 jar 源 + 用户自加）
+    // 合并进分类列表，两个后果：
+    //   · 破了「肥猫只在搜索里出现」这条规则；
+    //   · 主站同一部剧的 hx / xo 两条记录加上外部源的同名片，分类页里
+    //     一部剧能出现三次，用户看到的就是「重复卡片」。
     final wanted = _filterWanted(area: area, year: year);
     final scan = wanted ? _scanPages : 1;
 
@@ -305,36 +318,42 @@ class CmsBridge {
     Object? failure;
     for (var i = 0; i < scan; i++) {
       final rawPage = (page - 1) * scan + i + 1;
-      List<VideoCard> chunk;
+      List<VideoCard> rawChunk;
       try {
-        chunk = _withoutLive(
-          await CmsApi.list(type: typeId, page: rawPage, sort: sort),
+        rawChunk = await CmsApi.list(
+          type: typeId,
+          page: rawPage,
+          sort: sort,
+          src: CmsApi.ownSrc,
         );
       } catch (e) {
         failure = e;
         break;
       }
+      // PAGES_ALIGN（2026-11-15）：这一页「给满了」才算后面还有内容，
+      // 而且要用**过滤前**的长度判断 —— 用 `_withoutLive` 之后的数量时，
+      // 首页少一条直播卡就会让整条分类永久判定「到底」。
+      final full = rawChunk.length >= _pageSize;
+      final chunk = _withoutLive(rawChunk);
       _markAll(chunk, _Origin.cms);
-      hasMore = chunk.length >= _pageSize;
       raw.addAll(chunk);
-      if (!hasMore) break;
-      // 没筛选就只取一页；有筛选且已经够一页了也不用再扫。
-      if (!wanted || raw.length >= _pageSize) break;
+      hasMore = full;
+      if (!full) break;
     }
 
-    final extra = await _safe(extraFuture);
     if (failure == null) {
-      return CmsPage(
-        _mergeWith(_filter(raw, area: area, year: year), extra),
-        hasMore: hasMore,
-      );
+      final items = _filter(raw, area: area, year: year);
+      // 带筛选时一个逻辑页由 [_scanPages] 个原始页组成，逐页按 [_pageSize]
+      // 切开，不能把三页 60 条一次性都当第 1 页给出去 ——
+      // 那样第 2 页永远取不到（rawPage 从 (page-1)*scan+1 起跳，
+      // 而第 1 页已经把前 3 页吞掉了）。
+      final pageItems = (wanted && items.length > _pageSize)
+          ? items.sublist(0, _pageSize)
+          : items;
+      return CmsPage(pageItems, hasMore: hasMore);
     }
-
-    // 主站这一页彻底失败（不是「空结果」）：先看外部源有没有货。
-    if (!legacyEnabled) {
-      if (extra.isNotEmpty) return CmsPage(extra);
-      throw failure;
-    }
+    // 主站这一页彻底失败（不是「空结果」）：旧接口开关打开时再试一次。
+    if (!legacyEnabled) throw failure;
 
     List<VideoCard> legacy = const <VideoCard>[];
     try {
@@ -347,12 +366,11 @@ class CmsBridge {
       ));
       _markAll(legacy, _Origin.legacy);
     } catch (_) {
-      // 两边都不通：外部源有结果就先给结果，否则把主站的错误抛给页面。
-      if (extra.isNotEmpty) return CmsPage(extra);
+      // 两边都不通：把主站的错误抛给页面（页面有自己的重试入口）。
       throw failure;
     }
     return CmsPage(
-      _mergeWith(legacy, extra),
+      _filter(legacy, area: area, year: year),
       hasMore: legacy.length >= _pageSize,
     );
   }
@@ -419,7 +437,16 @@ class CmsBridge {
     final q = keyword.trim();
     if (q.isEmpty) return const <VideoCard>[];
     final hub = SourceHub.instance;
-    await hub.ensureReady();
+    // 和 searchStream 一样给 `ensureReady` 兜超时：这一步只是读本地缓存 +
+    // 片源表，卡住时不能让「上拉加载更多」永远转圈。
+    try {
+      await hub.ensureReady().timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => null,
+      );
+    } catch (_) {
+      // 索引坏了也要能搜：plan 为空表就只查主站。
+    }
     final plan = hub.searchPlan;
     final lists = await Future.wait(<Future<List<VideoCard>>>[
       _primarySearch(q, page),
@@ -535,7 +562,7 @@ class CmsBridge {
       unawaited(ctrl.close());
     }
 
-    void emit(List<VideoCard> cards, {required bool external}) {
+    void emit(List<VideoCard> cards, {required bool external, int page = 1}) {
       if (closed) return;
       final kept = <VideoCard>[];
       for (final card in cards) {
@@ -554,6 +581,7 @@ class CmsBridge {
           done: done,
           total: total,
           finished: false,
+          page: page,
         ),
       );
     }
@@ -668,7 +696,7 @@ class CmsBridge {
           if (more.isNotEmpty && !closed) {
             _markAll(more, _Origin.cms);
             done++;
-            emit(more, external: false);
+            emit(more, external: false, page: page + 1);
           }
         } catch (_) {
           // 第二页失败不影响第一批结果。
@@ -694,29 +722,6 @@ class CmsBridge {
     return ctrl.stream;
   }
 
-  /// 合并主站 / 外部源两份结果（分类页还在用；搜索走 [searchStream]）。
-  ///
-  /// 去重按片名分桶记年份：主站的卡片带年份（`ac=detail`），外部源走通用的
-  /// `ac=list`（第三方接口不一定给 `vod_year`），同一个片名一边是
-  /// `头号玩家|2018`、一边是 `头号玩家|0`，拼串比对会把同一部片留两条。
-  static List<VideoCard> _mergeWith(
-    List<VideoCard> primary,
-    List<VideoCard> extra,
-  ) {
-    if (extra.isEmpty) return primary;
-    final dedupe = _Dedupe();
-    final out = <VideoCard>[];
-    for (final card in primary) {
-      if (!dedupe.fresh(card)) continue;
-      out.add(SourceHub.relabel(card, label: '采集库'));
-    }
-    for (final card in extra) {
-      if (!dedupe.fresh(card)) continue;
-      out.add(card);
-    }
-    return out;
-  }
-
   /// 直播内容不进搜索 / 分类 / 排行（直播有独立入口）。
   static List<VideoCard> _withoutLive(List<VideoCard> list) {
     var clean = true;
@@ -733,17 +738,6 @@ class CmsBridge {
     ];
   }
 
-  /// 外部源失败不能拖垮整页：当作「这个源没结果」。
-  static Future<List<VideoCard>> _safe(
-    Future<List<VideoCard>> task,
-  ) async {
-    try {
-      return await task;
-    } catch (_) {
-      return const <VideoCard>[];
-    }
-  }
-
   /// 热搜词：CMS 按点击量排的片名；拿不到再用旧接口的日榜。
   static Future<List<String>> hotWords({int limit = 12}) async {
     _boot();
@@ -758,7 +752,7 @@ class CmsBridge {
     }
 
     try {
-      final list = await CmsApi.list(sort: 'hot');
+      final list = await CmsApi.list(sort: 'hot', src: CmsApi.ownSrc);
       _markAll(list, _Origin.cms);
       take(list);
     } catch (_) {
@@ -793,7 +787,8 @@ class CmsBridge {
     Future<List<VideoCard>> scan(int t) async {
       final lists = await Future.wait(<Future<List<VideoCard>>>[
         for (var p = 1; p <= n; p++)
-          CmsApi.list(type: t, page: p, sort: 'hot').catchError(
+          CmsApi.list(type: t, page: p, sort: 'hot', src: CmsApi.ownSrc)
+              .catchError(
             (Object e) {
               failure ??= e;
               return const <VideoCard>[];
@@ -1128,7 +1123,16 @@ class SearchBatch {
     required this.done,
     required this.total,
     required this.finished,
+    this.page = 1,
   });
+
+  /// 这一批对应接口的第几页（1 起）。
+  ///
+  /// 为什么要带页码：一轮搜索里除了第 1 页，还会额外补一波「第 2 页」
+  /// （见 searchStream 末尾）。页面如果只把 `_page` 记成 1，上拉时又会
+  /// 请求一次第 2 页，同一批结果被追加两遍。页面用它把 `_page` 推进到
+  /// 真实已经拿到的那一页。
+  final int page;
 
   /// 这一批新增的结果（已去重、已带来源标记与 `@src:` id）。
   final List<VideoCard> items;

@@ -670,7 +670,9 @@ class SourceHub extends ChangeNotifier {
       map['live'],
       map['live_playlist'],
     ]);
-    if (live.isNotEmpty) _liveUrl = live;
+    // 后台删掉 live_url 时要跟着清空：否则页面会一直显示上一次下发的地址
+    // （IP 已经换掉了，地址还挂在片源管理页上）。
+    _liveUrl = live;
   }
 
   /// 取第一个非空文本（配置里同一项可能有多种写法）。
@@ -764,10 +766,16 @@ class SourceHub extends ChangeNotifier {
   }) async {
     final address = api.trim();
     if (address.isEmpty) throw ApiException('填一下片源地址');
-    if (!address.startsWith('http://') && !address.startsWith('https://')) {
+    final kind = kindOf(type);
+    // JAR_CLASS（2026-11-15）：jar 插件源的 `api` 是**类名**（`csp_Xxx`），
+    // 不是网址。这里原来一律要求 http(s)://，于是「添加片源 → jar 插件」
+    // 永远保存失败（弹窗却特意提示「填 jar 里的类名」）。updateUser 早就按
+    // kind 分别校验，这里对齐。
+    if (kind != KSourceKind.jar &&
+        !address.startsWith('http://') &&
+        !address.startsWith('https://')) {
       throw ApiException('片源地址要以 http(s):// 开头');
     }
-    final kind = kindOf(type);
     var label = name.trim();
     if (label.isEmpty) {
       final host = Uri.tryParse(address)?.host ?? '';

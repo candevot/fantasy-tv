@@ -154,13 +154,15 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
                 color: const Color(0xFFF4F7FC),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: SelectableText(
-                liveUrl,
-                maxLines: 3,
-                style: const TextStyle(
+              // NO_URL（2026-11-15）：片源管理页不显示任何接口地址。
+              // 这里原来把后台下发的直播地址（含 IP）原样铺出来，既破了
+              // 「不显示地址」的规则，后台换机后也只会让用户看到一条死地址。
+              child: const Text(
+                '直播频道地址已由后台下发，可在「直播」页直接观看。',
+                style: TextStyle(
                   fontSize: 10.5,
                   height: 1.45,
-                  color: Fx.accent,
+                  color: Fx.sub,
                 ),
               ),
             ),
@@ -590,7 +592,8 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
               const Text(
                 '粘贴含 sites 数组的 JSON，或填配置地址（http 开头，默认是肥猫）。'
                 '加密配置（\$#key#\$ + AES）会自动解密。'
-                '只导入 type 1 / type 0，type 3 / 4 会标「暂不支持」后跳过。',
+                'type 1 / 0 直接导入，type 3 作为 jar 源导入（需要装 spider.jar），'
+                '只有 type 4（python 脚本）会标「暂不支持」后跳过。',
                 style: TextStyle(fontSize: 11, height: 1.5, color: Fx.sub),
               ),
               const SizedBox(height: 10),

@@ -41,6 +41,20 @@ class CmsApi {
 
   static const String vodPath = '/api.php/provide/vod/';
 
+  /// 片源筛选（SRC_FILTER，2026-11-15）。
+  ///
+  /// 服务端把同一部剧按片源拆成两条记录，每条带 `vod_from`：
+  ///   · `hx` = 我们自己的片源（首页 / 各分类只能用这一批）
+  ///   · `xo` = 官采切片（只随搜索出现）
+  /// 列表接口默认**不筛**，`t=1` 实测回 148 条、里面 hx / xo 混着，
+  /// 同一部剧（八仙 / 蜘蛛侠）会连着出现两条 —— 首页看起来就是「重复卡片」，
+  /// 并且破坏了「首页=我们自己的片源」这条规则。所以首页 / 分类 / 榜单
+  /// 一律带 `src=hx`（实测 `src=hx&t=1` 回 143 条、全部 hx）。
+  static const String ownSrc = 'hx';
+
+  /// 官采切片（搜索时会一起出现，详情页的「官采切片」那组线路就是它）。
+  static const String sliceSrc = 'xo';
+
   /// 解析服务根：默认和站点同一个 host（nginx 反代到 hxparse 服务）。
   static const String parseRoot = String.fromEnvironment(
     'CMS_PARSE',
@@ -166,9 +180,10 @@ class CmsApi {
     int type = 0,
     int page = 1,
     String sort = '',
+    String src = '',
   }) async {
     try {
-      final vods = await listVod(type: type, page: page, sort: sort);
+      final vods = await listVod(type: type, page: page, sort: sort, src: src);
       return <VideoCard>[for (final vod in vods) cardOf(vod)];
     } catch (e) {
       final original = e;
@@ -198,11 +213,14 @@ class CmsApi {
     int type = 0,
     int page = 1,
     String sort = '',
+    String src = '',
   }) async {
     final body = await _vod(<String, String>{
       'ac': 'detail',
       if (type > 0) 't': '$type',
       'pg': '$page',
+      // SRC_FILTER（2026-11-15）：`src=hx` 只回我们自己的片源。
+      if (src.trim().isNotEmpty) 'src': src.trim(),
       // HOT_ORDER（2026-11-15）：服务端 `order=` 已经修好且真生效
       // （实测 `order=vod_hits` 是严格递减），所以热播行必须把 `order`
       // 和 `by=desc` 一起带上 —— 只带 order 时后台按升序给「最冷」的那批。
@@ -422,9 +440,14 @@ class CmsApi {
       'tags': _tagsOf(vod),
       'sourceLabel': froms.isEmpty ? '' : froms.first,
       // SOURCE_SPLIT（2026-11-15）：服务端把同一部剧按片源拆成多条记录，
-      // 每条多一个 vod_from_source（hx=幻想 / xo=官采切片）。卡片要把它带下去，
-      // 否则两条记录长得一模一样，用户会以为是重复项。
-      'fromSource': _str(vod['vod_from_source']),
+      // 每条多一个 `vod_from`（hx=幻想 / xo=官采切片，`?src=hx` 就是按它筛）。
+      // 字段名踩过一次坑：这里原来只读 `vod_from_source`，而线上给的是
+      // `vod_from`，于是每张卡片的片源分组都是空串 —— 卡片上不显示
+      // 「幻想 / 官采切片」，去重键也退化成「片名+年份」，同一部剧的两个
+      // 版本会被合成一条（用户看到的就是「详情里线路少了一半」）。
+      'fromSource': _str(vod['vod_from']).isEmpty
+          ? _str(vod['vod_from_source'])
+          : _str(vod['vod_from']),
     };
   }
 
@@ -526,7 +549,8 @@ class CmsApi {
         }
         return map;
       } on TimeoutException {
-        failure = ApiException.timeout();
+        // TIMEOUT_NO_RETRY：和 Api 一样，超时立刻报错，不再白等第二个 8 秒。
+        throw ApiException.timeout();
       } on FormatException {
         failure = ApiException('接口返回的数据无法解析', kind: ApiErrorKind.server);
       } on http.ClientException {
