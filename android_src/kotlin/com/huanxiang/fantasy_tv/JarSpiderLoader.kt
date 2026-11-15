@@ -49,6 +49,13 @@ import java.util.zip.ZipFile
  * 内容变了会加载到旧类，所以 [JarSpiderPlugin] 在 md5 变化时换一个新的
  * dexDir（`dex/<md5>`），旧目录整个删掉。[destroy] 负责释放 ClassLoader 引用，
  * 让 GC 能回收；DexClassLoader 本身没有 close()，只能丢引用。
+ *
+ * **第四条硬约束（DEX_READONLY 2026-11-15）**：Android 14（API 34）起，jar
+ * 必须是只读（0444），可写就抛
+ * `SecurityException: Writable dex file '…' is not allowed.`。
+ * 所以 [classLoader] 在建构造器之前先过一遍 [JarPermissions.makeReadOnly]，
+ * 并打日志 `[JarSpider] jar path=… writable=false perms=444`；
+ * 输出目录 [dexDir] 反过来必须可写（ART 要往里写 odex），别给它 chmod。
  */
 class JarSpiderLoader(
     private val context: Context,
@@ -131,11 +138,57 @@ class JarSpiderLoader(
             if (!dexDir.exists() && !dexDir.mkdirs()) {
                 throw JarSpiderException("no_dex_dir", "无法创建 dex 目录")
             }
+            // dex 输出目录的要求和 jar 相反：ART 要把 odex / vdex 写进去，
+            // 目录可写是必须的（目录只读的表现是 ClassNotFoundException，
+            // 不是权限异常，很难查）。所以这里只「保证可写」，绝不 chmod 成只读。
+            JarPermissions.makeDirWritable(dexDir)
+            // Android 14 的硬要求：jar 必须 0444，否则构造函数里就抛
+            // SecurityException("Writable dex file … is not allowed")。
+            ensureJarReadOnly()
             val parent = context.classLoader
-            val made = DexClassLoader(jarPath.absolutePath, dexDir.absolutePath, null, parent)
+            val made = try {
+                DexClassLoader(jarPath.absolutePath, dexDir.absolutePath, null, parent)
+            } catch (e: SecurityException) {
+                // 极端情况：chmod 明明成功了 ART 还是拒（个别 ROM / 预览版）。
+                // 再来一次最暴力的 chmod，仍失败就给用户一句能看懂的话。
+                Log.w(TAG, "[JarSpider] DexClassLoader 拒绝加载：${e.message}；强制 chmod 444 后重试")
+                JarPermissions.makeReadOnly(jarPath)
+                val now = JarPermissions.describe(jarPath)
+                Log.i(TAG, "[JarSpider] jar path=${jarPath.absolutePath} $now (retry)")
+                if (JarPermissions.isWritable(jarPath)) {
+                    throw JarSpiderException(
+                        "jar_not_readonly",
+                        "jar 文件不是只读，Android 14 不允许加载：${jarPath.absolutePath}（$now）",
+                    )
+                }
+                DexClassLoader(jarPath.absolutePath, dexDir.absolutePath, null, parent)
+            }
             loader = made
             Log.i(TAG, "DexClassLoader 就绪 jar=${jarPath.name} dex=${dexDir.absolutePath}")
             return made
+        }
+    }
+
+    /**
+     * 加载前把 jar 钉成只读（DEX_READONLY 2026-11-15）。
+     *
+     * 这一行日志是排查「自检失败」的第一现场，格式固定成
+     * `[JarSpider] jar path=… writable=false perms=444`，`adb logcat -s FXSpider`
+     * 一搜就能确认权限到底是 444 还是 644。
+     *
+     * 只读失败不在这里抛：真正的判据是 ART 抛不抛 SecurityException。
+     * 老系统（< 14）可写 dex 完全能用，提前抛会把本来正常的源判死。
+     * 34+ 上真加载失败时由上面的 catch 报 `jar_not_readonly`。
+     */
+    private fun ensureJarReadOnly() {
+        val ok = JarPermissions.makeReadOnly(jarPath)
+        Log.i(TAG, "[JarSpider] jar path=${jarPath.absolutePath} ${JarPermissions.describe(jarPath)}")
+        if (!ok) {
+            Log.w(
+                TAG,
+                "[JarSpider] jar 仍然可写，Android 14 会拒绝加载：" +
+                    "${jarPath.absolutePath}（${JarPermissions.describe(jarPath)}）",
+            )
         }
     }
 
@@ -227,7 +280,6 @@ class JarSpiderLoader(
         if (bootstrapped) return
         synchronized(lock) {
             if (bootstrapped) return
-            bootstrapped = true
             val app = context.applicationContext ?: context
             try {
                 Runtime.setContext(app)
@@ -238,8 +290,14 @@ class JarSpiderLoader(
                 if (context is Activity) Spider.setActivity(context)
             } catch (ignored: Throwable) {
             }
+            // classLoader() 必须在 try 之外：它抛的是「jar 加载不了」
+            // （比如 jar_not_readonly），被下面那句「非 fatcat jar，跳过」的
+            // 兜底日志吞掉就看不到真正原因了。
+            val cl = classLoader()
+            // 拿到 ClassLoader 才算 bootstrap 过：classLoader() 抛错时
+            // 这个标记必须保持 false，否则换好 jar 之后不会再注入 Init.context。
+            bootstrapped = true
             try {
-                val cl = classLoader()
                 val loaderClass = Class.forName("com.github.catvod.spider.Init\$Loader", true, cl)
                 val instance = loaderClass.getDeclaredField("a").apply { isAccessible = true }.get(null)
                 if (instance != null) {

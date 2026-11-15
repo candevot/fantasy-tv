@@ -202,7 +202,11 @@ class _FavoritePageState extends State<FavoritePage> {
       return;
     }
     Navigator.of(context).push(
-      FxPageRoute(builder: (_) => DetailPage(id: r.id)),
+      FxPageRoute(
+        // 片名 + 年份一起带过去：这张卡片的 vod_id 可能已经被服务端去重
+        // 合并掉，详情页靠它们重查（ID_RETRY 2026-11-15）。
+        builder: (_) => DetailPage(id: r.id, title: r.title, year: r.year),
+      ),
     );
   }
 

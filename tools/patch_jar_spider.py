@@ -285,7 +285,9 @@ def main():
     kotlin_dest = 'android/app/src/main/kotlin/com/huanxiang/fantasy_tv'
     if not os.path.isdir(kotlin_dest):
         fail('没有 %s —— 先执行 tools/patch_exoplayer.py（它负责拷 .kt）' % kotlin_dest)
-    for need in ('JarSpiderLoader.kt', 'JarSpiderPlugin.kt'):
+    # JarPermissions.kt 是 DEX_READONLY（Android 14 只读 jar）的实现本体，
+    # 少了它编译能过但一加载就 SecurityException —— 这里一起校验。
+    for need in ('JarSpiderLoader.kt', 'JarSpiderPlugin.kt', 'JarPermissions.kt'):
         if not os.path.isfile(os.path.join(kotlin_dest, need)):
             fail('%s 没被拷进工程，先跑 tools/patch_exoplayer.py' % need)
     copy_libs()

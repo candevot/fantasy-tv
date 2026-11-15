@@ -94,6 +94,16 @@ jobs:
           # 那一步负责把 android_src/kotlin 下的 .kt 拷进工程。
           python3 tools/patch_jar_spider.py
           ls -l android/app/libs
+      - name: Jar permissions gate (Android 14 read-only dex)
+        run: |
+          # DEX_READONLY（2026-11-15）：Android 14 起 DexClassLoader 只加载只读
+          # jar，可写就抛 SecurityException: Writable dex file … is not allowed.
+          # 静态断言「chmod 444 在 DexClassLoader 之前、更新/卸载前先改回可写」，
+          # 删掉任何一处这里立刻红，不用等真机装包才发现。
+          python3 tools/check_jar_readonly.py
+          # 真实的 chmod 行为单测：非 root 验证 444 之后 canWrite=false、
+          # 覆盖写被拒、makeWritable 后又能写。没有 kotlinc 的环境自动 SKIP。
+          bash tools/check_jar_perms.sh
       - name: Check Android 8+ / 16KB compatibility
         run: |
           python3 tools/check_android_compat.py

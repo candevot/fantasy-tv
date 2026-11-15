@@ -113,8 +113,64 @@ class KSource {
     }
   }
 
+  /// 片源管理页的管理口径（这份配置是云端下发的，还是自己加的）。
+  ///
+  /// **搜索结果卡片不要用这个** —— 那是 [resultLabel] 的活。
   String get originLabel =>
       origin == KSourceOrigin.cloud ? '云端' : '自加';
+
+  /// 我们自己的 hx 库 api 特征（按地址判定，不看名字）。
+  static const String hxApiMark = '125.94.244.87/api.php';
+
+  /// 我们自己的源在卡片上的唯一叫法（SOURCE_LABEL，别再加别的说法）。
+  static const String ownResultLabel = '幻想';
+
+  /// 这算不算「我们自己的 hx 库」：内容和主站采集库是同一套 `vod_id`。
+  bool get isOwnLibrary =>
+      kind != KSourceKind.jar && api.contains(hxApiMark);
+
+  /// 源自己的短名字：TVBox 的站点名是「名字 • 类型」
+  /// （`咕噜 • APP` / `豆瓣 • 首页` / `玩偶 • 4K`），只留名字那一段，
+  /// 别把「 • APP」这种后缀带进来源标注。
+  String get shortName {
+    var text = name.trim();
+    if (text.isEmpty) return '';
+    for (final sep in const <String>['•', '·', '｜', '|', '┃']) {
+      final at = text.indexOf(sep);
+      if (at > 0) text = text.substring(0, at).trim();
+    }
+    return text;
+  }
+
+  /// 卡片下方的来源标注：**只看 api 特征**，不看它是不是云端下发的。
+  ///
+  /// SOURCE_LABEL（2026-11-15）：同一个源以前有两种写法 —— 云端下发的源按
+  /// [origin] 标「云端」，另几条线路切片按线路名标「幻想」，于是搜「济公传」
+  /// 时同一部片出现「来源：云端」和「来源：幻想」两个标签，看着像两个站。
+  /// 现在的规则：
+  ///   · 含 [hxApiMark]（我们自己的 hx 库）→ 永远只叫「幻想」
+  ///   · `csp_` 开头的肥猫 jar 源 → 用它自己的名字（咕噜 / 剧圈 / 豆瓣 …）
+  ///   · 其余（用户自加的源）→ 它自己的名字
+  ///   · 认不出来的（直播 / 暂不支持 / api 为空 / 没名字）→ 空串，不标
+  ///
+  /// 注意：「幻想4K / 幻想1080P / 幻想爱奇艺 / 量子 / 红牛 / SH4K / shvip」
+  /// 是**线路名**，不是来源标注，别混进来。
+  String get resultLabel {
+    final raw = api.trim();
+    if (raw.isEmpty) return '';
+    if (kind == KSourceKind.live || kind == KSourceKind.unsupported) return '';
+    if (raw.contains(hxApiMark)) return ownResultLabel;
+    return shortName;
+  }
+
+  /// 卡片 id 的路由形态。
+  ///
+  /// 我们自己的 hx 库和主站采集库是同一套 `vod_id`，卡片就用裸 id ——
+  /// 详情 / 播放走主站接口，永远能找到。以前统一编码成 `@src:<key>::<id>`，
+  /// 云端配置换 key / 删源之后 `decodeSource` 认不出来，找片子就成了
+  /// 「该视频已失效」（ID_RETRY 2026-11-15）。外部源仍然要编码，
+  /// 否则 id 会跑到主站库里查，串到别的片。
+  String cardIdOf(String vodId) => isOwnLibrary ? vodId : SourceHub.encodeId(key, vodId);
 
   KSource copyWith({
     String? name,
@@ -222,11 +278,13 @@ class SourceSearchPlan {
 ///   2. **可删可恢复**：删掉的内置源只记一个 key 黑名单，云端的原始列表
 ///      一直留着，「恢复默认」= 清空黑名单，不需要重新拉配置。
 ///   3. **多源合并**：搜索 / 分类并行查所有启用的源，按「片名 + 年份」
-///      去重，结果带上来源标记（云端 / 自加 / 采集库）；搜索分成
-///      「自己的」和「外部的」两组渐进返回，见 [searchPlan]。
+///      去重，结果带上来源标记（幻想 / 肥猫 / 自加，见
+///      [KSource.resultLabel]）；搜索分成「自己的」和「外部的」两组渐进
+///      返回，见 [searchPlan]。
 ///
 /// id 约定：外部源的影片 id 会编码成 `@src:<源key>::<vod_id>`，
-/// 详情 / 播放据此路由回原来的源；主站采集库的 id 保持原样不动。
+/// 详情 / 播放据此路由回原来的源；我们自己的 hx 库和主站采集库是同一套
+/// 编号，id 保持原样不动（见 [KSource.cardIdOf]）。
 class SourceHub extends ChangeNotifier {
   SourceHub._();
 
@@ -1099,8 +1157,9 @@ class SourceHub extends ChangeNotifier {
     }
   }
 
-  /// 查单个源并加工成可直接上列表的样子：带来源标记、id 编码成
-  /// `@src:<key>::<vod_id>`。
+  /// 查单个源并加工成可直接上列表的样子：来源标记按 [KSource.resultLabel]
+  /// 判定，id 按 [KSource.cardIdOf] 路由（我们自己的库用裸 id，外部源编成
+  /// `@src:<key>::<vod_id>`）。
   ///
   /// 渐进检索用这个：外部源一个比一个慢，谁先回来就先交给页面渲染。
   /// 单源超过 [sourceTimeout] 一律当「这个源没结果」，不阻塞其它源。
@@ -1118,8 +1177,8 @@ class SourceHub extends ChangeNotifier {
         if (!isLiveCard(card))
           relabel(
             card,
-            label: source.originLabel,
-            id: encodeId(source.key, card.id),
+            label: source.resultLabel,
+            id: source.cardIdOf(card.id),
           ),
     ];
   }
@@ -1164,14 +1223,14 @@ class SourceHub extends ChangeNotifier {
     final out = <VideoCard>[];
     for (var i = 0; i < sources.length && i < lists.length; i++) {
       final source = sources[i];
-      final label = source.originLabel;
+      final label = source.resultLabel;
       for (final card in lists[i]) {
         if (isLiveCard(card)) continue;
         if (!seen.add(dedupeKey(card))) continue;
         out.add(relabel(
           card,
           label: label,
-          id: encodeId(source.key, card.id),
+          id: source.cardIdOf(card.id),
         ));
       }
     }

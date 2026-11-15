@@ -34,6 +34,7 @@ class FxResumeEntry {
     required this.lineId,
     required this.lineName,
     required this.seconds,
+    this.year = 0,
   });
 
   final String id;
@@ -51,6 +52,9 @@ class FxResumeEntry {
   /// 上次看到第几秒（历史里的整数秒）。
   final int seconds;
 
+  /// 年份：详情页 id 失效时和片名一起用来重查（ID_RETRY）。
+  final int year;
+
   factory FxResumeEntry.fromRecord(WatchRecord r) => FxResumeEntry(
         id: r.id,
         title: r.title,
@@ -60,6 +64,7 @@ class FxResumeEntry {
         lineId: r.lineId,
         lineName: r.lineName,
         seconds: r.position,
+        year: r.year,
       );
 
   /// 关闭去重用的签名：同一条记录、同一进度才算「同一条」。
@@ -400,7 +405,14 @@ class _FxResumeBarHostState extends State<FxResumeBarHost>
     if (entry == null) return;
     // 和观看历史页保持一致：先进详情页，由详情页按记录的集数 / 线路续播
     // （播放器自己读 pos_<id>_<ep> 那份进度，所以这里不用传秒数）。
-    await Nav.detail(context, entry.id, ep: entry.ep, line: entry.lineId);
+    await Nav.detail(
+      context,
+      entry.id,
+      ep: entry.ep,
+      line: entry.lineId,
+      title: entry.title,
+      year: entry.year,
+    );
     if (mounted) await _load();
   }
 

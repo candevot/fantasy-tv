@@ -162,6 +162,8 @@ class JarSelfTest {
     this.size = 0,
     this.source = '',
     this.jarPath = '',
+    this.jarPerms = '',
+    this.jarWritable = false,
   });
 
   factory JarSelfTest.fromMap(Object? raw) {
@@ -181,6 +183,8 @@ class JarSelfTest {
       size: _intOf(map['size']),
       source: _text(map['source']),
       jarPath: _text(map['jarPath']),
+      jarPerms: _text(map['jarPerms']),
+      jarWritable: map['jarWritable'] == true,
     );
   }
 
@@ -201,6 +205,15 @@ class JarSelfTest {
   final String source;
   final String jarPath;
 
+  /// jar 的 9 位权限（`444` / `644` / `unknown`）。
+  ///
+  /// DEX_READONLY（2026-11-15）：Android 14 起 DexClassLoader 只接受只读文件，
+  /// `444` 才算合格；自检失败时把这两个字段显示出来，用户截图就能定位。
+  final String jarPerms;
+
+  /// jar 是否仍然可写（可写 = Android 14 必拒）。
+  final bool jarWritable;
+
   /// 一句话结论（设置页 / 提示条直接用）。
   String get summary {
     if (ok) {
@@ -220,7 +233,15 @@ class JarSelfTest {
       _ => '自检失败',
     };
     final detail = error.isEmpty ? code : error;
-    return '$api 自检失败（$stageText${code.isEmpty ? '' : '/$code'}）：$detail';
+    // Android 14 的「Writable dex file」：原生 chmod 444 没成功。
+    // 用户唯一能做的就是重装（安装流程会重新 chmod），所以文案要指路。
+    if (code == 'jar_not_readonly') {
+      return '$api 自检失败（jar 权限不对）：$detail\n'
+          'Android 14 只加载只读 jar（要 444），重装一次 jar 源插件即可自动改正';
+    }
+    final permsText = jarPerms.isEmpty ? '' : '，权限 $jarPerms';
+    return '$api 自检失败（$stageText${code.isEmpty ? '' : '/$code'}）'
+        '$permsText：$detail';
   }
 }
 

@@ -611,10 +611,22 @@ class _BootRetryBannerState extends State<_BootRetryBanner> {
 
 /// 统一导航
 class Nav {
-  static Future<void> detail(BuildContext c, String id,
-          {int ep = 1, String line = ''}) =>
+  static Future<void> detail(
+    BuildContext c,
+    String id, {
+    int ep = 1,
+    String line = '',
+    String title = '',
+    int year = 0,
+  }) =>
       Navigator.of(c).push(FxPageRoute(
-          builder: (_) => DetailPage(id: id, ep: ep, line: line)));
+          builder: (_) => DetailPage(
+                id: id,
+                ep: ep,
+                line: line,
+                title: title,
+                year: year,
+              )));
 
   static Future<void> search(BuildContext c) => Navigator.of(c)
       .push(FxPageRoute(builder: (_) => const SearchPage()));

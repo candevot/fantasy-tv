@@ -96,6 +96,43 @@ void main() {
       expect(t.summary, contains('OkHttpClient'));
     });
 
+    // DEX_READONLY（2026-11-15）：Android 14 拒加载可写 jar，原生会回
+    // code=jar_not_readonly + jarPerms/jarWritable。文案要能指着用户重装。
+    test('jar 不是只读：专有文案 + 权限', () {
+      final t = JarSelfTest.fromMap(<String, dynamic>{
+        'ok': false,
+        'api': 'csp_Douban',
+        'stage': 'classloader',
+        'code': 'jar_not_readonly',
+        'error': 'jar 文件不是只读，Android 14 不允许加载：'
+            '/data/user/0/com.huanxiang.fantasy_tv/files/spiders/x.jar'
+            '（writable=true perms=644）',
+        'jarPerms': '644',
+        'jarWritable': true,
+      });
+      expect(t.ok, isFalse);
+      expect(t.jarPerms, '644');
+      expect(t.jarWritable, isTrue);
+      expect(t.summary, contains('权限不对'));
+      expect(t.summary, contains('Android 14'));
+      expect(t.summary, contains('重装'));
+    });
+
+    test('自检结果带上 jar 权限（444 = 合格）', () {
+      final t = JarSelfTest.fromMap(<String, dynamic>{
+        'ok': true,
+        'api': 'csp_Douban',
+        'stage': 'done',
+        'classes': 9,
+        'items': 20,
+        'jarPerms': '444',
+        'jarWritable': false,
+      });
+      expect(t.jarPerms, '444');
+      expect(t.jarWritable, isFalse);
+      expect(t.summary, contains('自检通过'));
+    });
+
     test('方法签名不匹配：带上实际方法列表', () {
       final t = JarSelfTest.fromMap(<String, dynamic>{
         'ok': false,

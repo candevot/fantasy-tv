@@ -13,7 +13,7 @@ import '../widgets/detail_widgets.dart';
 import '../widgets/download_sheet.dart';
 import '../widgets/player_theme.dart';
 import 'category_page.dart'
-    show FxEmptyView, FxErrorView, FxPosterCard, fxErrorText, fxInt;
+    show FxEmptyView, FxErrorView, FxPosterCard, fxErrorText, fxInt, fxStr;
 import 'feedback_page.dart' show FeedbackPage;
 import 'history_page.dart' show FxStore;
 import 'offline_player_page.dart';
@@ -29,11 +29,25 @@ class DetailPage extends StatefulWidget {
     required this.id,
     this.ep = 1,
     this.line = '',
+    this.title = '',
+    this.year = 0,
+    this.retried = false,
   });
 
   final String id;
   final int ep;
   final String line;
+
+  /// 片名 / 年份（ID_RETRY 2026-11-15）。
+  ///
+  /// 服务端去重合并后旧 `vod_id` 会失效，详情 404 时要靠「片名 + 年份」重查
+  /// 一次而不是直接报「该视频已失效」。入口能带就带上（搜索结果、历史、
+  /// 收藏都带）；没带时详情页会退回本地缓存记录里的片名/年份。
+  final String title;
+  final int year;
+
+  /// 已经按片名重查过一次（换到新记录的那个页面不再重查，避免来回跳）。
+  final bool retried;
 
   @override
   State<DetailPage> createState() => _DetailPageState();
@@ -110,6 +124,9 @@ class _DetailPageState extends State<DetailPage>
   /// 作品已被服务端删除 / 下架：首屏拿到 404「作品不存在」时，
   /// 给友好提示 + 删除这条历史记录的入口，不再走通用错误页的重试。
   bool _invalid = false;
+
+  /// 正在按「片名 + 年份」重查（ID_RETRY）：同一时刻只查一次。
+  bool _retrying = false;
 
   List<CommentItem> _comments = const <CommentItem>[];
   final Set<String> _liked = <String>{};
@@ -262,7 +279,14 @@ class _DetailPageState extends State<DetailPage>
     } catch (e) {
       if (!mounted) return;
       if (_isGoneError(e)) {
-        // 作品已从服务端删除：只提示一次，并给出删除这条记录的入口。
+        // ID_RETRY（2026-11-15）：先按「片名 + 年份」重查一次。
+        //
+        // 服务端刚把同名片做了去重合并（旧副本并进主记录并删除），App 缓存
+        // 的历史 / 收藏里还留着已经不存在的 vod_id。这种情况片还在，直接甩
+        // 「该视频已失效」是错的 —— 重查到就跳到新记录。
+        if (!widget.retried && await _retryByTitle()) return;
+        if (!mounted) return;
+        // 重查也找不到，才算真的失效：只提示一次，并给出删除这条记录的入口。
         // 不走「重试」错误页（重试必然再失败），播放器也没机会再报一次，
         // 避免用户看到两层错误弹窗。
         fxToast(context, '该视频已失效');
@@ -280,6 +304,75 @@ class _DetailPageState extends State<DetailPage>
     }
   }
 
+  /// 详情 404 后的自愈：用「片名 + 年份」重查，命中就直接换到新记录。
+  ///
+  /// 片名 / 年份的来源顺序：入口传进来的（搜索结果、历史、收藏）→ 本地缓存
+  /// 记录里的（[FxStore.historyKey] / [FxStore.favoriteKey] 都存了
+  /// 片名 + 年份）→ 都没有就只能算失效。
+  ///
+  /// 返回 true 表示「已经跳到新记录」，调用方不要再走失效页。
+  Future<bool> _retryByTitle() async {
+    if (_retrying) return false;
+    _retrying = true;
+    try {
+      final cached = await _cachedRecord();
+      final name =
+          widget.title.trim().isNotEmpty ? widget.title.trim() : cached.$1;
+      final year = widget.year > 0 ? widget.year : cached.$2;
+      if (name.isEmpty) return false;
+      // 重查期间保持「加载中」，别让用户先看到一帧「已失效」。
+      if (mounted) {
+        setState(() => _error = null);
+      }
+      VideoCard? hit;
+      try {
+        hit = await CmsBridge.findByTitle(name, year: year).timeout(
+          const Duration(seconds: 8),
+        );
+      } catch (_) {
+        hit = null;
+      }
+      if (!mounted || hit == null) return false;
+      final card = hit;
+      if (card.id.isEmpty || card.id == widget.id) return false;
+      fxToast(context, '记录已更新，正在打开《${card.title}》');
+      await Navigator.of(context).pushReplacement(
+        FxPageRoute(
+          builder: (_) => DetailPage(
+            id: card.id,
+            ep: _ep,
+            line: _lineId,
+            title: card.title,
+            year: card.year,
+            retried: true,
+          ),
+        ),
+      );
+      return true;
+    } finally {
+      _retrying = false;
+    }
+  }
+
+  /// 本地缓存记录里的「片名 + 年份」：观看历史优先，其次收藏。
+  Future<(String, int)> _cachedRecord() async {
+    try {
+      for (final m in await FxStore.read(FxStore.historyKey)) {
+        if ('${m['id']}' == widget.id) {
+          return (fxStr(m['title']).trim(), fxInt(m['year'], 0));
+        }
+      }
+    } catch (_) {}
+    try {
+      for (final m in await FxStore.read(FxStore.favoriteKey)) {
+        if ('${m['id']}' == widget.id) {
+          return (fxStr(m['title']).trim(), fxInt(m['year'], 0));
+        }
+      }
+    } catch (_) {}
+    return ('', 0);
+  }
+
   /// 服务端已删掉这个作品：/api/detail 以 404「作品不存在」返回。
   bool _isGoneError(Object e) {
     if (e is! ApiException) return false;
@@ -292,6 +385,20 @@ class _DetailPageState extends State<DetailPage>
       final list = await FxStore.read(FxStore.historyKey);
       list.removeWhere((e) => '${e['id']}' == widget.id);
       await FxStore.write(FxStore.historyKey, list);
+    } catch (_) {}
+    try {
+      // 从收藏进来时，「这条记录」也在收藏里，一并清掉。
+      final favs = await FxStore.read(FxStore.favoriteKey);
+      final before = favs.length;
+      favs.removeWhere((e) => '${e['id']}' == widget.id);
+      if (favs.length != before) {
+        await FxStore.write(FxStore.favoriteKey, favs);
+      }
+    } catch (_) {}
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.remove('his_${widget.id}');
+      await sp.remove('fav_${widget.id}');
     } catch (_) {}
     if (!mounted) return;
     fxToast(context, '已删除这条记录');
@@ -687,6 +794,8 @@ class _DetailPageState extends State<DetailPage>
         id: widget.id,
         title: d.title,
         cover: d.cover,
+        // 片名 + 年份一起存：id 失效时详情页靠它们重查（ID_RETRY）。
+        year: d.year,
         ep: _ep,
         epName: _currentEpLabel,
         lineId: _lineId,

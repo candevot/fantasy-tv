@@ -61,6 +61,8 @@ Dart MethodChannel('fantasy_tv/spider')
   第二参按目标形参自动在 String / boolean 之间转换。
 - **dex 缓存**：`filesDir/dex/<jar md5>`，md5 变了换目录并重建加载器 ——
   否则会命中上一次的 odex，改了 jar 也还是旧类。
+- **jar 必须只读**：Android 14 起 `DexClassLoader` 只吃 `0444` 的文件，
+  加载前先 chmod（见第 8 节）。
 
 ## 4. jar 从哪来
 
@@ -127,3 +129,53 @@ TVBox 配置里的 `sites` 里 `type: 3` 的项粘进「TVBox 导入」即可（
   一条 —— 这是 App 对 CMS 线路的既有规则，jar 源同样适用。
 - R8：release 默认没开 minify；万一将来开启，`proguard-rules.pro` 里已经
   keep 了 `com.github.catvod.**` / okhttp / gson / jsoup（反射用的类）。
+
+## 8. Android 14 的「Writable dex file」（DEX_READONLY）
+
+v1.0.352 在 Android 14+ 真机上的报错：
+
+```
+java.lang.SecurityException: Writable dex file
+'/data/user/0/com.huanxiang.fantasy_tv/files/spiders/cbe016eb…jar'
+is not allowed.
+```
+
+**根因**：API 34 起 ART 打开 dex 前会看 `st_mode & 0222`，只要 owner /
+group / other 任一可写就拒加载。我们下载 / 解 assets 出来的 jar 天生是
+`0644`，所以「下载成功、md5 通过、自检必失败」。
+
+**修法**：落盘之后、交给 `DexClassLoader` 之前把文件钉成 `0444`。
+实现集中在 `JarPermissions.kt`（新文件），两侧的调用点：
+
+| 场景 | 处理 |
+| --- | --- |
+| 下载 / 本地文件 / 内置 jar 安装（`adopt`） | 落盘后 `sealJar(target, strict = true)`，34+ 上 chmod 失败直接报 `jar_not_readonly` |
+| 从 assets 释放（`extractAssetJar` / `installBundled`） | 写之前 `unseal`，写完 `sealJar` |
+| 每次取到当前 jar（`currentJar`） | 顺手 chmod：老版本装下的 `0644` 自动修好，用户不用重装 |
+| 加载前（`JarSpiderLoader.classLoader`） | `ensureJarReadOnly()` 打日志 + 仍失败时 chmod 后重试；ART 还拒就报 `jar_not_readonly` |
+| 重新下载（`download.tmp`） | 删旧 tmp 前 `unseal` |
+| 覆盖写固定文件名的 `bundled.jar` | 写之前 `unseal`（否则第二次「用内置」EACCES） |
+| 卸载 / 清 dex 缓存 | 先 `unseal` / `makeDirWritable`，再删 |
+| dex 输出目录 `dex/<md5>` | **相反**：必须 0700 可写（ART 要往里写 odex），只确保可写，绝不 chmod 只读 |
+
+真机确认方式（一眼看权限）：
+
+```
+adb logcat -s FXSpider | grep JarSpider
+I FXSpider: [JarSpider] jar path=/data/user/0/com.huanxiang.fantasy_tv/files/spiders/cbe016eb….jar writable=false perms=444
+```
+
+自检结果里也带 `jarPerms` / `jarWritable`（`444` / `false` 才是合格），
+失败时页面文案是「jar 权限不对 … 重装一次 jar 源插件即可自动改正」。
+
+**本机验证**（不需要真机、不需要 Android SDK）：
+
+```bash
+# 1) 真实 chmod 行为：非 root 跑，验证 444 之后 canWrite=false、覆盖写被拒、
+#    makeWritable 之后又能写；会跑两遍（纯 JVM / 带假 android.system.Os 的反射路径）
+bash tools/check_jar_perms.sh
+
+# 2) 静态门禁（CI 里必跑）：chmod 必须在 DexClassLoader 之前、
+#    更新/卸载前必须改回可写，删一行就红
+python3 tools/check_jar_readonly.py
+```

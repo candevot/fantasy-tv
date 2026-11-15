@@ -1,6 +1,7 @@
 package com.huanxiang.fantasy_tv
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
@@ -34,6 +35,13 @@ import android.os.Looper
  * 与 ExoPlayer 插件的关系：互不相干。本类不碰播放器，只在 Dart 侧取数据时
  * 出现；[JarSpiderLoader] 里的 okhttp 连接池与播放器的 ExoPlayer 数据源分开，
  * 不会互相抢带宽（各自的 client）。
+ *
+ * **文件权限（DEX_READONLY 2026-11-15）**：Android 14 不允许 DexClassLoader
+ * 加载可写的 dex/jar。所以这里的规则是「装完立刻 0444，动之前先 0600」：
+ *   · [adopt] / [installBundled] / [extractAssetJar] 落盘后调 [sealJar]；
+ *   · [installJar] 的 tmp、[installBundled] 的固定文件名 bundled.jar、
+ *     [uninstall] 的删除、[loader] 清 dex 缓存，动手前先 [unseal]；
+ *   · [currentJar] 每次取到 jar 顺手 chmod，老版本装下的 0644 jar 自动修好。
  */
 class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHandler {
 
@@ -280,6 +288,10 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "size" to jar.length(),
             "md5" to md5,
             "source" to source,
+            // DEX_READONLY：自检结果里直接带上权限，用户截图就能说明问题
+            // （Android 14 只接受 perms=444 / writable=false）。
+            "jarPerms" to JarPermissions.modeText(jar),
+            "jarWritable" to JarPermissions.isWritable(jar),
         )
         val result = try {
             loader(api).selfTest(api, ext)
@@ -313,8 +325,12 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 loader = null
             }
             val dexDir = File(File(appContext.filesDir, "dex"), md5)
+            // 上一轮的 odex 可能被权限问题锁住：目录先 0700 再整个删。
+            JarPermissions.makeDirWritable(dexDir)
             if (dexDir.exists()) dexDir.deleteRecursively()
             dexDir.mkdirs()
+            // 装完 / 换完 jar 的第一现场日志：writable=false perms=444 才加载得动。
+            sealJar(jar)
             val made = JarSpiderLoader(appContext, jar, dexDir)
             loader = made
             loaderMd5 = md5
@@ -324,6 +340,39 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     /* ------------------------------------------------------------ jar 文件 */
+
+    /**
+     * 把 jar 钉成只读（0444）—— Android 14 不加载可写 dex（DEX_READONLY 2026-11-15）。
+     *
+     * 日志固定成 `[JarSpider] jar path=… writable=false perms=444`，
+     * 真机上 `adb logcat -s FXSpider | grep JarSpider` 就能确认。
+     *
+     * `strict = true` 只用在「刚装完」这条路上：34+ 装完还是可写，
+     * 说明 chmod 被 ROM 拦了，这时候直接报错比让用户点自检再看
+     * SecurityException 清楚。老系统（< 34）可写 dex 能加载，只记警告。
+     */
+    private fun sealJar(file: File, strict: Boolean = false) {
+        val wasWritable = JarPermissions.isWritable(file)
+        val ok = JarPermissions.makeReadOnly(file)
+        // 已经是 444 时不刷日志：currentJar() 每次取数都会走到这里，
+        // 搜索时 41 个源各打一行会把 logcat 冲爆。
+        if (wasWritable || !ok) {
+            Log.i(TAG, "[JarSpider] jar path=${file.absolutePath} ${JarPermissions.describe(file)}")
+        }
+        if (ok) return
+        val message = "jar 文件不是只读，Android 14 不允许加载：" +
+            "${file.absolutePath}（${JarPermissions.describe(file)}）"
+        if (strict && Build.VERSION.SDK_INT >= 34) {
+            throw JarSpiderException("jar_not_readonly", message)
+        }
+        Log.w(TAG, message)
+    }
+
+    /** 更新 / 覆盖 / 删除之前必须做：0444 的文件 open(O_WRONLY) 是 EACCES。 */
+    private fun unseal(file: File) {
+        if (!file.exists()) return
+        JarPermissions.makeWritable(file)
+    }
 
     private fun spidersDir(): File {
         val dir = File(appContext.filesDir, "spiders")
@@ -338,7 +387,13 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         val path = prefs().getString(KEY_PATH, "") ?: ""
         if (path.isNotEmpty()) {
             val f = File(path)
-            if (f.isFile && f.length() > 0) return f
+            if (f.isFile && f.length() > 0) {
+                // 老版本（v1.0.352 及之前）装下来的 jar 是 0644，在 Android 14
+                // 上一加载就 SecurityException。这里顺手纠正：用户不用重装，
+                // 升级到这一版后第一次取数据就自动变成 444。
+                sealJar(f)
+                return f
+            }
         }
         // 用户点过「卸载」：不要再偷偷把内置 jar 解出来，否则卸载等于没卸。
         if (prefs().getBoolean(KEY_BUNDLE_OFF, false)) return null
@@ -348,8 +403,13 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
     /** 内置 jar（可选）：首次使用时从 assets 解到 filesDir，之后走同一套路径。 */
     private fun extractAssetJar(): File? {
         val target = File(spidersDir(), "bundled.jar")
-        if (target.isFile && target.length() > 0) return target
+        if (target.isFile && target.length() > 0) {
+            sealJar(target)
+            return target
+        }
         return try {
+            // 残留的半截文件可能是 444：先放开再写，否则 FileOutputStream 直接 EACCES。
+            unseal(target)
             appContext.assets.open(ASSET_JAR).use { input ->
                 FileOutputStream(target).use { out -> input.copyTo(out) }
             }
@@ -359,6 +419,7 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 .putString(KEY_MD5, md5)
                 .putString(KEY_SOURCE, "bundled")
                 .apply()
+            sealJar(target)
             Log.i(TAG, "已解出内置 jar：${target.absolutePath} md5=$md5")
             target
         } catch (e: Throwable) {
@@ -400,6 +461,8 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
 
     private fun installJar(url: String, expectMd5: String): Map<String, Any?> {
         val tmp = File(spidersDir(), "download.tmp")
+        // 上一次安装中途被杀可能留下一个 444 的 tmp：先放开再删。
+        unseal(tmp)
         if (tmp.exists()) tmp.delete()
         val started = System.currentTimeMillis()
         reportProgress("start", url, 0, 0)
@@ -417,6 +480,7 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             reportProgress("error", url, 0, 0)
             throw e
         } finally {
+            unseal(tmp)
             if (tmp.exists()) tmp.delete()
         }
     }
@@ -425,6 +489,9 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private fun installBundled(): Map<String, Any?> {
         val target = File(spidersDir(), "bundled.jar")
         try {
+            // 固定的文件名：上一次「用内置」留下的 bundled.jar 已经是 444，
+            // 不放开就写不进去（EACCES），这是点第二次必踩的坑。
+            unseal(target)
             appContext.assets.open(ASSET_JAR).use { input ->
                 FileOutputStream(target).use { out -> input.copyTo(out) }
             }
@@ -463,13 +530,23 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             File(spidersDir(), "$md5.jar")
         }
         if (target.exists()) {
-            if (source.absolutePath != target.absolutePath) source.delete()
+            if (source.absolutePath != target.absolutePath) {
+                // 同名 jar 重复安装：目标可能已经是 444，先放开再删 tmp。
+                unseal(target)
+                source.delete()
+            }
         } else if (source.absolutePath != target.absolutePath) {
+            unseal(source)
             if (!source.renameTo(target)) {
+                unseal(target)
                 source.copyTo(target, overwrite = true)
                 source.delete()
             }
         }
+        // DEX_READONLY：落盘之后、prefs 记录「已安装」之前钉成 0444。
+        // 34+ 上 chmod 失败就直接报错（strict），别让用户点自检才看到
+        // SecurityException: Writable dex file。
+        sealJar(target, strict = true)
         prefs().edit()
             .putString(KEY_PATH, target.absolutePath)
             .putString(KEY_MD5, md5)
@@ -480,12 +557,14 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         loader?.destroy()
         loader = null
         loaderMd5 = ""
-        Log.i(TAG, "jar 已安装：${target.absolutePath} md5=$md5")
+        Log.i(TAG, "jar 已安装：${target.absolutePath} md5=$md5 perms=${JarPermissions.modeText(target)}")
         return mapOf(
             "ok" to true,
             "path" to target.absolutePath,
             "md5" to md5,
             "size" to target.length(),
+            "perms" to JarPermissions.modeText(target),
+            "writable" to JarPermissions.isWritable(target),
         )
     }
 
@@ -567,7 +646,7 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         false
     }
 
-    /** 卸载：释放加载器 + 删掉 filesDir/spiders 下的 jar 与记录。 */
+    /** 卸载：释放加载器 + 删掉 filesDir/spiders 下的 jar、dex 缓存与记录。 */
     private fun uninstall(): Map<String, Any?> {
         loader?.destroy()
         loader = null
@@ -575,9 +654,26 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         val dir = spidersDir()
         dir.listFiles()?.forEach { file ->
             try {
-                file.delete()
-            } catch (ignored: Throwable) {
+                // 0444 的 jar 在 unlink 层面其实删得掉（有目录写权限就行），
+                // 但先放开再删能把「删了半个目录 / 删不掉」这类 ROM 差异抹平。
+                unseal(file)
+                if (!file.delete() && file.exists()) Log.w(TAG, "删不掉 ${file.name}")
+            } catch (e: Throwable) {
+                Log.w(TAG, "删除 ${file.name} 失败：${e.message}")
             }
+        }
+        // dex 缓存（dex/<md5>）一起清：换过 jar 之后旧 odex 留着没用，
+        // 而且新 md5 目录名不同，不清就一路堆着。目录要 0700 才删得干净。
+        try {
+            val dexRoot = File(appContext.filesDir, "dex")
+            dexRoot.listFiles()?.forEach { sub ->
+                JarPermissions.makeDirWritable(sub)
+                sub.listFiles()?.forEach { JarPermissions.makeWritable(it) }
+                sub.deleteRecursively()
+            }
+            dexRoot.delete()
+        } catch (e: Throwable) {
+            Log.w(TAG, "清 dex 缓存失败：${e.message}")
         }
         // clear 之后立刻写回「别再用内置」：否则下一次 status() 又会把
         // assets 里的 spider.jar 解出来，用户点了卸载却还是「已安装」。
@@ -606,6 +702,9 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "size" to jar.length(),
             "bundled" to (source == "bundled" || jar.name.startsWith("bundled")),
             "source" to source,
+            // 设置页「jar 插件」里直接看权限：444 才是 Android 14 能加载的形态。
+            "perms" to JarPermissions.modeText(jar),
+            "writable" to JarPermissions.isWritable(jar),
         )
     }
 

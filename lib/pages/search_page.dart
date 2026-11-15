@@ -534,9 +534,11 @@ class _SearchPageState extends State<SearchPage> {
     }
   }
 
-  void _openDetail(String id) {
+  void _openDetail(String id, {String title = '', int year = 0}) {
     Navigator.of(context).push(
-      FxPageRoute(builder: (_) => DetailPage(id: id)),
+      FxPageRoute(
+        builder: (_) => DetailPage(id: id, title: title, year: year),
+      ),
     );
   }
 
@@ -544,7 +546,11 @@ class _SearchPageState extends State<SearchPage> {
   /// 搜索结果点击：统一进详情页。
   /// 平台条目（tx_/iq_）由服务端合成详情，线路卡 / 选集 / 播放 / 一起看 /
   /// 下载与片库条目完全一致，客户端不再需要单独的简化播放页。
-  void _openResult(VideoCard item) => _openDetail(item.id);
+  ///
+  /// 片名 + 年份一起带进详情页：id 万一已经失效（服务端去重合并过），
+  /// 详情页能用它们重查，不会直接报「该视频已失效」（ID_RETRY）。
+  void _openResult(VideoCard item) =>
+      _openDetail(item.id, title: item.title, year: item.year);
 
   @override
   Widget build(BuildContext context) {

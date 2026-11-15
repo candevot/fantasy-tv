@@ -65,6 +65,7 @@ class FxStore {
     required String id,
     required String title,
     String cover = '',
+    int year = 0,
     int ep = 1,
     String epName = '',
     String lineId = '',
@@ -99,6 +100,10 @@ class FxStore {
       list.insert(0, <String, dynamic>{
         'id': id,
         'title': title,
+        // ID_RETRY（2026-11-15）：记录里存住「片名 + 年份」。
+        // 服务端去重合并会删掉旧 vod_id，详情 404 时就靠这两个字段重查，
+        // 而不是把这条记录判死。
+        'year': year > 0 ? year : (hasOld ? fxInt(old['year'], 0) : 0),
         'cover': cover.isEmpty && hasOld ? fxStr(old['cover']) : cover,
         'ep': nextEp,
         'epName': keepOld ? oldEpName : epName,
@@ -220,11 +225,15 @@ class WatchRecord {
     required this.position,
     required this.duration,
     required this.updatedAt,
+    this.year = 0,
   });
 
   final String id;
   final String title;
   final String cover;
+
+  /// 年份：ID_RETRY 时和片名一起用来重查（老记录没有，就是 0）。
+  final int year;
   final int ep;
   final String epName;
 
@@ -238,6 +247,7 @@ class WatchRecord {
   factory WatchRecord.fromMap(Map<String, dynamic> m) => WatchRecord(
         id: fxStr(m['id']),
         title: fxStr(m['title'], '未命名影片'),
+        year: fxInt(m['year']),
         cover: fxStr(m['cover']),
         ep: fxInt(m['ep'], 1),
         epName: fxStr(m['epName']),
@@ -251,6 +261,7 @@ class WatchRecord {
   Map<String, dynamic> toMap() => <String, dynamic>{
         'id': id,
         'title': title,
+        'year': year,
         'cover': cover,
         'ep': ep,
         'epName': epName,
@@ -349,7 +360,14 @@ class _HistoryPageState extends State<HistoryPage> {
   Future<void> _continue(WatchRecord r) async {
     // 与首页点卡片保持一致：先进详情页，由详情页定位集数并负责起播。
     // 作品已被服务端删除时，详情页会提示「该视频已失效」并提供删除入口。
-    await Nav.detail(context, r.id, ep: r.ep, line: r.lineId);
+    await Nav.detail(
+      context,
+      r.id,
+      ep: r.ep,
+      line: r.lineId,
+      title: r.title,
+      year: r.year,
+    );
     // 播放器会在播放中回写进度，返回时重新读一次让进度条保持最新。
     if (mounted) await _load();
   }
