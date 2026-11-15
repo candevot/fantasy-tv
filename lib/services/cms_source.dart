@@ -214,6 +214,15 @@ List<CmsLine> parseLines(Map<String, dynamic> vod) {
     // `LineInfo.type` 的地方还会再套一层解析。
     // 地址是直链就是 hls，是令牌 / 页面 / `iqiyi:` 占位才叫 parse —— 占位
     // 地址本身过不了 [needsParse]，所以这一句已经覆盖了爱奇艺那种情况。
+    // DEAD_LINE（2026-11-15）：解析一定失败的线路不给用户看 —— 也不必给播放器。
+    //
+    // 服务端已经在输出层摘掉死线路（`HxApi::dropDeadLines`），但客户端不能
+    // 只靠它：本地详情缓存（12 条）、外部 CMS 源、老接口都可能还带着
+    // 「幻想蓝光（FY-PAN1 令牌）」这类必然 404 的线路。用户点到它的结果是
+    // 白等一整个起播超时窗口，然后再被自动换线 —— 体验上就是「点了没反应」。
+    // 判据（[isDeadLine]）和接口层同一份，地址只要有一集是活的就照常保留。
+    if (isDeadLine(name, urls)) continue;
+
     final parse = urls.any(needsParse);
     out.add(CmsLine(
       info: LineInfo(

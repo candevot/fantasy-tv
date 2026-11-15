@@ -94,4 +94,79 @@ void main() {
       expect(fxRelevantCards(const <VideoCard>[], '济公传'), isEmpty);
     });
   });
+
+  group('闸门放宽但保留底线（GATE_RELAX 2026-11-15）', () {
+    VideoCard card(String title, {String desc = ''}) =>
+        VideoCard.fromJson(<String, dynamic>{
+          'id': title,
+          'title': title,
+          'desc': desc,
+        });
+
+    test('片名带括号 / 年份 / 前缀后缀都算相关（不要求完全相等）', () {
+      for (final title in <String>[
+        '济公传[电影解说]',
+        '济公传(2016)',
+        '济公传 4K',
+        '新编济公传 国语',
+        '【高清】济公传',
+        '活佛济公',
+        '济公游记',
+      ]) {
+        final gate = fxSearchGate(<VideoCard>[card(title)], '济公传');
+        expect(gate.kept, hasLength(1), reason: '《$title》应算相关');
+        expect(gate.dropped, 0);
+      }
+    });
+
+    test('「关键词任一分词出现」就算相关', () {
+      // 「济公」是「济公传」的分词：同 IP 的其它片子要留。
+      expect(fxSearchRelevant('活佛济公', '济公传'), isTrue);
+      expect(fxSearchRelevant('济公游记', '济公传'), isTrue);
+      // 只有关键词的**其它**分词（公传）命中，也算。
+      expect(fxSearchRelevant('天公传奇', '济公传'), isTrue);
+    });
+
+    test('底线还在：完全无关的不许进（引流到首页那批）', () {
+      final gate = fxSearchGate(<VideoCard>[
+        card('背着善宰跑'),
+        card('与恶魔有约'),
+        card('爱情怎么翻译'),
+        card('釜山行前传：首尔站'),
+        card('济公传'),
+      ], '济公传');
+      expect(gate.kept.map((c) => c.title).toList(), <String>['济公传']);
+      expect(gate.dropped, 4, reason: '日志里的 dropped= 要说得准');
+    });
+
+    test('简介提到关键词不算（只认片名）', () {
+      final gate = fxSearchGate(<VideoCard>[
+        card('背着善宰跑', desc: '本片与济公传无关，是韩剧'),
+      ], '济公传');
+      expect(gate.kept, isEmpty);
+      expect(gate.dropped, 1);
+    });
+
+    test('解说 / 预告单独判断：留下但排在正片后面', () {
+      final gate = fxSearchGate(<VideoCard>[
+        card('济公传[电影解说]'),
+        card('济公传'),
+        card('新济公传'),
+      ], '济公传');
+      expect(gate.kept.map((c) => c.title).toList(), <String>[
+        '济公传',
+        '新济公传',
+        '济公传[电影解说]',
+      ]);
+      expect(gate.extraClips, 1);
+      expect(gate.dropped, 0, reason: '解说不是「无关」，只是降位');
+    });
+
+    test('空关键词 / 空列表：整批放行，丢 0 条', () {
+      final raw = <VideoCard>[card('背着善宰跑')];
+      expect(fxSearchGate(raw, '').dropped, 0);
+      expect(fxSearchGate(const <VideoCard>[], '济公传').kept, isEmpty);
+      expect(fxSearchGate(const <VideoCard>[], '济公传').dropped, 0);
+    });
+  });
 }

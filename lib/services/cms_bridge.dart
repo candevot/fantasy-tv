@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:collection';
 
 import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
+import 'jar_log.dart';
 import 'jar_spider.dart';
 import 'play_log.dart';
 import 'play_path.dart';
@@ -581,6 +583,14 @@ class CmsBridge {
     var closed = false;
     Object? primaryFailure;
 
+    /// 外部源（肥猫 jar 源）一共命中多少条 —— 页面进度文案「命中 3」用它。
+    var externalHits = 0;
+
+    /// 外部源各结局的计数（空 / 超时 / 出错），页面左下角一行小字就能看出
+    /// 「不是没搜，是这些源本身没东西 / 挂了」（JAR_PROGRESS 2026-11-15）。
+    final externalStates = <SourceSearchStatus, int>{};
+    final searchStarted = DateTime.now();
+
     /// 主站第一页给了多少条（用来判断要不要补第二页那一波）。
     var firstPageCount = 0;
 
@@ -595,6 +605,17 @@ class CmsBridge {
     void finish() {
       if (closed) return;
       closed = true;
+      // 一轮的收尾日志：一行看到「41 个源里几个有货、几个空、几个挂」。
+      if (externalStates.isNotEmpty || externalHits > 0) {
+        final parts = externalStates.entries
+            .map((e) => '${e.value} ${e.key.name}')
+            .join(' / ');
+        fxJarLog(
+          'summary key=$q 源=${externalStates.values.fold<int>(0, (a, b) => a + b)} '
+          '命中=$externalHits [$parts] '
+          '耗时=${(DateTime.now().difference(searchStarted).inMilliseconds / 1000).toStringAsFixed(1)}s',
+        );
+      }
       if (emitted == 0 && primaryFailure != null) {
         ctrl.addError(primaryFailure!);
       } else {
@@ -611,20 +632,38 @@ class CmsBridge {
       unawaited(ctrl.close());
     }
 
-    void emit(List<VideoCard> cards, {required bool external, int page = 1}) {
+    void emit(
+      List<VideoCard> cards, {
+      required bool external,
+      int page = 1,
+      String source = '',
+      SourceSearchStatus status = SourceSearchStatus.ok,
+    }) {
       if (closed) return;
       final kept = <VideoCard>[];
       // SEARCH_RELEVANCE（2026-11-15）：外部源（肥猫的 jar 源）不保证按关键词
       // 搜 —— 有的 jar 直接把关键词当分类 id（见 search_relevance.dart 头注释），
-      // 返回的是源站首页那批片。片名和关键词无关的一律丢掉：
-      // 整段都没相关的就整段不显示，绝不拿首页数据冒充搜索结果。
-      final judged = external ? fxRelevantCards(cards, q) : cards;
-      for (final card in judged) {
+      // 返回的是源站首页那批片。片名和关键词无关的一律丢掉。
+      //
+      // GATE_LOG（2026-11-15）：**每个源单独判、单独记**。整批判的话只知道
+      // 「41 个源一共丢了 30 条」，不知道是哪个源在灌首页数据。
+      final gate = external
+          ? fxSearchGate(cards, q)
+          : FxSearchGate(kept: cards, dropped: 0, extraClips: 0);
+      if (external && (gate.dropped > 0 || gate.kept.isNotEmpty)) {
+        fxJarGateLog(source, gate);
+      }
+      for (final card in gate.kept) {
         if (SourceHub.isLiveCard(card)) continue;
-        if (!dedupe.fresh(card)) continue;
+        // JAR_PROGRESS：外部源**按 id 去重**（id 里带 `@src:<源>`）。
+        // 以前外部卡片也走「片名+年份」跨源合并 —— 咕噜和剧圈都搜到
+        // 「济公传」时后到的会被当成重复丢掉，用户只看到一条，
+        // 和「肥猫乐园每个源各自出结果」的体验相反。
+        if (!dedupe.fresh(card, perSource: external)) continue;
         kept.add(card);
       }
       emitted += kept.length;
+      if (external) externalHits += kept.length;
       // SEARCH_RANK：每一批都按「分辨率优先」排好再交给页面 —— 先到的一批
       // 也已经是正确顺序，不会出现「低画质先占位、高画质后到被压在下面」。
       final ranked = SearchRank.sort(kept);
@@ -636,6 +675,9 @@ class CmsBridge {
           total: total,
           finished: false,
           page: page,
+          source: source,
+          status: status,
+          dropped: gate.dropped,
         ),
       );
     }
@@ -719,12 +761,39 @@ class CmsBridge {
         }());
       }
 
-      // 3. 外部源（肥猫 41 个 jar 源 + 自加）：并行后台查，逐批追加。
-      for (final source in plan.external) {
+      // 3. 外部源（肥猫 41 个 jar 源 + 自加）：**并行发、谁先回谁先上屏**。
+      //
+      // JAR_PROGRESS（2026-11-15）：这里原来是 `searchPrepared`，它把异常和
+      // 超时全吞成空列表，页面看不出「这个源超时了」还是「这个源真没这部片」。
+      // 现在每个源回一个 [SourceSearchResult]（条数 + 结局 + 耗时），
+      // 立刻单独 emit 一批 —— 用户是**一条一条看到结果冒出来**的，
+      // 不是等 15 秒后一次性出现（壳的体验就是这样）。
+      // 某个源超时 / 出错只影响它自己：已上屏的结果不动，进度继续往前走。
+      final jarGate = _ConcurrencyGate(JarSpider.maxConcurrentSearches);
+      for (final source in _prioritizeExternal(plan.external)) {
         tasks.add(() async {
-          final cards = await hub.searchPrepared(source, q, page);
+          // JAR_CONCURRENCY：原生侧只有 6 条 worker 线程，Dart 一次发 41 个
+          // 请求只会让后 35 个在队列里超时（排队时间也算在 guard 的超时里）。
+          final gated = source.kind == KSourceKind.jar;
+          if (gated) await jarGate.acquire();
+          SourceSearchResult result;
+          try {
+            result = await hub.searchSource(source, q, page);
+          } finally {
+            if (gated) jarGate.release();
+          }
           done++;
-          emit(cards, external: true);
+          externalStates.update(
+            result.status,
+            (v) => v + 1,
+            ifAbsent: () => 1,
+          );
+          emit(
+            result.cards,
+            external: true,
+            source: result.label,
+            status: result.status,
+          );
         }());
       }
 
@@ -761,11 +830,59 @@ class CmsBridge {
         },
       ).whenComplete(finish),
     );
-    // 硬上限：所有源都按 8 秒单源超时，正常 8 秒内一定收工；这里再兜一层
-    // 「整体 15 秒」，页面最多等 15 秒就一定有结果或错误，绝不允许无限转圈。
-    Timer(const Duration(seconds: 15), finish);
+    // 硬上限：单源 12 秒（[SourceHub.sourceTimeout]），这里再兜一层
+    // 「整体 20 秒」，页面最多等 20 秒就一定有结果或错误，绝不允许无限转圈。
+    //
+    // JAR_TIMEOUT（2026-11-15）：15 秒 → 20 秒。jar 源的 quick 回退
+    // （quick=false 空 → quick=true）单个源最长能占满 12 秒，41 个源同时发
+    // 在 15 秒时被整轮截断，日志里会出现「源还没跑完就被收尾」，
+    // 用户看到的是「进度停在 12/41」。
+    Timer(const Duration(seconds: 20), finish);
     return ctrl.stream;
   }
+
+  /// 外部源的发车顺序：**先发最可能返回影视结果的源**。
+  ///
+  /// JAR_ORDER（2026-11-15）：41 个 jar 源同时发，谁先回来谁先上屏 —— 但
+  /// 「谁先回来」取决于源站，先发的那些决定第一屏看到什么。肥猫那份配置里
+  /// 混着一堆**不搜影视**的源（豆瓣预告 / 配置中心 / 酷狗音乐 / 小学课堂 /
+  /// 急救教学 / 直播 / 网盘），它们的 `searchContent` 要么回别的类型、要么
+  /// 直接空；`csp_Bili` 更特殊 —— 反编译确认它把关键词当分类 id，
+  /// 只会回首页/合集（客户端只能靠相关性闸门丢掉）。
+  ///
+  /// 所以按「能真搜影视」→「只回分类」→「其它」排序。排序只影响先后，
+  /// **不影响是否参与**：后面的照样会查，只是不再占着第一屏。
+  static List<KSource> _prioritizeExternal(List<KSource> sources) {
+    int rank(KSource s) {
+      if (s.kind != KSourceKind.jar) return 1;
+      final api = s.api.trim().toLowerCase();
+      final name = api.replaceFirst('csp_', '');
+      if (_jarCategoryOnly.contains(name)) return 3;
+      if (_jarSearchable.contains(name)) return 0;
+      return 2;
+    }
+
+    final indexed = <MapEntry<int, int>>[
+      for (var i = 0; i < sources.length; i++) MapEntry<int, int>(i, rank(sources[i])),
+    ];
+    indexed.sort((a, b) {
+      final r = a.value.compareTo(b.value);
+      return r != 0 ? r : a.key.compareTo(b.key);
+    });
+    return <KSource>[for (final e in indexed) sources[e.key]];
+  }
+
+  /// 反编译确认「真的按关键词搜」的类（`searchContent` 里把 key 编进了请求）。
+  ///
+  /// 名字是 `api` 去掉 `csp_` 再转小写（配置写 `csp_Gulu`，jar 里类叫 `Gulu`）。
+  static const Set<String> _jarSearchable = <String>{
+    'gulu', 'saohuo', 'jpys', 'gz360', 'appget', 'appqi', 'apprj', 'appyqk',
+    'hxq', 'push', 'czsapp', 'sp360', 'ygp', 'jike', 'kule', 'fengye', 'djuu',
+    'wogg', 'seedhub', 'xbpq', 'juxiafan', 'yunduo', 'new6v', 'renren',
+  };
+
+  /// 反编译确认「无视关键词、只回分类/首页」的类（结果靠闸门丢）。
+  static const Set<String> _jarCategoryOnly = <String>{'bili'};
 
   /// 单条记录转卡片；坏数据返回 null，**不能**让一条脏记录炸掉整页。
   ///
@@ -1323,6 +1440,9 @@ class SearchBatch {
     required this.total,
     required this.finished,
     this.page = 1,
+    this.source = '',
+    this.status = SourceSearchStatus.ok,
+    this.dropped = 0,
   });
 
   /// 这一批对应接口的第几页（1 起）。
@@ -1347,6 +1467,18 @@ class SearchBatch {
 
   /// 所有源都结束了（这一批的 items 一定是空的）。
   final bool finished;
+
+  /// 这一批来自哪个源（只对外部源有意义：`咕噜` / `剧圈` / 自加源的短名）。
+  ///
+  /// JAR_PROGRESS（2026-11-15）：外部源是**一个源一批**地回来的，页面要能
+  /// 说出「第 12 个源是哪个、它给了几条」，而不是只有一个总数。
+  final String source;
+
+  /// 这个源的结局（有结果 / 空 / 超时 / 出错）。页面进度条用它分类计数。
+  final SourceSearchStatus status;
+
+  /// 被相关性闸门丢掉的条数（外部源才有；日志里已经写过一行）。
+  final int dropped;
 }
 
 /// 一页分类列表：条目 + 还有没有下一页。
@@ -1404,8 +1536,14 @@ class _Dedupe {
   /// 按卡片 id 去重（跨源不合并）：一起看建房要列出「同一部片在各个源」。
   final bool byId;
 
-  bool fresh(VideoCard card) {
-    if (byId) {
+  /// [perSource] = 外部源（jar）单独一批：**按 id 去重**。
+  ///
+  /// JAR_PROGRESS（2026-11-15）：外部卡片的 id 已经带 `@src:<源key>`，
+  /// 按 id 去重等于「同一个源里的同一部片只留一条、不同源的同名片都留」——
+  /// 这正是「肥猫乐园里每个源各自出结果」的样子。按片名跨源合并的话，
+  /// 咕噜和剧圈都搜到「济公传」时只会剩一条，用户以为肥猫只有 1 条结果。
+  bool fresh(VideoCard card, {bool perSource = false}) {
+    if (byId || perSource) {
       final hit = _seen.putIfAbsent('id:${card.id}', () => <VideoCard>[]);
       if (hit.isNotEmpty) return false;
       hit.add(card);
@@ -1450,5 +1588,38 @@ class _Dedupe {
       return true;
     }
     return false;
+  }
+}
+
+/// 简单的并发闸门（先进先出）。
+///
+/// JAR_CONCURRENCY（2026-11-15）：外部源是「41 个一起发」，但原生 jar 加载器
+/// 只有固定几条 worker 线程 —— 不在这里排队，就会在原生队列里超时，
+/// 用户看到的是「后面的源一个都没查到」。这里保证：
+/// 同时最多 [limit] 个源在跑，其余排队；谁跑完谁补位，页面继续逐源上屏。
+class _ConcurrencyGate {
+  _ConcurrencyGate(this.limit);
+
+  final int limit;
+  int _active = 0;
+  final Queue<Completer<void>> _waiting = Queue<Completer<void>>();
+
+  Future<void> acquire() {
+    if (_active < limit) {
+      _active++;
+      return Future<void>.value();
+    }
+    final completer = Completer<void>();
+    _waiting.add(completer);
+    return completer.future;
+  }
+
+  void release() {
+    if (_waiting.isNotEmpty) {
+      // 名额直接交给排在最前面的那个（_active 不变）。
+      _waiting.removeFirst().complete();
+      return;
+    }
+    if (_active > 0) _active--;
   }
 }

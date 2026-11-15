@@ -1394,6 +1394,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     private fun bindListener(p: ExoPlayer) {
         p.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
+                // CRASH_GUARD2（2026-11-15）：media3 的 listener 都在主线程回调，
+                // 这里抛异常就是 FATAL EXCEPTION: main —— 直接闪退。
+                // 状态回调里的动作（收音频闸 / 停后台服务 / 发快照）全是「尽力而为」，
+                // 失败只记日志，不影响播放。
+                try {
                 // 拖动后播到结尾 / 被停掉：闸必须收掉，否则会一直静音。
                 if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) {
                     endSeekAudioGate()
@@ -1405,14 +1410,29 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 // CRASH_FIX：缓冲状态只在主线程读，写进 volatile 给预取线程看。
                 playerBuffering = state == Player.STATE_BUFFERING
                 emit()
+                } catch (error: Throwable) {
+                    Log.e(LOG_TAG, "listener state 异常 ${error.javaClass.simpleName}", error)
+                }
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                // BG_SERVICE：第一次真的出声才算「在播放」→ 起前台服务；
-                // 之后每次状态变化只刷新通知（暂停 / 继续的按钮文案）。
-                if (isPlaying) startBackground() else PlaybackService.sync()
-                emit()
+                // CRASH_GUARD2：起前台服务的 API 在 Android 12+ 会抛
+                // ForegroundServiceStartNotAllowedException / SecurityException
+                // （没有通知权限），主线程上一抛就是闪退。播放本身不受影响 ——
+                // 后台保活失败只意味着"切到后台可能被系统回收"，不是播放失败。
+                try {
+                    // BG_SERVICE：第一次真的出声才算「在播放」→ 起前台服务；
+                    // 之后每次状态变化只刷新通知（暂停 / 继续的按钮文案）。
+                    if (isPlaying) startBackground() else PlaybackService.sync()
+                    emit()
+                } catch (error: Throwable) {
+                    Log.e(LOG_TAG, "listener playing 异常 ${error.javaClass.simpleName}", error)
+                }
             }
             override fun onRenderedFirstFrame() {
+                // CRASH_GUARD2：首帧回调里既有预取（磁盘 / 网络）也有统计，
+                // 任何一步抛异常都会把进程带走；首帧标记本身必须置上。
+                firstFrameRendered = true
+                try {
                 // FIRST_FRAME：只有这里才把首帧标记置 true。
                 // Dart 的加载层就是靠它收起的，别再拿 buffering / playing 猜。
                 firstFrameRendered = true
@@ -1447,8 +1467,15 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 // 才开始往后预取 —— 起播那一片只留给播放器，不和它抢。
                 startPendingPreload()
                 emit()
+                } catch (error: Throwable) {
+                    Log.e(LOG_TAG, "listener first_frame 异常 ${error.javaClass.simpleName}", error)
+                }
             }
             override fun onPlayerError(error: PlaybackException) {
+                // CRASH_GUARD2：错误回调是最容易被死线路触发的一条路径
+                // （404 清单 / 空 variant / 非法地址）。这里抛异常 = 闪退，
+                // 而用户只是选了一条坏线路 —— 必须降级成"这条线路失败"。
+                try {
                 lastError = error.errorCodeName + ": " + (error.message ?: "")
                 endSeekAudioGate()
                 // SLOW_NET（2026-11-15，用户口径）：先判「真失败」。
@@ -1479,6 +1506,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 }
                 // 两次都失败：把错误交回 Dart，由救援链换线路。
                 emit()
+                } catch (nested: Throwable) {
+                    Log.e(LOG_TAG, "listener error 异常 ${nested.javaClass.simpleName}", nested)
+                    try {
+                        emit()
+                    } catch (_: Throwable) {
+                        // 连 emit 都失败：播放器已经不可用，Dart 侧看门狗会兜底。
+                    }
+                }
             }
         })
     }
@@ -1742,7 +1777,78 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
      * [requestedUrl] 是 Dart 给的原地址 —— 重试计数与原生重开都按原地址算，
      * 免得「这次归并成功、下次超时」把同一线路的重试次数莫名清零。
      */
+    /**
+     * 真正开播的**入口**（CRASH_GUARD2 2026-11-15）。
+     *
+     * 为什么需要这一层：`onMethodCall` 里的 CRASH_GUARD 只兜住「通道调用当场」，
+     * 而 open 有两个分支是**延迟**才执行 `startPlayback` 的 ——
+     *   · 清单预归并线程跑完后 `mainHandler.post { startPlayback(...) }`
+     *   · 分级重试里 `mainHandler.post { rebuildRenderersAndReopen(...) }`
+     * 这两条都在主线程上、且不在任何 try 里。它们一旦抛异常，用户看到的就是
+     * `FATAL EXCEPTION: main` → **App 直接退出**（不是提示失败）。
+     *
+     * 死线路（幻想蓝光 FY-PAN1 / mgtv）正好会走到这条路上：404 的清单、
+     * 空的 variant 列表、空地址，都会让 media3 侧抛 IllegalArgumentException /
+     * IllegalStateException。所以这里做两件事：
+     *   1. 地址不合法就地拒绝，绝不把空 Uri 交给 MediaItem.Builder；
+     *   2. 整个开播过程兜住 Throwable —— 失败只回一句可读的 error，
+     *      由 Dart 侧按「这条线路失败」处理（换线路 / 提示），**绝不带走进程**。
+     */
     private fun startPlayback(
+        playUrl: String,
+        requestedUrl: String,
+        headers: Map<String, String>,
+        isHls: Boolean,
+        startPositionMs: Long,
+        result: MethodChannel.Result,
+        fromRetry: Boolean = false,
+        headerUrl: String = playUrl,
+    ) {
+        val target = playUrl.trim()
+        if (target.isEmpty()) {
+            Log.e(LOG_TAG, "OPEN 拒绝空地址（requested=$requestedUrl）")
+            replyError(result, "bad_url", "这一集没有播放地址，换一条线路试试")
+            return
+        }
+        if (!PlayerHttp.isPlayableUrl(target)) {
+            Log.e(LOG_TAG, "OPEN 拒绝非法地址 $target")
+            replyError(result, "bad_url", "播放地址不合法，换一条线路试试")
+            return
+        }
+        try {
+            startPlaybackUnsafe(
+                target,
+                requestedUrl,
+                headers,
+                isHls,
+                startPositionMs,
+                result,
+                fromRetry = fromRetry,
+                headerUrl = headerUrl,
+            )
+        } catch (error: Throwable) {
+            Log.e(
+                LOG_TAG,
+                "OPEN 开播异常 ${error.javaClass.simpleName}: ${error.message} url=$target",
+                error,
+            )
+            lastError = error.javaClass.simpleName + ": " + (error.message ?: "")
+            replyError(result, "open_failed", "播放器打不开这一集，换一条线路试试")
+            emit()
+        }
+    }
+
+    /** 回一句话给 Dart；已经回过话（重复 reply）时忽略，别让 Guard 自己抛。 */
+    private fun replyError(result: MethodChannel.Result, code: String, message: String) {
+        try {
+            result.error(code, message, null)
+        } catch (_: Throwable) {
+            // 重复 reply：调用方已经拿到结果了，这里没有补救动作。
+        }
+    }
+
+    /** 原来的 startPlayback 函数体（不做入参校验，只由 [startPlayback] 调用）。 */
+    private fun startPlaybackUnsafe(
         playUrl: String,
         requestedUrl: String,
         headers: Map<String, String>,
@@ -1930,6 +2036,32 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         playWhenReady: Boolean,
     ) {
         val p = player ?: return
+        try {
+            switchToSourceUnsafe(p, source, startPositionMs, playWhenReady)
+        } catch (error: Throwable) {
+            // CRASH_GUARD2：换源本身失败（空源 / 已被 release / media3 内部状态机
+            // 拒绝）绝不能抛到主线程 —— 那是一次直接闪退。
+            Log.e(
+                LOG_TAG,
+                "SWITCH 换源异常 ${error.javaClass.simpleName}: ${error.message}",
+                error,
+            )
+            lastError = error.javaClass.simpleName + ": " + (error.message ?: "")
+            try {
+                p.stop()
+            } catch (_: Throwable) {
+                // 播放器已不可用：无所谓，Dart 侧会按失败处理。
+            }
+            emit()
+        }
+    }
+
+    private fun switchToSourceUnsafe(
+        p: ExoPlayer,
+        source: MediaSource,
+        startPositionMs: Long,
+        playWhenReady: Boolean,
+    ) {
         // 记住原来的播放意图：换集时用户正在播 → 换完继续播；
         // 暂停态打开（先拉一帧再 pause）不被强制播起来。
         val wasPlaying = p.playWhenReady || p.isPlaying

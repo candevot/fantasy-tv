@@ -307,6 +307,17 @@ class ExoPlayerEngine {
   }) async {
     if (_disposed || !isSupported) return false;
     _error = null;
+    // URL_GUARD（2026-11-15）：**空地址 / 非法地址绝不进通道**。
+    //
+    // 原生侧也有一道同样的拦截（ExoPlayerPlugin 的 URL_GUARD），但那是
+    // 第二道闸：Dart 这边先拦住，才能保证「地址为空 / 解析失败 / 清单为空」
+    // 这三种情况在 App 里是**一次播放失败**，而不是一次把主线程带走的异常。
+    // media3 对空 Uri 是直接抛 IllegalArgumentException 的，而那条路径在
+    // 原生主线程上 —— 真机上就是「闪退」，不是「播放失败」。
+    if (url.trim().isEmpty) {
+      _error = '这一集没有播放地址';
+      return false;
+    }
     try {
       final r = await _method.invokeMethod<bool>('open', {
         'url': url,

@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../api.dart';
 import '../models.dart';
 import 'cms_source.dart';
+import 'play_path.dart';
 import 'play_log.dart';
 import 'search_rank.dart';
 
@@ -425,6 +426,20 @@ class CmsApi {
     final address = line.urlAt(index);
     if (address == null || address.trim().isEmpty) {
       throw ApiException('该线路没有可用播放地址');
+    }
+    // DEAD_LINE（2026-11-15）：死线路的地址**绝不交给播放器**。
+    //
+    // 幻想蓝光的 FY-PAN1 令牌、芒果网页地址都属于「解析一定失败」那一类：
+    // 交给原生只会换来一次必然的 404 / 解析失败。以前这条路径还会让
+    // ExoPlayer 拿到一个打不开的清单 —— 起播超时、自动换线、用户看到的是
+    // 「点这条线路就卡住」。这里在 Dart 层就判成「该线路已下线」，
+    // 由详情页统一按「线路不可用」处理（提示 + 换下一条），不进播放器。
+    if (isDeadLine(line.info.displayName, <String>[address])) {
+      fxPlayLog(
+        'line=${line.info.displayName} url=$address source=cms kind=dead '
+        '（死线路，不交给播放器）',
+      );
+      throw ApiException('该线路已下线，换一条线路试试');
     }
     if (!needsParse(address)) {
       // 真 m3u8 直链：直接用，少一次解析请求。

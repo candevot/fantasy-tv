@@ -147,10 +147,15 @@ class SegmentPreloader(
      * 「目标位置之前」的任务。
      */
     fun seekTo(positionMs: Long) {
-        if (released || segments.isEmpty()) return
+        // CRASH_GUARD2（2026-11-15）：先取一次快照再判空。
+        // 老写法是 `segments.isEmpty()` 和 `% segments.size` 各读一次 volatile，
+        // 中间被 release()/换源清空时就是 `% 0` → ArithmeticException，
+        // 在预取线程 / 主线程上都算未捕获异常（闪退）。
+        val list = segments
+        if (released || list.isEmpty()) return
         val generationAtSeek = nextGeneration()
         // 目标位置那一片播放器自己会取，预取从它的下一片开始。
-        val startIndex = (findIndex(positionMs) + 1) % segments.size
+        val startIndex = (findIndex(positionMs) + 1) % list.size
         val headers = requestHeaders
         executor.execute {
             log("预取: seek 改道到 ${positionMs}ms（第 $startIndex 片）")

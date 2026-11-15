@@ -10,10 +10,10 @@ import '../services/cms_bridge.dart';
 import '../services/download_service.dart';
 import '../services/fallback_match.dart';
 import '../services/fx_player.dart';
-import '../services/line_cooldown.dart';
 import '../services/line_enrich.dart';
 import '../services/line_health.dart';
 import '../services/play_log.dart';
+import '../services/play_path.dart';
 import '../services/source_fallback.dart';
 import '../services/source_hub.dart';
 import '../services/fx_video_geometry.dart';
@@ -144,6 +144,19 @@ class _DetailPageState extends State<DetailPage>
   /// 稳定播放 3 秒后才清零重试预算与失败集合。
   Timer? _stableTimer;
 
+  /// CHAIN_WATCHDOG（2026-11-15）：自动换线链的哨兵。
+  ///
+  /// 用户实测「失败直接显示错误页，不往下一线路走」。除了播放器自己把
+  /// 「播放中断」当终点（已修），详情页这边还有一个真实缺口：
+  /// 第一次失败走的是「原线重试」（`player.reload()`），而 reload 有多条
+  /// 早退（正在切线路 / 已把全部线路试完 / 被新的 open 取代）—— 任何一条
+  /// 都会让这次「重试」变成什么都没发生，`_retriedLine` 却已经被占掉，
+  /// 于是既不会再重试，也不会进入换线路 → 停在错误页。
+  ///
+  /// 哨兵的作用只有一句：**5 秒后还在错误层、而且没有任何一轮在跑，
+  /// 就直接把整轮线路轮起来**。宁可多试一次，也不能让用户对着死页面。
+  Timer? _lineChainWatchdog;
+
   /// 服务端平台线路是异步计算的：首屏没有平台线时，2.5 秒后再拉一次
   /// /api/detail 把平台线补上，最多补 2 次；只合并 lines，不重载页面、
   /// 不重建播放器。补线期间线路区一直占着固定高度，布局不跳动。
@@ -232,6 +245,7 @@ class _DetailPageState extends State<DetailPage>
   void dispose() {
     _downloads.removeListener(_onDownloadsChanged);
     _stableTimer?.cancel();
+    _lineChainWatchdog?.cancel();
     _lineRefreshTimer?.cancel();
     _scroll.dispose();
     _fade.dispose();
@@ -265,15 +279,47 @@ class _DetailPageState extends State<DetailPage>
 
       final lines = d.lines;
       var lineId = _lineId;
-      if (lineId.isEmpty || !lines.any((l) => l.id == lineId)) {
-        if (lines.any((l) => l.id == widget.line)) {
+      // 当前线路本身就是死线路（历史 / 路由 / 老详情缓存带进来的名字）：
+      // 当作「没选」，让下面的默认线路重挑一条能播的。
+      var currentDead = false;
+      for (final l in lines) {
+        if (l.id == lineId) {
+          currentDead = isDeadLineName(l.displayName);
+          break;
+        }
+      }
+      if (lineId.isEmpty || currentDead || !lines.any((l) => l.id == lineId)) {
+        // KNOWN_BAD（2026-11-15）：**死线路 / 已知坏线路不许当默认**。
+        //
+        // 用户实测：「换一部剧默认还是幻想蓝光 → 直接闪退」。原因就是这里：
+        // 以前只在历史/路由带进来的线路上找，找不到就用
+        // `FxLineCooldown.sortLines(...).first` —— 那个排序只认「10 分钟内
+        // 失败过」，全新装的 App 冷却表是空的，于是原样取服务端的第一条；
+        // 而服务端按「线路名推断分辨率」把幻想蓝光（1080P）排在了量子/红牛
+        // （720P）前面，FY-PAN1 令牌解析又必然 404 → 一进页面就播不了。
+        //
+        // 现在统一走 [LineHealth.defaultLine]：死线路沉到最后且不选，
+        // 冷却中 / 预检判坏 / 服务端 degraded 的排在健康线路后面。
+        // 历史里带进来的线路同样过一遍这道闸（老记录可能存着死线路名）。
+        LineInfo? fromRoute;
+        for (final l in lines) {
+          if (l.id == widget.line) {
+            fromRoute = l;
+            break;
+          }
+        }
+        if (fromRoute != null && !isDeadLineName(fromRoute.displayName)) {
           lineId = widget.line;
         } else {
-          // LINE_COOLDOWN（2026-11-15）：10 分钟内失败过的线路沉到最后 ——
-          // 「下次打开同一部剧，最近失败过的排在同分辨率后面，10 分钟后
-          // 恢复原权重」。这里只是默认值，用户手动点哪条仍然尊重。
-          final ordered = FxLineCooldown.sortLines(widget.id, lines);
-          lineId = ordered.isEmpty ? '' : ordered.first.id;
+          final pick = LineHealth.instance.defaultLine(widget.id, lines);
+          lineId = pick?.id ?? '';
+          if (pick != null) {
+            fxPlayLog(
+              'default line=${pick.displayName} '
+              'from=${fromRoute?.displayName ?? '-'} '
+              'total=${lines.length} skip=${lines.length - 1}',
+            );
+          }
         }
       }
 
@@ -1267,6 +1313,11 @@ class _DetailPageState extends State<DetailPage>
 
   /// PlayerView 报告当前线路不可播：第一次先在原线路上重试一次（带缓冲态），
   /// 重试仍失败才记为失败线路并按原因切下一条。
+  ///
+  /// CHAIN_FIX（2026-11-15）：每次上报都挂一个哨兵（[_armLineChainWatchdog]）。
+  /// 「原线重试」这一步有早退（player.reload() 里正在切线路 / 全部线路已试完
+  /// 都会直接 return），早退之后没有人再触发下一次失败回调 —— 降级链就停在
+  /// 错误页上。哨兵负责把这种情况接回来。
   void _reportLineIssue(SourceIssue issue) {
     if (!mounted) return;
     _stableTimer?.cancel();
@@ -1279,6 +1330,8 @@ class _DetailPageState extends State<DetailPage>
         _retriedLine != lineId &&
         player != null) {
       _retriedLine = lineId;
+      fxPlayLog('chain line=$lineId stage=retry issue=${issue.name}');
+      _armLineChainWatchdog();
       unawaited(player.reload());
       return;
     }
@@ -1286,15 +1339,44 @@ class _DetailPageState extends State<DetailPage>
     // 之后全自动：把本片**所有**线路依次试一遍，画面显示
     // 「正在尝试其他线路（2/11）」，用户不用点任何东西。
     if (player != null) {
+      _lineChainWatchdog?.cancel();
+      fxPlayLog(
+        'chain line=$lineId stage=auto-all total=${_detail?.lines.length ?? 0}',
+      );
       unawaited(player.autoTryAllLines());
       return;
     }
     _switchNextLine(auto: true, issue: issue);
   }
 
+  /// 挂 / 重置自动换线哨兵（详见字段 [_lineChainWatchdog]）。
+  ///
+  /// 5 秒后看两件事：
+  ///   · 已经出画面（不在错误层）→ 什么都不用做；
+  ///   · 已经有一轮在跑（`autoChainRunning`）→ 别开第二轮打断它；
+  ///   · 还是错误层且没人在跑 → 直接整轮（`autoTryAllLines`），
+  ///     并由它走完「全部线路 → 跨源」的后半段。
+  void _armLineChainWatchdog() {
+    _lineChainWatchdog?.cancel();
+    _lineChainWatchdog = Timer(const Duration(seconds: 5), () {
+      if (!mounted) return;
+      final player = _playerKey.currentState;
+      if (player == null) {
+        _switchNextLine(auto: true);
+        return;
+      }
+      if (!player.showingError) return;
+      if (player.autoChainRunning) return;
+      fxPlayLog('chain watchdog → 整轮线路自动尝试');
+      unawaited(player.autoTryAllLines());
+    });
+  }
+
   /// 本片所有线路都试完仍不可播：继续第 2 / 3 段（同源其他版本 → 跨源同名）。
   void _onAllLinesFailed() {
     if (!mounted) return;
+    // 本片线路已经轮完：接下来的动作由跨源降级接手，哨兵不用再开枪。
+    _lineChainWatchdog?.cancel();
     unawaited(_attemptSourceFallback());
   }
 
@@ -1308,11 +1390,14 @@ class _DetailPageState extends State<DetailPage>
     _autoLineTries = 0;
     _retriedLine = null;
     _stableTimer?.cancel();
+    _lineChainWatchdog?.cancel();
   }
 
   /// 播放稳定 3 秒后才清空失败集合与自动重试预算，避免「能 open 但立刻报错」
   /// 的线路在 A/B 之间无限乒乓。
   void _onPlaybackStarted() {
+    // CHAIN_WATCHDOG：出画面了 = 这一轮失败已经翻篇，哨兵撤掉。
+    _lineChainWatchdog?.cancel();
     // 真正出声了才算看过：这时才允许回写历史集数。
     if (!_played) {
       _played = true;

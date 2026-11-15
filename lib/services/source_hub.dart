@@ -10,6 +10,7 @@ import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
 import 'fallback_match.dart' show fxNormTitle;
+import 'jar_log.dart';
 import 'jar_spider.dart';
 import 'tvbox_crypto.dart';
 
@@ -133,15 +134,37 @@ class KSource {
   /// 源自己的短名字：TVBox 的站点名是「名字 • 类型」
   /// （`咕噜 • APP` / `豆瓣 • 首页` / `玩偶 • 4K`），只留名字那一段，
   /// 别把「 • APP」这种后缀带进来源标注。
+  ///
+  /// SOURCE_SHORTNAME（2026-11-15）：线上肥猫配置的名字长这样 ——
+  /// `🕊┃︎咕噜┃APP`、`🐼┃豆瓣┃预告`、`⭕┃韩圈 ┃APP`：emoji + `┃` 分段。
+  /// 老实现「遇到第一个分隔符就砍」，于是**每一条的标注都只剩一个 emoji**，
+  /// 日志里也变成 `source=🕊`，排查时完全看不出是哪个源。
+  /// 现在按分隔符切段，**跳过纯 emoji / 空白段**，取第一个有字的段。
   String get shortName {
-    var text = name.trim();
+    final text = name.trim();
     if (text.isEmpty) return '';
-    for (final sep in const <String>['•', '·', '｜', '|', '┃']) {
-      final at = text.indexOf(sep);
-      if (at > 0) text = text.substring(0, at).trim();
+    final parts = text
+        .split(RegExp(r'[•·｜|┃]'))
+        .map(_cleanSegment)
+        .where((e) => e.isNotEmpty)
+        .toList();
+    for (final part in parts) {
+      if (_hasWord(part)) return part;
     }
-    return text;
+    return parts.isEmpty ? _cleanSegment(text) : parts.first;
   }
+
+  /// 去掉段里的隐形字符（变体选择符 U+FE0E/FE0F、零宽空格、BOM…）。
+  ///
+  /// 线上配置里 `🕊┃︎咕噜┃APP` 的 `︎` 就是 U+FE0E：直接 trim 掉不掉，
+  /// 结果标注变成「︎咕噜」，看着像名字前面多了个方框。
+  static String _cleanSegment(String raw) => raw
+      .replaceAll(RegExp(r'[\uFE00-\uFE0F\u200B-\u200F\u2060\uFEFF]'), '')
+      .trim();
+
+  /// 这一段里有没有「文字」（汉字 / 字母 / 数字）—— 只有 emoji 的段不算。
+  static bool _hasWord(String text) =>
+      RegExp(r'[\u4e00-\u9fa5A-Za-z0-9]').hasMatch(text);
 
   /// 卡片下方的来源标注：**只看 api 特征**，不看它是不是云端下发的。
   ///
@@ -270,6 +293,67 @@ class SourceSearchPlan {
   bool get isEmpty => total == 0;
 }
 
+/// 单个源一轮检索的结局（JAR_PROGRESS 2026-11-15）。
+///
+/// 页面要用它显示「已查 12/41 源 · 命中 3 · 空 20 · 超时 2」，
+/// 日志要用它区分「真的没有」和「根本没跑起来」。
+enum SourceSearchStatus {
+  /// 有结果。
+  ok,
+
+  /// 跑了，但一条都没有（站点就是没这部片）。
+  empty,
+
+  /// 超时（源级 12 秒兜底，或 jar 通道自己报的超时）。
+  timeout,
+
+  /// 出错：类找不到（`no_class`）、jar 抛异常（`call_failed`）、站点报错……
+  error;
+
+  /// 页面上给人看的三个字。
+  String get label => switch (this) {
+        SourceSearchStatus.ok => '有结果',
+        SourceSearchStatus.empty => '空',
+        SourceSearchStatus.timeout => '超时',
+        SourceSearchStatus.error => '出错',
+      };
+}
+
+/// [SourceHub.searchSource] 的产物：加工好的卡片 + 这个源发生了什么。
+class SourceSearchResult {
+  const SourceSearchResult({
+    required this.source,
+    required this.cards,
+    required this.status,
+    required this.elapsed,
+    this.rawCount = 0,
+    this.note = '',
+    this.quickFallback = false,
+  });
+
+  final KSource source;
+
+  /// 已经 relabel + 编码好 id 的卡片（可直接上列表）。
+  final List<VideoCard> cards;
+
+  final SourceSearchStatus status;
+
+  final Duration elapsed;
+
+  /// jar 侧转换前的条数（调试：转换是否误杀）。
+  final int rawCount;
+
+  /// 失败原因 / 备注（超时、no_class、站点报错原文）。
+  final String note;
+
+  /// 是不是靠 quick=true 回退才拿到的结果。
+  final bool quickFallback;
+
+  String get label => source.resultLabel;
+
+  bool get hasCards => cards.isNotEmpty;
+}
+
 /// 片源中心：云端配置 + 本地增删 + 多源检索。
 ///
 /// 三件事：
@@ -362,7 +446,14 @@ class SourceHub extends ChangeNotifier {
   static const String tvBoxTag = 'TVBox';
 
   /// 单源检索超时：超时按「这个源没结果」处理，不拖住其它源。
-  static const Duration sourceTimeout = Duration(seconds: 8);
+  ///
+  /// JAR_TIMEOUT（2026-11-15）：从 8 秒放宽到 **12 秒**。8 秒是「jar 通道
+  /// 自身超时」的值，套在源级上就变成了「源级和通道级同时到点」—— jar 那边
+  /// 刚要说「超时」我们已经先把它判死了，日志里全是一致的 8000ms，
+  /// 分不清是谁先放弃。现在源级 12 秒 > 通道 12 秒内的两次尝试预算
+  /// （[JarSpider.searchBudget] = 11 秒），层次清楚：**先由 jar 报「这个源
+  /// 超时/出错」，源级只兜底**。
+  static const Duration sourceTimeout = Duration(seconds: 12);
 
   /* ------------------------------------------------------ jar 插件可用性 */
 
@@ -1141,20 +1232,130 @@ class SourceHub extends ChangeNotifier {
     String keyword,
     int page,
   ) async {
+    final result = await searchSource(source, keyword, page);
+    return result.cards;
+  }
+
+  /// 单个源的检索结局（JAR_PROGRESS 2026-11-15）。
+  ///
+  /// 为什么要它：上一版 `_searchOne` 把 jar 抛出来的东西**一律 catch 成空列表**，
+  /// 于是「类找不到 / 超时 / 站点报错 / 真没有」在页面上全都长成一个样子
+  /// —— 用户只看到「肥猫源搜不到」，日志里连一行都没有。现在每个源都带
+  /// 自己的结局 + 耗时 + 失败原因，页面按结局显示进度，日志按结局写一行。
+  Future<SourceSearchResult> searchSource(
+    KSource source,
+    String keyword,
+    int page,
+  ) async {
     final q = keyword.trim();
-    if (q.isEmpty) return const <VideoCard>[];
-    try {
-      if (source.kind == KSourceKind.jar) {
-        return await JarSpider.search(
+    final label = source.resultLabel;
+    if (q.isEmpty) {
+      return SourceSearchResult(
+        source: source,
+        cards: const <VideoCard>[],
+        status: SourceSearchStatus.empty,
+        elapsed: Duration.zero,
+      );
+    }
+    final started = DateTime.now();
+    Duration spent() => DateTime.now().difference(started);
+
+    List<VideoCard> prepared(List<VideoCard> cards) => <VideoCard>[
+          for (final card in cards)
+            if (!isLiveCard(card))
+              relabel(card, label: label, id: source.cardIdOf(card.id)),
+        ];
+
+    if (source.kind == KSourceKind.jar) {
+      try {
+        // 两种 quick 都在 [JarSpider.searchWithFallback] 里试过了，
+        // 这里只给它一层「源级」兜底超时，别让某个源把整轮拖死。
+        final report = await JarSpider.searchWithFallback(
           api: source.api,
           ext: source.ext,
           key: q,
           page: page,
+          label: label,
+        ).timeout(sourceTimeout);
+        final cards = prepared(report.cards);
+        final status = cards.isNotEmpty
+            ? SourceSearchStatus.ok
+            : report.allTimedOut
+                ? SourceSearchStatus.timeout
+                : report.allFailed
+                    ? SourceSearchStatus.error
+                    : SourceSearchStatus.empty;
+        if (cards.isEmpty) {
+          fxJarLog(
+            'source=$label key=$q 结局=${status.name}'
+            '${report.note.isEmpty ? '' : ' err=${fxJarClip(report.note, max: 120)}'}'
+            ' 耗时=${spent().inMilliseconds}ms',
+          );
+        }
+        return SourceSearchResult(
+          source: source,
+          cards: cards,
+          status: status,
+          elapsed: spent(),
+          rawCount: report.cards.length,
+          note: report.note,
+          quickFallback: report.usedFallback,
+        );
+      } on TimeoutException {
+        fxJarLog(
+          'source=$label key=$q 结局=timeout（源级 ${sourceTimeout.inSeconds}s 兜底）'
+          ' 耗时=${spent().inMilliseconds}ms',
+        );
+        return SourceSearchResult(
+          source: source,
+          cards: const <VideoCard>[],
+          status: SourceSearchStatus.timeout,
+          elapsed: spent(),
+          note: '源级超时',
+        );
+      } catch (e) {
+        fxJarLog(
+          'source=$label key=$q 结局=error err=${fxJarClip('$e', max: 120)}'
+          ' 耗时=${spent().inMilliseconds}ms',
+        );
+        return SourceSearchResult(
+          source: source,
+          cards: const <VideoCard>[],
+          status: SourceSearchStatus.error,
+          elapsed: spent(),
+          note: '$e',
         );
       }
-      return await CmsClient.of(source.api).search(q, page);
-    } catch (_) {
-      return const <VideoCard>[];
+    }
+
+    try {
+      final cards = await CmsClient.of(source.api)
+          .search(q, page)
+          .timeout(sourceTimeout);
+      final out = prepared(cards);
+      return SourceSearchResult(
+        source: source,
+        cards: out,
+        status: out.isEmpty ? SourceSearchStatus.empty : SourceSearchStatus.ok,
+        elapsed: spent(),
+        rawCount: cards.length,
+      );
+    } on TimeoutException {
+      return SourceSearchResult(
+        source: source,
+        cards: const <VideoCard>[],
+        status: SourceSearchStatus.timeout,
+        elapsed: spent(),
+        note: '源级超时',
+      );
+    } catch (e) {
+      return SourceSearchResult(
+        source: source,
+        cards: const <VideoCard>[],
+        status: SourceSearchStatus.error,
+        elapsed: spent(),
+        note: '$e',
+      );
     }
   }
 
@@ -1169,19 +1370,8 @@ class SourceHub extends ChangeNotifier {
     String keyword,
     int page,
   ) async {
-    final cards = await _searchOne(source, keyword, page).timeout(
-      sourceTimeout,
-      onTimeout: () => const <VideoCard>[],
-    );
-    return <VideoCard>[
-      for (final card in cards)
-        if (!isLiveCard(card))
-          relabel(
-            card,
-            label: source.resultLabel,
-            id: source.cardIdOf(card.id),
-          ),
-    ];
+    final result = await searchSource(source, keyword, page);
+    return result.cards;
   }
 
   Future<List<VideoCard>> _categoryOne(

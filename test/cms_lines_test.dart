@@ -25,13 +25,18 @@ void main() {
   }
 
   group('多线路解析（真实接口数据）', () {
-    test('罗梅莉亚战记：四条线路一个都不能少，顺序也不变', () {
+    test('罗梅莉亚战记：活线路一条都不能少，死线路（幻想蓝光）不摆出来', () {
+      // DEAD_LINE（2026-11-15）：夹具抓的是**修之前**的接口（四条线路都在）。
+      // 其中的「幻想蓝光」是 FY-PAN1 令牌，全库 36,079 条记录无一能解析
+      // （/hxparse/play/fuying/FY-PAN1-… 404，上游回「只支持 http/https 地址」），
+      // 所以解析层现在会把它跳过 —— 用户不会再点到一条必然失败的线路。
+      // 剩下的三条活线路顺序、集数都必须原样保留。
       final lines = parseLines(_realVod());
       expect(
         <String>[for (final line in lines) line.info.displayName],
-        <String>['量子', '幻想4K', '红牛', '幻想蓝光'],
+        <String>['量子', '幻想4K', '红牛'],
       );
-      expect(lines.length, 4);
+      expect(lines.length, 3);
     });
 
     test('每条线路都有自己的集地址，长度不为 0', () {
@@ -51,20 +56,19 @@ void main() {
       // （`/hxparse/play/fuying/FY-SH4K-<md5>/index.m3u8`），可以直接播。
       expect(byName['幻想4K']!.needsParse, isFalse);
       expect(byName['幻想4K']!.urls.first, endsWith('index.m3u8'));
-      expect(byName['幻想蓝光']!.needsParse, isFalse);
       // 红牛给的是 hn.bfvvs.com 的真 m3u8 直链。
       expect(byName['红牛']!.needsParse, isFalse);
       expect(byName['红牛']!.urls.first, contains('.m3u8'));
     });
 
-    test('detailJson 交给 UI 的 lines 也是四条', () {
+    test('detailJson 交给 UI 的 lines 与解析结果一致（三条活线路）', () {
       final vod = _realVod();
       final json = CmsApi.detailJson(vod, parseLines(vod));
       final lines = json['lines'] as List<dynamic>;
-      expect(lines.length, 4);
+      expect(lines.length, 3);
       expect(
         <String>[for (final l in lines) '${(l as Map<String, dynamic>)['name']}'],
-        <String>['量子', '幻想4K', '红牛', '幻想蓝光'],
+        <String>['量子', '幻想4K', '红牛'],
       );
     });
 

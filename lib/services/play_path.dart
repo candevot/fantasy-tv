@@ -130,3 +130,71 @@ String _hostOf(String address) {
   final uri = Uri.tryParse(address);
   return (uri?.host ?? '').toLowerCase();
 }
+
+/* ------------------------------------------------------------ 死线路跳过 */
+
+/// 解析一定失败的线路名（DEAD_LINE 2026-11-15）。
+///
+/// 和**服务端** `HxApi::deadLineNames()` 同一份规则，客户端留一份是双保险：
+/// 接口层已经把死线路摘掉了（`dropDeadLines`），但只要还有一条老缓存 /
+/// 老接口 / 外部 CMS 把死线路送进来，App 这边也不能把它摆给用户 ——
+/// 用户点到一条「解析一定失败」的线路，最好的结果也是白等 8 秒。
+///
+/// 目前成员：
+///   · `幻想蓝光`  福盈 PAN1 令牌全量失效（/hxparse/play/fuying/FY-PAN1-… 404，
+///                 上游回「只支持 http/https 地址」），全库 36,079 条记录无一例外。
+///   · `mgtv`      芒果网页地址，我们这边没有能用的解析器（福盈 404 / xo 502）。
+const List<String> kDeadLineNames = <String>['幻想蓝光', 'mgtv'];
+
+/// 地址形态本身就一定失败（令牌前缀 / 平台网页）。
+///
+/// 只认「确认过整批失效」的东西，别拿它当成通用的可用性探测 ——
+/// 真正的可用性靠实测（8 秒无首帧）和线路冷却。
+bool isDeadAddress(String address) {
+  final a = address.trim().toLowerCase();
+  if (a.isEmpty) return true;
+  // 福盈 PAN1 令牌：无论 query 风格还是 path 风格，一律 404。
+  if (a.contains('fy-pan1-')) return true;
+  // 直链媒体永远算活 —— 芒果也可能下发真 m3u8，不能被下面的网页判据误杀。
+  if (RegExp(r'\.(m3u8|mp4|flv|mkv)(\?|#|$)').hasMatch(a)) return false;
+  // 芒果网页地址：没有解析器，点了一定失败。
+  // 输出层可能把它包成 `/hxparse/xo?u=<urlencode>`，两种形态都认。
+  if (a.contains('mgtv.com/b/') ||
+      a.contains('mgtv.com%2fb%2f') ||
+      a.contains('www.mgtv.com')) {
+    return true;
+  }
+  return false;
+}
+
+/// 线路名是否在「已知死线路」名单里（**只看名字，不看地址**）。
+///
+/// 用在还拿不到地址的场合：详情页排线路顺序、选默认线路、线路健康度打分
+/// （`line_health.dart` / `detail_page.dart`）—— 这些地方手里只有
+/// `LineInfo`，没有每集的地址，只能按名字先避开必然失败的线路。
+///
+/// 真正「这条线路能不能播」的判定是 [isDeadLine]（以地址为准）。
+bool isDeadLineName(String name) {
+  final n = name.trim().toLowerCase();
+  if (n.isEmpty) return false;
+  return kDeadLineNames.any((d) => d.toLowerCase() == n);
+}
+
+/// 这条线路是不是已经确认的死线路。
+///
+/// 判定**只以地址为准**，不看名字：
+///   · 所有集都是死形态（FY-PAN1 令牌 / mgtv 网页 / 空地址）→ 死；
+///   · 只要有一集是活的地址 → 留着，交给实测（首帧 8 秒 / 线路冷却）判可用性。
+///
+/// 为什么名字不能参与判定：库里确实有「线路名和地址段错位」的坏数据
+/// （名下挂着别的线路的地址）。按名字杀线路会把**活地址**一起丢掉 ——
+/// 用户看到的是「这部片一条线路都没有」。名字只在文档里说明死线路是谁
+/// （[kDeadLineNames]），判定权留给地址。
+bool isDeadLine(String name, Iterable<String> addresses) {
+  final list = <String>[
+    for (final a in addresses)
+      if (a.trim().isNotEmpty) a.trim(),
+  ];
+  if (list.isEmpty) return true;   // 没有地址 = 没得播
+  return list.every(isDeadAddress);
+}

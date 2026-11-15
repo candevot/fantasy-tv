@@ -925,6 +925,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (_sourceFailNotified) return;
     _sourceFailNotified = true;
     if (!mounted) return;
+    // CHAIN_FIX：这条回调以前是**空的**（只置标志位就 return），所以全屏里
+    // 起播失败既不会换线路，也不会把失败交回竖屏 —— 用户看到的就是
+    // 「直接显示失败」。现在统一退回竖屏，让那里的降级链接手。
+    if (widget.canChangeLine && !_exiting) {
+      unawaited(_exit(requestLineChange: true, sourceFailed: true));
+    }
   }
 
   /// 用同一播放器实例打开一个地址，并恢复进度 / 倍速 / 播放状态。
@@ -1249,6 +1255,19 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 「加载失败，重试」，连续 2 次自动让竖屏切下一条线路。
   Future<void> _onPlaybackFailure() async {
     if (!mounted || _exiting || _error || _failureBusy) return;
+    // CHAIN_FIX（2026-11-15）：全屏**起播失败**不许停在错误页。
+    //
+    // 用户实测：「进去播不了就直接显示播放中断/失败，不往下一线路走」。
+    // 全屏这边原来是一条死路：失败只亮错误页（`_registerFailure()` 恒 false），
+    // 而救援链第③步换线在 `FxPlayer._autoSwitchLine=false` 下是关着的 ——
+    // 也就是说全屏里**没有任何一处**会去试下一条线路。
+    // 现在：还没出过画面（首帧都没到）就带着集号 / 进度退回竖屏，
+    // 由竖屏那条链继续（原线重试 → 本片全部线路 → 跨源），用户不用自己点。
+    if (!_firstFrame && widget.canChangeLine) {
+      fxPlayLog('chain fullscreen stage=exit-on-first-frame-fail line=$_line');
+      unawaited(_exit(requestLineChange: true, sourceFailed: true));
+      return;
+    }
     _failureBusy = true;
     _firstFrameTimer?.cancel();
     _firstFrameTimer = null;

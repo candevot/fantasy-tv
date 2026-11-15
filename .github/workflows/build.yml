@@ -315,6 +315,10 @@ jobs:
           # LINE_COOLDOWN：失败线路 10 分钟不再试、本次播放内沉底、
           # 下次排序同分辨率下排后面、重试/播成功清记录。
           flutter test test/line_cooldown_test.dart
+          # KNOWN_BAD（2026-11-15）：死线路 / 冷却中 / 预检判坏的线路必须沉到
+          # 最后，并且**不被选成详情页默认线路**。用户实测的「默认还是幻想
+          # 蓝光 → 直接闪退」就是这条规则没生效。
+          flutter test test/line_rank_test.dart
           dart run tools/test_fallback_match.dart
       # JAR_PLUGIN（2026-11-15）：肥猫那 41 个 csp_ 源的 jar 插件链路。
       # 原生侧进度 / 自检回传的结构 -> Dart 模型；失败原因必须能翻译成

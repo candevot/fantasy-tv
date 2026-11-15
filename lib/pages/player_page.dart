@@ -1068,7 +1068,61 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
   }
 
+  /// 起播的**兜底包装**（BOOTSTRAP_GUARD 2026-11-15）。
+  ///
+  /// 降级链被打断的两个已知方式，这条包装堵住的是第二种：
+  /// ```
+  /// ① 失败回调只发一次（_sourceFailNotified 锁死）→ 见 [_onPlayerFatal]
+  /// ② 起播流程自己抛异常 → 冒泡到 Future，界面停在 loading，
+  ///    自动换线那一轮根本没机会开始
+  /// ```
+  /// 所以这里把整条起播流程包起来：任何意外异常都收敛成「这条线路失败」，
+  /// 按本次调用是否允许上报决定要不要通知外层，绝不冒泡。
   Future<bool> _bootstrapSource({
+    required bool seekToSaved,
+    required bool saveOld,
+    required String line,
+    required int ep,
+    required bool commitLine,
+    required bool reportFailure,
+    required bool forcePlayInfo,
+    double? resumeSeconds,
+    bool? playOverride,
+  }) async {
+    try {
+      return await _bootstrapSourceGuarded(
+        seekToSaved: seekToSaved,
+        saveOld: saveOld,
+        line: line,
+        ep: ep,
+        commitLine: commitLine,
+        reportFailure: reportFailure,
+        forcePlayInfo: forcePlayInfo,
+        resumeSeconds: resumeSeconds,
+        playOverride: playOverride,
+      );
+    } catch (e) {
+      _lastOpenError = '$e';
+      fxPlayLog(
+        'FAIL line=${fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], line)} '
+        'ep=$ep reason=bootstrap_exception err=$e',
+      );
+      if (!mounted) return false;
+      _clearFrozenFrame();
+      setState(() {
+        _loading = false;
+        _suppressLoading = false;
+        if (reportFailure) {
+          _error = true;
+          _errorText = '播放失败：线路不可用，请重试或切换下方线路';
+        }
+      });
+      if (reportFailure) _notifySourceFailed();
+      return false;
+    }
+  }
+
+  Future<bool> _bootstrapSourceGuarded({
     required bool seekToSaved,
     required bool saveOld,
     required String line,
@@ -1183,6 +1237,36 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         setState(() {
           _loading = false;
         });
+      }
+      return false;
+    }
+    // KNOWN_BAD（2026-11-15）：**解析必然失败的地址不打开**。
+    //
+    // 幻想蓝光的 FY-PAN1 令牌（`/hxparse/play/fuying/FY-PAN1-…`）服务端一律
+    // 404、mgtv 的网页地址我们这边没有解析器。这类地址以前照样交给播放器，
+    // 代价是一整个起播超时窗口（有时还会把原生主线程带崩 —— 见原生
+    // CRASH_GUARD2）。现在判定和解析层 / 服务端同一份（[isDeadAddress]）：
+    // 命中就当场按「这条线路失败」收尾，立刻进入下一条，0 秒浪费。
+    final usable = <String>[
+      for (final u in candidates)
+        if (!isDeadAddress(u)) u,
+    ];
+    if (usable.isEmpty) {
+      final name = fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], line);
+      fxPlayLog('FAIL line=$name ep=$ep reason=dead_line url=${candidates.first}');
+      FxLineCooldown.markFailed(widget.videoId, name);
+      if (!mounted || token != _loadToken) return false;
+      setState(() {
+        _loading = false;
+        _suppressLoading = false;
+        if (reportFailure) {
+          _error = true;
+          _errorText = '播放失败：线路不可用，请重试或切换下方线路';
+        }
+      });
+      if (reportFailure) {
+        _clearFrozenFrame();
+        _notifySourceFailed();
       }
       return false;
     }
@@ -1576,6 +1660,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     var attempt = 0;
     var ok = false;
     var skippedCooling = 0;
+    var deadSkipped = 0;
     try {
       var index = startLine.isEmpty
           ? -1
@@ -1584,6 +1669,23 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         if (!mounted) return false;
         final candidate = ordered[(index + 1 + step) % ordered.length];
         if (!tried.add(candidate.id)) continue;
+        // KNOWN_BAD（2026-11-15）：死线路（幻想蓝光 FY-PAN1 / mgtv）本轮
+        // 直接跳过，不用试 —— 服务端解析一律 404，试它只是白白多等一个
+        // 失败窗口。记一笔日志与冷却（下次排序也不会再排前面）。
+        if (isDeadLineName(candidate.displayName)) {
+          deadSkipped++;
+          FxLineCooldown.markFailed(videoId, candidate.displayName);
+          fxPlayLog(
+            fxAutoLineLog(
+              attempt: attempt + 1,
+              total: total,
+              name: candidate.displayName,
+              ok: false,
+              reason: 'dead_line',
+            ),
+          );
+          continue;
+        }
         // 冷却中的线路本轮直接跳过（10 分钟内不再试它）。
         if (FxLineCooldown.isCooling(videoId, candidate.displayName)) {
           skippedCooling++;
@@ -1657,6 +1759,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           'window=${fxLineCooldownWindow.inMinutes}min',
         );
       }
+      if (deadSkipped > 0) {
+        fxPlayLog('auto line skip=$deadSkipped reason=dead_line');
+      }
+      // 本轮结论（固定格式，真机 `adb logcat -s FxPlay` 直接 grep auto）：
+      //   `[FxPlay] auto done tried=2/11 ok=false dead=1 cooldown=0`
+      fxPlayLog(
+        'auto done tried=$attempt/$total ok=$ok '
+        'dead=$deadSkipped cooldown=$skippedCooling',
+      );
     } finally {
       _autoChainBusy = false;
       if (mounted) clearResolving();
@@ -1798,7 +1909,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   // ③换下一条线路（open 的 rescueLines hook），每步结果都写进 proxy.log。
   // 三步都失败后播放器才会带 hasError 回到页面，这里只负责弹一次错误层。
 
-  /// 救援链三步全部失败：只弹一次「播放中断」，页面不再自己重开 / 换线。
+  /// 救援链三步全部失败 / 播放中真失败：弹「播放中断」**并继续换线路**。
+  ///
+  /// CHAIN_FIX（2026-11-15，用户实测）：这里原来是**终点** —— 只 setState 亮
+  /// 错误层，既不通知外层（[onSourceFailed]），也不自己开自动轮。于是两种
+  /// 最常见的失败都停在错误页上：
+  ///   · 清单能拉、分片 404（幻想4K 的过期令牌就是这样）：播放器早就
+  ///     initialized，真失败走的是救援链，救援链 ③换线在
+  ///     `_autoSwitchLine=false` 下是关着的（AUTO_SWITCH_OFF 2026-11-14）→
+  ///     `_fail('播放中断…')` → 到这里就断了，一条线路都没再试；
+  ///   · 首帧之后卡死 / 停摆：同上。
+  /// 用户口径是「全部线路试完才允许说播不了」，所以错误层只是**过渡画面**：
+  /// 接着把失败交给外层（详情页：原线重试 → 全线路轮 → 跨源），
+  /// 没有外层（独立播放页 / 一起看）时自己开整轮。
   void _onPlayerFatal() {
     if (!mounted || _error) return;
     _clearFrozenFrame();
@@ -1811,6 +1934,18 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _uiDuration = null;
     });
     _showControls();
+    // 这一次失败必须能上报：`_sourceFailNotified` 可能已经被上一轮
+    // （showSourceError / 上一次 open）置位，不重置的话降级链会就此锁死。
+    _sourceFailNotified = false;
+    fxPlayLog(
+      'FAIL line=$_lineName ep=$_ep reason=player_fatal '
+      '→ ${widget.onSourceFailed == null ? 'auto' : 'outer'} 换线路',
+    );
+    if (widget.onSourceFailed != null) {
+      _notifySourceFailed();
+    } else {
+      _autoSwitchNextLine();
+    }
   }
 
   /// 本次播放页已经记过的最小集合（避免每帧写一次）。
@@ -2333,6 +2468,17 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (!mounted || text.isEmpty) return;
     setState(() => _resolvingText = text);
   }
+
+  /// CHAIN_WATCHDOG（2026-11-15）：外层判断降级链有没有真的跑起来的两个信号。
+  ///
+  /// 「原线重试」这一步有多个早退（正在切线路 / 已试完全部线路），任何一条
+  /// 都会让重试变成「什么都没发生」：界面停在错误页，自动换线永远不开始。
+  /// 外层用这两个 getter 判断「要不要自己把整轮开起来」：
+  ///   · [showingError] 停在错误层 = 这一轮确实没救了；
+  ///   · [autoChainRunning] 已经在轮线路 = 别再开一轮打断它。
+  bool get showingError => _error;
+
+  bool get autoChainRunning => _autoChainBusy;
 
   /// 换源 / 换线路降级前抓一份「播放现场」：集号 + 位置 + 播放状态。
   ///

@@ -73,7 +73,18 @@ class JarSpiderLoader(
          * 继续往下走了，原生却还在排队，后面的调用全被堵在队列里。
          * 现在两侧统一 8 秒：Dart 超时的那一刻原生也差不多收工，不会互相拖。
          */
-        const val DEFAULT_TIMEOUT_MS = 8_000L
+        /**
+         * 单次反射调用的默认超时：**12 秒**（JAR_TIMEOUT 2026-11-15）。
+         *
+         * 8 秒不够：`Gulu.searchContent` 自带 3 次重试 + 500ms×2ⁿ 退避
+         * （光睡眠 3.5 秒）再叠加密握手，8 秒经常刚到最后一次重试就被杀，
+         * 表现就是「咕噜一条都没有」。Dart 侧 `JarSpider.timeout` 同步 12 秒，
+         * 两边别再错位（否则日志里分不清是谁先放弃）。
+         */
+        const val DEFAULT_TIMEOUT_MS = 12_000L
+
+        /** 并行 worker 数：和 Dart 侧 `JarSpider.maxConcurrentSearches` 对齐。 */
+        const val WORKER_THREADS = 6
 
         /** 类名没有包名时补这个前缀（TVBox 的约定）。 */
         const val CLASS_PREFIX = "com.github.catvod.spider."
@@ -110,8 +121,29 @@ class JarSpiderLoader(
 
     private val lock = Any()
 
-    /** 串行 worker：jar 实现多为同步网络请求，且常有静态状态。 */
-    private val worker: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+    /**
+     * 每个 api（类名）一把锁：同一个源**串行**，不同源**并行**。
+     *
+     * JAR_CONCURRENCY（2026-11-15）：jar 里的源大多是「单例 + 可变字段」，
+     * 同一个源并发调两次会互相踩（上次的列表、上次的 token）。但**不同源**
+     * 之间没有共享状态，串着跑纯属浪费。
+     */
+    private val apiLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    private fun lockOf(api: String): Any =
+        apiLocks.computeIfAbsent(api.trim()) { Any() }
+
+    /**
+     * 并行 worker（**不是**单线程 —— 这是「肥猫源只出 1 条」的真凶）。
+     *
+     * 原来是 `newSingleThreadExecutor`：41 个 jar 源一起来的时候全部排进这
+     * 一条线程，每个 `guard()` 还要按 [DEFAULT_TIMEOUT_MS] 等自己那一轮 ——
+     * 排在后面的源根本没被调用就已经在 Dart 侧超时了，用户看到的就是
+     * 「只出 1 条」。现在固定 [WORKER_THREADS] 条线程并行，同一个源仍然靠
+     * [lockOf] 串行（见 [call]）。线程数要和 Dart 侧
+     * `JarSpider.maxConcurrentSearches` 对齐。
+     */
+    private val worker: ExecutorService = Executors.newFixedThreadPool(WORKER_THREADS) { runnable ->
         Thread(runnable, "fx-jar-spider").apply {
             isDaemon = true
             priority = Thread.NORM_PRIORITY - 1
@@ -494,6 +526,18 @@ class JarSpiderLoader(
      *   · 抛异常 → `{"error":"…","code":"call_failed"}`。
      */
     fun call(api: String, ext: String, method: String, args: Array<Any?>): String {
+        // 同一个源串行（它的实例字段是可变的），不同源并行。
+        synchronized(lockOf(api)) {
+            return callLocked(api, ext, method, args)
+        }
+    }
+
+    private fun callLocked(
+        api: String,
+        ext: String,
+        method: String,
+        args: Array<Any?>,
+    ): String {
         val instance = spider(api, ext)
         val m = findMethod(instance.javaClass, method, args)
             ?: throw JarSpiderException(
@@ -586,9 +630,17 @@ class JarSpiderLoader(
     fun detail(api: String, ext: String, ids: List<String>): String =
         guard("detailContent") { call(api, ext, "detailContent", arrayOf<Any?>(ArrayList(ids))) }
 
-    /** 搜索。先试三参（带页码）版本，jar 没实现再试两参版本。 */
-    fun search(api: String, ext: String, key: String, quick: Boolean, page: Int = 1): String =
-        guard("searchContent") {
+    /**
+     * 搜索。先试三参（带页码）版本，jar 没实现再试两参版本。
+     *
+     * 每次调用都打一行 `[JarSearch]`（JAR_LOG 2026-11-15）：真机排查时
+     * `adb logcat | grep JarSearch` 就能看到「哪个源、什么关键词、什么 quick、
+     * 回了几字节、耗时多少」—— Dart 侧那行日志说条数，这行说字节数，
+     * 两边一对就知道是「jar 真回空」还是「回了但被客户端转换/闸门丢了」。
+     */
+    fun search(api: String, ext: String, key: String, quick: Boolean, page: Int = 1): String {
+        val started = System.currentTimeMillis()
+        val out = guard("searchContent") {
             val pageText = page.coerceAtLeast(1).toString()
             try {
                 call(api, ext, "searchContent", arrayOf<Any?>(key, quick, pageText))
@@ -597,6 +649,14 @@ class JarSpiderLoader(
                 call(api, ext, "searchContent", arrayOf<Any?>(key, quick))
             }
         }
+        val elapsed = System.currentTimeMillis() - started
+        Log.i(
+            TAG,
+            "[JarSearch] api=$api key=$key quick=$quick page=$page " +
+                "bytes=${out.length} elapsed=${elapsed}ms",
+        )
+        return out
+    }
 
     /** 取播放地址。flag = 线路名，id = 该集地址。 */
     fun player(

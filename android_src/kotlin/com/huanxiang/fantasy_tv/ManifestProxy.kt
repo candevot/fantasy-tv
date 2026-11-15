@@ -334,8 +334,12 @@ object ManifestProxy {
         }
         // master：只有一条变体就直接把它合并掉，播放器少一跳。
         val variants = parseVariants(text)
+        // CRASH_GUARD2（2026-11-15）：用 firstOrNull 取值，不要 variants[0]。
+        // 空清单（404 的 HTML / 解析失败的空 body）会走到这里，下标越界在
+        // 代理线程上是未捕获异常 → 进程直接退出。清单没有 variant 时
+        // 就按 master 原样回给播放器，由它报「清单非法」。
         if (variants.size == 1 && depth < 2) {
-            val only = resolve(finalUrl, variants[0])
+            val only = variants.firstOrNull()?.let { resolve(finalUrl, it) }
             if (only != null) {
                 val merged = fetchAndStore(only, headers, depth + 1)
                 if (merged != null) {

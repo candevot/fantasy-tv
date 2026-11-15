@@ -7,6 +7,7 @@ import '../api.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../services/jar_plugin.dart';
+import '../services/jar_log.dart';
 import '../services/search_rank.dart';
 import '../services/source_hub.dart';
 import '../theme.dart';
@@ -51,6 +52,36 @@ class _SearchPageState extends State<SearchPage> {
   /// 进度：「已查 12/48 个源」。
   int _done = 0;
   int _total = 0;
+
+  /// JAR_PROGRESS（2026-11-15）：外部源（肥猫那批 jar 源）这一轮查到什么。
+  ///
+  /// 上一版只有一个总数，用户看到的是「一条都没有、整段消失」，分不清是
+  /// 「肥猫没这部片」「源全超时」还是「装 jar 没生效」。现在每个源回来都会
+  /// 报一个结局，这里按结局计数，页面直接写「已查 12/41 源 · 命中 3 ·
+  /// 空 6 · 超时 2 · 出错 1」。
+  int _externalHits = 0;
+  int _externalQueried = 0;
+  final Map<SourceSearchStatus, int> _externalStates =
+      <SourceSearchStatus, int>{};
+
+  /// 这一轮的 jar 源是不是有结果（决定「暂无相关结果」要不要出现）。
+  bool get _jarEmpty =>
+      _external.isEmpty && _externalQueried > 0 && !_loading;
+
+  /// 外部源结局的一行小字：「命中 3 · 空 6 · 超时 2 · 出错 1」。
+  String get _externalStateText {
+    final parts = <String>[
+      if (_externalHits > 0) '命中 $_externalHits',
+      for (final status in const <SourceSearchStatus>[
+        SourceSearchStatus.empty,
+        SourceSearchStatus.timeout,
+        SourceSearchStatus.error,
+      ])
+        if ((_externalStates[status] ?? 0) > 0)
+          '${status.label} ${_externalStates[status]}',
+    ];
+    return parts.join(' · ');
+  }
 
   /// 骨架卡片是否已经铺出来（300ms 阈值）。
   bool _skeleton = false;
@@ -305,6 +336,9 @@ class _SearchPageState extends State<SearchPage> {
       _done = 0;
       _total = 0;
       _skeleton = false;
+      _externalHits = 0;
+      _externalQueried = 0;
+      _externalStates.clear();
     });
     _scrollTop();
     // 我们自己的源 300ms 还没回来：先铺骨架卡片，让用户知道在动；
@@ -315,7 +349,9 @@ class _SearchPageState extends State<SearchPage> {
       setState(() => _skeleton = true);
     });
     _watchdog?.cancel();
-    _watchdog = Timer(const Duration(seconds: 16), () {
+    // JAR_TIMEOUT（2026-11-15）：16 秒 → 21 秒。流自己的硬上限是 20 秒
+    // （单源 12 秒 + quick 回退），页面侧只做「比流再多等 1 秒」的第二道保险。
+    _watchdog = Timer(const Duration(seconds: 21), () {
       if (!mounted || req != _req) return;
       if (!_loading && !_skeleton) return;
       _skeletonTimer?.cancel();
@@ -375,6 +411,21 @@ class _SearchPageState extends State<SearchPage> {
       _appendUnique(batch.external ? _external : _results, batch.items);
       _done = batch.done;
       _total = batch.total;
+      // 外部源：一个源一批，按结局记账（页面上要能看出是「空」还是「超时」）。
+      if (batch.external && !batch.finished) {
+        _externalQueried++;
+        _externalHits += batch.items.length;
+        _externalStates.update(
+          batch.status,
+          (v) => v + 1,
+          ifAbsent: () => 1,
+        );
+        fxJarLog(
+          'ui source=${batch.source.isEmpty ? '?' : batch.source} '
+          '${batch.status.name} +${batch.items.length} '
+          'drop=${batch.dropped} (${_externalQueried}源/命中$_externalHits)',
+        );
+      }
       // 页码推进到「真实已经拿到的那一页」：SEARCH_WAVES 会顺带把第 2 页
       // 追加进来，页面还按 1 算的话，上拉会再取一次第 2 页。
       if (!batch.external && batch.page > _page) _page = batch.page;
@@ -1002,6 +1053,11 @@ class _SearchPageState extends State<SearchPage> {
                 SliverToBoxAdapter(child: _externalHeader(external.length)),
                 _resultSliver(external),
               ],
+              // 肥猫的源查完了但一条相关结果都没有：**不要整段消失**
+              // （JAR_PROGRESS 2026-11-15）。用户至少要知道「查了、是空的」，
+              // 以及是「真没有」还是「全超时」。
+              if (!ai && external.isEmpty && _jarEmpty)
+                SliverToBoxAdapter(child: _externalEmptyNotice()),
               // 还没查完：骨架补在下面，表示「还在查」。
               if (_skeleton)
                 SliverPadding(
@@ -1072,7 +1128,9 @@ class _SearchPageState extends State<SearchPage> {
             const SizedBox(width: 6),
             Expanded(
               child: Text(
-                '外部源结果 · $count 部',
+                _externalStateText.isEmpty
+                    ? '外部源结果 · $count 部'
+                    : '外部源结果 · $count 部（$_externalStateText）',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 11, color: Fx.sub),
@@ -1082,11 +1140,73 @@ class _SearchPageState extends State<SearchPage> {
         ),
       );
 
+  /// 肥猫的源查完但一条相关结果都没有时的说明（JAR_PROGRESS 2026-11-15）。
+  ///
+  /// 为什么不能「整段不显示」：用户搜「济公传」看到肥猫分区整个消失，会以为
+  /// 是插件坏了；而实际情况可能是「这些源确实没这部片」或「站点全超时」。
+  /// 这里把**查了几个源、各自什么结局**写清楚，并把「重试」直接给出来
+  /// （不用用户再点一次搜索按钮）。
+  Widget _externalEmptyNotice() {
+    final detail = _externalStateText.isEmpty
+        ? '已查 $_externalQueried 个源'
+        : '已查 $_externalQueried 个源（$_externalStateText）';
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+      decoration: BoxDecoration(
+        color: Fx.ink.withValues(alpha: .04),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Fx.ink.withValues(alpha: .08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.pets_outlined, size: 15, color: Fx.sub),
+              const SizedBox(width: 8),
+              Text(
+                '肥猫源暂无相关结果',
+                style: const TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w600, color: Fx.ink),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            detail,
+            style: const TextStyle(fontSize: 11, height: 1.45, color: Fx.sub),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              TextButton(
+                onPressed: () {
+                  final q = _lastQuery;
+                  if (q != null && q.isNotEmpty) _search(q);
+                },
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text('重新查一次',
+                    style: TextStyle(fontSize: 12, color: Fx.accent)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 结果头：标题 + 总数 + 进度「已查 12/48 个源」。
   Widget _resultsHeader() {
     final ai = _mode == 'ai';
     final count = _results.length + _external.length;
-    final progress = !ai && _total > 0 ? '已查 $_done/$_total 个源' : '';
+    final progress = !ai && _total > 0
+        ? '已查 $_done/$_total 个源${_externalQueried > 0 ? ' · 命中 $_externalHits' : ''}'
+        : '';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
       child: Row(

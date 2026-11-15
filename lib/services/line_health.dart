@@ -22,7 +22,9 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models.dart';
+import 'line_cooldown.dart';
 import 'line_probe.dart';
+import 'play_path.dart';
 
 /// 一条线路的健康快照。
 @immutable
@@ -196,27 +198,66 @@ class LineHealth {
     await _save();
   }
 
-  /// 详情页排序：健康度高 → 未知 → 已知坏；同档内保持服务端原顺序。
+  /// 一条线路的「已知不可用」等级（数字越大越靠后、越不该当默认）。
   ///
-  /// 只调顺序，不隐藏任何线路：服务端 / 我们的探测都可能误判，
+  /// KNOWN_BAD（2026-11-15，用户实测报障）：排序以前只看线路预检档案，
+  /// 于是「解析一定失败」的死线路（幻想蓝光 FY-PAN1／mgtv）在没被预检过时
+  /// 是「未知」档，和健康的线路同权 —— 而服务端按推断分辨率把它排在
+  /// 量子/红牛（720P）前面，详情页就把它选成了默认线路，点播放必然失败
+  /// （FY-PAN1 令牌在服务端解析一律 404）。
+  ///
+  /// 现在三件事都算「已知不可用」，一律沉到最后：
+  /// ```
+  /// ① 死线路（名字命中 kDeadLineNames，或地址形态必然 404）
+  /// ② line_cooldown 里冷却中的（10 分钟内刚失败过）
+  /// ③ line_health 里 ok=false 的（预检/实测判过坏）
+  /// ④ 服务端标了 degraded / 解析 error 的（上游明确不可用）
+  /// ```
+  int rankOf(String vodId, LineInfo line, {DateTime? now}) {
+    // ① 死线路：绝对最后，且在 [defaultLine] 里不会被选中。
+    if (isDeadLineName(line.displayName)) return 3;
+    // ② 冷却中 / ③ 预检判坏 / ④ 服务端判坏：沉后。
+    if (FxLineCooldown.isCooling(vodId, line.displayName, now: now)) return 2;
+    final entry = effective(vodId, line.displayName, now: now);
+    if (entry != null) return entry.ok ? 0 : 2; // 健康 / 坏
+    if (line.degraded || line.lineUnavailable) return 2;
+    return 1; // 未知
+  }
+
+  /// 详情页排序：健康 → 未知 → 已知坏 → 死线路；同档内保持服务端原顺序。
+  ///
+  /// 只调顺序，不隐藏任何线路（死线路除外，它们由解析层 `isDeadLine`
+  /// 在详情解析时就摘掉）：服务端 / 我们的探测都可能误判，
   /// 用户想点坏的照样能点（播放页里它会自动跳下一条）。
   List<LineInfo> rankLines(String vodId, List<LineInfo> lines, {DateTime? now}) {
     if (lines.length < 2) return lines;
-    int rankOf(LineInfo line) {
-      final entry = effective(vodId, line.displayName, now: now);
-      if (entry == null) return 1; // 未知
-      return entry.ok ? 0 : 2; // 健康 / 坏
-    }
-
     final indexed = <MapEntry<int, LineInfo>>[
       for (var i = 0; i < lines.length; i++) MapEntry(i, lines[i]),
     ];
     indexed.sort((a, b) {
-      final byRank = rankOf(a.value).compareTo(rankOf(b.value));
+      final byRank = rankOf(vodId, a.value, now: now)
+          .compareTo(rankOf(vodId, b.value, now: now));
       if (byRank != 0) return byRank;
       return a.key.compareTo(b.key);
     });
     return <LineInfo>[for (final e in indexed) e.value];
+  }
+
+  /// 详情页**默认线路**：排序后的第一条「不是死线路」的线路。
+  ///
+  /// 用户口径（2026-11-15）：「死线路不许排前面，也不许被选成默认」。
+  /// 这里和 [rankLines] 共用同一份判据 —— 默认线路永远是用户看到的第一条，
+  /// 两者必须是同一个答案，否则会出现「高亮的是 A、实际播的是 B」。
+  ///
+  /// 全是死线路时返回 `lines.first`（详情页会照常给出「暂无可播放地址」），
+  /// 列表为空时返回 null。
+  LineInfo? defaultLine(String vodId, List<LineInfo> lines, {DateTime? now}) {
+    if (lines.isEmpty) return null;
+    for (final line in rankLines(vodId, lines, now: now)) {
+      if (isDeadLineName(line.displayName)) continue;
+      return line;
+    }
+    return lines.first;
   }
 
   /// 启动探针：探当前可见的那批线路，结果写档案。

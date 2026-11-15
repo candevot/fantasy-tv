@@ -34,6 +34,7 @@ import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
 import 'cms_source.dart';
+import 'jar_log.dart';
 
 /// 当前 jar 的安装状态。
 class JarStatus {
@@ -253,6 +254,83 @@ class JarClass {
   final String name;
 }
 
+/// 一次 `searchContent` 尝试的结果（quick 的取值 + 条数 + 耗时 + 失败原因）。
+///
+/// JAR_SEARCH_FALLBACK（2026-11-15）：`quick` 到底该传什么，各源实现不一样 ——
+/// 线上这份 jar 里几乎没有一个源真的读它（反编译核对：`Gulu` /
+/// `SaoHuo` / `Jpys` / `Gz360` / `AppGet` / `AppQi` / `AppRJ` / `AppYQK` /
+/// `YGP` 的 `searchContent(str, z)` 里都没有对 `z` 的分支，`Hxq` / `Gulu`
+/// 只是把 `z` 原样转给三参版本），而 `Bili` 干脆无视关键词。所以两种模式
+/// **都要试**，失败/空就换另一种，谁先出结果用谁 —— 不能像上一版那样
+/// 押死 `quick=false`，也不能像更早那样押死 `true`（`true` 时缓存型实现
+/// 会直接回整段首页）。
+class JarSearchAttempt {
+  const JarSearchAttempt({
+    required this.quick,
+    required this.count,
+    required this.elapsed,
+    this.error = '',
+    this.timedOut = false,
+  });
+
+  /// 这次传的 quick。
+  final bool quick;
+
+  /// 转换后能用的卡片条数。
+  final int count;
+
+  final Duration elapsed;
+
+  /// 失败原因（成功时为空串）。
+  final String error;
+
+  /// 是不是超时（超时和报错在日志里要分开看）。
+  final bool timedOut;
+
+  bool get ok => error.isEmpty;
+
+  String get mode => quick ? 'quick=true' : 'quick=false';
+
+  /// `quick=false → 3 条 耗时 897ms` / `quick=true → 0 条 (empty) 耗时 1204ms`
+  String describe() {
+    final ms = elapsed.inMilliseconds;
+    if (timedOut) return '$mode → 超时 耗时 ${ms}ms';
+    if (!ok) return '$mode → 出错($error) 耗时 ${ms}ms';
+    if (count == 0) return '$mode → 0 条 (empty) 耗时 ${ms}ms';
+    return '$mode → $count 条 耗时 ${ms}ms';
+  }
+}
+
+/// 一个源一轮搜索的完整报告（日志 + 页面状态都用它）。
+class JarSearchReport {
+  const JarSearchReport({required this.cards, required this.attempts});
+
+  final List<VideoCard> cards;
+  final List<JarSearchAttempt> attempts;
+
+  /// 是不是靠回退（第二次 quick）才拿到的结果。
+  bool get usedFallback =>
+      attempts.length > 1 && attempts.first.count == 0 && attempts.last.count > 0;
+
+  /// 最后一次尝试（日志 / 状态文案用）。
+  JarSearchAttempt? get last => attempts.isEmpty ? null : attempts.last;
+
+  /// 全部尝试都超时（页面显示「超时」而不是「空」）。
+  bool get allTimedOut =>
+      attempts.isNotEmpty && attempts.every((a) => a.timedOut);
+
+  /// 全部尝试都报错（含 no_class / call_failed）。
+  bool get allFailed =>
+      attempts.isNotEmpty && attempts.every((a) => !a.ok && !a.timedOut);
+
+  String get note {
+    for (final attempt in attempts.reversed) {
+      if (!attempt.ok) return attempt.error;
+    }
+    return '';
+  }
+}
+
 /// 一次 detail 调用的产物：给 UI 的模型 + 给播放用的原始线路（带集地址）。
 class _JarDetail {
   _JarDetail(this.video, this.lines);
@@ -274,13 +352,29 @@ class JarSpider {
   /// 自检超时：原生 25 秒，这里给 30 秒余量。
   static const Duration selfTestTimeout = Duration(seconds: 30);
 
-  /// 单次取数据超时：**8 秒**（TIMEOUT_UNIFY 2026-11-15）。
+  /// 单次取数据超时：**12 秒**（JAR_TIMEOUT 2026-11-15）。
   ///
-  /// 和原生 `JarSpiderLoader.DEFAULT_TIMEOUT_MS` 取同一个值。原来这里是 30
-  /// 秒、原生 25 秒，比用户能忍的等待长得多：jar 没装 / 源站死了的时候，
-  /// 详情页会先转 8 秒（页面自己的超时）再转 30 秒（这里），用户看到的就是
-  /// 「加载失败，请求超时」之前那段无尽转圈。统一 8 秒，失败立刻有文案。
-  static const Duration timeout = Duration(seconds: 8);
+  /// 原来这里和原生都是 8 秒。实测不够：`Gulu.searchContent` 自带
+  /// 「最多 3 次重试 + 500ms×2ⁿ 退避」（反编译：`Thread.sleep(Math.pow(2,i)*500)`，
+  /// 光睡眠就有 500+1000+2000=3.5 秒），再叠上 `GuluCrypto` 的握手和加密请求，
+  /// 8 秒经常是「刚好在最后一次重试前被杀掉」—— 用户看到的就是咕噜一条都没有。
+  /// 单源给到 12 秒；原生 `DEFAULT_TIMEOUT_MS` 同步改 12 秒，两边别再错位。
+  static const Duration timeout = Duration(seconds: 12);
+
+  /// Dart 侧同时问 jar 的最大源数（JAR_CONCURRENCY 2026-11-15）。
+  ///
+  /// 原生 `JarSpiderLoader.WORKER_THREADS` 是同一个数：原生线程池只有这么多
+  /// 线程，Dart 一次发 41 个请求并不会更快 —— 排在队列里的那些会**连着排队
+  /// 时间一起**算进 `guard()` 的超时，于是「还没开始跑就先超时了」。
+  /// 两边对齐之后：最多 6 个源同时在跑，其余排队，队列长度由
+  /// `cms_bridge` 的并发闸门控制。
+  static const int maxConcurrentSearches = 6;
+
+  /// 一轮搜索里单个源的**总**预算（quick=false + quick=true 两次尝试之和）。
+  ///
+  /// 略小于 [timeout]：留给通道往返和 JSON 解析，保证源级超时先于整体超时生效，
+  /// 页面能明确显示「这个源超时了」，而不是含糊的「整轮没查完」。
+  static const Duration searchBudget = Duration(seconds: 11);
 
   /// 安装 jar 的超时：下载 + 校验，给足 4 分钟。
   static const Duration installTimeout = Duration(minutes: 4);
@@ -316,7 +410,14 @@ class JarSpider {
   static final Map<String, List<JarClass>> _classes = <String, List<JarClass>>{};
 
   /// 通道只在 Android 上存在（桌面 / Web 调试时直接报错，别静默返回空）。
-  static bool get supported => !kIsWeb && Platform.isAndroid;
+  ///
+  /// [debugForceSupported] 只给单元测试用：`flutter test` 跑在 Linux 上，
+  /// `Platform.isAndroid` 恒为 false，不给个开关就没法测 quick 回退 / 超时
+  /// 这些纯逻辑（JAR_SEARCH_FALLBACK 2026-11-15）。
+  static bool debugForceSupported = false;
+
+  static bool get supported =>
+      debugForceSupported || (!kIsWeb && Platform.isAndroid);
 
   /// 最后一次拿到的状态（可能为 null：还没查过）。
   static JarStatus? get cachedStatus => _status;
@@ -541,7 +642,7 @@ class JarSpider {
     return '';
   }
 
-  /// 搜索。
+  /// 搜索（单次，不来回退 —— 内部用；调用方一般用 [searchWithFallback]）。
   ///
   /// SEARCH_QUICK（2026-11-15）：[quick] 默认 **false**。
   ///
@@ -550,26 +651,123 @@ class JarSpider {
   /// 我们原来写死 true，等于给每个 jar 源开了「走缓存」的许可 —— 某些源实现
   /// 得很粗糙（把缓存整段返回、不做关键词过滤），搜索词就被无视了，列表里
   /// 出现与该词毫无关系的片（现场：搜「济公传」出来「背着善宰跑」「与恶魔
-  /// 有约」这类首页热门）。改成 false 走真搜索；客户端还有一道
-  /// [fxRelevantCards] 相关性闸门兜底。
+  /// 有约」这类首页热门）。
+  ///
+  /// 但**线上这份 jar 里几乎没有源读 quick**（反编译核对见 [JarSearchAttempt]
+  /// 注释），所以单靠改它既治不了脏结果、也可能让只实现了快速搜索的源回空。
+  /// 现在统一走 [searchWithFallback]：两种模式都试 + 客户端相关性闸门兜底。
   static Future<List<VideoCard>> search({
     required String api,
     required String ext,
     required String key,
     int page = 1,
     bool quick = false,
+    String label = '',
+    Duration? wait,
   }) async {
     final q = key.trim();
     if (q.isEmpty) return const <VideoCard>[];
-    final body = await _spider('search', <String, Object?>{
-      'api': api,
-      'ext': ext,
-      'key': q,
-      'quick': quick,
-      'page': page < 1 ? 1 : page,
-    });
+    final body = await _spider(
+      'search',
+      <String, Object?>{
+        'api': api,
+        'ext': ext,
+        'key': q,
+        'quick': quick,
+        'page': page < 1 ? 1 : page,
+      },
+      wait: wait,
+    );
     return cardsOf(body);
   }
+
+  /// 搜索（**两种 quick 都试**，JAR_SEARCH_FALLBACK 2026-11-15）。
+  ///
+  /// 顺序：先 `quick=false`（真搜索，脏结果最少）；**返回空 / 抛异常 / 超时**
+  /// 就回退 `quick=true`（有些源只实现了快速模式，或者慢搜索会被站点掐）。
+  /// 谁先给出非空结果就用谁；两种都空就把空结果交出去，由上层闸门 / 页面
+  /// 显示「暂无相关结果」。
+  ///
+  /// 每次尝试都会写一行日志（[fxJarLog]），格式固定，真机排查一条 grep 够：
+  ///
+  /// ```
+  /// [JarSearch] source=咕噜 key=济公传 quick=false → 3 条 耗时 897ms
+  /// [JarSearch] source=咕噜 key=济公传 quick=true → 0 条 (empty) 耗时 1204ms
+  /// ```
+  ///
+  /// [budget] 是这个源的总预算（两次尝试共享），默认 [searchBudget]。
+  static Future<JarSearchReport> searchWithFallback({
+    required String api,
+    required String ext,
+    required String key,
+    int page = 1,
+    String label = '',
+    Duration? budget,
+  }) async {
+    final q = key.trim();
+    final who = label.trim().isEmpty ? api.trim() : label.trim();
+    if (q.isEmpty) {
+      return const JarSearchReport(cards: <VideoCard>[], attempts: <JarSearchAttempt>[]);
+    }
+    final total = budget ?? searchBudget;
+    final deadline = DateTime.now().add(total);
+    final attempts = <JarSearchAttempt>[];
+
+    for (final quick in const <bool>[false, true]) {
+      final left = deadline.difference(DateTime.now());
+      if (left <= const Duration(milliseconds: 300)) {
+        // 预算用完：记一条，别让第二个模式把整轮搜索拖过 12 秒。
+        fxJarLog('source=$who key=$q ${quick ? 'quick=true' : 'quick=false'} → 跳过(预算已用完)');
+        break;
+      }
+      // quick=false 拿大头（真搜索本来就是慢的），quick=true 用剩余预算。
+      final slice = quick
+          ? left
+          : (left > const Duration(seconds: 7) ? const Duration(seconds: 7) : left);
+      final started = DateTime.now();
+      try {
+        final cards = await search(
+          api: api,
+          ext: ext,
+          key: q,
+          page: page,
+          quick: quick,
+          label: who,
+          wait: slice,
+        );
+        final attempt = JarSearchAttempt(
+          quick: quick,
+          count: cards.length,
+          elapsed: DateTime.now().difference(started),
+        );
+        attempts.add(attempt);
+        fxJarLog('source=$who key=$q ${attempt.describe()}');
+        if (cards.isNotEmpty) return JarSearchReport(cards: cards, attempts: attempts);
+      } on ApiException catch (e) {
+        final attempt = JarSearchAttempt(
+          quick: quick,
+          count: 0,
+          elapsed: DateTime.now().difference(started),
+          error: e.message,
+          timedOut: e.kind == ApiErrorKind.timeout,
+        );
+        attempts.add(attempt);
+        fxJarLog('source=$who key=$q ${attempt.describe()}');
+      } catch (e) {
+        final attempt = JarSearchAttempt(
+          quick: quick,
+          count: 0,
+          elapsed: DateTime.now().difference(started),
+          error: '$e',
+        );
+        attempts.add(attempt);
+        fxJarLog('source=$who key=$q ${attempt.describe()}');
+      }
+    }
+    fxJarLog('source=$who key=$q 两种模式都没结果（已试 ${attempts.length} 次）');
+    return JarSearchReport(cards: const <VideoCard>[], attempts: attempts);
+  }
+
 
   /// 分类列表。
   static Future<List<VideoCard>> category({
@@ -626,14 +824,35 @@ class JarSpider {
     final flag = (line.info.from ?? '').trim().isEmpty
         ? line.info.displayName
         : line.info.from!.trim();
-    final body = await _spider('player', <String, Object?>{
-      'api': api,
-      'ext': ext,
-      'flag': flag,
-      'id': address,
-      'vipFlags': vipFlags,
-    });
-    return playOf(body, lineName: line.info.displayName);
+    final body = await _spider(
+      'player',
+      <String, Object?>{
+        'api': api,
+        'ext': ext,
+        'flag': flag,
+        'id': address,
+        'vipFlags': vipFlags,
+      },
+      logTag: fxJarPlayTag,
+    );
+    try {
+      final info = playOf(body, lineName: line.info.displayName);
+      fxJarLog(
+        'play api=$api vodId=$vodId line=${line.info.displayName} ep=$ep '
+        'flag=$flag parse=${_intOf(body['parse'])} url=${fxJarClip(info.url, max: 120)}',
+        tag: fxJarPlayTag,
+      );
+      return info;
+    } on ApiException catch (e) {
+      // 「加载不了」的具体原因只有这里看得见：是没给 url、还是这条线路要
+      // WebView 嗅探（parse=1 且不是直链）。原始返回已经在上面那行打过了。
+      fxJarLog(
+        'play api=$api vodId=$vodId line=${line.info.displayName} ep=$ep '
+        '→ 失败：${e.message}',
+        tag: fxJarPlayTag,
+      );
+      rethrow;
+    }
   }
 
   /* ------------------------------------------------------------ 转换（纯函数，可单测） */
@@ -752,16 +971,32 @@ class JarSpider {
     final key = '${_key(api, ext)}|$id';
     final hit = _details[key];
     if (hit != null) return hit;
-    final body = await _spider('detail', <String, Object?>{
-      'api': api,
-      'ext': ext,
-      'ids': <String>[id],
-    });
+    final body = await _spider(
+      'detail',
+      <String, Object?>{
+        'api': api,
+        'ext': ext,
+        'ids': <String>[id],
+      },
+      logTag: fxJarDetailTag,
+    );
     final vod = _firstVod(body);
-    if (vod == null) throw ApiException('这个源没有返回影片信息');
+    if (vod == null) {
+      fxJarLog('detail api=$api vodId=$id → 没有解析到 vod 记录', tag: fxJarDetailTag);
+      throw ApiException('这个源没有返回影片信息');
+    }
     final normalized = _normalizeVod(vod, fallbackId: id);
     final lines = parseLines(normalized);
+    fxJarLog(
+      'detail api=$api vodId=$id play_from="${_text(normalized['vod_play_from'])}" '
+      'play_url_len=${_text(normalized['vod_play_url']).length} lines=${lines.length}',
+      tag: fxJarDetailTag,
+    );
     if (lines.isEmpty) {
+      fxJarLog(
+        'detail api=$api vodId=$id → 线路解析为空（这个源可能只给网页解析线路）',
+        tag: fxJarDetailTag,
+      );
       throw ApiException('这个源没给播放地址（可能是需要网页解析的线路）');
     }
     final entry = _JarDetail(CmsApi.detailOf(normalized, lines), lines);
@@ -773,12 +1008,35 @@ class JarSpider {
   }
 
   /// 调一个取数方法，返回解析后的 JSON（带 error 字段时抛 [ApiException]）。
+  ///
+  /// [wait] 本次调用的超时（默认 [timeout]）。[logTag] 非空时把**原始返回**
+  /// 截断后写一行日志 —— 详情 / 播放打不开时，光看「加载失败」定位不了是
+  /// `detailContent` 没给线路还是 `playerContent` 没给地址（JAR_LOG 2026-11-15）。
   static Future<Map<String, dynamic>> _spider(
     String method,
-    Map<String, Object?> args,
-  ) async {
+    Map<String, Object?> args, {
+    Duration? wait,
+    String logTag = '',
+  }) async {
     // _invoke 已经把原生返回的 {"error": …} 转成 ApiException。
-    return _invoke(method, args);
+    final body = await _invoke(method, args, wait: wait);
+    if (logTag.isNotEmpty) {
+      fxJarLog(
+        '$method api=${args['api']} '
+        'ids=${args['ids'] ?? args['id'] ?? ''} '
+        'raw=${fxJarClip(_jsonText(body))}',
+        tag: logTag,
+      );
+    }
+    return body;
+  }
+
+  static String _jsonText(Object? body) {
+    try {
+      return jsonEncode(body);
+    } catch (_) {
+      return '$body';
+    }
   }
 
   /// 真正调通道：把「返回值是 String / Map」「平台异常」「超时」统一成 Map 或 [ApiException]。

@@ -1,10 +1,11 @@
 /// 搜索结果相关性判定（SEARCH_RELEVANCE 2026-11-15）。
 ///
 /// 为什么需要：外部源（肥猫那 41 个 jar 源）的 `searchContent(key, quick)`
-/// 并不保证「按 key 搜」。实测（`spider.jar` 反编译，md5 cbe016eb…）：
+/// 并不保证「按 key 搜」。实测（`spider.jar` 反编译，md5 cbe016eb…，
+/// `com.github.catvod.spider.Bili`，肥猫配置里 6 个站点都用它）：
 ///
 /// ```java
-/// // com.github.catvod.spider.Bili（肥猫配置里 6 个站点都用它）
+/// // com.github.catvod.spider.Bili
 /// public String searchContent(String str, boolean z) {
 ///     return categoryContent(str, "1", true, new HashMap<>());
 /// }
@@ -13,21 +14,29 @@
 /// 它把**搜索词当成分类 id** 传进 `categoryContent`，站点对不存在的分类
 /// 返回的是自己的首页 / 合集列表 —— 于是搜「济公传」会冒出「背着善宰跑」
 /// 「与恶魔有约」这类完全无关的韩剧。jar 在进程内、我们改不了它，所以必须
-/// 在客户端做最后一道判断：**片名和关键词无关的结果不展示**。
+/// 在客户端做最后一道判断。
 ///
-/// 判据（宁可少一条，也不给一条明显不相干的）：
-///   1. 归一化后片名包含关键词 → 1.0；
-///   2. 关键词包含片名（搜「济公传全集」，片名是「济公传」）→ .95；
-///   3. 关键词的中文二元组 / 英文单词命中片名 → ≥ .8；
-///   4. 否则用二元组 Jaccard 相似度（0~1）。
+/// 判据（GATE_RELAX 2026-11-15 —— **放宽但不能没有底线**）：
+///   1. 归一化后片名包含关键词 → 相关（`济公传[电影解说]` / `济公传(2016)` /
+///      `新编济公传` 归一化后照样含「济公传」，绝不要求「完全相等」）；
+///   2. 关键词包含片名（搜「济公传全集」，片名是「济公传」）→ 相关；
+///   3. 关键词的**任一分词**（中文二元组 / 英文单词）出现在片名里 → 相关
+///      （「活佛济公」「济公新传」这类同一 IP 的变体都留）；
+///   4. 以上都不满足 → 无关，丢掉。
 ///
-/// 阈值 [kSearchRelevanceMin]：低于它就算「无关」，整条丢掉。
+/// 「解说 / 预告 / 花絮」这类二次创作**单独判断**（[fxIsExtraClip]），
+/// 不参与上面的相关性判定：它们该不该显示由调用方决定，这里只负责把它们
+/// 排在正片后面（[fxSearchGate] 的 `extraClips`）。
+/// 之前把 `card.desc`（简介）当副标题一起判，简介里提一句关键词就能让一条
+/// 完全无关的片混进来 —— 现在只认片名。
 library;
 
 import '../models.dart';
-import 'fallback_match.dart' show fxNormTitle;
+import 'fallback_match.dart' show fxIsExtraClip, fxNormTitle;
+import 'jar_log.dart';
 
-/// 判定为「相关」的最低分。
+/// 判定为「相关」的最低分（保留给需要打分排序的调用方，闸门本身不用它
+/// 做硬阈值 —— 见 [fxSearchRelevant]）。
 const double kSearchRelevanceMin = .5;
 
 /// 关键词 → 检索片段。
@@ -70,29 +79,111 @@ double fxSearchScore(String title, String query) {
 }
 
 /// 这条片名算不算「和关键词相关」。
+///
+/// 规则见文件头：包含 / 被包含 / **任一分词命中** 三选一即可，
+/// **不看**简介、**不要**完全相等。
 bool fxSearchRelevant(
   String title,
   String query, {
   String alternativeTitle = '',
   double minScore = kSearchRelevanceMin,
 }) {
-  if (fxSearchScore(title, query) >= minScore) return true;
+  final q = fxNormTitle(query);
+  if (q.isEmpty) return true;
+  if (_titleHits(title, q)) return true;
   if (alternativeTitle.trim().isEmpty) return false;
-  return fxSearchScore(alternativeTitle, query) >= minScore;
+  return _titleHits(alternativeTitle, q);
 }
 
-/// 过滤一批卡片：只留和 [query] 相关的。
-///
-/// [cards] 为空或 [query] 为空时原样返回（空关键词不做判断）。
-List<VideoCard> fxRelevantCards(List<VideoCard> cards, String query) {
-  final q = query.trim();
-  if (cards.isEmpty || q.isEmpty) return cards;
-  return <VideoCard>[
-    for (final card in cards)
-      if (fxSearchRelevant(card.title, q, alternativeTitle: card.desc))
-        card,
-  ];
+bool _titleHits(String title, String normalizedQuery) {
+  final t = fxNormTitle(title);
+  if (t.isEmpty) return false;
+  if (t.contains(normalizedQuery) || normalizedQuery.contains(t)) return true;
+  for (final token in fxSearchTokens(normalizedQuery)) {
+    if (token.length < 2) continue;
+    if (t.contains(token)) return true;
+  }
+  return false;
 }
+
+/// 一次闸门判定的结果：留下的、丢掉的、以及其中有多少是「解说 / 预告」。
+///
+/// 日志要用它说清「丢了几条、留了几条、为什么」（JAR_LOG 2026-11-15）：
+/// `[JarSearch] gate source=哔哩合集 dropped=2 kept=3 reason=unrelated`。
+class FxSearchGate {
+  const FxSearchGate({
+    required this.kept,
+    required this.dropped,
+    required this.extraClips,
+  });
+
+  const FxSearchGate.empty()
+      : kept = const <VideoCard>[],
+        dropped = 0,
+        extraClips = 0;
+
+  /// 相关的结果（正片在前，解说 / 预告这类排在后面，各自保持原顺序）。
+  final List<VideoCard> kept;
+
+  /// 被判成「无关」而丢掉的条数。
+  final int dropped;
+
+  /// [kept] 里属于解说 / 预告 / 花絮的条数（不再单独丢，只降位）。
+  final int extraClips;
+
+  bool get isEmpty => kept.isEmpty;
+}
+
+/// 过一遍闸门：[cards] 里留下和 [query] 相关的，解说 / 预告排到后面。
+///
+/// [cards] 为空或 [query] 为空时整批放行（空关键词不做判断）。
+FxSearchGate fxSearchGate(List<VideoCard> cards, String query) {
+  final q = query.trim();
+  if (cards.isEmpty || q.isEmpty) {
+    return FxSearchGate(kept: cards, dropped: 0, extraClips: 0);
+  }
+  final main = <VideoCard>[];
+  final clips = <VideoCard>[];
+  var dropped = 0;
+  for (final card in cards) {
+    if (!fxSearchRelevant(card.title, q)) {
+      dropped++;
+      continue;
+    }
+    // 解说 / 预告：判相关的规则**不参与**，这里只决定它排在哪。
+    if (fxIsExtraClip(card.title)) {
+      clips.add(card);
+    } else {
+      main.add(card);
+    }
+  }
+  return FxSearchGate(
+    kept: <VideoCard>[...main, ...clips],
+    dropped: dropped,
+    extraClips: clips.length,
+  );
+}
+
+/// 闸门的日志行（JAR_LOG 2026-11-15）。
+///
+/// 格式固定，真机 `grep 'gate source='` 就能看出**哪个源**在灌无关数据：
+/// `[JarSearch] gate source=哔哩合集 dropped=2 kept=3 clips=0 reason=unrelated`
+void fxJarGateLog(String source, FxSearchGate gate) {
+  final who = source.trim().isEmpty ? '?' : source.trim();
+  final reason = gate.dropped > 0
+      ? 'unrelated'
+      : (gate.kept.isEmpty ? 'empty' : 'ok');
+  fxJarLog(
+    'gate source=$who dropped=${gate.dropped} kept=${gate.kept.length} '
+    'clips=${gate.extraClips} reason=$reason',
+  );
+}
+
+/// 过滤一批卡片：只留和 [query] 相关的（保留给老调用方）。
+///
+/// 新代码用 [fxSearchGate]：它同时给「丢了几条」，日志才能说清链路。
+List<VideoCard> fxRelevantCards(List<VideoCard> cards, String query) =>
+    fxSearchGate(cards, query).kept;
 
 Set<String> _bigrams(String text) {
   final chars = text.split('');
