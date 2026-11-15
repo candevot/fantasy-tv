@@ -1207,6 +1207,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       final url = target.url;
       if (target.degradeFromHevc) fxPlayLog(iqDegradeLog(url));
       final controller = reusable ?? FxPlayer.create();
+      // BG_SERVICE（2026-11-15）：通知栏标题「片名 · 第N集」。
+      // 在 open 之前登记：原生是「首次真的出声」才 startForeground，
+      // 换集 / 换线路时这里会带着新集号重登记一次。
+      controller.setBackgroundMedia(_title, ep);
       if (mounted) setState(() => _loadingPlayer = controller);
       try {
         fxPlayLog(

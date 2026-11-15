@@ -7,6 +7,8 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import android.content.Context
+import android.content.Intent
+import android.os.PowerManager
 import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -84,7 +86,7 @@ import io.flutter.plugin.platform.PlatformViewFactory
  */
 @OptIn(UnstableApi::class)
 class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHandler,
-    EventChannel.StreamHandler {
+    EventChannel.StreamHandler, PlaybackService.Controller {
 
     companion object {
         /** 真机 logcat 过滤标签：`adb logcat -s FxExo`。 */
@@ -101,6 +103,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
          * 否则播放器会永久静音。
          */
         const val SEEK_AUDIO_GATE_TIMEOUT_MS = 1200L
+
+        /**
+         * POST_NOTIFICATIONS 的请求码（BG_SERVICE，2026-11-15）。
+         *
+         * 只用来区分结果，不用管值；与 MainActivity 里存储权限的请求码
+         * （0x2101 一类）错开即可。
+         */
+        const val REQUEST_NOTIFICATION_PERMISSION = 0x0B02
 
         /**
          * 分片磁盘缓存上限：1.5 GiB（逆向报告的取值区间 1.5–2 GiB）。
@@ -442,6 +452,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     fun dispose() {
+        // BG_SERVICE：播放器实例没了，前台服务也不能留着（留 = 空保活，费电）。
+        stopBackground()
         mainHandler.removeCallbacks(seekGateTimeout)
         seekGateActive = false
         pendingPreload = null
@@ -457,6 +469,173 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         events = null
         try { mediaCache?.release() } catch (_: Exception) {}
         mediaCache = null
+    }
+
+    // ---------------------------------------- 后台播放保活（BG_SERVICE）
+
+    /**
+     * 为什么在原生侧持有 player 引用，而不是让通知走广播回 Dart：
+     *   · 通知按钮必须在 0.1 秒内响应，绕一圈 MethodChannel 回来会晚一拍；
+     *   · 切后台后 Dart 侧可能被冻结（Android 12+ 的 App Freeze），
+     *     广播回去的 pause 有可能没人接；
+     *   · 播放器本来就在这个类里，直接调 `player.pause()` 最简单，
+     *     也最不容易出错（不新增依赖，不引 MediaSessionCompat）。
+     *
+     * 只做「播放 / 暂停」和「关闭」两件事，不新增任何暂停逻辑 ——
+     * 切后台继续播的行为完全没变，这里只是给进程挂了个前台服务。
+     */
+    private var bgTitle = ""
+    private var bgEpisode = 0
+    private var bgStarted = false
+
+    override fun isPlaying(): Boolean = try {
+        player?.isPlaying == true
+    } catch (_: Throwable) {
+        true
+    }
+
+    override fun togglePlay(): Boolean {
+        val p = player ?: return false
+        return try {
+            if (p.isPlaying) {
+                p.pause()
+                false
+            } else {
+                p.play()
+                true
+            }
+        } catch (error: Throwable) {
+            Log.w(LOG_TAG, "通知栏切换失败：${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    override fun stopPlayback() {
+        bgStarted = false
+        try {
+            player?.pause()
+        } catch (error: Throwable) {
+            Log.w(LOG_TAG, "通知栏关闭播放失败：${error.javaClass.simpleName}")
+        }
+        stopBackground()
+    }
+
+    /** Dart 在 open 之前把片名 / 集号交进来（通知标题 =「片名 · 第N集」）。 */
+    fun setBackgroundMedia(title: String, episode: Int) {
+        bgTitle = title.trim()
+        bgEpisode = episode
+    }
+
+    /** 起前台服务（可重复调用：已在前台时只刷新通知）。 */
+    fun startBackground() {
+        if (bgTitle.isEmpty()) return // 没有片名 = 不是正式播放，不挂保活
+        if (bgStarted && PlaybackService.isRunning()) {
+            PlaybackService.sync()
+            return
+        }
+        bgStarted = true
+        PlaybackService.start(context, bgTitle, bgEpisode, this)
+    }
+
+    /** 停前台服务（[PlaybackService.stop] 内部有实例身份校验）。 */
+    fun stopBackground() {
+        bgStarted = false
+        PlaybackService.stop(context, this)
+    }
+
+    /**
+     * 电池优化白名单入口。**只在用户从「设置」里点时调用**，
+     * 不在启动 / 播放时弹系统对话框（那样很烦，而且用户不知道是干嘛的）。
+     *
+     * 返回 true = 已经在白名单里或已把系统页面拉起来。
+     */
+    private fun requestIgnoreBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        val pkg = context.packageName
+        try {
+            val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (power?.isIgnoringBatteryOptimizations(pkg) == true) return true
+        } catch (error: Throwable) {
+            Log.w(LOG_TAG, "读取电池优化状态失败：${error.javaClass.simpleName}")
+        }
+        // ① 优先用「本应用的电池优化」直连弹窗（设置页里主动点的，不算骚扰）；
+        // ② 部分 ROM 没有这个 action，退到「电池优化应用列表」让用户自己找。
+        for (action in arrayOf(
+            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS,
+        )) {
+            try {
+                val intent = Intent(action)
+                if (action == android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS) {
+                    intent.data = android.net.Uri.parse("package:$pkg")
+                }
+                if (context !is Activity) intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                context.startActivity(intent)
+                return true
+            } catch (error: Throwable) {
+                Log.w(
+                    LOG_TAG,
+                    "打开电池优化页面失败 action=$action：${error.javaClass.simpleName}",
+                )
+            }
+        }
+        return false
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        return try {
+            val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            power?.isIgnoringBatteryOptimizations(context.packageName) == true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * 一次性提示的取用（读后即清）：上次在后台播放时被系统压过内存，
+     * 就在下次启动时提示用户加电池白名单。返回 true = 需要提示。
+     */
+    private fun consumeInterruptHint(): Boolean {
+        return try {
+            val prefs = context.getSharedPreferences(PlaybackService.PREFS, Context.MODE_PRIVATE)
+            val pending = prefs.getBoolean(PlaybackService.PREF_INTERRUPTED, false)
+            if (pending) {
+                prefs.edit().putBoolean(PlaybackService.PREF_INTERRUPTED, false).apply()
+                Log.i(LOG_TAG, "一次性提示：后台播放曾被系统中断")
+            }
+            pending
+        } catch (error: Throwable) {
+            Log.w(LOG_TAG, "读取一次性提示失败：${error.javaClass.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * Android 13 起通知必须运行时授权，否则通知栏只有「点进去才看得见」的
+     * 沉默通知 —— 也就是前台服务起来了但用户看不到控件。
+     *
+     * 只问一次（用户拒绝就记住，不再弹）；拒绝也不影响播放，只是没通知。
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) return
+        try {
+            val activity = context as? Activity ?: return
+            val granted = activity.checkSelfPermission(
+                "android.permission.POST_NOTIFICATIONS",
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (granted) return
+            val prefs = context.getSharedPreferences(PlaybackService.PREFS, Context.MODE_PRIVATE)
+            if (prefs.getBoolean(PlaybackService.PREF_NOTIF_ASKED, false)) return
+            prefs.edit().putBoolean(PlaybackService.PREF_NOTIF_ASKED, true).apply()
+            activity.requestPermissions(
+                arrayOf("android.permission.POST_NOTIFICATIONS"),
+                REQUEST_NOTIFICATION_PERMISSION,
+            )
+            Log.i(LOG_TAG, "已请求 POST_NOTIFICATIONS")
+        } catch (error: Throwable) {
+            Log.w(LOG_TAG, "请求通知权限失败：${error.javaClass.simpleName}")
+        }
     }
 
     // ---------------- EventChannel ----------------
@@ -593,6 +772,27 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 result.success(true)
             }
             "release" -> { dispose(); result.success(true) }
+            // BG_SERVICE（2026-11-15）：后台播放保活。
+            //
+            // 这里**只登记**片名 / 集号，真正的 startForeground 由
+            // 「首次 onIsPlayingChanged(true) / 首帧渲染」触发 —— 地址打不开
+            // 就永远不会起服务，不会留下一个空转的前台服务。
+            "bgStart" -> {
+                val title = (call.argument<String>("title") ?: "").trim()
+                val ep = call.argument<Number>("ep")?.toInt() ?: 0
+                setBackgroundMedia(title, ep)
+                requestNotificationPermissionIfNeeded()
+                result.success(true)
+            }
+            "bgStop" -> {
+                stopBackground()
+                result.success(true)
+            }
+            // 电池优化白名单：只在「设置」里由用户点，不发系统对话框骚扰。
+            "bgBattery" -> result.success(requestIgnoreBatteryOptimizations())
+            "bgBatteryIgnoring" -> result.success(isIgnoringBatteryOptimizations())
+            // 一次性提示：上次后台播放被系统压过内存 → 这次启动提示一次。
+            "bgConsumeHint" -> result.success(consumeInterruptHint())
             else -> result.notImplemented()
         }
     }
@@ -939,11 +1139,18 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 if (state == Player.STATE_IDLE || state == Player.STATE_ENDED) {
                     endSeekAudioGate()
                 }
+                // BG_SERVICE：播到结尾就收服务（此时进程没有理由留在后台）。
+                // STATE_IDLE 不收：换集 / 换线路会先 stop 再 prepare，收掉会让
+                // 新一集的保活晚一拍（下一帧 onIsPlayingChanged 又会把它拉起来）。
+                if (state == Player.STATE_ENDED) stopBackground()
                 // CRASH_FIX：缓冲状态只在主线程读，写进 volatile 给预取线程看。
                 playerBuffering = state == Player.STATE_BUFFERING
                 emit()
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                // BG_SERVICE：第一次真的出声才算「在播放」→ 起前台服务；
+                // 之后每次状态变化只刷新通知（暂停 / 继续的按钮文案）。
+                if (isPlaying) startBackground() else PlaybackService.sync()
                 emit()
             }
             override fun onRenderedFirstFrame() {
@@ -1349,6 +1556,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } else {
                 pendingPreload = null
             }
+            // BG_SERVICE（2026-11-15）：open 成功（清单已下发、prepare 已发出）
+            // 就是「这一集确实要播了」，此时把前台服务拉起来。
+            //
+            // 放在这里而不是只等 onIsPlayingChanged(true)：用户可能刚点播放就
+            // 按了 Home，那时 App 已经在后台，Android 12+ 不允许后台启动前台
+            // 服务（会抛 ForegroundServiceStartNotAllowedException）。
+            // open 这一步几乎总在前台完成，在这里起最稳。
+            startBackground()
             result.success(true)
         } catch (e: Throwable) {
             // 这里必须兜 Throwable：NoClassDefFoundError / OutOfMemoryError

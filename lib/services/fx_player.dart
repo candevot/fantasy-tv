@@ -387,6 +387,41 @@ class FxPlayer implements Listenable {
   int get renderEpoch => _renderEpoch;
   Completer<void>? _ready;
 
+  // ------------------------------------------- 后台播放保活（BG_SERVICE）
+
+  /// 通知栏标题用的片名与集号（页面在 open 之前交进来）。
+  ///
+  /// 为什么不放在页面里直接调原生：起服务的时机绑定在「这一集真的播起来了」，
+  /// 而那是 FxPlayer 内部（open 成功 / play 成功 / 播放结束）才知道的。
+  String _bgTitle = '';
+  int _bgEpisode = 0;
+
+  /// 前台服务是不是已经被我们拉起来过（避免每次状态回调都重发一次 start）。
+  bool _bgRunning = false;
+
+  /// 登记当前这一集的名字：原生据此拼通知标题「片名 · 第N集」。
+  ///
+  /// 换集 / 换线路前都要重新调一次（页面在 open 之前调），否则通知会一直
+  /// 显示上一集的名字。
+  void setBackgroundMedia(String title, int episode) {
+    _bgTitle = title.trim();
+    _bgEpisode = episode;
+  }
+
+  /// 交给原生：首次真的出声时由原生 startForeground（见 ExoPlayerPlugin）。
+  Future<void> _startBackground() async {
+    if (_bgTitle.isEmpty) return;
+    _bgRunning = true;
+    await ExoPlayerEngine.backgroundStart(title: _bgTitle, episode: _bgEpisode);
+  }
+
+  /// 收掉前台服务（幂等：没起过就什么都不做）。
+  Future<void> _stopBackground() async {
+    if (!_bgRunning) return;
+    _bgRunning = false;
+    await ExoPlayerEngine.backgroundStop();
+  }
+
   // ------------------------------------------------- 看门狗 / 救援链状态
 
   Timer? _watchdogTimer;
@@ -878,6 +913,10 @@ class FxPlayer implements Listenable {
     // 内核在 open 时会把 lastError 清空，Dart 侧的去重标记也要跟着清，
     // 否则救援重开之后同类错误会被当成「已处理过」而漏掉。
     _lastHandledError = '';
+    // BG_SERVICE：先把片名 / 集号交给原生，再 play。
+    // 原生在 open 成功那一刻 startForeground（首次真的出声时还会再补一次），
+    // 顺序不能反，否则通知标题会拿到空片名、服务干脆不起来。
+    unawaited(_startBackground());
     if (play) {
       await _engine.play();
     }
@@ -906,17 +945,24 @@ class FxPlayer implements Listenable {
   Future<void> play() {
     _playIntent = true;
     if (_rescueHold) return Future<void>.value();
+    // BG_SERVICE：暂停后再点播放，前台服务要跟着回来（暂停期间我们保留服务，
+    // 但用户从通知栏 / 系统恢复播放时这里兜一层）。
+    unawaited(_startBackground());
     return _engine.play();
   }
 
   Future<void> pause() {
     _playIntent = false;
+    // 注意：暂停**不**收服务 —— 通知栏要留着「播放」按钮让用户从后台继续，
+    // 这也是各视频 App 的常规行为（收掉的话用户就没法在通知栏点回来了）。
     return _engine.pause();
   }
 
   /// 停止播放（直播页 / 一起看退出时用）。
   Future<void> stop() async {
     _playIntent = false;
+    // BG_SERVICE：真的「停止播放」才收前台服务。
+    await _stopBackground();
     await _engine.pause();
     await _engine.seek(Duration.zero);
   }
@@ -1065,6 +1111,8 @@ class FxPlayer implements Listenable {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    // BG_SERVICE：退出播放页 / 释放实例 = 前台服务必须收掉，不留空保活。
+    await _stopBackground();
     _openToken++;
     _rescueGen++;
     _rescueBusy = false;
@@ -1116,6 +1164,10 @@ class FxPlayer implements Listenable {
   void _onEngineState() {
     if (_disposed) return;
     final st = _engine.state.value;
+
+    // BG_SERVICE：播到结尾就收掉前台服务（没东西可放了，留着就是空保活）。
+    // 自动连播下一集会重新 open → play，服务自己会再起来。
+    if (st.ended && _bgRunning) unawaited(_stopBackground());
 
     final shown = recoveryVisiblePosition(
       holding: _rescueHold,

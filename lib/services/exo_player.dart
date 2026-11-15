@@ -151,6 +151,79 @@ class ExoPlayerEngine {
     }
   }
 
+  // ------------------------------------------------- 后台播放保活（BG_SERVICE）
+  //
+  // 播放本身**不会**因为切后台而暂停（播放页里写死了永不暂停）。断流的原因
+  // 是 Android 回收了「没有前台服务的后台进程」，所以这里只做一件事：
+  // 让原生挂一个 foregroundServiceType=mediaPlayback 的前台服务 + 常驻通知，
+  // 进程就不会被随手回收。
+  //
+  // 分工：Dart 只负责「登记片名 / 集号」和「收工」；什么时候真正
+  // startForeground 由原生决定（首次 onIsPlayingChanged(true)），
+  // 这样地址打不开时不会留下空转的服务。
+
+  /// 登记「现在这一集叫什么」：原生拿它拼通知标题「片名 · 第N集」。
+  ///
+  /// 在 `open()` 之前调用即可；真正起服务是首次真的出声之后。重复调用安全。
+  static Future<void> backgroundStart({
+    required String title,
+    required int episode,
+  }) async {
+    final name = title.trim();
+    if (name.isEmpty || !isSupported) return;
+    try {
+      await _prefetchChannel.invokeMethod<bool>('bgStart', {
+        'title': name,
+        'ep': episode,
+      });
+    } catch (_) {
+      // 保活起不来只是「可能被系统回收」，绝不打断播放。
+    }
+  }
+
+  /// 收掉前台服务（退出播放页 / 播放结束 / 播放器释放）。
+  static Future<void> backgroundStop() async {
+    if (!isSupported) return;
+    try {
+      await _prefetchChannel.invokeMethod<bool>('bgStop');
+    } catch (_) {}
+  }
+
+  /// 把本应用加进电池优化白名单（**只在「设置」里由用户点**，不主动弹窗）。
+  ///
+  /// 返回 true = 已经在白名单里，或已把系统页面拉起来。
+  static Future<bool> requestIgnoreBatteryOptimizations() async {
+    if (!isSupported) return false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('bgBattery');
+      return r ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 当前是否已在电池优化白名单里（设置页显示状态用）。
+  static Future<bool> isIgnoringBatteryOptimizations() async {
+    if (!isSupported) return false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('bgBatteryIgnoring');
+      return r ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 取一次「后台播放曾被系统中断」的标记（读后即清，只提示一次）。
+  static Future<bool> consumeBackgroundHint() async {
+    if (!isSupported) return false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('bgConsumeHint');
+      return r ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   final MethodChannel _method;
   final EventChannel _event;
   StreamSubscription<dynamic>? _sub;

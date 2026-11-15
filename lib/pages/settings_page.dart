@@ -8,6 +8,7 @@ import '../services/app_info.dart';
 import '../services/app_settings.dart';
 import '../services/app_update_service.dart';
 import '../services/download_service.dart';
+import '../services/exo_player.dart';
 import '../services/jar_plugin.dart';
 import '../services/source_hub.dart';
 import '../theme.dart';
@@ -35,6 +36,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
   bool _checking = false;
   bool _ready = false;
+
+  /// 是否已在电池优化白名单里（BG_SERVICE：后台播放保活）。
+  bool _batteryOk = false;
 
   @override
   void initState() {
@@ -72,8 +76,29 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       debugPrint('SettingsPage: load failed: $e');
     }
+    final batteryOk = await ExoPlayerEngine.isIgnoringBatteryOptimizations();
     if (!mounted) return;
-    setState(() => _ready = true);
+    setState(() {
+      _ready = true;
+      _batteryOk = batteryOk;
+    });
+  }
+
+  /// 后台播放保活的白名单入口（BG_SERVICE，2026-11-15）。
+  ///
+  /// 只在用户**主动点**这里时才拉系统页面 —— 不在启动 / 播放时弹对话框，
+  /// 那对用户是纯骚扰。返回 false 表示这台机器没有对应的系统页面。
+  Future<void> _openBatteryWhitelist() async {
+    final ok = await ExoPlayerEngine.requestIgnoreBatteryOptimizations();
+    if (!mounted) return;
+    if (!ok) {
+      _toast('这台机器没有电池优化设置页，请到系统设置里允许「幻想影视」后台运行');
+      return;
+    }
+    final ignoring = await ExoPlayerEngine.isIgnoringBatteryOptimizations();
+    if (!mounted) return;
+    setState(() => _batteryOk = ignoring);
+    if (ignoring) _toast('已加入电池优化白名单');
   }
 
   void _toast(String message) {
@@ -371,6 +396,27 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               onTap: _openSources,
               showChevron: false,
+            ),
+          ),
+          const _SectionTitle('播放'),
+          GlassCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            radius: 20,
+            child: _row(
+              icon: Icons.battery_saver_rounded,
+              color: const Color(0xFF9B7BFF),
+              title: '后台播放保活',
+              subtitle: _batteryOk
+                  ? '已在电池优化白名单：锁屏 / 切后台继续播，不会被系统回收'
+                  : '未加白名单：长时间后台播放可能被系统回收（放着放着断了）',
+              trailing: Text(
+                _batteryOk ? '已加入' : '去设置',
+                style: const TextStyle(
+                  fontSize: 10.5,
+                  color: Color(0xFFA6B1C2),
+                ),
+              ),
+              onTap: _openBatteryWhitelist,
             ),
           ),
           const _SectionTitle('关于'),

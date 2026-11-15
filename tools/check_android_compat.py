@@ -124,6 +124,42 @@ def main() -> None:
             fail('manifest: %s (DLNA/SSDP multicast)' % name)
         print('ok manifest: %s' % name)
 
+    # BG_SERVICE（2026-11-15）：后台播放保活。
+    # 前台服务 + 通知 + 电池白名单四件套，少一条真机上就是
+    # 「切后台放几分钟断了」或者「服务起不来直接崩」。
+    for name in ('android.permission.FOREGROUND_SERVICE',
+                 'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+                 'android.permission.POST_NOTIFICATIONS',
+                 'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'):
+        if name not in permissions:
+            fail('manifest: %s (background playback service)' % name)
+        print('ok manifest: %s' % name)
+
+    playback = None
+    for el in mroot.findall('.//service'):
+        if (el.get(ns + 'name') or '').strip() in (
+                '.PlaybackService', 'com.huanxiang.fantasy_tv.PlaybackService'):
+            playback = el
+            break
+    if playback is None:
+        fail('manifest: <service android:name=".PlaybackService"> missing')
+    if playback.get(ns + 'foregroundServiceType') != 'mediaPlayback':
+        fail('PlaybackService foregroundServiceType must be mediaPlayback')
+    if playback.get(ns + 'exported') != 'false':
+        fail('PlaybackService must be android:exported="false"')
+    print('ok manifest: PlaybackService foregroundServiceType=mediaPlayback')
+
+    for path, what in (
+            ('android/app/src/main/kotlin/com/huanxiang/fantasy_tv/PlaybackService.kt',
+             'PlaybackService.kt'),
+            ('android_src/kotlin/com/huanxiang/fantasy_tv/PlaybackService.kt',
+             'android_src/PlaybackService.kt'),
+            ('android/app/src/main/res/drawable/ic_stat_fx_play.xml',
+             'notification icon')):
+        if not os.path.isfile(path):
+            fail('missing %s (%s)' % (path, what))
+    print('ok background playback service sources')
+
     if app is None:
         fail('manifest: application element')
     if app.get(ns + 'usesCleartextTraffic') != 'true':

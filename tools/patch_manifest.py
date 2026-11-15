@@ -51,6 +51,35 @@ WIFI_STATE = 'android.permission.ACCESS_WIFI_STATE'
 MULTICAST = 'android.permission.CHANGE_WIFI_MULTICAST_STATE'
 # 应用内更新：下载 APK 后用 FileProvider 换出 content:// URI 交给安装器。
 INSTALL = 'android.permission.REQUEST_INSTALL_PACKAGES'
+# BG_SERVICE（2026-11-15）：后台播放保活。
+#
+# 切后台继续播本身不需要权限，但「放着放着断了」是被系统回收进程 ——
+# 只有前台服务能挡住。前台服务在 Android 9+ 必须在 manifest 声明类型，
+# Android 14+ 还要单独申请该类型的权限（FOREGROUND_SERVICE_MEDIA_PLAYBACK），
+# 少一条就是启动时 SecurityException/ForegroundServiceStartNotAllowed。
+#
+# POST_NOTIFICATIONS（Android 13+）是运行时权限，拒绝也能播，只是没通知栏控件。
+# REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 只给「设置」里的入口用（不主动弹窗）。
+FOREGROUND_SERVICE = 'android.permission.FOREGROUND_SERVICE'
+FOREGROUND_SERVICE_MEDIA_PLAYBACK = (
+    'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK')
+POST_NOTIFICATIONS = 'android.permission.POST_NOTIFICATIONS'
+IGNORE_BATTERY = 'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
+PLAYBACK_SERVICE = '.PlaybackService'
+PLAYBACK_SERVICE_TYPE = 'mediaPlayback'
+PLAYBACK_ICON_RES = 'android/app/src/main/res/drawable/ic_stat_fx_play.xml'
+PLAYBACK_ICON_XML = '''<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏小图标：必须单色（系统会整体染色），所以只画一个白色播放三角。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M8,5.14v13.72c0,0.79 0.87,1.27 1.54,0.84l10.87,-6.86c0.62,-0.39 0.62,-1.29 0,-1.68L9.54,4.3C8.87,3.87 8,4.35 8,5.14z" />
+</vector>
+'''
 PROVIDER_NAME = 'androidx.core.content.FileProvider'
 PROVIDER_AUTHORITIES = '${applicationId}.fileprovider'
 FILE_PROVIDER_PATHS = 'android.support.FILE_PROVIDER_PATHS'
@@ -155,6 +184,45 @@ def ensure_file_provider(app):
     return changed
 
 
+def ensure_playback_service(app):
+    """确保 <application> 里声明后台播放服务；返回说明文字。"""
+    target = None
+    created = False
+    for el in app.findall('service'):
+        name = (el.get(attr('name')) or '').strip()
+        if name in (PLAYBACK_SERVICE, 'com.huanxiang.fantasy_tv.PlaybackService'):
+            target = el
+            break
+    if target is None:
+        target = ET.SubElement(app, 'service')
+        target.set(attr('name'), PLAYBACK_SERVICE)
+        created = True
+    changed = 'added' if created else ''
+    if target.get(attr('foregroundServiceType')) != PLAYBACK_SERVICE_TYPE:
+        target.set(attr('foregroundServiceType'), PLAYBACK_SERVICE_TYPE)
+        changed = changed or 'foregroundServiceType'
+    # exported=false：这个服务只由本应用的广播 / PendingIntent 唤起，
+    # 不接受外部应用绑定。
+    if target.get(attr('exported')) != 'false':
+        target.set(attr('exported'), 'false')
+        changed = changed or 'exported'
+    return changed
+
+
+def ensure_playback_icon():
+    """写通知栏小图标（单色 vector）；返回是否新建。"""
+    directory = os.path.dirname(PLAYBACK_ICON_RES)
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+    if os.path.exists(PLAYBACK_ICON_RES):
+        with io.open(PLAYBACK_ICON_RES, encoding='utf-8') as handle:
+            if '<vector' in handle.read():
+                return False
+    with io.open(PLAYBACK_ICON_RES, 'w', encoding='utf-8') as handle:
+        handle.write(PLAYBACK_ICON_XML)
+    return True
+
+
 def ensure_file_paths():
     """写 res/xml/file_paths.xml（cache-path updates/ = 下载目录）；返回是否新建。"""
     directory = os.path.dirname(FILE_PATHS_RES)
@@ -189,12 +257,22 @@ def patch(root):
         notes.append('MANAGE_EXTERNAL_STORAGE %s' % what)
     for what in ensure_permission(root, INSTALL):
         notes.append('REQUEST_INSTALL_PACKAGES %s' % what)
+    # BG_SERVICE（2026-11-15）：后台播放保活。
+    for name in (FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK,
+                 POST_NOTIFICATIONS, IGNORE_BATTERY):
+        for what in ensure_permission(root, name):
+            notes.append('%s %s' % (name.rsplit('.', 1)[-1], what))
 
     provider = ensure_file_provider(app)
     if provider:
         notes.append('FileProvider %s' % provider)
     if ensure_file_paths():
         notes.append('res/xml/file_paths.xml written')
+    service = ensure_playback_service(app)
+    if service:
+        notes.append('PlaybackService %s' % service)
+    if ensure_playback_icon():
+        notes.append('%s written' % PLAYBACK_ICON_RES)
 
     if app.get(attr('usesCleartextTraffic')) != 'true':
         app.set(attr('usesCleartextTraffic'), 'true')
@@ -236,9 +314,35 @@ def validate(root):
     if INSTALL not in perms:
         problems.append('missing uses-permission %s' % INSTALL)
 
+    # BG_SERVICE：前台播放服务 + 通知 + 电池白名单，四条缺一条就让构建红。
+    for name in (FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK,
+                 POST_NOTIFICATIONS, IGNORE_BATTERY):
+        if name not in perms:
+            problems.append('missing uses-permission %s' % name)
+
     if app is None:
         problems.append('missing <application>')
         return problems
+
+    playback = None
+    for el in app.findall('service'):
+        name = (el.get(attr('name')) or '').strip()
+        if name in (PLAYBACK_SERVICE, 'com.huanxiang.fantasy_tv.PlaybackService'):
+            playback = el
+            break
+    if playback is None:
+        problems.append('missing <service android:name="%s">' % PLAYBACK_SERVICE)
+    else:
+        if playback.get(attr('foregroundServiceType')) != PLAYBACK_SERVICE_TYPE:
+            problems.append('PlaybackService foregroundServiceType must be %s '
+                            '(got %r)' % (PLAYBACK_SERVICE_TYPE,
+                                          playback.get(
+                                              attr('foregroundServiceType'))))
+        if playback.get(attr('exported')) != 'false':
+            problems.append('PlaybackService android:exported must be false')
+
+    if not os.path.isfile(PLAYBACK_ICON_RES):
+        problems.append('missing %s (notification icon)' % PLAYBACK_ICON_RES)
 
     provider = None
     for el in app.findall('provider'):
@@ -370,6 +474,9 @@ def validate_ok_lines(root):
     yield '%s' % INSTALL
     yield 'provider=%s authorities=%s' % (PROVIDER_NAME, PROVIDER_AUTHORITIES)
     yield 'file_paths=%s' % FILE_PATHS_RES
+    yield 'service=%s foregroundServiceType=%s' % (PLAYBACK_SERVICE,
+                                                   PLAYBACK_SERVICE_TYPE)
+    yield 'notification_icon=%s' % PLAYBACK_ICON_RES
     yield 'usesCleartextTraffic=%s' % app.get(attr('usesCleartextTraffic'))
     yield 'label=%s' % app.get(attr('label'))
     yield 'icon=%s' % app.get(ICON_ATTR)

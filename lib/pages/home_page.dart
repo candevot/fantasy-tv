@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
+import '../services/exo_player.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
@@ -61,6 +62,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _load();
+    // BG_SERVICE（2026-11-15）：上次后台播放被系统压过内存 → 启动后提示一次。
+    unawaited(_maybeShowBackgroundHint());
     // 直播是独立 Tab（LiveAllPage），首页不再展示直播分区。
     // 之前 initState 顺手拉一次直播数据，现在没必要 —— 白占一次请求和内存。
   }
@@ -146,6 +149,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       });
       if (cached) _toast(msg);
     }
+  }
+
+  /// 后台播放保活的**一次性**提示。
+  ///
+  /// 触发链路：原生 `PlaybackService.onTrimMemory` 发现「播放中被系统压内存」
+  /// （这就是被回收的前兆），在偏好里记一个标记 → 下次启动问一次 → 读后即清。
+  /// 不主动弹系统对话框，只在提示条上给一个「去设置」的入口。
+  Future<void> _maybeShowBackgroundHint() async {
+    final hit = await ExoPlayerEngine.consumeBackgroundHint();
+    if (!hit || !mounted) return;
+    final m = ScaffoldMessenger.maybeOf(context);
+    if (m == null) return;
+    m.hideCurrentSnackBar();
+    m.showSnackBar(
+      SnackBar(
+        content: const Text('后台播放曾被系统中断过：把「幻想影视」加入电池优化白名单可以避免'),
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: const Color(0xEE1B2430),
+        duration: const Duration(seconds: 8),
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        action: SnackBarAction(
+          label: '去设置',
+          onPressed: () {
+            unawaited(ExoPlayerEngine.requestIgnoreBatteryOptimizations());
+          },
+        ),
+      ),
+    );
   }
 
   void _toast(String msg) {
