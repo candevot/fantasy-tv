@@ -111,6 +111,53 @@ class ExoPlayerEngine {
     }
   }
 
+  /// 缓冲档位推给原生（PARAMS_ALIGN 2026-11-15 · 阶段 2 第 5 条）。
+  ///
+  /// **只增不改**：新增方法，入参键 `level`（1..10）。壳的等价设置是
+  /// `Setting.getBuffer()`（pref 键 `buffer`），一个档位 = 50 秒：
+  /// 原生侧把它乘进 `DefaultLoadControl` 的 min/max 缓冲时长。
+  ///
+  /// 原生收下即返回（只在**下次建播放器**时生效，理由见原生
+  /// `ExoPlayerPlugin.setBufferLevel` 的注释）；老原生包没有这个方法，
+  /// 静默返回 false = 维持写死的 1 档，行为不退化。
+  static Future<bool> setBufferLevel(int level) async {
+    if (!isSupported) return false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('setBufferLevel', {
+        'level': level,
+      });
+      return r ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 音轨 / 隧道 / 字幕语言偏好推给原生（PARAMS_ALIGN 阶段 2 第 1 条）。
+  ///
+  /// **只增不改**：新增方法，三个可选键：
+  ///   · `preferAac`    Boolean 首选 AAC 音轨（壳 `setPreferredAudioMimeType(AUDIO_AAC)`）
+  ///   · `tunneling`    Boolean 隧道播放（壳 `setTunnelingEnabled`）
+  ///   · `textLanguage` String  首选字幕语言 ISO3 小写（壳用系统语言的 ISO3，传空 = 跟随系统）
+  ///
+  /// 传 null 的键原生不动（= 保持它自己的默认 / 上次的值）。
+  static Future<bool> setTrackPrefs({
+    bool? preferAac,
+    bool? tunneling,
+    String? textLanguage,
+  }) async {
+    if (!isSupported) return false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('setTrackPrefs', {
+        if (preferAac != null) 'preferAac': preferAac,
+        if (tunneling != null) 'tunneling': tunneling,
+        if (textLanguage != null) 'textLanguage': textLanguage,
+      });
+      return r ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 把**一个** HLS 分片下载进播放器同一份 SimpleCache（首页续播预取用）。
   ///
   /// 为什么不在这里用 Dart 的 http 自己拉：SimpleCache 是原生磁盘缓存，
@@ -329,6 +376,24 @@ class ExoPlayerEngine {
     /// 那两个按钮（第一集没有上一集、最后一集没有下一集、电影两个都没有）。
     bool bgHasPrev = true,
     bool bgHasNext = true,
+    /// 服务端 / 模型声明的 mimeType（PARAMS_ALIGN 阶段 2 第 6 条）。
+    ///
+    /// **可选键，只增不改**：空串 = 不传（原生走原来的嗅探），因此老调用
+    /// 方的行为一个字节都没变。传了就以它为准 —— 对应壳
+    /// `ExoUtil.getMediaItem()` 的 `if (mimeType != null) builder.setMimeType()`。
+    ///
+    /// 用途：服务端把 HLS 包装成 `application/octet-stream` 或不带 `.m3u8`
+    /// 后缀时，靠它把「这条流是 m3u8」这条知识交给内核，比按地址后缀猜准。
+    String mimeType = '',
+    /// 内核在 `prepare` 之后是否**自动开播**（PARAMS_ALIGN 阶段 2 第 2 条）。
+    ///
+    /// **只增不改**：缺省 true = 新行为（build 时 `playWhenReady=true`，
+    /// 对齐壳 `Players.java:151`，省掉一次「open 回来再发 play」的通道往返）。
+    ///
+    /// 传 false 的只有「明确要暂停」的三种场景：先拉一帧再暂停 / 投屏期间
+    /// 本机暂停 / 后台暂停。原生据此把 `dartWantsPause` 置上，换源、重试
+    /// 重开、重建渲染器都不会把播放器拉起来。
+    bool autoplay = true,
   }) async {
     if (_disposed || !isSupported) return false;
     _error = null;
@@ -357,6 +422,12 @@ class ExoPlayerEngine {
         'bgCover': bgCover,
         'bgHasPrev': bgHasPrev,
         'bgHasNext': bgHasNext,
+        // PARAMS_ALIGN：只有非空才发 —— 空串不发键，老原生 / 老调用
+        // 看到的载荷与改造前逐字节一致。
+        if (mimeType.isNotEmpty) 'mimeType': mimeType,
+        // autoplay 传 false 才发键：true 是老 Dart 的行为（随后补发 play），
+        // 不发键原生缺省也是 true，两边完全一致。
+        if (!autoplay) 'autoplay': false,
       });
       return r ?? false;
     } on PlatformException catch (e) {

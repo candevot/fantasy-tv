@@ -10,6 +10,7 @@ import '../services/app_update_service.dart';
 import '../services/download_service.dart';
 import '../services/exo_player.dart';
 import '../services/jar_plugin.dart';
+import '../services/playback_params.dart';
 import '../services/source_hub.dart';
 import '../theme.dart';
 import '../widgets/jar_plugin_card.dart';
@@ -122,6 +123,81 @@ class _SettingsPageState extends State<SettingsPage> {
     if (!mounted) return;
     await Navigator.of(context)
         .push(FxPageRoute(builder: (_) => const ChangePasswordPage()));
+  }
+
+  /// 缓冲档位选择（PARAMS_ALIGN 阶段 2 第 5 条）。
+  ///
+  /// 十档一次列全：壳的 `buffer` 就是 1..10 的整数，用户要的就是「拖多久
+  /// 之后能接着看」。改完立刻推给原生（下次建播放器生效），并提示用户
+  /// 需要重进播放页 —— 正在播的实例不重建，避免为了一个档位打断视频。
+  Future<void> _openBufferLevel() async {
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        padding: EdgeInsets.fromLTRB(
+            20, 16, 20, 22 + MediaQuery.of(ctx).padding.bottom),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '播放缓冲档位',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w800,
+                color: Fx.ink,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '档位越高，能承受的网络抖动越大，但起播前要等的数据也越多。'
+              '改完下次进播放页生效。',
+              style: TextStyle(fontSize: 11.5, height: 1.5, color: Fx.sub),
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (var n = AppSettings.minBufferLevel;
+                    n <= AppSettings.maxBufferLevel;
+                    n++)
+                  ChoiceChip(
+                    label: Text('$n 档'),
+                    selected: n == _settings.bufferLevel,
+                    selectedColor: Fx.accent,
+                    labelStyle: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: n == _settings.bufferLevel
+                          ? Colors.white
+                          : Fx.ink,
+                    ),
+                    onSelected: (_) => Navigator.of(ctx).pop(n),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              '当前：${AppSettings.bufferLevelHint(_settings.bufferLevel)}'
+              '（一档 = ${AppSettings.bufferStepMs ~/ 1000} 秒）',
+              style: const TextStyle(fontSize: 10.5, color: Fx.sub),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    if (selected == _settings.bufferLevel) return;
+    await _settings.setBufferLevel(selected);
+    // 设置只落盘不够：内核要拿到它（下次建播放器生效）。
+    unawaited(PlaybackParamsInstaller.sync(_settings));
+    if (mounted) _toast('缓冲已设为 $selected 档（${selected * 50} 秒），重进播放页生效');
   }
 
   Future<void> _openDownloadSettings() async {
@@ -417,6 +493,66 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ),
               onTap: _openBatteryWhitelist,
+            ),
+          ),
+          // PARAMS_ALIGN（2026-11-15 · 阶段 2）：缓冲档位。
+          //
+          // 对齐壳的 `Setting.getBuffer()`（pref 键 `buffer`，1..10 档）。
+          // 一档 = 50 秒（壳 media3 fork 的 DEFAULT_MIN/MAX_BUFFER_MS 都是
+          // 50000，buildLoadControl 只把这两个值乘档位）。
+          GlassCard(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+            radius: 20,
+            child: Column(
+              children: [
+                _row(
+                  icon: Icons.layers_rounded,
+                  color: const Color(0xFF4A9BFF),
+                  title: '播放缓冲档位',
+                  subtitle: _ready
+                      ? AppSettings.bufferLevelHint(_settings.bufferLevel)
+                      : '正在读取…',
+                  trailing: Text(
+                    '${_settings.bufferLevel} 档',
+                    style: const TextStyle(fontSize: 11, color: Fx.sub),
+                  ),
+                  onTap: _openBufferLevel,
+                ),
+                _divider(),
+                // 首选 AAC 音轨（壳 `prefer_aac`，默认关）。
+                _row(
+                  icon: Icons.audiotrack_rounded,
+                  color: const Color(0xFF8B6FE8),
+                  title: '优先 AAC 音轨',
+                  subtitle: _settings.preferAac
+                      ? '多音轨时优先选 AAC（兼容性最好，但可能不是最高码率那轨）'
+                      : '跟随片源默认音轨（推荐）',
+                  trailing: Switch(
+                    value: _settings.preferAac,
+                    activeThumbColor: Fx.accent,
+                    onChanged: (v) => _settings.setPreferAac(v),
+                  ),
+                  onTap: () => _settings.setPreferAac(!_settings.preferAac),
+                  showChevron: false,
+                ),
+                _divider(),
+                // 隧道播放（壳 `tunnel`，默认关）。
+                _row(
+                  icon: Icons.swap_horiz_rounded,
+                  color: const Color(0xFF2FA985),
+                  title: '隧道播放（实验）',
+                  subtitle: _settings.tunneling
+                      ? '音视频走同一条解码通路，音画同步更准；不支持时自动跳过'
+                      : '关闭：走普通解码通路（兼容性最好）',
+                  trailing: Switch(
+                    value: _settings.tunneling,
+                    activeThumbColor: Fx.accent,
+                    onChanged: (v) => _settings.setTunneling(v),
+                  ),
+                  onTap: () => _settings.setTunneling(!_settings.tunneling),
+                  showChevron: false,
+                ),
+              ],
             ),
           ),
           const _SectionTitle('关于'),

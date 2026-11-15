@@ -54,6 +54,23 @@ class AppSettings extends ChangeNotifier {
   static const String _kDownloadConcurrency =
       'fx_settings_download_concurrency';
 
+  /// 播放缓冲档位（PARAMS_ALIGN 2026-11-15 · 阶段 2 第 5 条）。
+  ///
+  /// 语义逐位对齐壳的 `buffer` 偏项（`Setting.java:101-103`）：
+  /// `Math.min(Math.max(Prefers.getInt("buffer"), 1), 10)`，一个档位 = 50 秒
+  /// （壳 media3 fork 的 `DEFAULT_MIN_BUFFER_MS` / `DEFAULT_MAX_BUFFER_MS`
+  /// 都是 50_000，`ExoUtil.buildLoadControl()` 只把这两个值乘档位）。
+  ///
+  /// 键名用我们自己的前缀，不跟壳的 `buffer` 共用 —— 两套 App 的
+  /// SharedPreferences 本来就不互通，共用键名只会让排查时对不上号。
+  static const String _kBufferLevel = 'fx_settings_buffer_level';
+
+  /// 首选 AAC 音轨（壳 `prefer_aac` 的语义，默认关）。
+  static const String _kPreferAac = 'fx_settings_prefer_aac';
+
+  /// 隧道播放（壳 `tunnel` 的语义，默认关）。
+  static const String _kTunneling = 'fx_settings_tunneling';
+
   /// JAR 插件（TVBox type 3 的 spider.jar）：
   ///   · 下载地址（默认指向我们自己的服务器）
   ///   · 可选 md5（填了就强校验，防下到错误页面）
@@ -91,6 +108,22 @@ class AppSettings extends ChangeNotifier {
   static const int maxDownloadConcurrency = 8;
   static const int defaultDownloadConcurrency = 6;
 
+  /// 缓冲档位的取值区间（壳 `Setting.getBuffer()` 的夹法：1..10）。
+  static const int minBufferLevel = 1;
+  static const int maxBufferLevel = 10;
+
+  /// 默认档位 = 1（50 秒 / 50 秒），与改造前的写死值完全一致。
+  static const int defaultBufferLevel = 1;
+
+  /// 一个档位对应多少毫秒的缓冲（壳 `DEFAULT_MIN_BUFFER_MS` = 50_000）。
+  static const int bufferStepMs = 50000;
+
+  /// `defaultBufferLevel` 对应的最短缓冲时长，给设置页文案用。
+  static String bufferLevelHint(int level) {
+    final seconds = level * bufferStepMs ~/ 1000;
+    return '前后各缓冲 $seconds 秒';
+  }
+
   static const List<FxQualityOption> qualityOptions = <FxQualityOption>[
     FxQualityOption('auto', '自动', '跟随片源默认清晰度'),
     FxQualityOption('4k', '蓝光 4K', '优先 4K，画质最好、最占流量'),
@@ -116,6 +149,9 @@ class AppSettings extends ChangeNotifier {
 
   String? get downloadCustomRoot => _downloadCustomRoot;
   int _downloadConcurrency = defaultDownloadConcurrency;
+  int _bufferLevel = defaultBufferLevel;
+  bool _preferAac = false;
+  bool _tunneling = false;
 
   bool _ready = false;
   Future<void>? _initFuture;
@@ -144,6 +180,15 @@ class AppSettings extends ChangeNotifier {
   bool get jarAutoInstall => _jarAutoInstall;
   DownloadLocation get downloadLocation => _downloadLocation;
   int get downloadConcurrency => _downloadConcurrency;
+
+  /// 播放缓冲档位（1..10，一档 = 50 秒）。
+  int get bufferLevel => _bufferLevel;
+
+  /// 首选 AAC 音轨（默认关，与壳 `prefer_aac` 一致）。
+  bool get preferAac => _preferAac;
+
+  /// 隧道播放（默认关，与壳 `tunnel` 一致）。
+  bool get tunneling => _tunneling;
 
   String get defaultQualityLabel {
     for (final option in qualityOptions) {
@@ -188,6 +233,9 @@ class AppSettings extends ChangeNotifier {
       _downloadConcurrency = _validConcurrency(
         sp.getInt(_kDownloadConcurrency),
       );
+      _bufferLevel = _validBufferLevel(sp.getInt(_kBufferLevel));
+      _preferAac = sp.getBool(_kPreferAac) ?? false;
+      _tunneling = sp.getBool(_kTunneling) ?? false;
     } catch (e) {
       debugPrint('AppSettings: load failed: $e');
     } finally {
@@ -214,6 +262,13 @@ class AppSettings extends ChangeNotifier {
   int _validConcurrency(int? value) {
     if (value == null) return defaultDownloadConcurrency;
     return value.clamp(minDownloadConcurrency, maxDownloadConcurrency).toInt();
+  }
+
+  /// 缓冲档位的夹法（与壳 `Setting.getBuffer()` 的 `Math.min(Math.max(v,1),10)`
+  /// 逐位一致：null / 0 / 负数都当默认档，超界只夹到边界）。
+  int _validBufferLevel(int? value) {
+    if (value == null) return defaultBufferLevel;
+    return value.clamp(minBufferLevel, maxBufferLevel).toInt();
   }
 
   Future<void> setDefaultQuality(String key) async {
@@ -335,6 +390,32 @@ class AppSettings extends ChangeNotifier {
     _downloadConcurrency = valid;
     notifyListeners();
     await _saveInt(_kDownloadConcurrency, valid);
+  }
+
+  /// 改缓冲档位（1..10）。只落盘 + 通知；推给原生由
+  /// `PlaybackParamsInstaller` 逐项同步（它监听本对象）。
+  Future<void> setBufferLevel(int value) async {
+    final valid = _validBufferLevel(value);
+    if (_bufferLevel == valid) return;
+    _bufferLevel = valid;
+    notifyListeners();
+    await _saveInt(_kBufferLevel, valid);
+  }
+
+  /// 首选 AAC 音轨。
+  Future<void> setPreferAac(bool value) async {
+    if (_preferAac == value) return;
+    _preferAac = value;
+    notifyListeners();
+    await _saveBool(_kPreferAac, value);
+  }
+
+  /// 隧道播放。
+  Future<void> setTunneling(bool value) async {
+    if (_tunneling == value) return;
+    _tunneling = value;
+    notifyListeners();
+    await _saveBool(_kTunneling, value);
   }
 
   Future<void> _saveBool(String key, bool value) async {

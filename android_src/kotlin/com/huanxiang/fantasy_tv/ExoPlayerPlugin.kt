@@ -18,9 +18,16 @@ import android.widget.FrameLayout
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.C
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+import androidx.media3.extractor.ts.TsExtractor
+import androidx.media3.exoplayer.hls.DefaultHlsExtractorFactory
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.DataSpec
@@ -169,6 +176,45 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
          * 再叠加两轮换地址 / 换解码器就够了，再多只是在拖时间。
          */
         const val MAX_LAYER_RETRIES = 2
+
+        /**
+         * 缓冲档位的单位（PARAMS_ALIGN 2026-11-15 · 阶段 2 第 5 条）。
+         *
+         * 壳的 `ExoUtil.buildLoadControl()` 只有一行：
+         * ```
+         * setBufferDurationsMs(DEFAULT_MIN_BUFFER_MS * Setting.getBuffer(),
+         *                      DEFAULT_MAX_BUFFER_MS * Setting.getBuffer(),
+         *                      DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+         *                      DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS)
+         * ```
+         * 它的 media3 fork 里 `DEFAULT_MIN_BUFFER_MS` / `DEFAULT_MAX_BUFFER_MS`
+         * **都是 50_000**，`Setting.getBuffer()` = `Prefers.getInt("buffer")`
+         * 夹在 1..10（`Setting.java:101-103`）。所以一个档位 = 50 秒。
+         *
+         * 官方 media3 的 `DEFAULT_MIN_BUFFER_MS` 是 15_000、`MAX` 是 50_000，
+         * 乘出来比例不对，因此这里**不用官方的 DEFAULT_* 常量**，直接用
+         * 壳的绝对值 50_000 —— 行为与壳逐位一致。
+         */
+        const val BUFFER_STEP_MS = 50_000
+
+        /** 缓冲档位下限（壳 `Setting.getBuffer()` 的 `Math.max(...,1)`）。 */
+        const val BUFFER_LEVEL_MIN = 1
+
+        /** 缓冲档位上限（壳 `Setting.getBuffer()` 的 `Math.min(...,10)`）。 */
+        const val BUFFER_LEVEL_MAX = 10
+
+        /** 默认档位 = 壳的 `Prefers.getInt("buffer")` 未设置时的行为（1 档）。 */
+        const val BUFFER_LEVEL_DEFAULT = 1
+
+        /**
+         * TS 时间戳搜索窗口的倍数（PARAMS_ALIGN · 阶段 2 第 3 条）。
+         *
+         * 壳：`setTsExtractorTimestampSearchBytes(TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * 10)`。
+         * 120 字节的关键帧标记可能要往后找很久才落在 PAT/PMT 上；默认只搜
+         * 112_800 字节（600 个 TS 包），部分源起播花屏、音画不同步就是这个窗口
+         * 太小、时间戳没被校准。×10 是壳的取值。
+         */
+        const val TS_TIMESTAMP_SEARCH_FACTOR = 10
 
         /**
          * 下一集预载的触发延时（改动 ⑥）：首帧之后、播放稳定 3 秒才开灌。
@@ -360,6 +406,104 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     /// 是否已经切到「优先软解」的渲染器（改动 ⑦ 的落点）。
     @Volatile
     private var softDecoderPreferred = false
+
+    // ------------------------------------- 参数面（PARAMS_ALIGN 2026-11-15 · 阶段 2）
+
+    /**
+     * 缓冲档位（1..10，壳 `Setting.getBuffer()` 的语义）。
+     *
+     * 只在**建播放器时**生效（`DefaultLoadControl` 是不可变的）：换档位由
+     * Dart 调 `setBufferLevel` 进来，这里记下新值，下次 `ensurePlayer()`
+     * 建实例时用上；正在播的实例不重建 —— 为了一个缓冲时长打断正在播的
+     * 视频不值得，用户下次进播放页就生效。
+     */
+    @Volatile
+    private var bufferLevel = BUFFER_LEVEL_DEFAULT
+
+    /**
+     * 隧道播放（tunneling）是否已经被判定为不可用（PARAMS_ALIGN 第 1 条）。
+     *
+     * 壳是 `setTunnelingEnabled(Setting.isTunnel())`，异常时**不**兜底：
+     * 某些机型 / 某些 ROM 在隧道模式下打开 TunneledPlayback 会抛
+     * IllegalStateException 或 CodecException。我们的取舍是「能开就开，
+     * 一炸就永久关掉这一台设备上的隧道」—— 见 [buildTrackSelector]。
+     */
+    @Volatile
+    private var tunnelingUnsupported = false
+
+    /**
+     * Dart 的「明确要暂停」意图（PARAMS_ALIGN 第 2 条的核心保险）。
+     *
+     * 为什么要这个字段：壳在 build 之后立刻 `setPlayWhenReady(true)`，
+     * 我们照做之后，`open` 就不再需要 Dart 额外发一次 `play()`。但由此
+     * 带来一个新风险 —— **Dart 明确要暂停的场景会被播放器自己播起来**：
+     *
+     *   · 播放页「先拉一帧再暂停」（`_openMedia(play: false)`）；
+     *   · 投屏期间本机暂停；
+     *   · 定时关闭 / 后台暂停开关。
+     *
+     * 所以这里是「谁最后说话算谁的」：Dart 每发一次 `pause` 就把这个字段
+     * 置 true，发 `play` 置 false；所有「自动播起来」的路径
+     * （[switchToSourceUnsafe] / 重试重开）都要先看它。
+     */
+    @Volatile
+    private var dartWantsPause = false
+
+    /**
+     * 下一次 open 要强加的 mimeType（PARAMS_ALIGN 第 4 条：mime 兜底重开）。
+     *
+     * 壳在 `onPlayerError` 里按错误码换一个 mimeType 重新 `setMediaItem`：
+     * ```
+     * PARSING_MANIFEST_UNSUPPORTED / MALFORMED → APPLICATION_OCTET
+     * PARSING_CONTAINER_* , IO_UNSPECIFIED      → APPLICATION_M3U8
+     * ```
+     * 典型场景：清单服务端返回 `text/html` 或 `application/octet-stream`，
+     * media3 按 Content-Type 选错解析器，第一档必然失败；换一个 mime 重开
+     * 一次就过了。这个字段是「只在这一次重开里生效」的一次性开关。
+     */
+    @Volatile
+    private var forcedMimeType: String? = null
+
+    /**
+     * 这一次 open 是由 mime 兜底触发的（重试预算要不要还回去的标志）。
+     *
+     * 兜底重开如果成功（出首帧），说明「原来那个错误只是 mime 判错」，
+     * 不该吃掉这条线路的分级重试预算 —— 与 [retryReason] 的 io/decode 同级记账。
+     */
+    @Volatile
+    private var mimeFallbackUsed = false
+
+    /**
+     * 首选 AAC 音轨（壳 `Setting.isPreferAAC()` →
+     * `setPreferredAudioMimeType(MimeTypes.AUDIO_AAC)`）。
+     *
+     * 为什么默认 **false**：壳的 pref 键 `prefer_aac` 未设置时
+     * `Prefers.getBoolean` 返回 false —— 它的默认值也是关。我们照抄默认，
+     * 免得在本来是 E-AC3 / DTS 的源上把音轨强行挑成 AAC（那等于降级）。
+     */
+    @Volatile
+    private var preferAacTrack = false
+
+    /**
+     * 隧道播放开关（壳 `Setting.isTunnel()`）。
+     *
+     * 默认 **false**（同壳：`Prefers.getBoolean("tunnel")` 未设置 = false）。
+     * 隧道模式让音频和视频走同一条 Codec 通路（音画同步更好、省一次合成），
+     * 前提是设备/ROM 真的支持；不支持时 media3 会报
+     * `ERROR_CODE_DECODER_INIT_FAILED`，所以这里做成「能开就开，异常跳过」
+     * （用户口径「能开就开，异常时跳过」）。
+     */
+    @Volatile
+    private var tunnelingPreferred = false
+
+    /**
+     * 首选字幕 / 文本轨语言（ISO 639-2/3 小写，如 `chi` / `zho` / `eng`）。
+     *
+     * 壳取 `Locale.getDefault().getISO3Language()`（系统语言），空串 = 用系统语言。
+     * 传 `und` 会被 media3 归一化成「未定」，等同于不指定 —— 这里显式过滤掉。
+     */
+    @Volatile
+    private var textLanguagePreferred = ""
 
     /**
      * 「播放器正在缓冲」的**主线程快照**（CRASH_FIX 2026-11-15）。
@@ -905,10 +1049,47 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                         call.argument<Boolean>("bgHasNext") ?: true,
                     )
                 }
-                open(url, headers, isHls, startMs, result, resolveMs = resolveMs)
+                // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 6 条）：可选的 mimeType。
+                //
+                // **只增不改**：这是 `open` 上新增的**可选**入参键，老 Dart
+                // 不传就是 null，行为与改造前完全一致（交给 media3 嗅探）。
+                // 传了就以它为准 —— 壳 `ExoUtil.getMediaItem()` 的
+                // `if (mimeType != null) builder.setMimeType(mimeType)`。
+                val mimeType = (call.argument<String>("mimeType") ?: "").trim()
+                // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 2 条的**必需配套**）。
+                //
+                // **只增不改**：`autoplay` 是 `open` 上新加的可选键，缺省 true
+                // （= 与「build 时就 playWhenReady=true」的新行为一致；老 Dart
+                // 不传也不会变慢，它本来就随后发 play）。
+                //
+                // 为什么必须有它：native 现在自己在 build / 换源时把
+                // `playWhenReady` 置 true（对齐壳 `Players.java:151`），
+                // 而 Dart 有三种场景**明确要暂停**：
+                //   · 播放页「先拉一帧再暂停」（`play: false`）；
+                //   · 投屏期间本机暂停；
+                //   · 定时关闭 / 后台暂停开关。
+                // 这三条必须能在 open 这一刻就告诉原生，否则「一打开就出声」。
+                val autoplay = call.argument<Boolean>("autoplay") ?: true
+                dartWantsPause = !autoplay
+                open(
+                    url, headers, isHls, startMs, result,
+                    resolveMs = resolveMs,
+                    dartMimeType = mimeType.ifEmpty { null },
+                )
             }
-            "play" -> { player?.play(); result.success(true) }
-            "pause" -> { player?.pause(); result.success(true) }
+            // PARAMS_ALIGN 第 2 条的保险另一半：Dart 的播放意图是权威。
+            "play" -> {
+                dartWantsPause = false
+                player?.play()
+                result.success(true)
+            }
+            "pause" -> {
+                // 记下「用户明确要暂停」：这样重试重开 / 重建渲染器之后
+                // 不会自己又播起来，也不必让 Dart 再补发一次 pause。
+                dartWantsPause = true
+                player?.pause()
+                result.success(true)
+            }
             "seek" -> {
                 val ms = call.argument<Number>("positionMs")?.toLong() ?: 0L
                 // 先闸音量再 seek：避免「画面还在旧帧、声音已经跳过去」（改动 ③）。
@@ -1030,6 +1211,58 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 FxDns.applyProfile(hosts, doh)
                 result.success(true)
             }
+            // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 5 条）：缓冲档位。
+            //
+            // **只增不改**：新增方法，入参键 `level`（1..10）。壳的同名设置是
+            // `Prefers.getInt("buffer")`，1 档 = 50 秒，见 [BUFFER_STEP_MS]。
+            // 越界不报错，按壳的夹法夹到 1..10（`Setting.java:101-103` 就是
+            // `Math.min(Math.max(v,1),10)`）。
+            //
+            // 只在下次建播放器时生效（DefaultLoadControl 不可变）。返回 true
+            // 表示值已记下 —— 不是「已经作用于当前实例」。
+            "setBufferLevel" -> {
+                val raw = call.argument<Number>("level")?.toInt() ?: BUFFER_LEVEL_DEFAULT
+                val next = raw.coerceIn(BUFFER_LEVEL_MIN, BUFFER_LEVEL_MAX)
+                val changed = next != bufferLevel
+                bufferLevel = next
+                Log.i(
+                    LOG_TAG,
+                    "BUFFER 档位=$next（${next * BUFFER_STEP_MS / 1000}s）" +
+                        if (changed) "，下次建播放器生效" else "，与当前一致",
+                )
+                result.success(true)
+            }
+            // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 1 条）：音轨 / 字幕偏好。
+            //
+            // **只增不改**：新增方法。壳在 `ExoUtil.buildTrackSelector()` 里读
+            // 三个全局开关（`isPreferAAC` / `isTunnel` / 首选文本语言），跑在
+            // 建播放器那一刻。我们把它做成可推送的：Dart 在设置里改了，
+            // 下次建播放器就按新值来（正在播的实例不动，理由同缓冲档位）。
+            //
+            // 入参键：
+            //   preferAac     Boolean  首选 AAC 音轨（壳 `setPreferredAudioMimeType(AUDIO_AAC)`）
+            //   tunneling     Boolean  隧道播放（壳 `setTunnelingEnabled(Setting.isTunnel())`）
+            //   textLanguage  String   首选字幕语言 ISO3（壳 `Locale.getDefault().getISO3Language()`）
+            "setTrackPrefs" -> {
+                call.argument<Boolean>("preferAac")?.let { preferAacTrack = it }
+                call.argument<Boolean>("tunneling")?.let {
+                    // 用户重新打开隧道 = 重新给这台设备一次机会（换机 / 升级 ROM 后
+                    // 可能就好了）；原来那条「一炸永久关」只在同一次进程内有效。
+                    if (it && !tunnelingPreferred) tunnelingUnsupported = false
+                    tunnelingPreferred = it
+                }
+                call.argument<String>("textLanguage")?.let { raw ->
+                    val lang = raw.trim().lowercase()
+                    textLanguagePreferred = lang
+                }
+                Log.i(
+                    LOG_TAG,
+                    "TRACK 偏好 aac=$preferAacTrack tunnel=$tunnelingPreferred" +
+                        " text=${textLanguagePreferred.ifEmpty { "系统" }}" +
+                        (if (tunnelingUnsupported) "（本机隧道已判不可用）" else ""),
+                )
+                result.success(true)
+            }
             else -> result.notImplemented()
         }
     }
@@ -1051,16 +1284,23 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // （`PlayerSetting.getBuffer()`，默认 1，范围 1~10），
         // bufferForPlayback / afterRebuffer 原样透传，优先级开关根本不碰。
         //
-        // 所以我们按「档位 1」对齐：50s / 50s / 1s / 2s + backBuffer 0，
+        // 我们按「档位 1」对齐：50s / 50s / 1s / 2s + backBuffer 0，
         // 并且**删掉** setPrioritizeTimeOverSizeThresholds(true) ——
         // 壳用的是默认 false（按字节阈值优先），我们之前那行是自己的发明。
         //
         // 和原来的 15s / 60s 比：min=max=50s 表示「一直往 50 秒灌」，
         // 不留 60s 那种「灌满就停、掉到 15s 才续」的空档，弱网下更不容易断粮。
+        //
+        // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 5 条）：档位接进来。
+        // 之前是写死 1 档；现在 min/max 都乘 `bufferLevel`，与壳
+        // `setBufferDurationsMs(50000×getBuffer, 50000×getBuffer, 1000, 2000)`
+        // 逐位一致（1000 / 2000 不乘档位，壳也没乘）。
+        val minMax = bufferLevel.coerceIn(BUFFER_LEVEL_MIN, BUFFER_LEVEL_MAX) *
+            BUFFER_STEP_MS
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                50_000,   // minBufferMs
-                50_000,   // maxBufferMs
+                minMax,   // minBufferMs
+                minMax,   // maxBufferMs
                 1_000,    // bufferForPlaybackMs
                 2_000     // bufferForPlaybackAfterRebufferMs
             )
@@ -1075,8 +1315,21 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // 改动 ⑦：渲染器改由 [buildRenderers] 建 —— 解码失败重试时要把
         // 「优先软解」的 MediaCodecSelector 换进去，所以必须能重建。
         val renderers = buildRenderers()
+        // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 1 条）：TrackSelector 全套。
+        //
+        // 壳 `ExoUtil.buildTrackSelector()`（`:46-55`）四行：
+        //   if (isPreferAAC) builder.setPreferredAudioMimeType(AUDIO_AAC);
+        //   builder.setPreferredTextLanguage(Locale.getDefault().getISO3Language());
+        //   builder.setTunnelingEnabled(Setting.isTunnel());
+        //   builder.setForceHighestSupportedBitrate(true);
+        //
+        // 我们之前**完全没有** setTrackSelectionParameters（全工程 0 命中），
+        // 后果是多码率 master 由 ABR 自选、常常落在低码率档，字幕语言也没人指定。
+        // 这里按壳的顺序与取值补齐，顺序无关紧要，写在一起便于对照。
+        val trackSelector = buildTrackSelector()
         player = ExoPlayer.Builder(context, renderers)
             .setLoadControl(loadControl)
+            .setTrackSelector(trackSelector)
             .build()
         // ALIGN_EXO（2026-11-14，参考 FongMi/TV 的 ExoUtil.buildPlayer）：
         //   · setAudioAttributes(..., true)：申请音频焦点，来电/其它 App 播放时
@@ -1088,6 +1341,19 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             true
         )
         player!!.setHandleAudioBecomingNoisy(true)
+        // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 2 条）：playWhenReady 时机。
+        //
+        // 壳在 `Players.setPlayer()` 里 build 之后、setMediaItem 之前就
+        // `exoPlayer.setPlayWhenReady(true)`（`Players.java:151`）—— READY
+        // 即播，起播路径没有「等 UI 再发一次 play」这一趟。
+        //
+        // 我们原来是 open → prepare → 等 Dart 的 `play()`，多一次通道往返
+        // （移动网下这一趟虽然只有几毫秒，但它在**关键路径**上：Dart 要先等
+        // open 的 Future 回来、再发 play，中间还要走一遍消息循环）。
+        //
+        // 保险：Dart 明确要暂停时（[dartWantsPause]）不置 true —— 播放页的
+        // 「先拉一帧再暂停」、「投屏期间本机暂停」、「后台暂停开关」都靠它。
+        player!!.playWhenReady = !dartWantsPause
         // 播放器可能晚于视图创建，这里补一次绑定
         videoView?.let { player!!.setVideoTextureView(it) }
         // 精确 seek 要从前一个关键帧开始解码，大分片 4K 上很慢；
@@ -1105,6 +1371,176 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     // ------------------------------------------- 渲染器 / 解码器降级（改动 ⑦）
+
+    /**
+     * TrackSelector（PARAMS_ALIGN 2026-11-15 · 阶段 2 第 1 条）。
+     *
+     * 逐条对齐壳的 `ExoUtil.buildTrackSelector()`（`:46-55`）：
+     *
+     * ```
+     * if (Setting.isPreferAAC()) builder.setPreferredAudioMimeType(MimeTypes.AUDIO_AAC);
+     * builder.setPreferredTextLanguage(Locale.getDefault().getISO3Language());
+     * builder.setTunnelingEnabled(Setting.isTunnel());
+     * builder.setForceHighestSupportedBitrate(true);
+     * ```
+     *
+     * 四条的取舍：
+     *   1. **forceHighestSupportedBitrate**：无条件开。这是壳最实在的一条 ——
+     *      多码率 master（1080p/720p/480p 同时给）原来由 ABR 自己爬，起播
+     *      头几秒常常先落在 480p；打开后直接挑设备能解的最高档。代价是
+     *      弱网下更容易缓冲，但缓冲策略（[BUFFER_STEP_MS]）与预取都在，实测
+     *      比「先糊后清」的观感好。
+     *   2. **tunneling**：能开就开，异常时跳过。隧道模式要求音视频走同一个
+     *      `MediaCodec` 的 tunneled 通路（音画同步更准、少一次合成），但
+     *      部分 ROM 一开就 `DECODER_INIT_FAILED`。所以：
+     *        · 开关打开且本机没被判死 → 置 true；
+     *        · 置 true 之后真炸了，`onPlayerError` 的
+     *          `ERROR_CODE_DECODER_INIT_FAILED` 会把它落到 [tunnelingUnsupported]，
+     *          下一次建播放器就不再要隧道（见 [noteTunnelingFailure]）。
+     *   3. **首选文本语言**：壳用系统语言的 ISO3。我们允许 Dart 覆盖
+     *      （用户把 App 语言设成中文但系统是英文时，仍然应该优先中文字幕），
+     *      没覆盖就用系统语言 —— 与壳逐位一致。
+     *      `und`（未定）/ 空串不设：media3 会把它当「无偏好」，设了等于没设。
+     *   4. **preferAAC**：默认关（壳的 `Prefers.getBoolean("prefer_aac")`
+     *      默认也是 false）。开了才把 AAC 排到其它音轨前面。
+     *
+     * 注意 media3 1.4.1 的官方 API 与壳的 fork 有两点差异，都不影响语义：
+     *   · 壳调 `trackSelector.buildUponParameters()` 拿 builder 再
+     *     `setParameters(builder.build())`；官方等价写法是直接
+     *     `setParameters(builder.build())`，这里两种都行，用后一种。
+     *   · `setPreferredTextLanguage` 在 `DefaultTrackSelector.Parameters.Builder`
+     *     上是有的（`javap` 已验证），不需要退到 `TrackSelectionParameters`。
+     */
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun buildTrackSelector(): DefaultTrackSelector {
+        val selector = DefaultTrackSelector(context)
+        val builder = selector.buildUponParameters()
+        // ① 多码率源直接挑最高可解码率（壳无条件开）。
+        builder.setForceHighestSupportedBitrate(true)
+        // ② 隧道播放：开关打开 + 本机没判死才要（异常时跳过）。
+        val wantTunnel = tunnelingPreferred && !tunnelingUnsupported
+        builder.setTunnelingEnabled(wantTunnel)
+        // ③ 首选字幕语言：Dart 覆盖优先，否则系统语言（壳的取值）。
+        val textLang = resolvedTextLanguage()
+        if (textLang.isNotEmpty()) builder.setPreferredTextLanguage(textLang)
+        // ④ 可选 AAC 偏好（默认关，与壳一致）。
+        if (preferAacTrack) {
+            builder.setPreferredAudioMimeType(MimeTypes.AUDIO_AAC)
+        }
+        selector.setParameters(builder.build())
+        Log.i(
+            LOG_TAG,
+            "TRACK 建 selector forceHighest=true tunnel=$wantTunnel " +
+                "text=${textLang.ifEmpty { "-" }} aac=$preferAacTrack",
+        )
+        return selector
+    }
+
+    /**
+     * 解析出「首选字幕语言」，返回 ISO3 小写；空串 = 不指定。
+     *
+     * 三条规则：
+     *   · Dart 推过（[textLanguagePreferred] 非空且不是 `und`）→ 用它；
+     *   · 否则用系统语言（壳 `Locale.getDefault().getISO3Language()`）；
+     *   · `und` / 空 → 空串（media3 归一化后是 null，等于不做偏好）。
+     */
+    private fun resolvedTextLanguage(): String {
+        val fromDart = textLanguagePreferred.trim().lowercase()
+        if (fromDart.isNotEmpty() && fromDart != "und") return fromDart
+        return try {
+            // 壳直接 `Locale.getDefault().getISO3Language()`，但它在
+            // 「系统语言没有 ISO3 映射」时会抛 MissingResourceException
+            // （Kotlin 侧是 `getISO3Language()`，不是属性 `iso3Language`）。
+            // 壳没兜这个异常 —— 那是它的隐患，这里兜住：拿不到就当没偏好。
+            val sys = java.util.Locale.getDefault()
+                .getISO3Language()
+                .trim()
+                .lowercase()
+            if (sys.isEmpty() || sys == "und") "" else sys
+        } catch (_: Throwable) {
+            // MissingResourceException / 任何 ISO3 取不到的机型。
+            ""
+        }
+    }
+
+    /**
+     * 记录「这台设备的隧道模式不可用」（PARAMS_ALIGN 第 1 条的异常分支）。
+     *
+     * 壳没有这一层（它直接 `default: ErrorEvent.extract()` 上报），但用户口径
+     * 是「能开就开，异常时跳过」—— 一炸就把它永久关掉，下次建播放器不再要
+     * 隧道，用户不会卡在同一条死路上反复失败。
+     */
+    private fun noteTunnelingFailure(error: PlaybackException) {
+        if (!tunnelingPreferred || tunnelingUnsupported) return
+        val name = error.errorCodeName
+        if (name == "ERROR_CODE_DECODER_INIT_FAILED" ||
+            name == "ERROR_CODE_DECODER_QUERY_FAILED"
+        ) {
+            tunnelingUnsupported = true
+            Log.w(
+                LOG_TAG,
+                "TRACK 隧道模式在本机不可用（$name），已关闭；" +
+                    "下次建播放器走普通通路",
+            )
+        }
+    }
+
+    /**
+     * TS 解复用器（PARAMS_ALIGN 2026-11-15 · 阶段 2 第 3 条）。
+     *
+     * 壳 `MediaSourceFactory.getExtractorsFactory()`（`:87-90`）只有两行：
+     * ```
+     * new DefaultExtractorsFactory()
+     *     .setTsExtractorFlags(FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS)
+     *     .setTsExtractorTimestampSearchBytes(TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * 10);
+     * ```
+     *
+     * 两个参数各自解决一个真实问题：
+     *   · **FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS**（= 64）：默认 media3 会
+     *     **跳过** TS 里 stream_type 0x82（HDMV DTS）的音轨 —— 这类流原来
+     *     完全没声音（不是解不出来，是根本没把轨道交给渲染器）。
+     *   · **timestampSearchBytes ×10**（112_800 → 1_128_000）：时间戳校准的
+     *     搜索窗口。窗口太小时找不到 PAT/PMT 就放弃校准，表现是起播花屏 /
+     *     音画不同步。
+     *
+     * 注意：`DefaultExtractorsFactory` 只服务 **ProgressiveMediaSource**。
+     * HLS 走的是 `DefaultHlsExtractorFactory`（它自己 `new TsExtractor(...)`，
+     * 内部固定 `payloadReaderFactoryFlags`），见 [buildHlsExtractorFactory] ——
+     * 两条路都要接，否则只在 mp4/ts 直链生效、HLS 源一点没变。
+     */
+    private fun buildExtractorsFactory(): ExtractorsFactory =
+        DefaultExtractorsFactory()
+            .setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS)
+            .setTsExtractorTimestampSearchBytes(
+                TsExtractor.DEFAULT_TIMESTAMP_SEARCH_BYTES * TS_TIMESTAMP_SEARCH_FACTOR
+            )
+
+    /**
+     * HLS 侧的 TS flags（PARAMS_ALIGN 第 3 条的 HLS 分支）。
+     *
+     * 为什么不能复用 [buildExtractorsFactory]：官方 media3 的
+     * `DefaultMediaSourceFactory(extractorsFactory)` **不会**把那个工厂转给
+     * `HlsMediaSource.Factory`（`DelegateFactoryLoader` 里 HLS 分支只反射
+     * 构造 `HlsMediaSource$Factory`，不传 extractors）—— 只有
+     * ProgressiveMediaSource 吃它。所以 HLS 要单独给一个
+     * `DefaultHlsExtractorFactory(payloadReaderFactoryFlags, exposeCea608)`：
+     *
+     * 它的构造参数第一个就是 `DefaultTsPayloadReaderFactory` 的 flags，
+     * 内部把它 OR 进 `new DefaultTsPayloadReaderFactory(flags, ...)`。
+     * 传 `FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS` 即可打开 HDMV DTS。
+     *
+     * 时间戳窗口 ×10 在 HLS 侧**没有对应开关**（`createTsExtractor` 里写死
+     * `DEFAULT_TIMESTAMP_SEARCH_BYTES`），这一项只在 progressive 生效。
+     * 这不是偷懒：HLS 的每个分片都是独立 TS，时间戳由
+     * `TimestampAdjuster` 按分片 PTS 续接，本来就不靠长窗口搜索。
+     */
+    private fun buildHlsExtractorFactory(): DefaultHlsExtractorFactory =
+        DefaultHlsExtractorFactory(
+            DefaultTsPayloadReaderFactory.FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS,
+            // exposeCea608WhenMissingDeclarations：壳没传这个参数，media3
+            // 默认构造是 `(0, true)`。这里照默认保持 true。
+            true,
+        )
 
     /**
      * 建渲染器工厂。
@@ -1242,6 +1678,82 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     /**
+     * **mimeType 兜底**（PARAMS_ALIGN 2026-11-15 · 阶段 2 第 4 条）。
+     *
+     * 壳 `Players.onPlayerError()`（`:680-686`）里的一档：
+     * ```
+     * case ERROR_CODE_IO_UNSPECIFIED:
+     * case ERROR_CODE_PARSING_CONTAINER_MALFORMED:
+     * case ERROR_CODE_PARSING_MANIFEST_MALFORMED:
+     * case ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED:
+     * case ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED:
+     *     setFormat(ExoUtil.getMimeType(e.errorCode)); break;
+     * ```
+     * 而 `ExoUtil.getMimeType(int)`（`:86-90`）是一张两行的表：
+     * ```
+     * MANIFEST_UNSUPPORTED / MANIFEST_MALFORMED → APPLICATION_OCTET
+     * CONTAINER_UNSUPPORTED / CONTAINER_MALFORMED / IO_UNSPECIFIED → APPLICATION_M3U8
+     * ```
+     *
+     * 为什么这一档有效：清单服务端有时把 `Content-Type` 写成 `text/html` 或
+     * 干脆是 `application/octet-stream`，media3 按「声明的类型」选了错误的
+     * 解析器（甚至直接判定 unsupported）；强制成 `APPLICATION_M3U8` 之后
+     * 它才会用 HLS 解析器去读正文 —— 正文本来就是 m3u8，一次就过。
+     * 反向同理：正文其实不是 m3u8（是被包装成 m3u8 的 mp4 或错误页）时，
+     * 强制 OCTET 能让它退回收割式的前缀嗅探。
+     *
+     * 与原实现的差别（**不退化成壳的循环**）：
+     *   · 壳只有 `retry > 2` 的总预算，mime 兜底和 io/decode 抢同一个计数；
+     *   · 我们用一次性开关 [mimeFallbackUsed]，**同一集同一线路只兜一次**，
+     *     且不增加 [retryCount]：如果兜底之后还是同样的错，说明不是 mime
+     *     判定问题，原地升级到 io 档（换地址）才有意义。
+     *
+     * 返回 true = 已经安排了重开，本次错误不上报 Dart。
+     */
+    private fun tryMimeFallback(error: PlaybackException): Boolean {
+        val item = openedItem ?: return false
+        // 已经兜过一次：说明不是 mime 判错，把机会让给 io 档。
+        if (mimeFallbackUsed) return false
+        val mime = mimeTypeForError(error.errorCode) ?: return false
+        mimeFallbackUsed = true
+        // 记进 [retryReason] 供快照 / 日志对照（Dart 侧只打日志，不按键分支）。
+        retryReason = "mime"
+        forcedMimeType = mime
+        // 出错前的位置：重开从这里接着播。
+        val positionMs = (player?.currentPosition ?: 0L).coerceAtLeast(0L)
+        if (positionMs > 0) lastKnownPositionMs = positionMs
+        Log.i(
+            LOG_TAG,
+            "retry=mime 换 mimeType=$mime 重开（不占分级重试预算）" +
+                " code=${error.errorCodeName} pos=${positionMs}ms url=${item.url}",
+        )
+        // 与 decode 档同理：在回调外重开，避免和 media3 内部的错误处理重入。
+        mainHandler.post {
+            open(item.url, item.headers, item.isHls, positionMs, NoopResult, fromRetry = true)
+        }
+        return true
+    }
+
+    /**
+     * 错误码 → 兜底 mimeType（壳 `ExoUtil.getMimeType(int)` 的两行表，逐值对齐）。
+     *
+     * 注意 media3 **没有** `MimeTypes.APPLICATION_OCTET` 这个常量（那是壳的
+     * fork 里加的别名），官方等价物是字符串字面量 `"application/octet-stream"`。
+     * 这里直接用字面量，并在注释里标出来源，免得后来人以为写错了。
+     */
+    private fun mimeTypeForError(errorCode: Int): String? = when (errorCode) {
+        PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED ->
+            // 壳的 MimeTypes.APPLICATION_OCTET（fork 独有常量）
+            "application/octet-stream"
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+        PlaybackException.ERROR_CODE_IO_UNSPECIFIED ->
+            MimeTypes.APPLICATION_M3U8
+        else -> null
+    }
+
+    /**
      * 播放层分级重试（在 [Player.Listener.onPlayerError] 里调用）。
      *
      * 返回 true = 本次错误已经在原生侧吃掉重试，**不要**上报给 Dart
@@ -1250,6 +1762,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
      */
     private fun tryLayerRetry(error: PlaybackException): Boolean {
         val item = openedItem ?: return false
+        // PARAMS_ALIGN（阶段 2 第 4 条）：mime 兜底在 onPlayerError 里**先于**
+        // fatal 判定跑了（见那里的注释），这里不再重复调用 —— 走到这里说明
+        // 要么已经兜过（mimeFallbackUsed），要么这个错误码不在兜底表里。
         if (retryCount >= MAX_LAYER_RETRIES) {
             Log.i(
                 LOG_TAG,
@@ -1505,6 +2020,8 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                     retryCount = 0
                     retryReason = ""
                 }
+                // PARAMS_ALIGN 第 4 条：mime 兜底成功 = 原来只是类型判错，
+                // 这一次的兜底机会不还回去（同一集只兜一次，避免来回抖）。
                 Log.i(LOG_TAG, "FIRST_FRAME 已渲染，pos=${player?.currentPosition}ms")
                 // TIMING_PROBE：拖动出画面（目标 ≤500ms）。和起播分开记，
                 // 免得一次拖动把起播时间线搅乱。
@@ -1539,7 +2056,30 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 try {
                 lastError = error.errorCodeName + ": " + (error.message ?: "")
                 endSeekAudioGate()
-                // SLOW_NET（2026-11-15，用户口径）：先判「真失败」。
+                // PARAMS_ALIGN 第 1 条：隧道模式在本机炸了就让位（能开就开，
+                // 异常时跳过）—— 下一次 ensurePlayer 不再要隧道。
+                noteTunnelingFailure(error)
+                // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 4 条）：**mime 兜底要排在
+                // 「真失败」判定之前**。
+                //
+                // 为什么顺序这么关键：`classifyFatal` 把 `PARSING_MANIFEST*` /
+                // `PARSING_CONTAINER*` 一律判成 `manifest_invalid`（这是 SLOW_NET
+                // 那一轮的语义：清单不是 m3u8 = 这条线路死了）。但 mime 兜底要
+                // 处理的**正是**这一类错误码 —— 先判 fatal 就等于让它永远跑不到。
+                //
+                // 壳的顺序也是这样的：它的 `onPlayerError` 里没有「fatal 直通」，
+                // `PARSING_*` 走 `setFormat(getMimeType(code))` 重开一档。
+                //
+                // 代价与兜底：兜过一次还失败就回到原判（`mimeFallbackUsed` 已置，
+                // 第二次同样的错会走 `classifyFatal` → 直接换线路，
+                // 不会引入新的「反复重试不出错」路径）。
+                if (tryMimeFallback(error)) {
+                    lastError = null
+                    retryReason = "mime"
+                    emit()
+                    return
+                }
+                // SLOW_NET（2026-11-15，用户口径）：再判「真失败」。
                 // 401/403/404/410/500/502/503、DNS 不通、连接被拒、TLS 失败、
                 // 清单非法、0 分片 —— 这些重试没有任何意义，直接给 Dart 一个
                 // fatalError 码，让它**立刻**换下一条，不等 8 秒窗口。
@@ -1713,6 +2253,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         fromRetry: Boolean = false,
         /// Dart 侧解析播放地址的耗时（TIMING_PROBE，2026-11-15）。
         resolveMs: Long = 0L,
+        /// Dart 显式声明的 mimeType（PARAMS_ALIGN 第 6 条；`open` 的可选入参）。
+        ///
+        /// 缺省 null = 与改造前完全一致（交给 media3 按地址 / 内容嗅探）。
+        dartMimeType: String? = null,
     ) {
         ensurePlayer()
         lastError = null
@@ -1739,7 +2283,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 本地文件 / 非 HLS：没有清单可归并，直接开。
             manifestProxied = false
             logTransport(url, url, headers, "raw")
-            startPlayback(url, url, headers, isHls, startPositionMs, result, fromRetry = fromRetry)
+            startPlayback(
+                url, url, headers, isHls, startPositionMs, result,
+                fromRetry = fromRetry, dartMimeType = dartMimeType,
+            )
             return
         }
         // MANIFEST_PROXY（2026-11-15）：**起播前置动作清零**。
@@ -1764,6 +2311,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 fromRetry = fromRetry,
                 // 请求头按上游地址推导：Referer 不能变成 127.0.0.1。
                 headerUrl = url,
+                dartMimeType = dartMimeType,
             )
             return
         }
@@ -1792,14 +2340,20 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                         return@post
                     }
                     logTransport(url, merged, headers, if (merged == url) "raw" else "merged")
-                    startPlayback(merged, url, headers, isHls, startPositionMs, result, fromRetry = fromRetry)
+                    startPlayback(
+                        merged, url, headers, isHls, startPositionMs, result,
+                        fromRetry = fromRetry, dartMimeType = dartMimeType,
+                    )
                 }
             }
         } catch (error: Throwable) {
             // 归并线程不可用（极罕见）：退化成不归并，照常播。
             Log.w(LOG_TAG, "清单预归并线程不可用 ${error.javaClass.simpleName}")
             logTransport(url, url, headers, "raw")
-            startPlayback(url, url, headers, isHls, startPositionMs, result, fromRetry = fromRetry)
+            startPlayback(
+                url, url, headers, isHls, startPositionMs, result,
+                fromRetry = fromRetry, dartMimeType = dartMimeType,
+            )
         }
     }
 
@@ -1864,6 +2418,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         result: MethodChannel.Result,
         fromRetry: Boolean = false,
         headerUrl: String = playUrl,
+        dartMimeType: String? = null,
     ) {
         val target = playUrl.trim()
         if (target.isEmpty()) {
@@ -1886,6 +2441,7 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 result,
                 fromRetry = fromRetry,
                 headerUrl = headerUrl,
+                dartMimeType = dartMimeType,
             )
         } catch (error: Throwable) {
             Log.e(
@@ -1925,6 +2481,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         /// `127.0.0.1:PORT/m3u8?…`，但 Referer **必须**还是上游站点的 ——
         /// 否则带防盗链的源直接 403。所以这里单独一个参数。
         headerUrl: String = playUrl,
+        /// Dart 通过 `open` 的 `mimeType` 入参显式给的类型（阶段 0.1 起的可选键）。
+        ///
+        /// 上游（服务端 / Dart 模型）声明的类型，优先级高于嗅探。
+        /// 与 [forcedMimeType] 的区别：那个是「上一次按上游说的播失败了，
+        /// 换一个再试」的兜底，由原生自己算，走字段不走参数（重试重开时
+        /// Dart 不在场，没有参数可传）。
+        dartMimeType: String? = null,
     ) {
         ensurePlayer()
         lastError = null
@@ -1935,6 +2498,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             retryKey = retryAddressKey
             retryCount = 0
             retryReason = ""
+            // PARAMS_ALIGN：换了地址 = 新的 mime 现场，兜底机会重新给一次。
+            // 不清的话，「A 集兜过 mime、换到 B 集」就永远兜不了了。
+            mimeFallbackUsed = false
+            forcedMimeType = null
             // 换集 / 换线路：上一轮「下一集预载」整轮作废（改动 ⑥）。
             if (!fromRetry) {
                 nextPreloader?.cancel()
@@ -1992,6 +2559,35 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 必须在建 source 这一刻就定下来。换集 = 新的 open = 新的 MediaItem，
             // 元数据自然跟着集数一起变（封面不变时 artworkUri 指向同一个文件）。
             val itemBuilder = MediaItem.Builder().setUri(playUrl)
+            // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 6 条）：MediaItem 带 id 和 mime。
+            //
+            // 壳 `ExoUtil.getMediaItem()`（`:92-103`）里这两行我们搬：
+            //   builder.setMediaId(uri.toString());
+            //   if (mimeType != null) builder.setMimeType(mimeType);
+            //
+            // mediaId 的用处（为什么不是原样 uri）：
+            //   · 诊断 / 日志里能一眼看出「这一集是哪条地址」，不用去翻 playUrl；
+            //   · 我们**不用**它当缓存键 —— 缓存键是 [FxCacheKeyFactory]
+            //     （`stripQuery(url) + "||" + url`），比 mediaId 精确。
+            //     壳直接用 uri 当默认 mediaId，同路径分片会撞 key，这点我们更好。
+            // 用 requestedUrl（Dart 给的原地址）而不是 playUrl：走本地清单代理时
+            // playUrl 是 `127.0.0.1:PORT/m3u8?…`，写进 mediaId 全是噪音。
+            itemBuilder.setMediaId(if (requestedUrl.isNotEmpty()) requestedUrl else playUrl)
+            // mimeType：三档来源，优先级从高到低
+            //   1. 本次 open 的强制 mime（错误兜底重试，壳 `getMimeType(code)`）；
+            //   2. Dart 显式传进来的 mimeType（阶段 0.1 起的可选入参）；
+            //   3. 不设 —— 交给 media3 按地址/内容嗅探（与改造前一致）。
+            val mimeForItem = forcedMimeType ?: dartMimeType
+            val mimeFromFallback = forcedMimeType
+            if (!mimeForItem.isNullOrEmpty()) {
+                itemBuilder.setMimeType(mimeForItem)
+            }
+            // 兜底 mime 是**一次性**的：这一次 open 用掉就清掉，
+            // 否则下一次正常换集还会带着它（那等于永远强制错类型）。
+            if (forcedMimeType != null) {
+                Log.i(LOG_TAG, "MIME 兜底生效 ${forcedMimeType}（本次 open 一次性）")
+                forcedMimeType = null
+            }
             if (bgTitle.isNotEmpty()) {
                 itemBuilder.setMediaMetadata(
                     PlaybackService.buildMetadata(
@@ -2006,10 +2602,44 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // ALIGN_FONGMI：不挂自定义 LoadErrorHandlingPolicy（壳是空实现，
             // 跑 media3 默认：3 次重试 + 0/1s/2s 退避），死地址交给
             // onPlayerError → Dart 救援链。
-            val source: MediaSource = if (isHls) {
-                HlsMediaSource.Factory(cachedFactory).createMediaSource(item)
+            //
+            // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 3 条）：TS extractor flags。
+            // HLS 和 Progressive 两条路要分别接（原因见 [buildExtractorsFactory]
+            // 与 [buildHlsExtractorFactory] 的注释 —— 官方 media3 的
+            // DefaultMediaSourceFactory 不会把 extractorsFactory 传给 HLS）。
+            //
+            // PARAMS_ALIGN 第 4 条的配套（关键）：**源类型也要跟着 mime 走**。
+            //
+            // 为什么必须有这一行：壳用的是 `DefaultMediaSourceFactory`，
+            // 它按 `MediaItem.mimeType` 分派（APPLICATION_M3U8 → HlsMediaSource，
+            // 其它 → Progressive）。我们这里是手工二分，只认 `isHls` 布尔 ——
+            // 如果 mime 兜底把类型从 octet 翻成 m3u8，但源仍然建成 Progressive，
+            // 兜底等于没做（ProgressiveMediaSource 读 m3u8 正文必然失败）。
+            //
+            // 取值规则：Dart 的 boolean 是**原始判断**（地址形态），
+            // mime 是**事后修正**，后者更接近「正文到底是什么」，所以优先。
+            val effectiveHls = when (mimeForItem?.lowercase()) {
+                MimeTypes.APPLICATION_M3U8.lowercase(),
+                "application/vnd.apple.mpegurl",
+                "application/mpegurl" -> true
+                "application/octet-stream" -> false
+                else -> isHls
+            }
+            if (effectiveHls != isHls) {
+                Log.i(
+                    LOG_TAG,
+                    "SRC 类型按 mime 修正 isHls=$isHls → $effectiveHls" +
+                        "（mime=${mimeForItem ?: "-"}" +
+                        (if (mimeFromFallback != null) "，来自 mime 兜底" else "") + "）",
+                )
+            }
+            val source: MediaSource = if (effectiveHls) {
+                HlsMediaSource.Factory(cachedFactory)
+                    .setExtractorFactory(buildHlsExtractorFactory())
+                    .createMediaSource(item)
             } else {
-                ProgressiveMediaSource.Factory(cachedFactory).createMediaSource(item)
+                ProgressiveMediaSource.Factory(cachedFactory, buildExtractorsFactory())
+                    .createMediaSource(item)
             }
             // CONNECTS（TRANSPORT_OKHTTP，2026-11-15）：清零连接计数，然后按
             // 壳的 switchEpisode 同款序列换源。首帧回来时打 connects=N ——
@@ -2020,7 +2650,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // SWITCH_INSTANCE_REUSE（改动 ④）：换集 / 换线路**不重建播放器**，
             // 也不解绑渲染器和纹理视图 —— 只按壳的 switchEpisode 同款序列
             // 换源。细节见 [switchToSource]。
-            switchToSource(source, startPositionMs, playWhenReady = fromRetry)
+            // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 2 条）：起播意图直接取
+            // [dartWantsPause] 的反面 —— 它已经完整编码了「这次要不要播」：
+            //   · Dart 的 open 带 autoplay=false（先拉一帧再暂停 / 投屏 / 后台暂停）
+            //     → dartWantsPause=true → 不播；
+            //   · Dart 的 open 缺省 / autoplay=true → false → 立刻播（省一次往返）；
+            //   · 原生分级重试（io / decode / mime）走 NoopResult 重开，
+            //     不会碰这个字段 → 沿用用户的原始意图，暂停态不会被重试带起来。
+            switchToSource(source, startPositionMs, playWhenReady = !dartWantsPause)
             // TIMING_PROBE：prepare 已经下发给播放器（这一刻起等首帧）。
             FxTiming.mark("prepare_called")
             // RESUME（2026-11-14）：真机 logcat -s FxExo 核对续播是否真的带上了。
@@ -2042,7 +2679,9 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 播放器要的那一片和预取线程要的那一片是同一个地址：两路请求同时
             // 打到 CDN / 中转，首片等于是和自己的预取抢带宽和连接名额。
             // 现在预取从「当前位置的下一片」开始，并且只在首帧之后跑。
-            if (!isLocal && isHls) {
+            // PARAMS_ALIGN 第 4 条的配套：用 [effectiveHls] 而不是 raw [isHls] ——
+            // mime 兜底把类型翻成 Progressive 时不该再去拉分片清单（那不是 HLS）。
+            if (!isLocal && effectiveHls) {
                 // 交给预取器的是**归并后**的地址：它自己拉清单时直接就是媒体
                 // 清单，不用再走一次 master → variant。
                 pendingPreload = PreloadRequest(playUrl, headers, startPositionMs)
@@ -2126,6 +2765,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // 记住原来的播放意图：换集时用户正在播 → 换完继续播；
         // 暂停态打开（先拉一帧再 pause）不被强制播起来。
         val wasPlaying = p.playWhenReady || p.isPlaying
+        // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 2 条）：Dart 明确要暂停时，
+        // 这里**绝不**把播放器拉起来。
+        //
+        // 为什么需要这一道：build 时已经 `playWhenReady = true`（对齐壳
+        // `Players.java:151`），所以「先拉一帧再暂停」「投屏期间本机暂停」
+        // 「后台暂停开关」这三种场景如果只靠 open 时那一刻的默认值，换源 /
+        // 重试重开之后就会自己播出声。这里的 `!dartWantsPause` 是最后一道闸。
+        val wantPlay = !dartWantsPause && (wasPlaying || playWhenReady)
         // OPEN_RESET（2026-11-14）：换源前先把上一个源停掉并清空。
         // 之前某条线路失败后，播放器会停在错误/未就绪状态，
         // 之后无论手动还是自动切线路，setMediaSource 都会被旧状态拖住，
@@ -2151,11 +2798,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             p.seekTo(startPositionMs)
         }
         p.prepare()
-        if (wasPlaying || playWhenReady) p.playWhenReady = true
+        p.playWhenReady = wantPlay
         Log.i(
             LOG_TAG,
             "SWITCH 复用实例（不 release / 不解绑渲染器）start=${startPositionMs}ms " +
-                "play=${wasPlaying || playWhenReady}",
+                "play=$wantPlay（wasPlaying=$wasPlaying hold=$dartWantsPause）",
         )
     }
 

@@ -1294,6 +1294,14 @@ class FxPlayer implements Listenable {
       bgCover: _bgCover,
       bgHasPrev: _bgHasPrev,
       bgHasNext: _bgHasNext,
+      // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 2 条）：内核在 build 时就把
+      // playWhenReady 置 true（对齐壳 Players.java:151），不再等我们补发
+      // play() —— 省掉一次通道往返，起播快一拍。
+      //
+      // 但「明确要暂停」的场景必须让原生知道：`play: false` 传下去之后，
+      // 原生换源 / 重试重开都不会把播放器拉起来。`play: true` 时不发键
+      // （缺省就是 true），载荷与改造前逐字节一致。
+      autoplay: play,
     );
     if (_disposed || token != _openToken) {
       throw StateError('open 已被新的播放请求取代');
@@ -1313,6 +1321,9 @@ class FxPlayer implements Listenable {
     // 顺序不能反，否则通知标题会拿到空片名、服务干脆不起来。
     unawaited(_startBackground());
     if (play) {
+      // PARAMS_ALIGN 第 2 条：原生已经在 prepare 时 playWhenReady=true，
+      // 这次 play() 是**幂等**的兜底（老原生包没有 autoplay 键时靠它起播）。
+      // 不能删：Dart 与原生版本可能不同步（用户装了旧 APK）。
       await _engine.play();
     }
     _renderEpoch++;
@@ -1737,6 +1748,9 @@ class FxPlayer implements Listenable {
         headers: _sourceHeaders,
         isHls: _typeHint ?? _looksLikeHls(next),
         startPositionMs: resume.inMilliseconds,
+        // PARAMS_ALIGN 第 2 条：这是原生重试触发的重开，播放意图必须沿用
+        // 用户当前的 `_playIntent` —— 暂停态换地址不该变成自动开播。
+        autoplay: _playIntent,
       );
       if (_disposed || gen != _rescueGen || token != _openToken) return;
       _sourceUrl = next;
@@ -2025,6 +2039,10 @@ class FxPlayer implements Listenable {
         isHls: _typeHint ?? _looksLikeHls(url),
         // 重连也带着原进度打开：不然位置 0 会先把中转名额用掉。
         startPositionMs: target.inMilliseconds,
+        // PARAMS_ALIGN 第 2 条：重连沿用**原来的**播放意图。
+        // 回前台自检时用户可能是暂停态（wantPlay=false）—— 不传这个键，
+        // 内核会按 autoplay=true 自己播起来，等于把用户的暂停吃掉了。
+        autoplay: wantPlay,
       );
       if (_disposed || gen != _rescueGen) return;
       if (target > Duration.zero) {

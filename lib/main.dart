@@ -10,7 +10,9 @@ import 'package:path_provider/path_provider.dart';
 import 'api.dart';
 import 'auth.dart';
 import 'fx_globals.dart';
+import 'services/app_settings.dart';
 import 'services/app_update_service.dart';
+import 'services/playback_params.dart';
 import 'services/download_service.dart';
 import 'services/jar_plugin.dart';
 import 'services/cms_bridge.dart';
@@ -124,6 +126,24 @@ class Boot {
     } catch (e, st) {
       AppLog.write('boot.sources', e, st);
     }
+
+    // PARAMS_ALIGN（2026-11-15 · 阶段 2）：把「缓冲档位 / 音轨偏好 / 隧道」
+    // 推到原生内核。
+    //
+    // 为什么在这里：内核参数只在**建播放器那一刻**取用（壳也是这么做的，
+    // `ExoUtil.buildLoadControl` / `buildTrackSelector` 都在 `ExoPlayer.Builder`
+    // 组装时跑一次）。启动时推一遍，用户第一次点播放就是对的档位，不必
+    // 等进一次设置页。
+    //
+    // 不阻塞首屏：fire-and-forget，通道不通只是退回改造前的写死值。
+    unawaited(() async {
+      try {
+        await AppSettings.instance.init();
+        await PlaybackParamsInstaller.sync(AppSettings.instance);
+      } catch (e, st) {
+        AppLog.write('boot.playbackParams', e, st);
+      }
+    }());
 
     // jar 插件（肥猫那 41 个 csp_ 源的运行期依赖）：
     // 只在这一台设备上真的导入了 jar 源时才自动装，避免给纯 CMS 用户白下 1.5MB。
