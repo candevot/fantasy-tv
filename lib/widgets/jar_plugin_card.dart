@@ -146,7 +146,9 @@ class _JarPluginCardState extends State<JarPluginCard> {
     // 就把这个入口做成死按钮。
     String? path;
     try {
-      final picked = await FilePicker.platform.pickFiles(
+      // file_picker 11.x 起是静态方法（没有 .platform 了），和下载页的
+      // FilePicker.getDirectoryPath 用法保持一致。
+      final picked = await FilePicker.pickFiles(
         dialogTitle: '选择 spider.jar',
         type: FileType.any,
         withData: false,
