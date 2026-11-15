@@ -6,7 +6,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
+import '../services/jar_plugin.dart';
 import '../services/search_rank.dart';
+import '../services/source_hub.dart';
 import '../theme.dart';
 import 'category_page.dart';
 import 'detail_page.dart';
@@ -80,6 +82,11 @@ class _SearchPageState extends State<SearchPage> {
   int _page = 1;
   int _req = 0;
 
+  /// jar 插件（肥猫那批 csp_ 源）的状态：装好之后自动把这次搜索重跑一遍，
+  /// 否则用户在「需要装 jar」的提示里装完，还得自己再点一次搜索。
+  JarPluginPhase _jarPhase = JarPluginPhase.unknown;
+  bool _jarRerunPending = false;
+
   @override
   void initState() {
     super.initState();
@@ -87,6 +94,8 @@ class _SearchPageState extends State<SearchPage> {
     _scroll.addListener(_onScroll);
     _loadHistory();
     _loadHotWords();
+    _jarPhase = JarPluginManager.instance.phase;
+    JarPluginManager.instance.addListener(_onJarChanged);
     if (widget.openAi) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _aiFocus.requestFocus();
@@ -101,6 +110,7 @@ class _SearchPageState extends State<SearchPage> {
     _sub?.cancel();
     _skeletonTimer?.cancel();
     _watchdog?.cancel();
+    JarPluginManager.instance.removeListener(_onJarChanged);
     _q.dispose();
     _ai.dispose();
     _focus.dispose();
@@ -111,6 +121,32 @@ class _SearchPageState extends State<SearchPage> {
 
   void _onQueryChanged() {
     if (mounted) setState(() {});
+  }
+
+  /// jar 插件状态变化：进度 / 失败原因直接反映在提示条上；
+  /// 一旦「从没装变成可用」，把上一次搜索自动重跑一遍。
+  void _onJarChanged() {
+    if (!mounted) return;
+    final phase = JarPluginManager.instance.phase;
+    final becameReady =
+        phase == JarPluginPhase.ready && _jarPhase != JarPluginPhase.ready;
+    _jarPhase = phase;
+    setState(() {});
+    if (!becameReady) return;
+    final query = _lastQuery;
+    if (_mode != 'search' || query == null || query.isEmpty) return;
+    if (_loading) {
+      // 这一轮还在查：等它收尾再重跑，避免把正在回填的批次打断。
+      _jarRerunPending = true;
+      return;
+    }
+    _rerunAfterJarReady(query);
+  }
+
+  void _rerunAfterJarReady(String query) {
+    _jarRerunPending = false;
+    _toast('jar 插件已就绪，正在把肥猫的源重新查一遍…');
+    unawaited(_search(query));
   }
 
   void _onScroll() {
@@ -312,6 +348,17 @@ class _SearchPageState extends State<SearchPage> {
       }
     });
     if (pinTop) _scrollTop();
+    if (batch.finished && _jarRerunPending) {
+      final query = _lastQuery;
+      if (query != null && query.isNotEmpty && _mode == 'search') {
+        // 等这一帧画完再起新请求：立刻 _search 会把当前 setState 打断。
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _rerunAfterJarReady(query);
+        });
+      } else {
+        _jarRerunPending = false;
+      }
+    }
   }
 
   Future<void> _loadMore() async {
@@ -896,8 +943,14 @@ class _SearchPageState extends State<SearchPage> {
                 ),
               // jar 插件没装时，肥猫的源一个都出不来：把原因写在结果区上面，
               // 不要让用户以为「外部源就是没有内容」。
-              if (!ai && CmsBridge.sourceNotice.isNotEmpty)
-                SliverToBoxAdapter(child: _sourceNotice(CmsBridge.sourceNotice)),
+              if (!ai && _sourceNoticeText.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: _sourceNotice(
+                    _sourceNoticeText,
+                    actionLabel: _sourceNoticeAction == null ? null : '重试',
+                    onAction: _sourceNoticeAction,
+                  ),
+                ),
               SliverToBoxAdapter(child: _footer(bottom)),
             ],
           ),
@@ -955,8 +1008,42 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  /// 片源侧提示条（目前是「需要安装 jar 插件」）。
-  Widget _sourceNotice(String text) {
+  /// 提示条文案：装 jar 的过程中显示进度，失败显示原因，其余沿用片源的说明。
+  String get _sourceNoticeText {
+    final jar = JarPluginManager.instance;
+    final installing = jar.phase == JarPluginPhase.downloading ||
+        jar.phase == JarPluginPhase.installing ||
+        jar.phase == JarPluginPhase.installingBundled;
+    if (installing) {
+      final pct = jar.fraction;
+      final progress = pct == null ? '' : ' ${(pct * 100).round()}%';
+      return '正在准备 jar 插件（$progress）：'
+          '${jar.message}。装好后会自动把肥猫的源重新查一遍。';
+    }
+    if (jar.phase == JarPluginPhase.failed && SourceHub.instance.jarMissing) {
+      return '肥猫的 jar 源还不可用：${jar.error}';
+    }
+    return CmsBridge.sourceNotice;
+  }
+
+  /// 提示条右侧的重试按钮（只有「jar 缺失 / 失败」时才出现）。
+  VoidCallback? get _sourceNoticeAction {
+    if (!SourceHub.instance.jarMissing) return null;
+    final phase = JarPluginManager.instance.phase;
+    if (phase == JarPluginPhase.downloading ||
+        phase == JarPluginPhase.installing ||
+        phase == JarPluginPhase.installingBundled) {
+      return null;
+    }
+    return () => unawaited(JarPluginManager.instance.ensureReady(force: true));
+  }
+
+  /// 片源侧提示条（jar 插件进度 / 失败原因 / 需要安装）。
+  Widget _sourceNotice(
+    String text, {
+    String? actionLabel,
+    VoidCallback? onAction,
+  }) {
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 4, 16, 10),
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
@@ -976,6 +1063,19 @@ class _SearchPageState extends State<SearchPage> {
               style: const TextStyle(fontSize: 12, height: 1.45, color: Fx.sub),
             ),
           ),
+          if (actionLabel != null)
+            TextButton(
+              onPressed: onAction,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(
+                actionLabel,
+                style: const TextStyle(fontSize: 12, color: Fx.accent),
+              ),
+            ),
         ],
       ),
     );
@@ -1052,10 +1152,14 @@ class _SearchPageState extends State<SearchPage> {
             }
           },
         ),
-        // 空结果时更要说清楚「外部源为什么没东西」（jar 插件没装）。
-        if (!ai && CmsBridge.sourceNotice.isNotEmpty) ...[
+        // 空结果时更要说清楚「外部源为什么没东西」（jar 插件没装 / 正在装）。
+        if (!ai && _sourceNoticeText.isNotEmpty) ...[
           const SizedBox(height: 10),
-          _sourceNotice(CmsBridge.sourceNotice),
+          _sourceNotice(
+            _sourceNoticeText,
+            actionLabel: _sourceNoticeAction == null ? null : '重试',
+            onAction: _sourceNoticeAction,
+          ),
         ],
         if (!ai && _hotWords.isNotEmpty) ...[
           const SizedBox(height: 6),

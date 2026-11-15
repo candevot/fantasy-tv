@@ -27,40 +27,74 @@ class Api {
   /// 主服务器（佛山，2026-11-14 迁移）。
   static const String _ipBase = 'http://125.94.244.87:8787/api';
 
-  /// 旧服务器：迁移后保留一段时间做兜底，新机不可达时还能回落。
-  static const String _legacyBase = 'http://47.96.0.112:8787/api';
+  /// 旧服务器地址（`47.96.0.112:8787`）**已彻底下线**：迁移后它的 `/api/*`
+  /// 全部 404，TCP 也会超时。留着它当兜底只会让「地址探测」多等 3 秒、
+  /// 还会让一起看的 ws 地址拼到一个死 host 上（表现就是「一直正在重连」）。
+  /// 这段常量只用于**识别并清掉**老版本存下来的地址，不再参与候选。
+  static const String _retiredHost = '47.96.0.112';
 
   static String base = _domainBase.isNotEmpty ? _domainBase : _ipBase;
-  static String wsBase = _domainBase.isNotEmpty
-      ? _domainBase.replaceFirst('http', 'ws').replaceFirst('/api', '/ws/together')
-      : 'ws://125.94.244.87:8787/ws/together';
 
-  /// 可选的服务地址（按优先级）。
-  static List<String> get _candidates => <String>[
+  /// 一起看的 WebSocket 地址：**由 [base] 推导**，永远同一台服务器。
+  static String wsBase = wsFromBase(base);
+
+  /// 把 `http(s)://host[:port]/api` 推成 `ws(s)://host[:port]/ws/together`。
+  ///
+  /// 单独抽成纯函数是因为这里踩过两次坑：
+  ///   · 用 `replaceFirst('http','ws')` 时 `https` 会变成 `wss`（对），
+  ///     但 `http://` 里第二个 `http`（路径里）也会被换掉；
+  ///   · 有的构建把 `API_BASE` 写成 `…/api/`（带尾斜杠），
+  ///     直接拼 `/ws/together` 会得到 `…/api//ws/together`。
+  /// 现在统一按 Uri 规范化，路径只认最后一个 `/api`。
+  static String wsFromBase(String apiBase) {
+    var text = apiBase.trim();
+    if (text.isEmpty) return 'ws://125.94.244.87:8787/ws/together';
+    while (text.endsWith('/')) {
+      text = text.substring(0, text.length - 1);
+    }
+    if (text.endsWith('/api')) {
+      text = text.substring(0, text.length - 4);
+    }
+    final uri = Uri.tryParse(text);
+    if (uri == null || uri.host.isEmpty) return text;
+    final scheme = uri.scheme.toLowerCase();
+    final wsScheme = scheme == 'https' ? 'wss' : 'ws';
+    return Uri(
+      scheme: wsScheme,
+      host: uri.host,
+      port: uri.hasPort ? uri.port : null,
+      path: '/ws/together',
+    ).toString();
+  }
+
+  /// 可选的服务地址（按优先级）。旧机地址不在里面了，见 [_retiredHost]。
+  static List<String> get candidates => <String>[
         if (_domainBase.isNotEmpty) _domainBase,
         _ipBase,
-        _legacyBase,
       ];
+
+  /// 切到某个地址：`base` 和 `wsBase` 必须同时更新，否则一起看会连到上一台。
+  static void _applyBase(String cand) {
+    base = cand;
+    wsBase = wsFromBase(cand);
+  }
 
   /// 探测可用地址并切换。返回最终使用的地址。
   ///
   /// 只探一次、超时 3 秒，失败就保持当前值——启动路径上不能卡住。
   static Future<String> pickBase() async {
     final saved = (await SharedPreferences.getInstance()).getString('apiBase');
-    for (final cand in _candidates) {
+    for (final cand in candidates) {
       if (await _probe(cand)) {
         if (cand != base || saved != cand) {
-          base = cand;
-          wsBase = cand
-              .replaceFirst('http', 'ws')
-              .replaceFirst('/api', '/ws/together');
+          _applyBase(cand);
           await _save();
         }
         return cand;
       }
     }
     // 全部不通：保持上次记住的地址，让错误界面去提示重试。
-    if (saved != null && saved.isNotEmpty) base = saved;
+    if (saved != null && saved.isNotEmpty) _applyBase(saved);
     return base;
   }
 
@@ -121,16 +155,24 @@ class Api {
 
   static Future<void> init() async {
     final sp = await SharedPreferences.getInstance();
-    base = sp.getString('apiBase') ?? base;
-    wsBase = sp.getString('wsBase') ?? wsBase;
+    final saved = sp.getString('apiBase') ?? '';
+    // 老版本可能把 `47.96.0.112` 存进 prefs：那是已下线的旧机，
+    // 继续用它会让登录 / 一起看全部超时。存到死地址就直接丢掉。
+    if (saved.isEmpty || saved.contains(_retiredHost)) {
+      base = _domainBase.isNotEmpty ? _domainBase : _ipBase;
+    } else {
+      base = saved;
+    }
+    // ws 地址永远由 base 推导（不读 prefs 里的旧值：那份可能还是旧 host）。
+    wsBase = wsFromBase(base);
+    await _save();
   }
 
-  static Future<void> setBase(String api, String ws) async {
-    base = api;
-    wsBase = ws;
-    final sp = await SharedPreferences.getInstance();
-    await sp.setString('apiBase', api);
-    await sp.setString('wsBase', ws);
+  /// 手动换服务器（调试 / 测试用）：ws 地址跟着推导，不单独传。
+  static Future<void> setBase(String api, [String? ws]) async {
+    _applyBase(api.trim());
+    if (ws != null && ws.trim().isNotEmpty) wsBase = ws.trim();
+    await _save();
   }
 
   static Uri _u(String path, [Map<String, dynamic>? q]) {

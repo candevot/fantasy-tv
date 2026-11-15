@@ -32,7 +32,19 @@ ASSET_JAR = 'assets/spiders/spider.jar'
 DEST_ASSETS = 'android/app/src/main/assets/spiders'
 
 DEPS_MARK = '// FX_JAR_SPIDER_DEPS'
+MAVEN_DEPS_MARK = '// FX_JAR_SPIDER_MAVEN'
 REGISTER_MARK = '// FX_SPIDER_REGISTER'
+
+# jar 源要用、但**不能**以 jar 形式放进 libs 的依赖：
+#   · okhttp / okio 已经由 media3-datasource-okhttp 带进工程（4.12.0 / okio 3.x），
+#     再放一份 3.12.13 的 jar 会 Duplicate class okhttp3.…（Gradle 直接失败）；
+#   · gson 之前没进过工程，用 Maven 依赖最省事（同样避免和将来的插件冲突）。
+# libs 目录里的同名 jar 会被 copy_libs() 主动跳过，见 CONFLICT_JARS。
+MAVEN_DEPS = (
+    'com.google.code.gson:gson:2.10.1',
+)
+
+CONFLICT_JARS = ('okhttp', 'okio', 'gson')
 PROGUARD_MARK = '# FX_JAR_SPIDER'
 
 # jar 源要用、但 app 自己不会直接引用的类必须在 R8 下保住。
@@ -49,6 +61,11 @@ PROGUARD_RULES = '''# FX_JAR_SPIDER —— jar 源（TVBox type 3）的 R8 保�
 -keep class org.apache.commons.** { *; }
 -dontwarn com.google.gson.**
 -dontwarn org.jsoup.**
+# 肥猫那份 spider.jar 里少数源引用了 rxhttp / zxing / kotlinx.coroutines；
+# 只有点到那些源时才会真正用到，缺失时由加载器兜成 {"error": ...}。
+-dontwarn rxhttp.**
+-dontwarn com.google.zxing.**
+-dontwarn kotlinx.**
 
 # ---------------------------------------------------------------------------
 # FX_TRANSPORT_OKHTTP（2026-11-15）：播放器传输层 R8 保留规则。
@@ -96,6 +113,14 @@ def copy_libs():
         fail('缺少 api.jar（Spider 基类），先跑 python3 tools/build_api_jar.py')
     os.makedirs(DEST_LIBS, exist_ok=True)
     total = 0
+    kept = []
+    for name in jars:
+        low = name.lower()
+        if any(low.startswith(bad) for bad in CONFLICT_JARS) and name != 'api.jar':
+            print('  skip %s（与 Gradle 依赖重复，改用 Maven 依赖）' % name)
+            continue
+        kept.append(name)
+    jars = kept
     for name in jars:
         src = os.path.join(SRC_LIBS, name)
         dst = os.path.join(DEST_LIBS, name)
@@ -129,6 +154,7 @@ def patch_gradle():
     path = find_gradle()
     is_kt = path.endswith('.kts')
     src = io.open(path, encoding='utf-8').read()
+    src = patch_maven_deps(path, src, is_kt)
     if DEPS_MARK in src or 'fileTree' in src and 'libs' in src:
         print('  libs 依赖已存在，跳过 -> %s' % path)
         patch_proguard(path)
@@ -154,6 +180,27 @@ def patch_gradle():
         print('  已追加 dependencies 块 -> %s' % path)
     patch_proguard(path)
     return path
+
+
+def patch_maven_deps(path, src, is_kt):
+    """gson 等「不能在 libs 里放 jar」的依赖，用 Maven 依赖注入。"""
+    if MAVEN_DEPS_MARK in src:
+        return src
+    lines = [MAVEN_DEPS_MARK]
+    for dep in MAVEN_DEPS:
+        if is_kt:
+            lines.append('    implementation("%s")' % dep)
+        else:
+            lines.append("    implementation '%s'" % dep)
+    block = '\n'.join(lines) + '\n'
+    m = re.search(r'dependencies\s*\{', src)
+    if m:
+        src = src[:m.end()] + '\n' + block + src[m.end():]
+    else:
+        src = src + '\n\ndependencies {\n' + block + '}\n'
+    io.open(path, 'w', encoding='utf-8').write(src)
+    print('  已加 jar 源 Maven 依赖（%s）-> %s' % (', '.join(MAVEN_DEPS), path))
+    return src
 
 
 def patch_proguard(gradle_path):

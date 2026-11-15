@@ -48,6 +48,18 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         private const val KEY_PATH = "jar_path"
         private const val KEY_MD5 = "jar_md5"
 
+        /** jar 从哪来：downloaded / manual / bundled（状态页据此写「内置」）。 */
+        private const val KEY_SOURCE = "jar_source"
+
+        /**
+         * 用户主动卸载过内置 jar：下次启动不要再自动从 assets 解出来。
+         * 重新安装（下载 / 选文件 / 点「用内置」）时清掉。
+         */
+        private const val KEY_BUNDLE_OFF = "bundled_off"
+
+        /** 下载进度回传间隔：250ms 一次，别把通道刷爆。 */
+        private const val PROGRESS_INTERVAL_MS = 250L
+
         private const val UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -99,6 +111,8 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             when (method) {
                 "jarInstall" -> install(call)
                 "installFromPath" -> installFromPath(call)
+                "installBundled" -> installBundled()
+                "selfTest" -> selfTestCall(call)
                 "status" -> status()
                 "uninstall" -> uninstall()
                 "destroy" -> {
@@ -173,6 +187,41 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         }
     }
 
+    /* ------------------------------------------------------------ 进度回传 */
+
+    @Volatile
+    private var lastProgressAt = 0L
+
+    /**
+     * 下载 / 校验 / 安装进度回传给 Flutter（`jarInstallProgress`）。
+     *
+     * 通道是双向的：Dart 侧 `JarSpider.installProgress` 监听这个方法，
+     * 设置页用 percent 画进度条；total <= 0 时 percent = -1（不确定进度）。
+     * 250ms 节流 + 主线程 invokeMethod：下载线程里不能直接碰通道。
+     */
+    private fun reportProgress(phase: String, url: String, received: Long, total: Long) {
+        val now = System.currentTimeMillis()
+        if (phase == "download" && now - lastProgressAt < PROGRESS_INTERVAL_MS) return
+        lastProgressAt = now
+        val percent = if (total > 0) ((received * 100L) / total).toInt().coerceIn(0, 100) else -1
+        mainHandler.post {
+            try {
+                channel?.invokeMethod(
+                    "jarInstallProgress",
+                    mapOf(
+                        "phase" to phase,
+                        "url" to url,
+                        "received" to received,
+                        "total" to total,
+                        "percent" to percent,
+                    ),
+                )
+            } catch (ignored: Throwable) {
+                // 通道已销毁 / Dart 侧没监听：进度丢了不影响安装本身。
+            }
+        }
+    }
+
     /* ------------------------------------------------------------ jar 调用 */
 
     /**
@@ -198,6 +247,53 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             Log.w(TAG, "调用失败：${e.javaClass.simpleName}: ${e.message}")
             errorJson("failed", e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    /**
+     * 自检：装完 jar 后确认它真的能跑（默认 `csp_Douban` 的 `homeContent`）。
+     *
+     * 返回值结构（Flutter 侧 `JarSelfTest.fromMap` 解析）：
+     * ```
+     * {ok, api, stage, code?, error?, className?, classes?, items?, sample?,
+     *  elapsedMs, md5, size, source, jarPath}
+     * ```
+     * 失败时 `stage` 指出卡在哪一步（resolve / instantiate / init / call /
+     * parse），`code` 是原因（no_class / missing_dependency / no_method …），
+     * 页面上直接把 `error` 原文显示出来，不用连 adb 看日志。
+     */
+    private fun selfTestCall(call: MethodCall): Map<String, Any?> {
+        val api = (call.argument<String>("api") ?: "").trim().ifEmpty { "csp_Douban" }
+        val ext = call.argument<String>("ext") ?: ""
+        val jar = currentJar()
+            ?: return mapOf(
+                "ok" to false,
+                "api" to api,
+                "stage" to "jar",
+                "code" to "no_jar",
+                "error" to "还没有安装 jar 源插件",
+                "elapsedMs" to 0,
+            )
+        val md5 = jarMd5(jar)
+        val source = prefs().getString(KEY_SOURCE, "") ?: ""
+        val base = mapOf<String, Any?>(
+            "jarPath" to jar.absolutePath,
+            "size" to jar.length(),
+            "md5" to md5,
+            "source" to source,
+        )
+        val result = try {
+            loader(api).selfTest(api, ext)
+        } catch (e: Throwable) {
+            mapOf<String, Any?>(
+                "ok" to false,
+                "api" to api,
+                "stage" to "loader",
+                "code" to ((e as? JarSpiderException)?.code ?: "failed"),
+                "error" to (e.message ?: e.javaClass.simpleName),
+                "elapsedMs" to 0,
+            )
+        }
+        return base + result
     }
 
     /** 取（必要时重建）加载器。jar 换了必须重建，否则加载到的是旧 odex。 */
@@ -244,6 +340,8 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             val f = File(path)
             if (f.isFile && f.length() > 0) return f
         }
+        // 用户点过「卸载」：不要再偷偷把内置 jar 解出来，否则卸载等于没卸。
+        if (prefs().getBoolean(KEY_BUNDLE_OFF, false)) return null
         return extractAssetJar()
     }
 
@@ -256,7 +354,11 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 FileOutputStream(target).use { out -> input.copyTo(out) }
             }
             val md5 = jarMd5(target)
-            prefs().edit().putString(KEY_PATH, target.absolutePath).putString(KEY_MD5, md5).apply()
+            prefs().edit()
+                .putString(KEY_PATH, target.absolutePath)
+                .putString(KEY_MD5, md5)
+                .putString(KEY_SOURCE, "bundled")
+                .apply()
             Log.i(TAG, "已解出内置 jar：${target.absolutePath} md5=$md5")
             target
         } catch (e: Throwable) {
@@ -290,25 +392,58 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         if (path.isEmpty()) throw JarSpiderException("bad_path", "没有文件路径")
         val src = File(path)
         if (!src.isFile) throw JarSpiderException("bad_path", "文件不存在：$path")
-        return adopt(src, "")
+        reportProgress("verify", "file://$path", src.length(), src.length())
+        val map = adopt(src, "", "manual")
+        reportProgress("done", "file://$path", src.length(), src.length())
+        return map
     }
 
     private fun installJar(url: String, expectMd5: String): Map<String, Any?> {
         val tmp = File(spidersDir(), "download.tmp")
         if (tmp.exists()) tmp.delete()
         val started = System.currentTimeMillis()
+        reportProgress("start", url, 0, 0)
         try {
-            download(url, tmp)
+            download(url, tmp) { received, total ->
+                reportProgress("download", url, received, total)
+            }
             Log.i(TAG, "下载完成 ${tmp.length()} bytes, " +
                 "${System.currentTimeMillis() - started}ms, $url")
-            return adopt(tmp, expectMd5)
+            reportProgress("verify", url, tmp.length(), tmp.length())
+            val map = adopt(tmp, expectMd5, "downloaded")
+            reportProgress("done", url, map["size"] as? Long ?: tmp.length(), tmp.length())
+            return map
+        } catch (e: Throwable) {
+            reportProgress("error", url, 0, 0)
+            throw e
         } finally {
             if (tmp.exists()) tmp.delete()
         }
     }
 
+    /** 用安装包里内置的 `assets/spiders/spider.jar`（不联网）。 */
+    private fun installBundled(): Map<String, Any?> {
+        val target = File(spidersDir(), "bundled.jar")
+        try {
+            appContext.assets.open(ASSET_JAR).use { input ->
+                FileOutputStream(target).use { out -> input.copyTo(out) }
+            }
+        } catch (e: Throwable) {
+            throw JarSpiderException("no_asset", "安装包里没有内置 spider.jar（assets/$ASSET_JAR）")
+        }
+        prefs().edit().putBoolean(KEY_BUNDLE_OFF, false).apply()
+        reportProgress("verify", "asset://$ASSET_JAR", target.length(), target.length())
+        val map = adopt(target, "", "bundled")
+        reportProgress("done", "asset://$ASSET_JAR", target.length(), target.length())
+        return map
+    }
+
     /** 校验 → 按 md5 命名落盘 → 记录 → 换加载器。 */
-    private fun adopt(source: File, expectMd5: String): Map<String, Any?> {
+    private fun adopt(
+        source: File,
+        expectMd5: String,
+        kind: String = "manual",
+    ): Map<String, Any?> {
         if (!source.isFile || source.length() < 1024) {
             throw JarSpiderException("bad_jar", "文件太小，不是有效的 jar")
         }
@@ -320,7 +455,13 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         if (!looksLikeJar(source)) {
             throw JarSpiderException("bad_jar", "不是有效的 jar（没有 class 文件）")
         }
-        val target = File(spidersDir(), "$md5.jar")
+        // 内置 jar 保留固定文件名 `bundled.jar`：状态页要能一眼看出「这是内置的」，
+        // 下载 / 手动的按 md5 命名，同一个 jar 重复装不会堆文件。
+        val target = if (kind == "bundled") {
+            File(spidersDir(), "bundled.jar")
+        } else {
+            File(spidersDir(), "$md5.jar")
+        }
         if (target.exists()) {
             if (source.absolutePath != target.absolutePath) source.delete()
         } else if (source.absolutePath != target.absolutePath) {
@@ -332,6 +473,8 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         prefs().edit()
             .putString(KEY_PATH, target.absolutePath)
             .putString(KEY_MD5, md5)
+            .putString(KEY_SOURCE, kind)
+            .putBoolean(KEY_BUNDLE_OFF, false)
             .apply()
         // 换 jar → 旧加载器立即释放，下次调用按新 md5 重建 dex 目录。
         loader?.destroy()
@@ -346,11 +489,16 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         )
     }
 
-    private fun download(url: String, dst: File) {
+    private fun download(
+        url: String,
+        dst: File,
+        onProgress: (Long, Long) -> Unit = { _, _ -> },
+    ) {
         if (url.startsWith("file://")) {
             val src = File(url.removePrefix("file://"))
             if (!src.isFile) throw JarSpiderException("bad_url", "本地文件不存在")
             src.copyTo(dst, overwrite = true)
+            onProgress(src.length(), src.length())
             return
         }
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
@@ -368,8 +516,20 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             conn = connection
             val code = connection.responseCode
             if (code >= 400) throw JarSpiderException("http_$code", "下载失败：HTTP $code")
+            // minSdk 23：contentLengthLong 是 API 24，只能用 Int 版（-1 = 未知）。
+            val total = connection.contentLength.toLong()
+            var received = 0L
             connection.inputStream.use { input ->
-                FileOutputStream(dst).use { out -> input.copyTo(out) }
+                FileOutputStream(dst).use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        received += n
+                        onProgress(received, total)
+                    }
+                }
             }
             if (dst.length() < 1024) {
                 throw JarSpiderException("bad_jar", "下载到的内容太小（${dst.length()} bytes）")
@@ -382,13 +542,21 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
         }
     }
 
-    /** zip 里有没有 .class：有才当 jar。 */
+    /**
+     * zip 里有没有可加载的字节码：`.class` **或 `classes.dex`** 才算。
+     *
+     * 为什么两种都收：线上肥猫那批 spider.jar 是 **dex 包**
+     * （`classes.dex` + META-INF，176KB / 解压 3.8MB），
+     * 之前只认 `.class` 会把它当「不是有效的 jar」直接拒掉 ——
+     * 这才是「下到了正确的 jar 却装不上」的隐藏原因。
+     */
     private fun looksLikeJar(file: File): Boolean = try {
         ZipFile(file).use { zip ->
             val entries = zip.entries()
             var found = false
             while (entries.hasMoreElements()) {
-                if (entries.nextElement().name.endsWith(".class")) {
+                val name = entries.nextElement().name
+                if (name.endsWith(".class") || name == "classes.dex" || name.endsWith(".dex")) {
                     found = true
                     break
                 }
@@ -411,7 +579,9 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
             } catch (ignored: Throwable) {
             }
         }
-        prefs().edit().clear().apply()
+        // clear 之后立刻写回「别再用内置」：否则下一次 status() 又会把
+        // assets 里的 spider.jar 解出来，用户点了卸载却还是「已安装」。
+        prefs().edit().clear().putBoolean(KEY_BUNDLE_OFF, true).apply()
         Log.i(TAG, "已卸载 jar（${dir.absolutePath}）")
         return mapOf("ok" to true)
     }
@@ -428,12 +598,14 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 "size" to 0,
             )
         }
+        val source = prefs().getString(KEY_SOURCE, "") ?: ""
         return mapOf(
             "installed" to true,
             "path" to jar.absolutePath,
             "md5" to jarMd5(jar),
             "size" to jar.length(),
-            "bundled" to jar.name.startsWith("bundled"),
+            "bundled" to (source == "bundled" || jar.name.startsWith("bundled")),
+            "source" to source,
         )
     }
 

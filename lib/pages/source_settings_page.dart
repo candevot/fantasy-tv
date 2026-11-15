@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../services/jar_spider.dart';
+import '../widgets/jar_plugin_card.dart';
 import '../services/source_hub.dart';
 import '../theme.dart';
 import '../utils/fx_route.dart';
@@ -28,10 +28,6 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
   final SourceHub _hub = SourceHub.instance;
   bool _refreshing = false;
 
-  /// jar 插件（TVBox type 3）的安装状态。
-  JarStatus? _jar;
-  bool _jarBusy = false;
-
   @override
   void initState() {
     super.initState();
@@ -51,20 +47,8 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
 
   Future<void> _boot() async {
     await _hub.ensureReady();
-    await _loadJar();
     if (!mounted) return;
     setState(() {});
-  }
-
-  Future<void> _loadJar({bool fresh = false}) async {
-    try {
-      final status = await JarSpider.status(fresh: fresh);
-      if (!mounted) return;
-      setState(() => _jar = status);
-    } catch (_) {
-      // 查状态失败按「没装」处理，UI 上还能点安装重试。
-      if (mounted) setState(() => _jar = const JarStatus.missing());
-    }
   }
 
   void _toast(String message) {
@@ -690,188 +674,12 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
   /// 都是「一个 jar + 一堆站点配置」，不装 jar 那些源永远是空的，
   /// 用户不会知道要去哪里补这一块。
   Widget _jarCard() {
-    final status = _jar;
-    final installed = status?.installed ?? false;
-    final bundled = status?.bundled ?? false;
-    final md5 = status?.shortMd5 ?? '';
-    final sizeMb = ((status?.size ?? 0) / 1024 / 1024).toStringAsFixed(1);
-    return GlassCard(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
-      radius: 18,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                installed
-                    ? Icons.extension_rounded
-                    : Icons.extension_off_rounded,
-                size: 16,
-                color: installed ? Fx.accent : const Color(0xFFA6B1C2),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  installed
-                      ? 'spider.jar 已安装${bundled ? '（内置）' : ''}'
-                      : '还没安装 spider.jar',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: installed ? Fx.ink : Fx.sub,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            installed
-                ? 'md5 $md5 · $sizeMb MB。TVBox 的 type 3 源（肥猫 / 饭太硬 / '
-                    '二小这类 csp_ 源）都由它解析。'
-                : 'TVBox 的 type 3 源（肥猫 / 饭太硬 / 二小这类 csp_ 源）需要这个 '
-                    'jar 才能出内容；装好之后导入的 jar 源会自动生效。',
-            style: const TextStyle(
-              fontSize: 10.5,
-              height: 1.5,
-              color: Color(0xFFA6B1C2),
-            ),
-          ),
-          Row(
-            children: [
-              TextButton(
-                onPressed: _jarBusy ? null : _installJar,
-                child: Text(
-                  installed ? '更新 jar' : '安装 jar',
-                  style: const TextStyle(color: Fx.accent),
-                ),
-              ),
-              if (installed)
-                TextButton(
-                  onPressed: _jarBusy ? null : _removeJar,
-                  child: const Text('卸载', style: TextStyle(color: Fx.sub)),
-                ),
-              const Spacer(),
-              if (_jarBusy)
-                const SizedBox(
-                  width: 15,
-                  height: 15,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else
-                IconButton(
-                  tooltip: '刷新状态',
-                  onPressed: () => _loadJar(fresh: true),
-                  icon: const Icon(
-                    Icons.refresh_rounded,
-                    size: 18,
-                    color: Fx.sub,
-                  ),
-                ),
-            ],
-          ),
-        ],
-      ),
+    // 状态 / 进度 / 失败原因 / 自检 / 四种安装方式都在共用组件里，
+    // 和「设置 → jar 插件」保持完全一致（那边是同一个 Widget）。
+    return JarPluginCard(
+      dense: true,
+      onChanged: () => setState(() {}),
     );
-  }
-
-  Future<void> _installJar() async {
-    final urlCtrl = TextEditingController();
-    final md5Ctrl = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text(
-          '安装 jar 插件',
-          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            TextField(
-              controller: urlCtrl,
-              keyboardType: TextInputType.url,
-              decoration: const InputDecoration(
-                labelText: 'spider.jar 下载地址',
-                hintText: 'https://…/spider.jar 或 http://…/api.jar',
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: md5Ctrl,
-              decoration: const InputDecoration(
-                labelText: 'md5（可选，填了就强校验）',
-                hintText: '32 位小写 md5',
-              ),
-            ),
-            const SizedBox(height: 10),
-            const Text(
-              '要的是 TVBox 的解析器 jar（里面有一堆 csp_ 开头的类），'
-              '不是随便一个 zip。装好之后 type 3 的源就能出内容。',
-              style: TextStyle(fontSize: 10.5, height: 1.5, color: Fx.sub),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消', style: TextStyle(color: Fx.sub)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('下载安装', style: TextStyle(color: Fx.accent)),
-          ),
-        ],
-      ),
-    );
-    final url = urlCtrl.text.trim();
-    final md5 = md5Ctrl.text.trim();
-    urlCtrl.dispose();
-    md5Ctrl.dispose();
-    if (ok != true || !mounted) return;
-    setState(() => _jarBusy = true);
-    try {
-      final status = await JarSpider.install(url, md5: md5);
-      // 装完立刻让片源中心重查 jar 状态：不然「肥猫的源需要装 jar」这条
-      // 提示会一直挂着，检索也还在跳过 jar 源（直到下次冷启动）。
-      SourceHub.instance.invalidateJarStatus();
-      await SourceHub.instance.ensureJarStatus();
-      if (!mounted) return;
-      setState(() {
-        _jar = status;
-        _jarBusy = false;
-      });
-      _toast('jar 已安装（${status.shortMd5}），jar 源现在可以用了');
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _jarBusy = false);
-      _toast('$e');
-    }
-  }
-
-  Future<void> _removeJar() async {
-    final ok = await _confirm(
-      title: '卸载 spider.jar？',
-      body: '卸载后所有 type 3 的 jar 源都会暂时没有内容，重新装一次即可恢复。',
-      confirm: '卸载',
-    );
-    if (ok != true || !mounted) return;
-    setState(() => _jarBusy = true);
-    try {
-      await JarSpider.uninstall();
-      SourceHub.instance.invalidateJarStatus();
-      await SourceHub.instance.ensureJarStatus();
-    } catch (e) {
-      if (mounted) _toast('$e');
-    }
-    if (!mounted) return;
-    await _loadJar(fresh: true);
-    if (!mounted) return;
-    setState(() => _jarBusy = false);
-    _toast('已卸载 spider.jar');
   }
 
   /* ------------------------------------------------------------ 小部件 */

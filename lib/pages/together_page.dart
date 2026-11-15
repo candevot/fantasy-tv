@@ -352,6 +352,7 @@ class _TogetherPageState extends State<TogetherPage>
       onError: _onError,
       onClosed: _onClosed,
       onAuthFailed: _onAuthFailed,
+      onUnreachable: _onUnreachable,
     );
     WidgetsBinding.instance.addObserver(this);
     _startTimers();
@@ -519,7 +520,10 @@ class _TogetherPageState extends State<TogetherPage>
     setState(() => _online = false);
     if (!_entered && _stage == _TogetherStage.entering) {
       _backToEntry();
-      togetherToast(context, '连不上一起看服务器，稍后再试');
+      togetherToast(
+        context,
+        '连不上一起看服务器（${_client.wsUrl}），检查网络后重试',
+      );
       return;
     }
     if (_entered && wasOnline && !_downReported) {
@@ -527,6 +531,45 @@ class _TogetherPageState extends State<TogetherPage>
       if (_isHost) _needsHostResync = true;
       _appendSystem('连接断开，正在自动重连…');
     }
+  }
+
+  /// 自动重连耗尽（连续失败 5 次，约 45 秒）：**停止无限「正在重连」**，
+  /// 把地址和失败原因说清楚，并给一个能点的「重试」。
+  ///
+  /// 之前这里只有 `_onDown` 里的一句「连接断开，正在自动重连…」，
+  /// 服务器地址错 / 端口不通时这句话会一直挂着，用户既不知道连的是哪，
+  /// 也没有任何可点的东西 —— 这就是「一起看连不上」的观感来源。
+  void _onUnreachable(String url) {
+    if (!mounted) return;
+    setState(() => _online = false);
+    final reason = '连不上一起看服务器（$url），已停止自动重连';
+    if (!_entered) {
+      if (_stage == _TogetherStage.entering) _backToEntry();
+    } else {
+      _downReported = true;
+      _appendSystem('$reason。点「重试」再连。');
+    }
+    _showRetrySnack(reason);
+  }
+
+  void _showRetrySnack(String text) {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(
+      content: Text(text),
+      duration: const Duration(seconds: 12),
+      behavior: SnackBarBehavior.floating,
+      action: SnackBarAction(
+        label: '重试',
+        textColor: Colors.white,
+        onPressed: () {
+          if (!mounted) return;
+          _appendSystem('正在重连一起看服务器…');
+          _client.retryNow();
+        },
+      ),
+    ));
   }
 
   /// 建房 / 加入 / 退出时清空同步游标与防抖状态。

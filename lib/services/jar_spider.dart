@@ -43,6 +43,7 @@ class JarStatus {
     required this.md5,
     required this.size,
     this.bundled = false,
+    this.source = '',
   });
 
   const JarStatus.missing()
@@ -50,7 +51,8 @@ class JarStatus {
         path = '',
         md5 = '',
         size = 0,
-        bundled = false;
+        bundled = false,
+        source = '';
 
   final bool installed;
   final String path;
@@ -60,7 +62,166 @@ class JarStatus {
   /// 来自内置 assets（没有手动安装时也能用）。
   final bool bundled;
 
+  /// downloaded / manual / bundled（原生记录）。
+  final String source;
+
+  /// 手动安装的那一份（区别于内置 / 自动下载，设置页文案用）。
   String get shortMd5 => md5.length <= 8 ? md5 : md5.substring(0, 8);
+
+  /// 「1.5 MB」这种人看的体积。
+  String get sizeLabel {
+    if (size <= 0) return '未知大小';
+    if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(0)} KB';
+    return '${(size / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+}
+
+/// jar 安装进度阶段（原生 `jarInstallProgress` 的 phase 字段）。
+enum JarInstallPhase { start, download, verify, install, done, error }
+
+/// 一次安装的进度快照。
+///
+/// 原生每 250ms 回传一次（下载阶段），`percent < 0` 表示服务器没给
+/// Content-Length，进度不确定（此时 UI 显示滚动条而不是百分比）。
+class JarInstallProgress {
+  const JarInstallProgress({
+    required this.phase,
+    this.received = 0,
+    this.total = 0,
+    this.percent = -1,
+    this.url = '',
+  });
+
+  factory JarInstallProgress.fromMap(Object? raw) {
+    final map = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    final phase = switch ('${map['phase'] ?? ''}') {
+      'start' => JarInstallPhase.start,
+      'download' => JarInstallPhase.download,
+      'verify' => JarInstallPhase.verify,
+      'install' => JarInstallPhase.install,
+      'done' => JarInstallPhase.done,
+      'error' => JarInstallPhase.error,
+      _ => JarInstallPhase.download,
+    };
+    return JarInstallProgress(
+      phase: phase,
+      received: _intOf(map['received']),
+      total: _intOf(map['total']),
+      percent: _intOf(map['percent'], fallback: -1),
+      url: _text(map['url']),
+    );
+  }
+
+  final JarInstallPhase phase;
+  final int received;
+  final int total;
+
+  /// 0–100；-1 = 不确定。
+  final int percent;
+  final String url;
+
+  bool get determinate => percent >= 0;
+
+  /// 0..1，给 LinearProgressIndicator 用。
+  double? get fraction => determinate ? (percent / 100).clamp(0, 1) : null;
+
+  String get label => switch (phase) {
+        JarInstallPhase.start => '准备下载 jar…',
+        JarInstallPhase.download => determinate
+            ? '正在下载 jar $percent%'
+            : '正在下载 jar（${_mb(received)}）',
+        JarInstallPhase.verify => '校验 md5 / jar 结构…',
+        JarInstallPhase.install => '正在安装…',
+        JarInstallPhase.done => 'jar 安装完成',
+        JarInstallPhase.error => 'jar 安装失败',
+      };
+
+  static String _mb(int bytes) {
+    if (bytes <= 0) return '0 MB';
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+}
+
+/// jar 自检结果（原生 `selfTest`）。
+///
+/// 成功只看 [ok]；失败时 [stage] + [code] + [error] 足够定位到
+/// 「类找不到 / 方法签名不匹配 / 缺依赖 / 源站挂了」这四类问题。
+class JarSelfTest {
+  const JarSelfTest({
+    required this.ok,
+    required this.api,
+    required this.stage,
+    this.code = '',
+    this.error = '',
+    this.className = '',
+    this.classes = 0,
+    this.items = 0,
+    this.sample = '',
+    this.elapsedMs = 0,
+    this.md5 = '',
+    this.size = 0,
+    this.source = '',
+    this.jarPath = '',
+  });
+
+  factory JarSelfTest.fromMap(Object? raw) {
+    final map = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    return JarSelfTest(
+      ok: map['ok'] == true,
+      api: _text(map['api']),
+      stage: _text(map['stage']),
+      code: _text(map['code']),
+      error: _text(map['error']),
+      className: _text(map['className']),
+      classes: _intOf(map['classes']),
+      items: _intOf(map['items']),
+      sample: _text(map['sample']),
+      elapsedMs: _intOf(map['elapsedMs']),
+      md5: _text(map['md5']),
+      size: _intOf(map['size']),
+      source: _text(map['source']),
+      jarPath: _text(map['jarPath']),
+    );
+  }
+
+  final bool ok;
+  final String api;
+
+  /// done / jar / classloader / resolve / instantiate / init / call / parse / loader。
+  final String stage;
+  final String code;
+  final String error;
+  final String className;
+  final int classes;
+  final int items;
+  final String sample;
+  final int elapsedMs;
+  final String md5;
+  final int size;
+  final String source;
+  final String jarPath;
+
+  /// 一句话结论（设置页 / 提示条直接用）。
+  String get summary {
+    if (ok) {
+      final extra = sample.isEmpty ? '' : '，首条「$sample」';
+      return '$api 自检通过：$classes 个分类 / $items 条数据$extra'
+          '（${elapsedMs}ms）';
+    }
+    final stageText = switch (stage) {
+      'jar' => '没装 jar',
+      'classloader' => '加载 jar 失败',
+      'resolve' => '找不到类',
+      'instantiate' => '实例化失败',
+      'init' => 'init 失败',
+      'call' => '调用失败',
+      'parse' => '返回不是 JSON',
+      'loader' => '加载器异常',
+      _ => '自检失败',
+    };
+    final detail = error.isEmpty ? code : error;
+    return '$api 自检失败（$stageText${code.isEmpty ? '' : '/$code'}）：$detail';
+  }
 }
 
 /// jar 首页里的一个分类（`type_id` + `type_name`）。
@@ -85,6 +246,12 @@ class JarSpider {
 
   /// 与 MainActivity 里注册的通道名必须一致。
   static const MethodChannel channel = MethodChannel('fantasy_tv/spider');
+
+  /// 自检默认测的类：`csp_Douban`（肥猫 jar 里必然有、且不需要 ext）。
+  static const String defaultSelfTestApi = 'csp_Douban';
+
+  /// 自检超时：原生 25 秒，这里给 30 秒余量。
+  static const Duration selfTestTimeout = Duration(seconds: 30);
 
   /// 单次取数据超时：**8 秒**（TIMEOUT_UNIFY 2026-11-15）。
   ///
@@ -117,6 +284,12 @@ class JarSpider {
 
   static JarStatus? _status;
 
+  /// 安装进度广播（原生 `jarInstallProgress` → Dart）。
+  static final StreamController<JarInstallProgress> _progress =
+      StreamController<JarInstallProgress>.broadcast();
+
+  static bool _progressHooked = false;
+
   static final Map<String, _JarDetail> _details = <String, _JarDetail>{};
 
   static final Map<String, List<JarClass>> _classes = <String, List<JarClass>>{};
@@ -126,6 +299,28 @@ class JarSpider {
 
   /// 最后一次拿到的状态（可能为 null：还没查过）。
   static JarStatus? get cachedStatus => _status;
+
+  /// 安装进度流（广播；多个页面可以同时听）。
+  static Stream<JarInstallProgress> get installProgress {
+    _hookProgress();
+    return _progress.stream;
+  }
+
+  /// 挂一次通道回调：原生用 `invokeMethod('jarInstallProgress')` 回传进度。
+  static void _hookProgress() {
+    if (_progressHooked) return;
+    _progressHooked = true;
+    try {
+      channel.setMethodCallHandler((call) async {
+        if (call.method == 'jarInstallProgress') {
+          _progress.add(JarInstallProgress.fromMap(call.arguments));
+        }
+        return null;
+      });
+    } catch (_) {
+      // 桌面 / 测试环境没有通道：进度拿不到，安装照常。
+    }
+  }
 
   /* ------------------------------------------------------------ 通道 */
 
@@ -146,6 +341,7 @@ class JarSpider {
         md5: _text(map['md5']),
         size: _intOf(map['size']),
         bundled: map['bundled'] == true,
+        source: _text(map['source']),
       );
     } catch (_) {
       _status = const JarStatus.missing();
@@ -159,6 +355,7 @@ class JarSpider {
   static Future<JarStatus> install(String url, {String md5 = ''}) async {
     final address = url.trim();
     if (address.isEmpty) throw ApiException('先填 jar 下载地址');
+    _hookProgress();
     final map = await _invoke(
       'jarInstall',
       <String, Object?>{'url': address, 'md5': md5.trim()},
@@ -173,6 +370,72 @@ class JarSpider {
     _resetCaches();
     _status = status;
     return status;
+  }
+
+  /// 用安装包内置的 `assets/spiders/spider.jar` 安装（不联网）。
+  ///
+  /// 服务器没放 jar / 首次启动没网时的兜底：CI 把
+  /// `assets/spiders/spider.jar` 打进 APK，这里让原生解到 filesDir 并生效。
+  static Future<JarStatus> installBundled() async {
+    _hookProgress();
+    final map = await _invoke(
+      'installBundled',
+      const <String, Object?>{},
+      wait: installTimeout,
+    );
+    final status = JarStatus(
+      installed: map['ok'] == true,
+      path: _text(map['path']),
+      md5: _text(map['md5']),
+      size: _intOf(map['size']),
+      bundled: true,
+      source: 'bundled',
+    );
+    _resetCaches();
+    _status = status;
+    return status;
+  }
+
+  /// 自检：装完 jar 后真的调一次 `homeContent`，能返回 JSON 才算成功。
+  ///
+  /// 失败时返回 [JarSelfTest]，`stage` / `code` / `error` 说明卡在哪
+  /// （类找不到 / 方法签名不匹配 / 缺依赖 / 源站异常），不抛异常，
+  /// 页面直接把 [JarSelfTest.summary] 显示出来。
+  static Future<JarSelfTest> selfTest({
+    String api = defaultSelfTestApi,
+    String ext = '',
+  }) async {
+    final target = api.trim().isEmpty ? defaultSelfTestApi : api.trim();
+    if (!supported) {
+      return JarSelfTest(
+        ok: false,
+        api: target,
+        stage: 'jar',
+        code: 'unsupported',
+        error: 'jar 源只在 Android 客户端上可用',
+      );
+    }
+    Map<String, dynamic> map;
+    try {
+      map = await _invoke(
+        'selfTest',
+        <String, Object?>{'api': target, 'ext': ext},
+        wait: selfTestTimeout,
+      );
+    } catch (e) {
+      return JarSelfTest(
+        ok: false,
+        api: target,
+        stage: 'loader',
+        code: 'exception',
+        error: '$e',
+      );
+    }
+    if (_text(map['error']).isNotEmpty && map['ok'] != false) {
+      // 原生把通道级错误放在 error 字段（_invoke 已抛），这里兜底。
+      map = <String, dynamic>{...map, 'ok': false, 'code': map['code']};
+    }
+    return JarSelfTest.fromMap(map);
   }
 
   /// 从本地文件安装（真机 adb push 上来之后用）。
@@ -596,8 +859,8 @@ String _text(Object? raw) {
   return raw.toString().trim();
 }
 
-int _intOf(Object? raw) {
+int _intOf(Object? raw, {int fallback = 0}) {
   if (raw is int) return raw;
   if (raw is num) return raw.toInt();
-  return int.tryParse(_text(raw)) ?? 0;
+  return int.tryParse(_text(raw)) ?? fallback;
 }

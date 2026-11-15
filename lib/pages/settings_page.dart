@@ -8,8 +8,10 @@ import '../services/app_info.dart';
 import '../services/app_settings.dart';
 import '../services/app_update_service.dart';
 import '../services/download_service.dart';
+import '../services/jar_plugin.dart';
 import '../services/source_hub.dart';
 import '../theme.dart';
+import '../widgets/jar_plugin_card.dart';
 import 'about_page.dart';
 import 'category_page.dart';
 import 'change_password_page.dart';
@@ -41,6 +43,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _downloads.addListener(_onChanged);
     Auth.instance.addListener(_onChanged);
     SourceHub.instance.addListener(_onChanged);
+    JarPluginManager.instance.addListener(_onChanged);
     // 片源配置在后台补一次（有缓存就直接用，不挡设置页渲染）。
     unawaited(SourceHub.instance.ensureReady());
     _load();
@@ -52,6 +55,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _downloads.removeListener(_onChanged);
     Auth.instance.removeListener(_onChanged);
     SourceHub.instance.removeListener(_onChanged);
+    JarPluginManager.instance.removeListener(_onChanged);
     super.dispose();
   }
 
@@ -349,6 +353,8 @@ class _SettingsPageState extends State<SettingsPage> {
               showChevron: false,
             ),
           ),
+          const _SectionTitle('jar 插件'),
+          const JarPluginCard(),
           const _SectionTitle('片源与直播'),
           GlassCard(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),

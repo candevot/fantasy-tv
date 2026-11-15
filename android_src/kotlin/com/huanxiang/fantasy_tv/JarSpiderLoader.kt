@@ -1,10 +1,15 @@
 package com.huanxiang.fantasy_tv
 
+import android.app.Activity
 import android.content.Context
 import android.util.Log
+import com.github.catvod.Runtime
+import com.github.catvod.crawler.Spider
+import com.github.catvod.spider.SpiderApiImpl
 import dalvik.system.DexClassLoader
 import org.json.JSONObject
 import java.io.File
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
@@ -65,6 +70,25 @@ class JarSpiderLoader(
 
         /** 类名没有包名时补这个前缀（TVBox 的约定）。 */
         const val CLASS_PREFIX = "com.github.catvod.spider."
+
+        /**
+         * fatcat jar 的默认 `Pizazz/config.json`（和 jar 里 `Init.saveConfig`
+         * 写出来的一致，只留取数据会用到的键，少写几个键不影响源）。
+         */
+        const val DEFAULT_FATCAT_CONFIG =
+            "{\"version\":\"2.0\",\"update\":\"关闭\"," +
+                "\"danmuColor\":\"默认\",\"danmuSearch\":\"开启\"," +
+                "\"homePage\":\"猜你喜欢,热门电影,热播剧集,热门动漫,热播综艺," +
+                "电影筛选,电视筛选,电影榜单,电视剧榜单\",\"proxyMode\":\"关闭\"}"
+
+        /**
+         * 自检单项超时：**25 秒**。
+         *
+         * 自检要真的走一遍 jar 的网络请求（`csp_Douban.homeContent`），
+         * 比日常取数的 8 秒宽一点；但也不能无限等，否则点「自检」的按钮
+         * 会一直转。超时同样返回结构化结果（stage=timeout）。
+         */
+        const val SELF_TEST_TIMEOUT_MS = 25_000L
     }
 
     /** 懒创建的 DexClassLoader：jar 不存在时永远不该建它。 */
@@ -89,6 +113,10 @@ class JarSpiderLoader(
 
     @Volatile
     private var destroyed = false
+
+    /** jar 自带的宿主环境只初始化一次（Init.context + 默认 config.json）。 */
+    @Volatile
+    private var bootstrapped = false
 
     /* ------------------------------------------------------------ 类加载 */
 
@@ -176,6 +204,72 @@ class JarSpiderLoader(
         }
     }
 
+    /* ------------------------------------------------------------ jar 运行时环境 */
+
+    /**
+     * 给 fatcat 系 jar 补宿主环境（FATCAT_ENV 2026-11-15）。
+     *
+     * 线上这份 `spider.jar`（classes.dex 4.9MB，带 `com.github.catvod.spider.Init`）
+     * 里的源普遍会：
+     *   · `Init.context().getFilesDir()` 读自己的配置目录 `Pizazz/`；
+     *   · 用 `Spider.safeDns()` / `SpiderApi` 回调。
+     *
+     * **但不能直接调 `Init.init(context)`**：它内部有签名黑名单检查
+     * （debug / apktool / MT 管理器签名会 `Process.killProcess`），
+     * 还会启动悬浮球和 Go 代理线程 —— 在 debug 包上等于一点就闪退。
+     *
+     * 所以这里只做两件无副作用的事：
+     *   1. 反射把 App Context 塞进 `Init.Loader.a.c`（`Init.context()` 的返回值）；
+     *   2. 没有 `Pizazz/config.json` 时写一份官方默认配置（homePage 等），
+     *      否则 `csp_Douban.homeContent` 解析空串会直接抛 JSONException。
+     */
+    private fun bootstrapJar() {
+        if (bootstrapped) return
+        synchronized(lock) {
+            if (bootstrapped) return
+            bootstrapped = true
+            val app = context.applicationContext ?: context
+            try {
+                Runtime.setContext(app)
+            } catch (e: Throwable) {
+                Log.w(TAG, "Runtime.setContext 失败：${e.javaClass.simpleName}")
+            }
+            try {
+                if (context is Activity) Spider.setActivity(context)
+            } catch (ignored: Throwable) {
+            }
+            try {
+                val cl = classLoader()
+                val loaderClass = Class.forName("com.github.catvod.spider.Init\$Loader", true, cl)
+                val instance = loaderClass.getDeclaredField("a").apply { isAccessible = true }.get(null)
+                if (instance != null) {
+                    val contextField = instance.javaClass.getDeclaredField("c")
+                    contextField.isAccessible = true
+                    contextField.set(instance, app)
+                    Log.i(TAG, "已注入 Init.context：${app.packageName}")
+                }
+                ensureFatcatConfig(app)
+            } catch (e: Throwable) {
+                // 不是 fatcat 结构（普通 csp_ jar）：正常，跳过。
+                Log.i(TAG, "jar 没有 Init.context（非 fatcat jar，跳过）：${e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /** `filesDir/Pizazz/config.json`：缺了就写官方默认值（不联网）。 */
+    private fun ensureFatcatConfig(app: Context) {
+        try {
+            val dir = File(app.filesDir, "Pizazz")
+            if (!dir.exists()) dir.mkdirs()
+            val file = File(dir, "config.json")
+            if (file.isFile && file.length() > 2) return
+            file.writeText(DEFAULT_FATCAT_CONFIG, Charsets.UTF_8)
+            Log.i(TAG, "已写入默认 Pizazz/config.json")
+        } catch (e: Throwable) {
+            Log.w(TAG, "写 Pizazz/config.json 失败：${e.message}")
+        }
+    }
+
     /* ------------------------------------------------------------ 实例 */
 
     /**
@@ -187,6 +281,7 @@ class JarSpiderLoader(
     fun spider(api: String, ext: String): Any {
         val key = api.trim()
         if (key.isEmpty()) throw JarSpiderException("no_api", "没有配置 api（类名）")
+        bootstrapJar()
         synchronized(lock) {
             cache[key]?.let { instance ->
                 if (initedWith[key] == ext) return instance
@@ -216,6 +311,12 @@ class JarSpiderLoader(
     /** 调 init：优先 (Context, String)，只有 (Context) 的 jar 也认。 */
     private fun initInstance(instance: Any, ext: String) {
         val contextParam = context.applicationContext ?: context
+        // 先把宿主的 SpiderApi 注入基类：源里调用 api.log / getAddress 时才不 NPE。
+        try {
+            (instance as? Spider)?.initApi(SpiderApiImpl(contextParam))
+        } catch (e: Throwable) {
+            Log.w(TAG, "initApi 失败：${e.javaClass.simpleName}: ${e.message}")
+        }
         val two = findMethod(instance.javaClass, "init", arrayOf<Any?>(contextParam, ext))
         if (two != null) {
             try {
@@ -455,6 +556,182 @@ class JarSpiderLoader(
         guard("liveContent") { call(api, ext, "liveContent", arrayOf<Any?>(url)) }
 
     /** 这个源是不是要 App 侧再校验播放地址。 */
+    /* ------------------------------------------------------------ 自检 */
+
+    /**
+     * 结构化自检：装完 jar 之后确认「它到底能不能跑」。
+     *
+     * 走的是一条真链路：解析类 → 实例化 → init(context, ext) →
+     * `homeContent(false)` → JSON 解析。任何一步失败都带上**具体阶段**和
+     * **异常类型 / 缺失的类**，页面上直接显示，不用连 adb 抓日志：
+     *
+     * | code | 含义 | 用户要做什么 |
+     * | --- | --- | --- |
+     * | `no_jar` | 没装 jar | 先安装 |
+     * | `no_class` | jar 里没有这个类 | 换 jar（不是肥猫那批） |
+     * | `new_instance_failed` | 没有无参构造 / 构造抛异常 | jar 与 api.jar 不配套 |
+     * | `init_failed` | init 抛异常（常见：ext 配置不对） | 检查 ext |
+     * | `no_method` | 方法签名不匹配 | 返回里带实际方法列表 |
+     * | `missing_dependency` | 缺 okhttp / gson 等类 | 打包缺依赖 |
+     * | `call_failed` | homeContent 抛异常（多为源站/网络） | 换时间重试 |
+     * | `empty` / `bad_json` | 返回空 / 不是 JSON | 源站挂了或需要代理 |
+     */
+    fun selfTest(api: String, ext: String): Map<String, Any?> {
+        val started = System.currentTimeMillis()
+        val task = Callable {
+            val out = LinkedHashMap<String, Any?>()
+            out["api"] = api
+            out["jar"] = jarPath.name
+            var stage = "classloader"
+            try {
+                classLoader()
+                bootstrapJar()
+                stage = "resolve"
+                val clz = resolveClass(api)
+                out["className"] = clz.name
+                out["extendsSpider"] = Spider::class.java.isAssignableFrom(clz)
+                stage = "instantiate"
+                val instance = try {
+                    clz.getDeclaredConstructor().newInstance()
+                } catch (e: Throwable) {
+                    throw wrap("new_instance_failed", "实例化 ${clz.name} 失败", e)
+                }
+                stage = "init"
+                try {
+                    initInstance(instance, ext)
+                } catch (e: Throwable) {
+                    throw wrap("init_failed", "init(${clz.simpleName}) 失败", e)
+                }
+                stage = "call"
+                val method = findMethod(instance.javaClass, "homeContent", arrayOf<Any?>(false))
+                    ?: throw JarSpiderException(
+                        "no_method",
+                        "${clz.simpleName} 没有 homeContent(boolean)；实际方法：${signatures(clz, "homeContent")}",
+                    )
+                val raw = try {
+                    method.invoke(instance, false)
+                } catch (e: Throwable) {
+                    throw wrap("call_failed", "homeContent 抛异常", e)
+                }
+                val text = when (raw) {
+                    null -> ""
+                    is String -> raw
+                    else -> raw.toString()
+                }
+                if (text.isBlank()) {
+                    throw JarSpiderException("empty", "homeContent 返回为空（源站没数据，或 ext 没配对）")
+                }
+                stage = "parse"
+                val json = try {
+                    JSONObject(text)
+                } catch (e: Throwable) {
+                    throw JarSpiderException(
+                        "bad_json",
+                        "homeContent 返回的不是 JSON：${text.take(160)}",
+                    )
+                }
+                val classes = json.optJSONArray("class")
+                val list = json.optJSONArray("list")
+                out["ok"] = true
+                out["stage"] = "done"
+                out["classes"] = classes?.length() ?: 0
+                out["items"] = list?.length() ?: 0
+                out["sample"] = list?.optJSONObject(0)?.optString("vod_name") ?: ""
+                out["bytes"] = text.length
+                out["elapsedMs"] = System.currentTimeMillis() - started
+                return@Callable out
+            } catch (e: Throwable) {
+                val error = e as? JarSpiderException ?: wrap("failed", "自检失败", e)
+                out["ok"] = false
+                out["stage"] = stage
+                out["code"] = error.code
+                out["error"] = error.message ?: error.code
+                out["elapsedMs"] = System.currentTimeMillis() - started
+                Log.w(TAG, "自检失败[$stage/${error.code}]：${error.message}")
+                return@Callable out
+            }
+        }
+        return try {
+            worker.submit(task).get(SELF_TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            mapOf(
+                "api" to api,
+                "jar" to jarPath.name,
+                "ok" to false,
+                "stage" to "call",
+                "code" to "timeout",
+                "error" to "自检超时（${SELF_TEST_TIMEOUT_MS / 1000} 秒）：jar 里的网络请求没有返回",
+                "elapsedMs" to (System.currentTimeMillis() - started),
+            )
+        } catch (e: Throwable) {
+            mapOf(
+                "api" to api,
+                "jar" to jarPath.name,
+                "ok" to false,
+                "stage" to "unknown",
+                "code" to "failed",
+                "error" to "${e.javaClass.simpleName}: ${e.message}",
+                "elapsedMs" to (System.currentTimeMillis() - started),
+            )
+        }
+    }
+
+    /** 把反射调用里的真实异常挖出来，并识别「缺依赖」。 */
+    private fun wrap(code: String, prefix: String, e: Throwable): JarSpiderException {
+        if (e is JarSpiderException) return e
+        val inner = (e as? InvocationTargetException)?.targetException ?: e
+        val missing = missingClasses(inner)
+        val builder = StringBuilder(prefix)
+        builder.append("：").append(inner.javaClass.name)
+        val message = inner.message
+        if (!message.isNullOrBlank()) builder.append(": ").append(message)
+        if (missing.isNotEmpty()) builder.append("（缺少类：").append(missing.joinToString(", ")).append("）")
+        return JarSpiderException(
+            if (missing.isNotEmpty()) "missing_dependency" else code,
+            builder.toString(),
+        )
+    }
+
+    /**
+     * 从异常链里找「缺哪个类 / 方法」。
+     *
+     * 只看 NoClassDefFoundError / ClassNotFoundException / NoSuchMethodError /
+     * NoSuchFieldError 这几种：它们的 message 里带类名（
+     * `Failed resolution of: Lokhttp3/OkHttpClient;`、`com.google.gson.Gson`），
+     * 把描述符里的 `/` 换成 `.` 就是用户能看懂的类名。
+     */
+    private fun missingClasses(root: Throwable): List<String> {
+        val out = LinkedHashSet<String>()
+        var node: Throwable? = root
+        var guard = 0
+        while (node != null && guard++ < 8) {
+            val cls = node.javaClass.name
+            val wanted = cls.contains("NoClassDefFoundError") ||
+                cls.contains("ClassNotFoundException") ||
+                cls.contains("NoSuchMethodError") ||
+                cls.contains("NoSuchFieldError")
+            if (wanted) {
+                val raw = node.message ?: ""
+                Regex("[A-Za-z_\\$][A-Za-z0-9_\\$/.]*").findAll(raw).forEach { m ->
+                    val text = m.value.replace('/', '.').trim().removeSuffix(".")
+                    if (text.length > 5 && text.contains('.')) out.add(text)
+                }
+            }
+            node = node.cause
+        }
+        return out.take(4).toList()
+    }
+
+    /** 某个方法名的所有实际签名（诊断「方法签名不匹配」用）。 */
+    private fun signatures(clz: Class<*>, name: String): String = try {
+        val hits = clz.methods
+            .filter { it.name == name }
+            .map { m -> m.parameterTypes.joinToString(", ") { it.simpleName } }
+        if (hits.isEmpty()) "（没有这个方法）" else hits.joinToString(" / ") { "$name($it)" }
+    } catch (ignored: Throwable) {
+        "（无法读取方法列表）"
+    }
+
     fun manualVideoCheck(api: String, ext: String): Boolean = try {
         val instance = spider(api, ext)
         val m = findMethod(instance.javaClass, "manualVideoCheck", emptyArray<Any?>())

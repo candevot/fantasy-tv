@@ -7,7 +7,7 @@
 
 | 文件 | 用途 | 来源 |
 | --- | --- | --- |
-| `api.jar` | `com.github.catvod.crawler.Spider` 基类 + `SpiderDebug` / `SpiderNull` / `com.github.catvod.net.OkHttp` / `com.github.catvod.utils.Json` / `Util` | **自建**，源码在 `android_src/api_stub/java/`，用 `python3 tools/build_api_jar.py` 重新生成（class version 55 / Java 11） |
+| `api.jar` | `com.github.catvod.crawler.Spider` 基类（含 `client()` / `safeDns()` / `getActivity()` / `initApi()`）+ `SpiderApi` / `SpiderDebug` / `SpiderNull` / `com.github.catvod.net.OkHttp` / `Net` / `NetSocket` / `com.github.catvod.utils.Json` / `Util` / `UriUtil` / `com.github.catvod.Runtime` / `com.github.catvod.spider.SpiderApiImpl` | **自建**，源码在 `android_src/api_stub/java/`，用 `python3 tools/build_api_jar.py` 重新生成（class version 55 / Java 11） |
 | `okhttp-3.12.13.jar` | jar 源里的 `okhttp3.*` 同步请求 | Maven Central |
 | `okio-1.17.5.jar` | okhttp3 3.x 的 IO 依赖 | Maven Central |
 | `gson-2.10.1.jar` | jar 源里的 `com.google.gson.*` | Maven Central |
@@ -21,6 +21,20 @@
 `api.jar` 即可 —— 包名、类名、方法签名与自建版本一致，Kotlin 侧不用改。
 自建版本少的是官方那些 `bean` / `utils` 里更冷门的类，行为差异只在
 「某个源用到这些冷门类」时出现，加载器会把这类失败兜成 `{"error": ...}`。
+
+## 线上肥猫 jar 实测依赖（2026-11-15）
+
+服务器上的 `spider.jar`（1,929,492 B / md5 `cbe016eb…`，dex 包，3102 个
+`com.github.catvod.spider.*` 类）引用到这些宿主类：
+
+| 依赖 | 提供方式 |
+| --- | --- |
+| `com.github.catvod.crawler.Spider` / `SpiderApi` / `SpiderDebug` | `api.jar`（自建，签名与 jar 的调用点逐一对齐） |
+| `com.github.catvod.net.Net` / `NetSocket` / `com.github.catvod.utils.UriUtil` | `api.jar`（能用就不崩的实现） |
+| `com.github.catvod.Runtime`、`com.github.catvod.spider.Init` 的 Context | 加载器 `bootstrapJar()`：反射注入 App Context + 默认 `Pizazz/config.json`；**不调用 `Init.init()`**（debug 签名会被它 `Process.killProcess`） |
+| `okhttp3` / `okio` | Gradle：`media3-datasource-okhttp` 带来的 okhttp 4.12.0 + okio 3.x（**不能**再放 3.12.13 的 jar，会 Duplicate class） |
+| `com.google.gson` | Gradle：`com.google.code.gson:gson:2.10.1`（由 `patch_jar_spider.py` 注入） |
+| `rxhttp` / `zxing` | 只有少数源用到，缺失时由加载器兜成 `{"error": …}`（proguard 里 dontwarn） |
 
 ## 注意
 

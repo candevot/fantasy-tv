@@ -1,10 +1,18 @@
 package com.github.catvod.crawler;
 
+import android.app.Activity;
 import android.content.Context;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import okhttp3.Dns;
+import okhttp3.OkHttpClient;
 
 /**
  * TVBox 的解析器基类（JAR_SPIDER，2026-11-14）。
@@ -47,6 +55,89 @@ public abstract class Spider {
 
     /** 释放资源（子类可选）。 */
     public void destroy() {
+    }
+
+    /* ------------------------------------------------------------ 宿主回调 */
+
+    /**
+     * 宿主注入的代理 / 日志 / 多请求回调（见 [SpiderApi]）。
+     *
+     * <p>肥猫那批 jar 的 Spider 基类会覆写它，源里用 `api.getAddress(...)`、
+     * `api.log(...)`；宿主不注入时那些调用会 NPE，所以在
+     * [com.github.catvod.spider.SpiderApiImpl] 里给了一个空实现兜底。
+     */
+    private SpiderApi api;
+
+    public void initApi(SpiderApi value) {
+        this.api = value;
+    }
+
+    /** 供子类取当前注入的回调（不是官方 API，但不会和官方冲突）。 */
+    protected SpiderApi api() {
+        return api;
+    }
+
+    /** 全局 Activity：jar 里少数源（嗅探 / 分享）会调 `getActivity()`。 */
+    private static volatile Activity activity;
+
+    public static void setActivity(Activity value) {
+        activity = value;
+    }
+
+    public Activity getActivity() {
+        return activity;
+    }
+
+    /* ------------------------------------------------------------ 网络 */
+
+    /**
+     * 共享的 OkHttpClient（**实例方法**，与官方一致）。
+     *
+     * <p>官方 jar 里的子类会这样用：
+     * <pre>
+     *   public OkHttpClient client() {
+     *       if (c == null) return super.client();
+     *       return c;
+     *   }
+     * </pre>
+     * 也就是说子类通过 {@code super.client()} 拿基类的共享 client ——
+     * 缺了它，线上肥猫那批 jar 一调网络就 NoSuchMethodError
+     * （表现为「所有 csp_ 源都返回空」）。
+     *
+     * <p>运行期 okhttp 由 Gradle 依赖提供（media3-datasource-okhttp 带的
+     * okhttp 4.12.0），所以这里引用 okhttp3.OkHttpClient 不会和 libs 里的
+     * jar 冲突；编译期用 okhttp 3.12.13 的 API 编译，两边二进制兼容。
+     */
+    private static volatile OkHttpClient sharedClient;
+
+    public OkHttpClient client() {
+        OkHttpClient hit = sharedClient;
+        if (hit != null) return hit;
+        synchronized (Spider.class) {
+            if (sharedClient == null) {
+                sharedClient = new OkHttpClient.Builder()
+                        .followRedirects(true)
+                        .followSslRedirects(true)
+                        .build();
+            }
+            return sharedClient;
+        }
+    }
+
+    /**
+     * DNS 解析（**静态方法**，官方签名是 {@code public static Dns safeDns()}）。
+     *
+     * <p>很多 jar 在自定义 client 时用 {@code .dns(Spider.safeDns())}。
+     * 这里返回一个直接走系统解析器的 Dns，不做拦截 —— 服务器已经在本机 DNS
+     * 层做过排障（FxDns），jar 内部再改解析反而会把可用地址改坏。
+     */
+    public static Dns safeDns() {
+        return new Dns() {
+            @Override
+            public List<InetAddress> lookup(String hostname) throws UnknownHostException {
+                return new ArrayList<>(Arrays.asList(InetAddress.getAllByName(hostname)));
+            }
+        };
     }
 
     /* ------------------------------------------------------------ 内容接口 */

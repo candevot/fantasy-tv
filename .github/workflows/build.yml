@@ -131,6 +131,19 @@ jobs:
       # SEARCH_RANK：搜索结果按「实际分辨率」跨源全局排序的回归。
       - name: Search rank regressions
         run: flutter test test/search_rank_test.dart
+      # JAR_PLUGIN（2026-11-15）：肥猫那 41 个 csp_ 源的 jar 插件链路。
+      # 原生侧进度 / 自检回传的结构 -> Dart 模型；失败原因必须能翻译成
+      # 「类找不到 / 方法签名不匹配 / 缺依赖 / 源站异常」四类人话。
+      - name: jar plugin regressions
+        run: |
+          flutter test test/jar_plugin_test.dart
+          # 服务器上的 spider.jar 必须还在、md5 必须和默认值一致。
+          # 非阻塞：服务器偶发抖动不该让整个构建红掉，但日志里要能看见。
+          python3 tools/check_spider_url.py || true
+      # TOGETHER_WS（2026-11-15）：一起看的 ws 地址推导回归
+      # （旧机 47.96.0.112 已下线、尾斜杠 / https 不能拼错）。
+      - name: together endpoint regressions
+        run: flutter test test/together_endpoint_test.dart
       - name: Build release APKs (split per ABI)
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"

@@ -238,6 +238,7 @@ class TogetherClient {
     required this.onError,
     required this.onClosed,
     this.onAuthFailed,
+    this.onUnreachable,
   });
 
   final void Function(TogetherMember me) onOpen;
@@ -251,6 +252,12 @@ class TogetherClient {
 
   /// 重连前探测确认 token 已过期（HTTP 401）时回调；回调后不再重连。
   final void Function()? onAuthFailed;
+
+  /// 连续失败 [giveUpAfterFailures] 次后回调（参数是当前 ws 地址）。
+  ///
+  /// 页面拿它显示「连不上 <地址>」+ 一个「重试」按钮，而不是让
+  /// 「正在自动重连…」永远挂着。
+  final void Function(String url)? onUnreachable;
 
   /// 房主操作合并窗口。
   ///
@@ -276,6 +283,21 @@ class TogetherClient {
   bool _closed = false;
   bool _connecting = false;
   bool _connected = false;
+
+  /// 连续连接失败超过这个次数就停止自动重连，交给页面显示「重试」按钮。
+  ///
+  /// 3+6+12+24 ≈ 45 秒；再往后每 30 秒一次的重连对用户没有任何意义，
+  /// 却会一直显示「正在重连」—— 这正是要修的那个体验问题。
+  static const int giveUpAfterFailures = 5;
+
+  /// 自动重连失败次数（连上 hello 后清零）。
+  int _failedAttempts = 0;
+
+  /// 当前使用的 WebSocket 地址（错误提示里要写清楚，方便用户核对）。
+  String get wsUrl => Api.wsBase;
+
+  /// 已经连续失败几次。
+  int get failedAttempts => _failedAttempts;
 
   /// 断线重连退避：3s / 6s / 12s / 24s，上限 30s。
   int _retryAttempt = 0;
@@ -393,6 +415,18 @@ class TogetherClient {
     }
   }
 
+  /// 用户点了「重试」：清零失败次数并立刻重连（不等退避）。
+  void retryNow() {
+    if (_closed) return;
+    _retry?.cancel();
+    _retry = null;
+    _retryAttempt = 0;
+    _failedAttempts = 0;
+    _retryDelaySec = 0;
+    _connecting = false;
+    connect();
+  }
+
   void _fail() {
     if (_closed) return;
     // onError / onDone / openTimeout 可能连着触发，只处理第一次。
@@ -431,6 +465,15 @@ class TogetherClient {
 
   void _scheduleRetry() {
     if (_closed || _authFailed || _authChecking) return;
+    if (_failedAttempts >= giveUpAfterFailures) {
+      // 不再无限重连：把地址交给页面，显示明确提示 + 「重试」按钮。
+      _retryDelaySec = 0;
+      _retry?.cancel();
+      _retry = null;
+      final url = wsUrl;
+      onUnreachable?.call(url);
+      return;
+    }
     _retry?.cancel();
     _retry = null;
     // token 过期时服务端通常直接关闭握手，表现和「网络不好」完全一样；
@@ -448,6 +491,7 @@ class TogetherClient {
     // 3 / 6 / 12 / 24 / 30 / 30…
     final seconds = math.min(30, 3 * (1 << math.min(_retryAttempt, 4)));
     _retryAttempt = math.min(_retryAttempt + 1, 8);
+    _failedAttempts++;
     _retryDelaySec = seconds;
     _retry = Timer(Duration(seconds: seconds), connect);
   }
@@ -904,6 +948,7 @@ class TogetherClient {
     _connecting = false;
     _retryAttempt = 0;
     _retryDelaySec = 0;
+    _failedAttempts = 0;
     _lastPongAt = DateTime.now().millisecondsSinceEpoch;
     _openTimeout?.cancel();
     _openTimeout = null;
