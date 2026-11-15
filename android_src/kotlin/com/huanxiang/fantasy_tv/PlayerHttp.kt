@@ -217,6 +217,12 @@ object PlayerHttp {
         val scheme = parsed.scheme ?: return emptyMap()
         if (!scheme.startsWith("http", ignoreCase = true)) return emptyMap()
         val authority = parsed.authority ?: return emptyMap()
+        // REFERER_OWN（2026-11-15）：本站解析服务（`/hxparse/…`）的地址不发
+        // Referer。这些地址 302 到 CDN 之后，上游只看令牌；带一个
+        // `http://125.94.244.87/` 的 Referer 反而可能触发源站防盗链，
+        // 而且令牌是一次性的，被 403 一次这集就废了。
+        // 判定看路径前缀，不看域名：换服务器只改 DNS，域名/IP 都可能变。
+        if (parsed.path.orEmpty().startsWith("/hxparse/")) return emptyMap()
         return mapOf("Referer" to "$scheme://$authority/")
     }
 

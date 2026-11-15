@@ -666,7 +666,14 @@ class FxPlayer implements Listenable {
     // 失败路径是 throw。原来的 `opened != null` 因此永远不会为假，
     // 新版分析器会报 unnecessary_null_comparison（CI 的 flutter analyze 会挂）。
     if (!_disposed && token == _openToken) {
-      unawaited(_primeSegmentIndex(opened.url, opened.headers, token));
+      // TOKEN_ONCE（2026-11-15）：本站 `/hxparse/xo?u=` 这类包装地址背后是
+      // 一次性令牌，再抓一次清单就把播放器那条烧成 403（表现为清单到手、
+      // 分片 0 KB/s）。索引只服务拖动，令牌丢了整集都播不了，所以直接跳过。
+      if (!HlsSegmentIndex.isOneTimePlaylist(opened.url)) {
+        unawaited(_primeSegmentIndex(opened.url, opened.headers, token));
+      } else {
+        _logFx('INDEX 跳过：一次性令牌清单 ${opened.url}');
+      }
     }
   }
 

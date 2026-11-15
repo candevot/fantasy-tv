@@ -146,6 +146,25 @@ class HlsSegmentIndex {
   /// 单次分片探针的超时。
   static const Duration _probeTimeout = Duration(seconds: 6);
 
+  /// 本站解析服务包装出来的清单地址（`/hxparse/xo?u=…`、
+  /// `/hxparse/play/…/index.m3u8`）。
+  ///
+  /// TOKEN_ONCE（2026-11-15）：这类地址背后是**一次性令牌**——
+  /// 同一条 `/hxparse/xo?u=shvip-xxx` 第二次请求直接 403。
+  /// 所以它**绝对不能**被第二次抓取：否则索引这一路把令牌用掉，
+  /// 播放器随后那条请求就是 403，用户看到的是「清单拿到了、0 KB/s」。
+  static final RegExp _wrappedPlaylist = RegExp(
+    r'/hxparse/(?:xo|play|parse)(?:/|\?|$)',
+    caseSensitive: false,
+  );
+
+  /// [url] 是否是一次性令牌包装地址（不允许重复抓清单）。
+  static bool isOneTimePlaylist(String url) {
+    final text = url.trim().toLowerCase();
+    if (text.isEmpty) return false;
+    return _wrappedPlaylist.hasMatch(text);
+  }
+
   /// 校验时最多读多少字节就够判定（4K 大分片不必整片拉两遍）。
   static const int _probeBytes = 96 * 1024;
 
@@ -198,6 +217,13 @@ class HlsSegmentIndex {
     if (uri == null || !uri.hasScheme) return null;
     final scheme = uri.scheme;
     if (scheme != 'http' && scheme != 'https') return null;
+    // TOKEN_ONCE：一次性令牌清单不许为了「建拖动索引」再抓一遍 ——
+    // 抓完播放器那条就 403 了。索引只是 seek 的加速器，没有它照样能播，
+    // 令牌却是用完即焚，优先级完全不对等。
+    if (isOneTimePlaylist(url)) {
+      _log('HlsSegmentIndex: 一次性令牌清单，跳过索引抓取 $url');
+      return null;
+    }
     final body = await _fetchText(uri, headers);
     if (body == null || !body.contains('#EXTM3U')) return null;
     // master playlist：取第一个变体继续往下解析。

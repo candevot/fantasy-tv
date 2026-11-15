@@ -121,6 +121,18 @@ List<List<String>> epPairs(String block) {
 
 /* ------------------------------------------------------------ 地址判定 */
 
+/// 本站解析服务已经生好的播放地址（`/hxparse/xo?u=…`、`/hxparse/play/…`）。
+///
+/// PARSE_ONCE（2026-11-15）：这些地址是**解析的产物**，不是待解析的令牌 / 页面。
+/// 以前 `isMediaUrl` 只认媒体后缀，于是 `/hxparse/xo?u=SH4K-xxx` 被判成
+/// 「还需要解析」，又被套进 `/hxparse/parse/fuying?u=…` 转了一层：
+///   · 多一次 302 + 中转解析，起播白多 0.9~2 秒；
+///   · 中转站（hc.fuyingapi.top）和直连（api.wki8.com）并不等价；
+///   · 平台页面地址（qq 那条）本身带 `&t=&y=`，套两层后参数语义已经变了。
+/// 认出这层包装就直接当直链播，交给播放器的清单代理去跟 302。
+final RegExp _wrappedPlaylist =
+    RegExp(r'/hxparse/(?:xo|play|parse)(?:/|\?|$)', caseSensitive: false);
+
 /// 能不能直接播：http(s) 且带媒体后缀。
 ///
 /// 注意 `幻想4K` 的地址是 `FY-SH4K-<md5>` 令牌，连 http 都不是；
@@ -128,7 +140,9 @@ List<List<String>> epPairs(String block) {
 bool isMediaUrl(String address) {
   final text = address.trim().toLowerCase();
   if (!text.startsWith('http://') && !text.startsWith('https://')) return false;
-  return _mediaExt.hasMatch(text);
+  if (_mediaExt.hasMatch(text)) return true;
+  // 已经由本站解析服务包装好的清单地址：直接播，不再二次解析。
+  return _wrappedPlaylist.hasMatch(text);
 }
 
 /// 需要现场解析（不是直链）。
