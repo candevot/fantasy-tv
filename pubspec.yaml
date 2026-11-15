@@ -27,7 +27,6 @@ dependencies:
   # DOWNLOAD_DIR（2026-11-14）：调用系统文件管理器选缓存目录
   # 11.x：getDirectoryPath 已是静态方法；且它的 win32 ^5.9 不会和
   # share_plus 10.1.4 的 win32 ^5.5.3 冲突（13.x 要 win32 ^6，pub 解不出来）。
-  file_picker: '>=11.0.3 <12.0.0'
   # 读取 Android 真实 versionName / versionCode（设置页、关于页、检查更新）。
   # 播放器顶栏电量显示
   battery_plus: ^7.1.2
