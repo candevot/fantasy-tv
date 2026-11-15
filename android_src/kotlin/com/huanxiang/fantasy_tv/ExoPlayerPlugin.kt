@@ -668,10 +668,20 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         if (delta < 0) bgHasPrev else bgHasNext
 
     /** 起前台服务（可重复调用：已在前台时只刷新 session / 通知）。 */
+    private val BG_SERVICE_ENABLED = false
+
     fun startBackground() {
         if (bgTitle.isEmpty()) return // 没有片名 = 不是正式播放，不挂保活
+        // BG_SAFE（2026-11-15）：MediaSession 升级后出现「任意剧一点播放就闪退」。
+        // 先把服务调用整段关掉，优先保证能播；后台播放/媒体卡片等定位清楚再开回来。
+        if (!BG_SERVICE_ENABLED) { bgStarted = false; return }
         bgStarted = true
-        PlaybackService.start(context, bgTitle, bgEpisode, this)
+        try {
+            PlaybackService.start(context, bgTitle, bgEpisode, this)
+        } catch (e: Throwable) {
+            bgStarted = false
+            Log.w("FxPlay", "startBackground failed: " + e.message)
+        }
     }
 
     /** 停前台服务（[PlaybackService.stop] 内部有实例身份校验）。 */

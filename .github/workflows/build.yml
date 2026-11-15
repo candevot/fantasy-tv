@@ -260,6 +260,11 @@ jobs:
         run: |
           flutter test test/cms_lines_test.dart
           flutter test test/cms_source_test.dart
+          # DEAD_LINE / LINE_ALIGN（2026-11-15）：「幻想蓝光（FY-PAN1）」
+          # 整批失效 → 用户点到这条线路 App 直接闪退。这里钉住两件事：
+          # 死线路在解析层就被跳过；线路名/地址错位、空地址段进来时只少一条
+          # 线路，绝不把空 URL 或死令牌交给播放器。
+          flutter test test/dead_line_test.dart
       # IQ_CODEC（2026-11-15）：爱奇艺线路按**设备硬解能力**选编码。
       # 能硬解 HEVC 的机器要 1080P HEVC（地址追加 hevc=1），不能的才退
       # 896×504 H.264；HEVC 起播失败（解码错误 / 首帧 8 秒）自动降级一次。
