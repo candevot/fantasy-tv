@@ -14,7 +14,6 @@ import '../services/fx_player.dart';
 import '../services/fx_video_geometry.dart';
 import '../services/fallback_match.dart';
 import '../services/playback_progress.dart';
-import '../services/hls_segment_index.dart';
 import '../services/line_cooldown.dart';
 import '../services/line_health.dart';
 import '../services/line_probe.dart';
@@ -1731,11 +1730,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     //   · 前方缓冲领先 ≥ 25 秒（当前播放不会被挤）
     //   · 当前不在缓冲中
     if (v.position < const Duration(seconds: 20)) return;
-    final ahead = v.buffered.length == 0
-        ? Duration.zero
-        : v.buffered.last.end - v.position;
-    if (ahead < const Duration(seconds: 25)) return;
-    if (v.buffered.isEmpty) return;
+    // 前方缓冲 = 原生上报的 bufferedPosition - position（[FxPlayerValue.bufferedAhead]）。
+    // 注意 `buffered` 是「已缓冲的绝对位置」（Duration），不是分片列表。
+    if (v.bufferedAhead < const Duration(seconds: 25)) return;
     final next = _nextEpNumber();
     if (next == null) return;
     _nativePreloadedEp = _ep;
