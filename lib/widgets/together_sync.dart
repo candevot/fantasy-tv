@@ -167,17 +167,17 @@ class TogetherAuthorityVerdict {
 
 class TogetherSyncDecision {
   const TogetherSyncDecision.none()
-      : move = TogetherSyncMove.none,
-        rate = 1.0,
-        target = 0;
+    : move = TogetherSyncMove.none,
+      rate = 1.0,
+      target = 0;
 
   const TogetherSyncDecision.rate(this.rate)
-      : move = TogetherSyncMove.rate,
-        target = 0;
+    : move = TogetherSyncMove.rate,
+      target = 0;
 
   const TogetherSyncDecision.seek(this.target)
-      : move = TogetherSyncMove.seek,
-        rate = 1.0;
+    : move = TogetherSyncMove.seek,
+      rate = 1.0;
 
   final TogetherSyncMove move;
   final double rate;
@@ -202,6 +202,7 @@ TogetherSyncDecision decideTogetherDrift({
   required double baseRate,
   bool allowRate = true,
   bool allowBackwardSeek = true,
+
   /// 本地正在缓冲（网络跟不上）：放宽硬跳、优先让它自然缓冲完。
   bool buffering = false,
 }) {

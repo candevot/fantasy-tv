@@ -172,7 +172,6 @@ Widget _membersSheetBody(BuildContext ctx, List<TogetherMember> members) {
   );
 }
 
-
 /// 邀请弹层：大号房间号 + 邀请文案 + 一键复制。
 Future<void> showTogetherInvite(
   BuildContext context, {
@@ -751,7 +750,10 @@ Future<String?> showTogetherRoomLineSheet(
             const SizedBox(height: 4),
             Text(
               '换线路保持当前进度；房间里的所有人都跟着换过去',
-              style: TextStyle(fontSize: 10.5, color: Fx.sub.withValues(alpha: .95)),
+              style: TextStyle(
+                fontSize: 10.5,
+                color: Fx.sub.withValues(alpha: .95),
+              ),
             ),
             const SizedBox(height: 10),
             Flexible(
@@ -762,7 +764,8 @@ Future<String?> showTogetherRoomLineSheet(
                 itemBuilder: (ctx, i) {
                   final line = lines[i];
                   final active = line.name == current || line.id == current;
-                  final local = locals.contains(line.name) || locals.contains(line.id);
+                  final local =
+                      locals.contains(line.name) || locals.contains(line.id);
                   return InkWell(
                     onTap: () => Navigator.of(ctx).pop(line.name),
                     borderRadius: BorderRadius.circular(14),
@@ -789,8 +792,9 @@ Future<String?> showTogetherRoomLineSheet(
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                 fontSize: 12.5,
-                                fontWeight:
-                                    active ? FontWeight.w800 : FontWeight.w600,
+                                fontWeight: active
+                                    ? FontWeight.w800
+                                    : FontWeight.w600,
                                 color: Fx.ink,
                               ),
                             ),

@@ -48,13 +48,12 @@ class TogetherChatMessage {
     String text, {
     required String action,
     DateTime? time,
-  }) =>
-      TogetherChatMessage(
-        text: text,
-        time: time ?? DateTime.now(),
-        system: true,
-        action: action,
-      );
+  }) => TogetherChatMessage(
+    text: text,
+    time: time ?? DateTime.now(),
+    system: true,
+    action: action,
+  );
 
   factory TogetherChatMessage.fromServer(
     Map<String, dynamic> j, {
@@ -199,7 +198,8 @@ class _TogetherChatListState extends State<TogetherChatList>
     }
     return ListView.builder(
       controller: _scroll,
-      padding: widget.padding ??
+      padding:
+          widget.padding ??
           EdgeInsets.fromLTRB(
             widget.compact ? 8 : 12,
             widget.compact ? 8 : 12,
@@ -364,17 +364,14 @@ class _ChatBubble extends StatelessWidget {
     // 全屏小面板宽度只有屏宽 40%，气泡最大宽度要跟着收。
     final maxWidth = screen * (compact ? .30 : .64);
     final avatarSize = compact ? 24.0 : 32.0;
-    final name =
-        mine ? '我' : (message.user.trim().isEmpty ? '影迷' : message.user);
+    final name = mine
+        ? '我'
+        : (message.user.trim().isEmpty ? '影迷' : message.user);
 
     // 自己：主题色（半透明版 75%）；别人：浅色主题纯白卡片，全屏里半透明黑。
     final bubbleColor = mine
-        ? (transparent
-              ? Fx.accent.withValues(alpha: .75)
-              : Fx.accent)
-        : (transparent
-              ? Colors.black.withValues(alpha: .55)
-              : Colors.white);
+        ? (transparent ? Fx.accent.withValues(alpha: .75) : Fx.accent)
+        : (transparent ? Colors.black.withValues(alpha: .55) : Colors.white);
     final textColor = mine
         ? Colors.white
         : (transparent ? const Color(0xFFE6E9EF) : Fx.ink);
@@ -462,8 +459,9 @@ class _ChatBubble extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.symmetric(vertical: compact ? 6 : 7),
       child: Row(
-        mainAxisAlignment:
-            mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment: mine
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: mine
             ? [body, const SizedBox(width: 10), avatarColumn]
@@ -704,13 +702,13 @@ class _TogetherComposerState extends State<TogetherComposer> {
                     if (_emojiOpen) setState(() => _emojiOpen = false);
                   },
                   maxLength: 300,
-                  buildCounter: (
-                    _, {
-                    required currentLength,
-                    required isFocused,
-                    maxLength,
-                  }) =>
-                      null,
+                  buildCounter:
+                      (
+                        _, {
+                        required currentLength,
+                        required isFocused,
+                        maxLength,
+                      }) => null,
                   style: TextStyle(
                     fontSize: compact ? 12 : 13.5,
                     color: transparent ? Colors.white : Fx.ink,
@@ -718,7 +716,8 @@ class _TogetherComposerState extends State<TogetherComposer> {
                   decoration: InputDecoration(
                     isDense: true,
                     counterText: '',
-                    hintText: widget.hint ??
+                    hintText:
+                        widget.hint ??
                         (widget.enabled ? '说点什么…' : '正在重连，稍后可以聊天'),
                     hintStyle: TextStyle(
                       fontSize: compact ? 11.5 : 13,
@@ -746,7 +745,9 @@ class _TogetherComposerState extends State<TogetherComposer> {
                     decoration: BoxDecoration(
                       color: Fx.accent.withValues(alpha: .12),
                       borderRadius: BorderRadius.circular(actionSize / 2),
-                      border: Border.all(color: Fx.accent.withValues(alpha: .22)),
+                      border: Border.all(
+                        color: Fx.accent.withValues(alpha: .22),
+                      ),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,

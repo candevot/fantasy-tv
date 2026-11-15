@@ -67,8 +67,22 @@ int fxMainEpisodeCount(Iterable<Episode> episodes) =>
 /// 电影的多条是「正片 / 普通话版 / 粤语版」这类**版本**，不是集。
 /// 这些名字要原样显示，不能被改写成「第01集」。
 const List<String> _fxVersionWords = <String>[
-  '正片', '普通话', '普通话版', '国语', '国语版', '粤语', '粤语版',
-  '原声', '原声版', '中字', '中字版', '高清', '蓝光', 'TC', 'HD', '4K',
+  '正片',
+  '普通话',
+  '普通话版',
+  '国语',
+  '国语版',
+  '粤语',
+  '粤语版',
+  '原声',
+  '原声版',
+  '中字',
+  '中字版',
+  '高清',
+  '蓝光',
+  'TC',
+  'HD',
+  '4K',
 ];
 
 String fxEpisodeLabel(int ep, [String? name]) {
@@ -224,7 +238,8 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   /// 只接受真实宽高；返回是否真的变了。
   bool _syncVideoRatio() {
     final v = widget.player.value;
-    final real = fxVideoAspectOf(v.width, v.height) ??
+    final real =
+        fxVideoAspectOf(v.width, v.height) ??
         fxVideoAspectOf(v.videoWidth, v.videoHeight);
     if (real == null || !real.isFinite || real <= 0) return false;
     if ((real - _videoRatio).abs() < 0.001) return false;
@@ -298,11 +313,7 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     // 注意：这里**不能**再包一层 [fxMirrorWrap] —— 镜像已经下发到原生
     // （见上），Transform 对混合合成的原生视图不生效，包上反而会错位。
     // 冻结帧那层（[FxAspectBox]）是纯 Flutter 绘制，才需要自己翻。
-    return FxVideoStage(
-      mode: aspect,
-      videoRatio: _videoRatio,
-      child: surface,
-    );
+    return FxVideoStage(mode: aspect, videoRatio: _videoRatio, child: surface);
   }
 }
 

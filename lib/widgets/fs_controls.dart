@@ -42,14 +42,19 @@ class FsTextAction extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding:
-            EdgeInsets.symmetric(horizontal: 12 * size, vertical: 7 * size),
+        padding: EdgeInsets.symmetric(
+          horizontal: 12 * size,
+          vertical: 7 * size,
+        ),
         decoration: BoxDecoration(
           color: active
               ? Fx.accent.withValues(alpha: .86)
               : Colors.white.withValues(alpha: .13),
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white.withValues(alpha: .30), width: 1),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: .30),
+            width: 1,
+          ),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: .12),
@@ -90,11 +95,7 @@ class FsTextAction extends StatelessWidget {
 ///
 /// 纯信息展示，不可点击；码率档切换已收进 ⋯ 播放设置面板。
 class FsQualityPill extends StatelessWidget {
-  const FsQualityPill({
-    super.key,
-    required this.label,
-    this.size = 1,
-  });
+  const FsQualityPill({super.key, required this.label, this.size = 1});
 
   final String label;
   final double size;
@@ -164,7 +165,9 @@ class _FsClockPillState extends State<FsClockPill> {
   Widget build(BuildContext context) {
     return PGlassPill(
       padding: EdgeInsets.symmetric(
-          horizontal: 10 * widget.size, vertical: 5 * widget.size),
+        horizontal: 10 * widget.size,
+        vertical: 5 * widget.size,
+      ),
       child: Text(
         _text,
         style: TextStyle(
@@ -218,6 +221,7 @@ class FsTopBar extends StatelessWidget {
   /// 是否显示投屏按钮。离线播放没有投屏入口，传 false 直接不渲染，
   /// 不再靠外层盖一层渐变遮罩（那种做法位置一挪就会漏出来）。
   final bool showCast;
+
   /// 保留字段：顶栏已不再渲染「更多」按钮（重复入口），
   /// 播放设置统一走底栏。调用方仍可传，留作将来放其它功能。
   final VoidCallback onMore;
@@ -270,7 +274,10 @@ class FsTopBar extends StatelessWidget {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.black.withValues(alpha: .52), Colors.black.withValues(alpha: 0)],
+          colors: [
+            Colors.black.withValues(alpha: .52),
+            Colors.black.withValues(alpha: 0),
+          ],
         ),
       ),
       child: Row(
@@ -298,7 +305,7 @@ class FsTopBar extends StatelessWidget {
                     fontSize: 14 * s,
                     fontWeight: FontWeight.w700,
                     shadows: const [
-                      Shadow(color: Colors.black54, blurRadius: 4)
+                      Shadow(color: Colors.black54, blurRadius: 4),
                     ],
                   ),
                 ),
@@ -312,7 +319,7 @@ class FsTopBar extends StatelessWidget {
                       color: Colors.white70,
                       fontSize: 11 * s,
                       shadows: const [
-                        Shadow(color: Colors.black54, blurRadius: 4)
+                        Shadow(color: Colors.black54, blurRadius: 4),
                       ],
                     ),
                   ),
@@ -576,17 +583,19 @@ class _BatteryChip extends StatelessWidget {
         final icon = charging
             ? Icons.battery_charging_full_rounded
             : (lv >= 95
-                ? Icons.battery_full_rounded
-                : (lv >= 70
-                    ? Icons.battery_5_bar_rounded
-                    : (lv >= 45
-                        ? Icons.battery_4_bar_rounded
-                        : (lv >= 20
-                            ? Icons.battery_3_bar_rounded
-                            : Icons.battery_1_bar_rounded))));
+                  ? Icons.battery_full_rounded
+                  : (lv >= 70
+                        ? Icons.battery_5_bar_rounded
+                        : (lv >= 45
+                              ? Icons.battery_4_bar_rounded
+                              : (lv >= 20
+                                    ? Icons.battery_3_bar_rounded
+                                    : Icons.battery_1_bar_rounded))));
         return Container(
-          padding:
-              EdgeInsets.symmetric(horizontal: 7 * size, vertical: 3 * size),
+          padding: EdgeInsets.symmetric(
+            horizontal: 7 * size,
+            vertical: 3 * size,
+          ),
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: .34),
             borderRadius: BorderRadius.circular(7 * size),

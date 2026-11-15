@@ -96,7 +96,8 @@ BoxDecoration togetherGlass({
     color: base.withValues(alpha: opacity),
     borderRadius: BorderRadius.circular(radius),
     border:
-        border ?? Border.all(color: Colors.white.withValues(alpha: .92), width: 1),
+        border ??
+        Border.all(color: Colors.white.withValues(alpha: .92), width: 1),
     boxShadow: [
       BoxShadow(
         color: const Color(0xFF50729F).withValues(alpha: .10),
@@ -134,8 +135,10 @@ class TogetherCircleButton extends StatelessWidget {
       child: Container(
         width: size,
         height: size,
-        decoration:
-            togetherGlass(radius: size / 2, opacity: active ? .92 : .72),
+        decoration: togetherGlass(
+          radius: size / 2,
+          opacity: active ? .92 : .72,
+        ),
         child: Icon(
           icon,
           size: iconSize,
@@ -304,8 +307,10 @@ class TogetherAvatar extends StatelessWidget {
                     ),
                   ],
                 ),
-                child:
-                    const Text('👑', style: TextStyle(fontSize: 10, height: 1)),
+                child: const Text(
+                  '👑',
+                  style: TextStyle(fontSize: 10, height: 1),
+                ),
               ),
             ),
         ],

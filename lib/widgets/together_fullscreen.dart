@@ -562,9 +562,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               top: pad.top + 10,
               left: 0,
               right: 0,
-              child: const Center(
-                child: _FsBadge(text: '3.0x 快进中'),
-              ),
+              child: const Center(child: _FsBadge(text: '3.0x 快进中')),
             ),
         ],
       ),
@@ -628,12 +626,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        Positioned(
-          top: 0,
-          left: 0,
-          right: 0,
-          child: _buildTopBar(pad),
-        ),
+        Positioned(top: 0, left: 0, right: 0, child: _buildTopBar(pad)),
         Positioned.fill(
           child: FsSideControls(
             onLock: _lock,
@@ -853,11 +846,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             Text(
               widget.errorText,
               textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Fx.ink,
-                fontSize: 12,
-                height: 1.5,
-              ),
+              style: const TextStyle(color: Fx.ink, fontSize: 12, height: 1.5),
             ),
             const SizedBox(height: 12),
             Row(
@@ -986,7 +975,10 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
                                   fontWeight: FontWeight.w600,
                                   color: Color(0x99FFFFFF),
                                   shadows: [
-                                    Shadow(color: Colors.black54, blurRadius: 3),
+                                    Shadow(
+                                      color: Colors.black54,
+                                      blurRadius: 3,
+                                    ),
                                   ],
                                 ),
                               ),
@@ -1055,57 +1047,67 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
       onTap: _openChat,
       child: Tooltip(
         message: '聊天',
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: .52),
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white.withValues(alpha: .32)),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: .18),
-                    blurRadius: 12,
-                    offset: const Offset(0, 3),
+        // 视觉 32dp，热区 44dp：画面上的小圆钮手指不容易点空。
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.center,
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: .52),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: .32),
                   ),
-                ],
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: .18),
+                      blurRadius: 12,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.forum_outlined,
+                  size: 17,
+                  color: Colors.white,
+                ),
               ),
-              child: const Icon(
-                Icons.forum_outlined,
-                size: 17,
-                color: Colors.white,
-              ),
-            ),
-            if (_unread > 0)
-              Positioned(
-                right: -2,
-                top: -2,
-                child: Container(
-                  constraints:
-                      const BoxConstraints(minWidth: 12, minHeight: 12),
-                  padding: const EdgeInsets.symmetric(horizontal: 3),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFF5252),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Colors.white, width: 1),
-                  ),
-                  child: Text(
-                    _unread > 9 ? '9+' : '$_unread',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 7.5,
-                      fontWeight: FontWeight.w700,
-                      height: 1.1,
+              if (_unread > 0)
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: Container(
+                    constraints: const BoxConstraints(
+                      minWidth: 12,
+                      minHeight: 12,
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 3),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFF5252),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.white, width: 1),
+                    ),
+                    child: Text(
+                      _unread > 9 ? '9+' : '$_unread',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 7.5,
+                        fontWeight: FontWeight.w700,
+                        height: 1.1,
+                      ),
                     ),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1138,7 +1140,6 @@ class _FsBadge extends StatelessWidget {
   }
 }
 
-
 /// 掉线 / 自动重连期间的顶栏小标（常驻、不参与点击）。
 class _ReconnectBadge extends StatelessWidget {
   const _ReconnectBadge();
@@ -1157,7 +1158,8 @@ class _ReconnectBadge extends StatelessWidget {
         children: [
           Icon(Icons.circle, size: 6, color: Color(0xFFFF8A80)),
           SizedBox(width: 5),
-          Text('重连中',
+          Text(
+            '重连中',
             style: TextStyle(
               color: Colors.white,
               fontSize: 11,

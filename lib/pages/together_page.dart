@@ -90,11 +90,11 @@ class TogetherPage extends StatefulWidget {
     super.key,
     required this.liveChannel,
     this.liveLineId = '',
-  })  : videoId = null,
-        ep = 1,
-        line = '',
-        position = 0,
-        playing = true;
+  }) : videoId = null,
+       ep = 1,
+       line = '',
+       position = 0,
+       playing = true;
 
   /// 从详情页进入时直接创建房间；为空时显示一起看入口。
   final String? videoId;
@@ -192,13 +192,13 @@ class _TogetherPageState extends State<TogetherPage>
   bool get _waitingStaggerSeek => _staggerSeekTimer != null;
 
   bool get _canCorrectMember => togetherCanCorrectMember(
-        online: _online,
-        connected: _client.connected,
-        clockSynced: _client.synced,
-        // 错峰等待期间也复用同一个 gate：心跳到达不能把这段等待顶掉，
-        // 否则周期纠偏会先跳一次，等于错峰白做。
-        awaitingRoomState: _awaitingRoomState || _waitingStaggerSeek,
-      );
+    online: _online,
+    connected: _client.connected,
+    clockSynced: _client.synced,
+    // 错峰等待期间也复用同一个 gate：心跳到达不能把这段等待顶掉，
+    // 否则周期纠偏会先跳一次，等于错峰白做。
+    awaitingRoomState: _awaitingRoomState || _waitingStaggerSeek,
+  );
 
   /// 应用别人操作后的短暂静默期：先让 play / pause / seek 落位，再开始纠偏。
   int _applyHoldUntil = 0;
@@ -412,8 +412,9 @@ class _TogetherPageState extends State<TogetherPage>
         // 留空，等 _createRoom 拿到详情后再取第一条真实线路。
         _videoLine = widget.line.trim();
         // 从详情页进入时沿用当前进度；不足 60 秒视为刚看片头，从头开始。
-        _resumePos =
-            widget.position >= fxResumeMinSeconds ? widget.position : 0;
+        _resumePos = widget.position >= fxResumeMinSeconds
+            ? widget.position
+            : 0;
         _resumePlaying = widget.playing;
         _createRoom(videoId, _ep);
       }
@@ -574,10 +575,7 @@ class _TogetherPageState extends State<TogetherPage>
     setState(() => _online = false);
     if (!_entered && _stage == _TogetherStage.entering) {
       _backToEntry();
-      togetherToast(
-        context,
-        '连不上一起看服务器（${_client.wsUrl}），检查网络后重试',
-      );
+      togetherToast(context, '连不上一起看服务器（${_client.wsUrl}），检查网络后重试');
       return;
     }
     if (_entered && wasOnline && !_downReported) {
@@ -610,20 +608,22 @@ class _TogetherPageState extends State<TogetherPage>
     final messenger = ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;
     messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(SnackBar(
-      content: Text(text),
-      duration: const Duration(seconds: 12),
-      behavior: SnackBarBehavior.floating,
-      action: SnackBarAction(
-        label: '重试',
-        textColor: Colors.white,
-        onPressed: () {
-          if (!mounted) return;
-          _appendSystem('正在重连一起看服务器…');
-          _client.retryNow();
-        },
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(text),
+        duration: const Duration(seconds: 12),
+        behavior: SnackBarBehavior.floating,
+        action: SnackBarAction(
+          label: '重试',
+          textColor: Colors.white,
+          onPressed: () {
+            if (!mounted) return;
+            _appendSystem('正在重连一起看服务器…');
+            _client.retryNow();
+          },
+        ),
       ),
-    ));
+    );
   }
 
   /// 建房 / 加入 / 退出时清空同步游标与防抖状态。
@@ -759,7 +759,8 @@ class _TogetherPageState extends State<TogetherPage>
         _setupLive(live, _liveLineId, create: false);
       }
       final targetLine = state.line.trim();
-      final validLine = targetLine.isNotEmpty &&
+      final validLine =
+          targetLine.isNotEmpty &&
           (_liveChannel?.lines.any((line) => line.id == targetLine) ?? false);
       final changedLine = validLine && targetLine != _liveLineId;
       setState(() {
@@ -799,7 +800,8 @@ class _TogetherPageState extends State<TogetherPage>
     final changedEp = state.ep > 0 && state.ep != _ep;
     // 房间线路按**名字**比对：服务端存的是建房时那个源的线路名，
     // 每个成员本地的线路线路 id 不一定一样。
-    final roomLine = (state.lineName.isNotEmpty ? state.lineName : state.line).trim();
+    final roomLine = (state.lineName.isNotEmpty ? state.lineName : state.line)
+        .trim();
     final changedLine = roomLine.isNotEmpty && roomLine != _roomLine;
     var mappedLine = '';
     var missingLine = '';
@@ -894,10 +896,10 @@ class _TogetherPageState extends State<TogetherPage>
 
   /// 本地有这条线路吗（弹层里标「本机没有」用）。
   Set<String> get _localLineNames => <String>{
-        for (final line in _lines) line.displayName.trim(),
-        for (final line in _lines) line.name.trim(),
-        for (final line in _lines) line.id,
-      };
+    for (final line in _lines) line.displayName.trim(),
+    for (final line in _lines) line.name.trim(),
+    for (final line in _lines) line.id,
+  };
 
   /// 服务端说谁是主导者。老服务端没有 leaderId 时退回「创建者」标记。
   bool _leaderIsMe(TogetherRoomState state) {
@@ -973,8 +975,11 @@ class _TogetherPageState extends State<TogetherPage>
           action: action,
           now: now,
         )) {
-      _messages[_messages.length - 1] =
-          TogetherChatMessage.operation(text, action: action, time: last.time);
+      _messages[_messages.length - 1] = TogetherChatMessage.operation(
+        text,
+        action: action,
+        time: last.time,
+      );
       _publishChat();
       return;
     }
@@ -1300,8 +1305,8 @@ class _TogetherPageState extends State<TogetherPage>
       _videoLine = _lines.isNotEmpty
           ? _lines.first.id
           : (detail?.lines.isNotEmpty ?? false)
-              ? detail!.lines.first.id
-              : '';
+          ? detail!.lines.first.id
+          : '';
     }
     _qualityKey = null;
     _playInfo = null;
@@ -1340,9 +1345,11 @@ class _TogetherPageState extends State<TogetherPage>
             api: draft.sourceApi,
           );
     // 详情页进来的房间没有 draft：用本地详情里的线路当作房间线路列表。
-    final roomLines = draft?.lines ??
+    final roomLines =
+        draft?.lines ??
         <TogetherLine>[
-          for (final line in _lines) togetherLineOfInfo(line, episodes: _episodes.length),
+          for (final line in _lines)
+            togetherLineOfInfo(line, episodes: _episodes.length),
         ];
     _client.createRoom(
       videoId: videoId,
@@ -1535,7 +1542,8 @@ class _TogetherPageState extends State<TogetherPage>
       ep: _ep < 1 ? 1 : _ep,
       lineId: _isLive ? _liveLineId : _videoLine,
       position: position.isFinite && position > 0 ? position : 0,
-      playing: !forcePaused &&
+      playing:
+          !forcePaused &&
           (controller?.value.isPlaying ??
               (_isLive ? _livePlaying : (_remote?.playing ?? false))),
       kind: _isLive ? 'live' : 'video',
@@ -1553,10 +1561,9 @@ class _TogetherPageState extends State<TogetherPage>
     if (!position.isFinite || position <= .5) return;
     // 片尾窗口内不写进度，直接清 0：房间散场时往往已经播到片尾，
     // 若把「距结尾几十秒」存下来，下次单独打开这集会直接从片尾开始。
-    final totalSeconds =
-        controller != null && controller.value.isInitialized
-            ? controller.value.duration.inMilliseconds / 1000.0
-            : 0.0;
+    final totalSeconds = controller != null && controller.value.isInitialized
+        ? controller.value.duration.inMilliseconds / 1000.0
+        : 0.0;
     final save = fxIsFinishedPosition(position, totalSeconds) ? 0.0 : position;
     try {
       await fxSaveProgress(_videoId, _ep, save);
@@ -1981,7 +1988,9 @@ class _TogetherPageState extends State<TogetherPage>
   double _syncOffsetSeconds() {
     final state = _remote;
     final controller = _controller;
-    if (state == null || controller == null || !controller.value.isInitialized) {
+    if (state == null ||
+        controller == null ||
+        !controller.value.isInitialized) {
       return 0;
     }
     final expected = _targetPosition(state);
@@ -1996,12 +2005,16 @@ class _TogetherPageState extends State<TogetherPage>
   Future<void> _syncToHostNow() async {
     final state = _remote;
     final controller = _controller;
-    if (state == null || controller == null || !controller.value.isInitialized) {
+    if (state == null ||
+        controller == null ||
+        !controller.value.isInitialized) {
       return;
     }
     final expected = _targetPosition(state);
-    _logSync('手动同步房主：当前 ${controller.value.position.inSeconds}s → '
-        '目标 ${expected.toStringAsFixed(1)}s');
+    _logSync(
+      '手动同步房主：当前 ${controller.value.position.inSeconds}s → '
+      '目标 ${expected.toStringAsFixed(1)}s',
+    );
     // 手动同步是用户点出来的：不吃错峰延迟，还要顶掉排队中的错峰 seek。
     _cancelStaggerSeek();
     _hardSeek(expected, state);
@@ -2091,7 +2104,8 @@ class _TogetherPageState extends State<TogetherPage>
     if (_isHost) return;
     // 本地刚发过控制指令：这 700ms 内不跟权威纠偏。
     // 服务端回声还没到 / 别人也在动的时候，两边互相拽会让画面来回跳。
-    if (DateTime.now().millisecondsSinceEpoch - _lastLocalControlAt < 700) return;
+    if (DateTime.now().millisecondsSinceEpoch - _lastLocalControlAt < 700)
+      return;
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) return;
     if (mediaChanged) {
@@ -2139,7 +2153,8 @@ class _TogetherPageState extends State<TogetherPage>
     final expected = _targetPosition(state);
     final current = controller.value.position.inMilliseconds / 1000.0;
     final drift = expected - current;
-    final modeChanged = prev == null ||
+    final modeChanged =
+        prev == null ||
         prev.playing != state.playing ||
         (prev.rate - state.rate).abs() > 0.001;
 
@@ -2241,7 +2256,8 @@ class _TogetherPageState extends State<TogetherPage>
     bool fresh = false,
   }) {
     final now = DateTime.now().millisecondsSinceEpoch;
-    final anchorOk = _hostReportedPos >= 0 &&
+    final anchorOk =
+        _hostReportedPos >= 0 &&
         _hostReportedAt > 0 &&
         _hostReportedState == 'play';
     if (_isLive ||
@@ -2466,7 +2482,8 @@ class _TogetherPageState extends State<TogetherPage>
       if (mounted) setState(() {});
       return;
     }
-    final ended = _endedSent ||
+    final ended =
+        _endedSent ||
         (controller.value.duration > Duration.zero &&
             controller.value.position >=
                 controller.value.duration - const Duration(milliseconds: 400));
@@ -2540,8 +2557,9 @@ class _TogetherPageState extends State<TogetherPage>
     final position = ready
         ? controller.value.position.inMilliseconds / 1000.0
         : _displayPosition();
-    final playing =
-        ready ? controller.value.isPlaying : (_remote?.playing ?? false);
+    final playing = ready
+        ? controller.value.isPlaying
+        : (_remote?.playing ?? false);
     if (ready) {
       _lastRequestedRate = value;
       controller.setRate(value).catchError((_) {});
@@ -2577,8 +2595,14 @@ class _TogetherPageState extends State<TogetherPage>
     return key;
   }
 
-  /// 加载层文案：与主播放页同一句「正在加载 线路名 · 第01集」。
-  String get _loadingText => fxLoadingLineText(_ep, _currentLineLabel);
+  /// 自动换线路时的进度文案（「正在尝试其他线路（2/11）」），与主播放同一句。
+  String _tryingLineText = '';
+
+  /// 加载层文案：正在逐条试线路时用主播放那句「正在尝试其他线路（2/11）」，
+  /// 否则是与主播放完全一致的「正在加载 线路名 · 第01集」。
+  String get _loadingText => _tryingLineText.isNotEmpty
+      ? _tryingLineText
+      : fxLoadingLineText(_ep, _currentLineLabel);
 
   String get _currentLineLabel {
     if (_roomLine.isNotEmpty) return _roomLine;
@@ -2918,7 +2942,9 @@ class _TogetherPageState extends State<TogetherPage>
     final position = ready
         ? controller.value.position.inMilliseconds / 1000.0
         : _displayPosition();
-    final playing = ready ? controller.value.isPlaying : (_remote?.playing ?? false);
+    final playing = ready
+        ? controller.value.isPlaying
+        : (_remote?.playing ?? false);
     final localId = _localLineIdFor(name);
     _roomLine = name;
     if (localId == null) {
@@ -2939,12 +2965,7 @@ class _TogetherPageState extends State<TogetherPage>
       _loadingKey = '';
       _syncVideo();
     }
-    _client.sendSwitchLine(
-      name,
-      position: position,
-      playing: playing,
-      ep: _ep,
-    );
+    _client.sendSwitchLine(name, position: position, playing: playing, ep: _ep);
     _markRemote(playing ? 'play' : 'pause', position);
     if (mounted) setState(() {});
   }
@@ -3208,8 +3229,9 @@ class _TogetherPageState extends State<TogetherPage>
 
       // open(play:true) 只负责起播意图：ready 之后必须再显式 play，
       // 否则部分直播源停在首帧不动，用户得手点一次播放。
-      final wantPlay =
-          _isHost ? _livePlaying : (_remote?.playing ?? shouldPlay);
+      final wantPlay = _isHost
+          ? _livePlaying
+          : (_remote?.playing ?? shouldPlay);
       if (wantPlay) {
         await controller.play().catchError((_) {});
       } else {
@@ -3308,22 +3330,22 @@ class _TogetherPageState extends State<TogetherPage>
 
   /// 成员刚进房还没收到 state 时的兜底：按播放处理。
   TogetherRoomState _emptyLiveState() => TogetherRoomState(
-        code: _roomCode,
-        title: _roomTitle,
-        hostId: '',
-        members: _members,
-        videoId: _videoId,
-        ep: 1,
-        line: _liveLineId,
-        playing: true,
-        ended: false,
-        position: 0,
-        serverTime: 0,
-        seq: 0,
-        rate: 1,
-        kind: 'live',
-        liveChannel: _liveChannel,
-      );
+    code: _roomCode,
+    title: _roomTitle,
+    hostId: '',
+    members: _members,
+    videoId: _videoId,
+    ep: 1,
+    line: _liveLineId,
+    playing: true,
+    ended: false,
+    position: 0,
+    serverTime: 0,
+    seq: 0,
+    rate: 1,
+    kind: 'live',
+    liveChannel: _liveChannel,
+  );
 
   void _syncVideo() {
     if (_isLive) {
@@ -3419,9 +3441,7 @@ class _TogetherPageState extends State<TogetherPage>
     // 房主显式给过续播位置就以它为准（0 也是有效值：从开头播），
     // 不能退回去用房间进度，否则会先跳到房主进度再跳回 0。
     if (_isHost && localResumePos != null) {
-      return localResumePos.isFinite && localResumePos > 0
-          ? localResumePos
-          : 0;
+      return localResumePos.isFinite && localResumePos > 0 ? localResumePos : 0;
     }
     final state = _remote;
     if (state == null) return 0;
@@ -3522,8 +3542,17 @@ class _TogetherPageState extends State<TogetherPage>
         if (item.id != line) item,
     ];
 
+    var attempt = 0;
     for (final lineInfo in ordered) {
       if (!mounted || seq != _videoSeq) return;
+      attempt++;
+      // 第 2 条起才提示「正在尝试其他线路（2/11）」：第一条就是正常起播，
+      // 不该先闪一句换线路。文案与主播放页逐字一致。
+      if (attempt > 1 && ordered.length > 1 && mounted) {
+        setState(
+          () => _tryingLineText = fxTryingLineText(attempt, ordered.length),
+        );
+      }
       PlayInfo play;
       try {
         play = await CmsBridge.play(videoId, ep, lineInfo.id);
@@ -3537,8 +3566,7 @@ class _TogetherPageState extends State<TogetherPage>
       // 统一补成绝对地址：站内相对路径补全后 mpv 能直连，
       // 不必再过客户端代理（代理是整片下完才播，4K 大分片会卡）。
       final urls = <String>[];
-      final primary =
-          CmsBridge.absolutePlayUrl(videoId, _qualityUrl(play));
+      final primary = CmsBridge.absolutePlayUrl(videoId, _qualityUrl(play));
       if (primary.isNotEmpty) urls.add(primary);
       for (final raw in play.backup) {
         final url = CmsBridge.absolutePlayUrl(videoId, raw);
@@ -3569,7 +3597,8 @@ class _TogetherPageState extends State<TogetherPage>
             headers: play.headers,
             isHls: play.isHls,
             startPosition: Duration(
-              milliseconds: (_desiredStartSeconds(localResumePos) * 1000).round(),
+              milliseconds: (_desiredStartSeconds(localResumePos) * 1000)
+                  .round(),
             ),
             // 采集线路直连（让 mpv 边下边播），只有平台签名线路才走代理。
             // 一起看卡顿的主因就是这里：4K/大分片走代理要整片下完才播。
@@ -3689,6 +3718,7 @@ class _TogetherPageState extends State<TogetherPage>
             setState(() {
               _videoLoading = false;
               _videoError = '';
+              _tryingLineText = '';
             });
           }
           _position.value = target;
@@ -3719,6 +3749,7 @@ class _TogetherPageState extends State<TogetherPage>
     _clearFrozenFrame();
     setState(() {
       _videoLoading = false;
+      _tryingLineText = '';
       // 与主播放同一句收尾文案：全部线路都试过了，不把问题推回给用户。
       _videoError = fxFallbackAllFailedText;
     });
@@ -3779,10 +3810,7 @@ class _TogetherPageState extends State<TogetherPage>
         if (!mounted || seq != _videoSeq) return null;
         if (play.type.trim().toLowerCase() == 'parse') continue;
         final url = IqCodecGate.adapt(
-          CmsBridge.absolutePlayUrl(
-            videoId,
-            _qualityUrlFor(play, qualityKey),
-          ),
+          CmsBridge.absolutePlayUrl(videoId, _qualityUrlFor(play, qualityKey)),
         );
         if (url.isEmpty) continue;
         return FxLineSource(

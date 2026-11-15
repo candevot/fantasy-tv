@@ -139,9 +139,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
     }
     try {
       final items = _sanitize(await CmsBridge.search(keyword, 1));
-      if (!mounted ||
-          request != _requestId ||
-          _query.text.trim() != keyword) {
+      if (!mounted || request != _requestId || _query.text.trim() != keyword) {
         return;
       }
       setState(() {
@@ -149,9 +147,7 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
         _status = items.isEmpty ? _PickerStatus.empty : _PickerStatus.ready;
       });
     } catch (e) {
-      if (!mounted ||
-          request != _requestId ||
-          _query.text.trim() != keyword) {
+      if (!mounted || request != _requestId || _query.text.trim() != keyword) {
         return;
       }
       setState(() {
@@ -320,8 +316,9 @@ class _TogetherVideoPickerState extends State<_TogetherVideoPicker> {
                                   color: Fx.sub.withValues(alpha: .55),
                                 ),
                               ),
-                        contentPadding:
-                            const EdgeInsets.symmetric(vertical: 12),
+                        contentPadding: const EdgeInsets.symmetric(
+                          vertical: 12,
+                        ),
                       ),
                     ),
                   ),
@@ -529,11 +526,7 @@ class _VideoTile extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                TogetherCover(
-                  cover: card.cover,
-                  title: card.title,
-                  radius: 13,
-                ),
+                TogetherCover(cover: card.cover, title: card.title, radius: 13),
                 if (card.rating > 0)
                   Positioned(
                     right: 5,
@@ -575,7 +568,10 @@ class _VideoTile extends StatelessWidget {
           Text(
             [
               if (card.year > 0) '${card.year}',
-              if (card.episodes > 0) '${card.episodes}集' else if (card.status.isNotEmpty) card.status,
+              if (card.episodes > 0)
+                '${card.episodes}集'
+              else if (card.status.isNotEmpty)
+                card.status,
             ].join(' · '),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -698,11 +694,11 @@ class _TogetherEpisodePicker extends StatelessWidget {
                         itemCount: episodes.length,
                         gridDelegate:
                             const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 5,
-                          childAspectRatio: 1.62,
-                          mainAxisSpacing: 8,
-                          crossAxisSpacing: 8,
-                        ),
+                              crossAxisCount: 5,
+                              childAspectRatio: 1.62,
+                              mainAxisSpacing: 8,
+                              crossAxisSpacing: 8,
+                            ),
                         itemBuilder: (context, i) {
                           final ep = episodes[i];
                           final active = ep.n == current;

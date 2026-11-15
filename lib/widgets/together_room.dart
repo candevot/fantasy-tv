@@ -287,20 +287,17 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
             Column(
               children: [
                 _buildHeader(context),
-            SizedBox(
-              height: videoHeight,
-              child: _buildVideo(context),
-            ),
-            if (!keyboard) _buildInfo(context),
-            // 聊天改成悬浮层（右下角小标志 + 透明气泡），不再占屏幕。
-            // 观看时画面不被挤压，消息又不丢：未读数标在标志上。
-            Expanded(
-              child: Stack(
-                children: [
-                  // 键盘弹起时旧消息列表让位（气泡里能看到最新几条），
-                  // 避免「列表 + 气泡 + 键盘」三份内容挤在一起。
-                  if (!keyboard && !compact) _buildChat(context),
-                ],
+                SizedBox(height: videoHeight, child: _buildVideo(context)),
+                if (!keyboard) _buildInfo(context),
+                // 聊天改成悬浮层（右下角小标志 + 透明气泡），不再占屏幕。
+                // 观看时画面不被挤压，消息又不丢：未读数标在标志上。
+                Expanded(
+                  child: Stack(
+                    children: [
+                      // 键盘弹起时旧消息列表让位（气泡里能看到最新几条），
+                      // 避免「列表 + 气泡 + 键盘」三份内容挤在一起。
+                      if (!keyboard && !compact) _buildChat(context),
+                    ],
                   ),
                 ),
               ],
@@ -394,68 +391,82 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
               ),
             ),
           ),
-          TogetherPill(
-            text: '${widget.members.length}',
-            icon: Icons.people_alt_outlined,
-            height: 30,
-            onTap: widget.onMembers,
-          ),
-          const SizedBox(width: 6),
-          TogetherPill(
-            text: '邀请',
-            icon: Icons.person_add_alt_1_rounded,
-            height: 30,
-            accent: true,
-            onTap: widget.onInvite,
-          ),
-          // 投屏：主播放竖屏顶栏同一颗（tv_rounded）入口，图标 / 尺寸一致，
-          // 只是房间页是浅色底，用同款的浅色玻璃圆钮承载。
-          if (!widget.isLive) ...[
-            const SizedBox(width: 6),
-            TogetherCircleButton(
-              icon: Icons.tv_rounded,
-              size: 30,
-              iconSize: 16,
-              tooltip: '投屏',
-              onTap: widget.onCast,
-            ),
-          ],
-          // 手动对齐房主进度：成员侧才显示。偏差 >1 秒才高亮，
-          // 平时保持低调，不抢「邀请 / 换源」的视觉位置。
-          // SYNC_ALWAYS（2026-11-14）：同步状态对房主也要显示。
-          // 之前只有成员（!isHost）才渲染，房主进全屏后什么都看不到，
-          // 用户报「竖屏有同步、全屏没有同步」就是这条判断。
-          // 房主显示「房主」，成员显示「已同步 / 落后 x s」。
-          if (!widget.isLive) ...[
-            const SizedBox(width: 6),
-            if (widget.onSyncToHost != null && !widget.isHost)
-              _SyncToHostPill(
-                offsetSeconds: widget.syncOffsetSeconds,
-                onTap: widget.onSyncToHost!,
-              )
-            else
-              TogetherPill(
-                text: widget.isHost ? '我在操作' : '已同步',
-                icon: widget.isHost
-                    ? Icons.star_outline_rounded
-                    : Icons.check_circle_outline_rounded,
-                height: 30,
+          // HEADER_RIGHT_GROUP（2026-11-15）：右侧一组整体收进 FittedBox，
+          // 成员 / 邀请 / 投屏 / 同步状态 / 换源 / 换剧 全在时，360dp 窄屏
+          // 也不会溢出把「换剧」顶出屏幕（与底栏右组同一个保底做法）。
+          Flexible(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TogetherPill(
+                    text: '${widget.members.length}',
+                    icon: Icons.people_alt_outlined,
+                    height: 30,
+                    onTap: widget.onMembers,
+                  ),
+                  const SizedBox(width: 6),
+                  TogetherPill(
+                    text: '邀请',
+                    icon: Icons.person_add_alt_1_rounded,
+                    height: 30,
+                    accent: true,
+                    onTap: widget.onInvite,
+                  ),
+                  // 投屏：主播放竖屏顶栏同一颗（tv_rounded）入口，图标 / 尺寸一致，
+                  // 只是房间页是浅色底，用同款的浅色玻璃圆钮承载。
+                  if (!widget.isLive) ...[
+                    const SizedBox(width: 6),
+                    TogetherCircleButton(
+                      icon: Icons.tv_rounded,
+                      size: 30,
+                      iconSize: 16,
+                      tooltip: '投屏',
+                      onTap: widget.onCast,
+                    ),
+                  ],
+                  // 手动对齐房主进度：成员侧才显示。偏差 >1 秒才高亮，
+                  // 平时保持低调，不抢「邀请 / 换源」的视觉位置。
+                  // SYNC_ALWAYS（2026-11-14）：同步状态对房主也要显示。
+                  // 之前只有成员（!isHost）才渲染，房主进全屏后什么都看不到，
+                  // 用户报「竖屏有同步、全屏没有同步」就是这条判断。
+                  // 房主显示「房主」，成员显示「已同步 / 落后 x s」。
+                  if (!widget.isLive) ...[
+                    const SizedBox(width: 6),
+                    if (widget.onSyncToHost != null && !widget.isHost)
+                      _SyncToHostPill(
+                        offsetSeconds: widget.syncOffsetSeconds,
+                        onTap: widget.onSyncToHost!,
+                      )
+                    else
+                      TogetherPill(
+                        text: widget.isHost ? '我在操作' : '已同步',
+                        icon: widget.isHost
+                            ? Icons.star_outline_rounded
+                            : Icons.check_circle_outline_rounded,
+                        height: 30,
+                      ),
+                  ],
+                  const SizedBox(width: 6),
+                  TogetherPill(
+                    text: widget.isLive ? '换线' : '换源',
+                    height: 30,
+                    onTap: widget.onSwitchLine,
+                  ),
+                  if (!widget.isLive) ...[
+                    const SizedBox(width: 6),
+                    TogetherPill(
+                      text: '换剧',
+                      height: 30,
+                      onTap: widget.onChangeDrama,
+                    ),
+                  ],
+                ],
               ),
-          ],
-          const SizedBox(width: 6),
-          TogetherPill(
-            text: widget.isLive ? '换线' : '换源',
-            height: 30,
-            onTap: widget.onSwitchLine,
-          ),
-          if (!widget.isLive) ...[
-            const SizedBox(width: 6),
-            TogetherPill(
-              text: '换剧',
-              height: 30,
-              onTap: widget.onChangeDrama,
             ),
-          ],
+          ),
         ],
       ),
     );
@@ -707,8 +718,9 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
   Widget _buildSyncChip() {
     // 没有房主权限了：这里只显示「我在带动播放」还是「跟着别人」。
     final stateText = widget.isHost ? '我在操作' : '同步中';
-    final dot =
-        widget.online ? const Color(0xFF57D3A3) : const Color(0xFFFF8A80);
+    final dot = widget.online
+        ? const Color(0xFF57D3A3)
+        : const Color(0xFFFF8A80);
     // 房间内掉线即进入自动重连（客户端会回原房间号），顶栏小标显示「重连中」。
     final status = widget.online ? stateText : '重连中';
     return Container(
@@ -796,11 +808,7 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
             Text(
               widget.errorText,
               textAlign: TextAlign.center,
-              style: const TextStyle(
-                color: Fx.ink,
-                fontSize: 12,
-                height: 1.5,
-              ),
+              style: const TextStyle(color: Fx.ink, fontSize: 12, height: 1.5),
             ),
             const SizedBox(height: 10),
             Row(
@@ -1004,7 +1012,9 @@ class _RoomLiveBadge extends StatelessWidget {
         decoration: BoxDecoration(
           color: const Color(0xFFFF4D4F).withValues(alpha: .20),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFFF6B6B).withValues(alpha: .5)),
+          border: Border.all(
+            color: const Color(0xFFFF6B6B).withValues(alpha: .5),
+          ),
         ),
         child: const Row(
           mainAxisSize: MainAxisSize.min,
@@ -1092,9 +1102,7 @@ class _SyncToHostPill extends StatelessWidget {
         : '${behind ? '落后' : '领先'} ${off.toStringAsFixed(off >= 10 ? 0 : 1)}s';
     return TogetherPill(
       text: label,
-      icon: synced
-          ? Icons.check_circle_outline_rounded
-          : Icons.sync_rounded,
+      icon: synced ? Icons.check_circle_outline_rounded : Icons.sync_rounded,
       height: 30,
       // 不同步时才用强调色，平时是普通胶囊。
       accent: !synced,

@@ -96,13 +96,13 @@ class TogetherLine {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'name': name,
-        // id 空的时候用名字当 id：服务端按名字找线路，客户端按 id 起播，
-        // 两者一致才不会出现「房间换了线、本地还播旧线」。
-        'id': id.isEmpty ? name : id,
-        'episodes': episodes,
-        if (quality.isNotEmpty) 'quality': quality,
-      };
+    'name': name,
+    // id 空的时候用名字当 id：服务端按名字找线路，客户端按 id 起播，
+    // 两者一致才不会出现「房间换了线、本地还播旧线」。
+    'id': id.isEmpty ? name : id,
+    'episodes': episodes,
+    if (quality.isNotEmpty) 'quality': quality,
+  };
 
   static List<TogetherLine> listFrom(dynamic raw) {
     if (raw is! List) return const <TogetherLine>[];
@@ -158,7 +158,6 @@ class TogetherOp {
     );
   }
 }
-
 
 /// 服务器权威房间状态（`room_state`）。
 class TogetherRoomState {
@@ -643,10 +642,12 @@ class TogetherClient {
       final ws = Uri.parse(Api.wsBase);
       final uri = Api.token.isEmpty
           ? ws
-          : ws.replace(queryParameters: <String, String>{
-              ...ws.queryParameters,
-              'token': Api.token,
-            });
+          : ws.replace(
+              queryParameters: <String, String>{
+                ...ws.queryParameters,
+                'token': Api.token,
+              },
+            );
       final ch = WebSocketChannel.connect(uri);
       _channel = ch;
       // 连接失败会由 stream.onError 处理；ready 的错误必须被消费，否则是未处理异常。
@@ -745,9 +746,7 @@ class TogetherClient {
   /// 现在前两次 1 秒就重试（瞬时抖动一秒内接上），再逐步拉长到 30 秒，
   /// 连续失败 8 次（约 80 秒）才交给页面显示「重试」按钮，
   /// 比原来的 45 秒更宽容，也比原来更快接回。
-  static const List<int> _retryDelaysSeconds = <int>[
-    1, 1, 2, 3, 5, 8, 13, 30,
-  ];
+  static const List<int> _retryDelaysSeconds = <int>[1, 1, 2, 3, 5, 8, 13, 30];
 
   void _startRetryTimer() {
     if (_closed || _authFailed) return;
@@ -1125,12 +1124,7 @@ class TogetherClient {
   ///
   /// 只换线路，**不动进度**：传上当前 position，服务端原样保留并广播，
   /// 所有人换完线路还是接着看原来的位置，不会从头开始。
-  void sendSwitchLine(
-    String name, {
-    double? position,
-    bool? playing,
-    int? ep,
-  }) {
+  void sendSwitchLine(String name, {double? position, bool? playing, int? ep}) {
     final value = name.trim();
     if (value.isEmpty) return;
     _hostLine = value;
@@ -1305,12 +1299,14 @@ class TogetherClient {
         break;
       case 'chat':
         final user = togetherMap(msg['user']);
-        onChat(TogetherChatIncoming(
-          userId: '${user['id'] ?? ''}',
-          name: '${user['name'] ?? '影迷'}',
-          avatar: '${user['avatar'] ?? ''}',
-          text: '${msg['text'] ?? ''}',
-        ));
+        onChat(
+          TogetherChatIncoming(
+            userId: '${user['id'] ?? ''}',
+            name: '${user['name'] ?? '影迷'}',
+            avatar: '${user['avatar'] ?? ''}',
+            text: '${msg['text'] ?? ''}',
+          ),
+        );
         break;
       case 'op':
         onOp?.call(TogetherOp.fromJson(msg));
@@ -1394,11 +1390,7 @@ class TogetherClient {
       _rejoining = true;
       _send(_hostCredential.joinPayload(code));
     }
-    onOpen(TogetherMember(
-      id: selfId,
-      name: selfName,
-      avatar: selfAvatar,
-    ));
+    onOpen(TogetherMember(id: selfId, name: selfName, avatar: selfAvatar));
   }
 
   bool _isPasswordError(String code) {

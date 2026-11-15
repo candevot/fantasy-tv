@@ -33,7 +33,11 @@ void main() {
       for (final drift in <double>[0.5, 1.0, 1.5, 1.99, -0.5, -1.0, -1.99]) {
         final d = decide(drift);
         expect(d.move, TogetherSyncMove.rate, reason: '$drift');
-        expect(d.rate, closeTo(drift > 0 ? 1.05 : 0.95, 1e-9), reason: '$drift');
+        expect(
+          d.rate,
+          closeTo(drift > 0 ? 1.05 : 0.95, 1e-9),
+          reason: '$drift',
+        );
       }
     });
 
