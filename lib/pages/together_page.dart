@@ -10,6 +10,9 @@ import '../fx_globals.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../services/fx_player.dart';
+import '../services/iq_codec_gate.dart';
+import '../services/iqiyi_codec.dart';
+import '../services/play_log.dart';
 import '../theme.dart';
 import '../widgets/player_theme.dart';
 import '../widgets/together_chat.dart';
@@ -3197,8 +3200,14 @@ class _TogetherPageState extends State<TogetherPage>
       }
       if (urls.isEmpty) continue;
 
-      for (final url in urls) {
+      // IQ_CODEC（2026-11-15）：爱奇艺线路按设备硬解能力选编码，
+      // 规则和主播放页完全一致（HEVC 1080P 优先，失败降级 AVC 896×504）。
+      await IqCodecGate.ensure();
+      if (!mounted || seq != _videoSeq) return;
+      for (final target in IqCodecGate.plan(urls)) {
         if (!mounted || seq != _videoSeq) return;
+        final url = target.url;
+        if (target.degradeFromHevc) fxPlayLog(iqDegradeLog(url));
         FxPlayer? controller;
         try {
           // 和主播放页用同一套起播超时策略：慢线路不再被 20 秒一刀切，
@@ -3422,8 +3431,12 @@ class _TogetherPageState extends State<TogetherPage>
         final play = await CmsBridge.play(videoId, ep, next.id);
         if (!mounted || seq != _videoSeq) return null;
         if (play.type.trim().toLowerCase() == 'parse') continue;
-        final url =
-            CmsBridge.absolutePlayUrl(videoId, _qualityUrlFor(play, qualityKey));
+        final url = IqCodecGate.adapt(
+          CmsBridge.absolutePlayUrl(
+            videoId,
+            _qualityUrlFor(play, qualityKey),
+          ),
+        );
         if (url.isEmpty) continue;
         return FxLineSource(
           url: url,

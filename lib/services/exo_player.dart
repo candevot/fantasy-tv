@@ -38,6 +38,47 @@ class ExoPlayerEngine {
   static bool get isSupported =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
+  /// 设备能不能**硬解** HEVC（IQ_CODEC 2026-11-15）。
+  ///
+  /// 原生侧扫 `MediaCodecList(REGULAR_CODECS)`：只要有解码器声明支持
+  /// `video/hevc` 且 `isHardwareAccelerated`，就认为这台机器能硬解 1080P HEVC
+  /// （爱奇艺线路的 `hevc=1` 码流就是 HEVC Main / 10bit，软解跑不动）。
+  ///
+  /// 结果在**进程内缓存**：解码器表在一次进程生命周期里不会变，而每次起播
+  /// 都扫一遍表要几十毫秒 —— 起播路径上任何一次多余扫描都直接体现为「慢」。
+  /// 问到之前一律按「不支持」处理（AVC 一定播得出来，先保出画）。
+  static Future<bool> supportsHevc() {
+    final cached = _hevcSupport;
+    if (cached != null) return cached;
+    final future = _probeHevc();
+    _hevcSupport = future;
+    return future;
+  }
+
+  static Future<bool>? _hevcSupport;
+
+  /// 已经拿到的结果（还没探测过是 null）。
+  static bool? get hevcSupportKnown => _hevcKnown;
+
+  static bool? _hevcKnown;
+
+  static Future<bool> _probeHevc() async {
+    if (!isSupported) {
+      _hevcKnown = false;
+      return false;
+    }
+    var supported = false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('supportsHevc');
+      supported = r ?? false;
+    } catch (_) {
+      // 老原生包 / 通道未注册：按不支持处理，走 AVC。
+      supported = false;
+    }
+    _hevcKnown = supported;
+    return supported;
+  }
+
   /// 预取通道单独一条 [MethodChannel]：`prefetchSegment` 是**静态**方法，
   /// 首页还没创建过 [ExoPlayerEngine] 实例时也要能调（没播放器 = 没 _method）。
   /// 原生侧和播放用的是同一个 `ExoPlayerPlugin` 实例（同一个 SimpleCache），
@@ -333,6 +374,9 @@ class ExoPlayerState {
     this.droppedFrames = 0,
     this.bitrateKbps = 0,
     this.measuredKbps = 0,
+    this.videoCodec = '',
+    this.iqCodec = '',
+    this.iqQuality = '',
   });
 
   final Duration position;
@@ -410,6 +454,20 @@ class ExoPlayerState {
   /// OkHttp 实测吞吐（kbps）；0 = 还没测到。
   final int measuredKbps;
 
+  /// 真实解码出来的视频编码（原生 `videoFormat.sampleMimeType` 的短名）：
+  /// `'hevc'` / `'avc'` / `'av1'` / `'vp9'`；'' = 还没拿到视频轨。
+  ///
+  /// IQ_CODEC（2026-11-15）：爱奇艺线路「请求的是 HEVC，实际给的可能是
+  /// AVC」。请求参数骗不了人，响应头和内核解出来的轨道才骗不了人，
+  /// 所以诊断浮层的「编码」以这个值为准。
+  final String videoCodec;
+
+  /// 服务端响应头 `X-Iq-Codec`：`hevc` / `avc`（爱奇艺解析服务实测会带）。
+  final String iqCodec;
+
+  /// 服务端响应头 `X-Iq-Quality`：实际给的分辨率，如 `1920x1080`。
+  final String iqQuality;
+
   factory ExoPlayerState.fromMap(Map<String, dynamic> m) {
     Duration d(String k) =>
         Duration(milliseconds: (m[k] as num?)?.toInt() ?? 0);
@@ -449,6 +507,9 @@ class ExoPlayerState {
       droppedFrames: (m['droppedFrames'] as num?)?.toInt() ?? 0,
       bitrateKbps: (m['bitrateKbps'] as num?)?.toInt() ?? 0,
       measuredKbps: (m['measuredKbps'] as num?)?.toInt() ?? 0,
+      videoCodec: _str(m['videoCodec']),
+      iqCodec: _str(m['iqCodec']),
+      iqQuality: _str(m['iqQuality']),
     );
   }
 
@@ -475,6 +536,7 @@ class ExoPlayerState {
       // 诊断字段只挑最关键的：首帧段 + 丢帧，够定位「起播慢 / 掉帧」。
       'frame=${timing.firstFrameMs}ms, drops=$droppedFrames, '
       'kbps=${bitrateKbps > 0 ? bitrateKbps : measuredKbps}, '
+      'codec=${videoCodec.isEmpty ? '-' : videoCodec}, '
       'err=$error)';
 }
 
@@ -533,3 +595,6 @@ const int exoResizeFill = 3;
 
 /// AspectRatioFrameLayout.RESIZE_MODE_ZOOM
 const int exoResizeZoom = 4;
+
+/// 状态快照里的字符串字段：null / 非字符串一律当空串（老原生包没有这些键）。
+String _str(Object? raw) => raw is String ? raw.trim() : '';

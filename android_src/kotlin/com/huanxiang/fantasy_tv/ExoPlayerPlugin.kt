@@ -1,7 +1,10 @@
 package com.huanxiang.fantasy_tv
 
 import android.app.Activity
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import android.content.Context
 import java.io.File
@@ -154,6 +157,90 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
          * 只会让首屏更慢。
          */
         const val NEXT_PRELOAD_STABLE_MS = 3_000L
+
+        /**
+         * IQ_CODEC（2026-11-15）：解码器表扫一次就够。
+         *
+         * `MediaCodecList(REGULAR_CODECS)` 在一次进程生命周期里不会变，
+         * 而起播路径上任何一次多余扫描都是几十毫秒的用户等待，所以结果
+         * 缓存到进程退出。null = 还没扫过。
+         */
+        @Volatile
+        private var hevcHardwareCache: Boolean? = null
+
+        /**
+         * 这台机器能不能**硬解** HEVC（爱奇艺线路 1080P 码流）。
+         *
+         * 判据只有一条：解码器表里存在支持 `video/hevc` 且
+         * `isHardwareAccelerated` 的解码器。软解不算 —— 1080P HEVC 软解在
+         * 手机上直接掉到个位数帧率，用户看到的是「画质好了但卡成幻灯片」，
+         * 比给 896×504 的 H.264 更糟。
+         *
+         * 任何异常（个别 ROM 的 MediaCodecList 会抛）都按「不支持」处理：
+         * 走 AVC 永远播得出来。
+         */
+        fun supportsHevcHardware(): Boolean {
+            hevcHardwareCache?.let { return it }
+            var supported = false
+            try {
+                val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+                loop@ for (info in list.codecInfos) {
+                    if (info.isEncoder) continue
+                    for (type in info.supportedTypes) {
+                        if (!type.equals("video/hevc", ignoreCase = true)) continue
+                        if (!isHardwareCodec(info)) continue
+                        supported = true
+                        break@loop
+                    }
+                }
+            } catch (error: Throwable) {
+                Log.i(LOG_TAG, "supportsHevc 探测失败：${error.javaClass.simpleName}")
+                supported = false
+            }
+            hevcHardwareCache = supported
+            Log.i(LOG_TAG, "supportsHevc=$supported")
+            return supported
+        }
+
+        /**
+         * 这个解码器是不是**硬件**解码器。
+         *
+         * `MediaCodecInfo.isHardwareAccelerated` 是 API 29 才有的，而本项目
+         * minSdk 23：直接调用在老机器上是 NoSuchMethodError（被外层 catch
+         * 兜住就永远返回 false，等于把能硬解的机器也降成 AVC）。
+         * API 29 以下按命名判：`OMX.google.*` / `c2.android.*` 是 Google 的
+         * 软解，其余（OMX.qcom / OMX.MTK / c2.qti …）都是厂商硬解。
+         */
+        private fun isHardwareCodec(info: MediaCodecInfo): Boolean {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return info.isHardwareAccelerated
+            }
+            val name = info.name.lowercase()
+            if (name.startsWith("omx.google.") || name.startsWith("c2.android.")) {
+                return false
+            }
+            return !name.contains("software") && !name.contains("sw.decoder")
+        }
+
+        /**
+         * 视频编码短名：`hevc` / `avc` / `av1` / `vp9` …（'' = 还没有视频轨）。
+         *
+         * 诊断浮层的「编码」行用它 —— 请求参数只说明我们**要**什么，
+         * 内核解出来的轨道才说明服务端**给**了什么（HEVC 起播失败降级成
+         * AVC 时，两者不一样）。
+         */
+        fun codecNameOf(mime: String?): String {
+            val m = (mime ?: return "").lowercase()
+            if (m.isEmpty()) return ""
+            return when {
+                m.contains("hevc") || m.contains("h265") -> "hevc"
+                m.contains("avc") || m.contains("h264") -> "avc"
+                m.contains("av01") || m.contains("av1") -> "av1"
+                m.contains("vp9") -> "vp9"
+                m.contains("vp8") -> "vp8"
+                else -> m.substringAfter('/', m)
+            }
+        }
     }
 
     private var player: ExoPlayer? = null
@@ -485,6 +572,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 val maxBytes = call.argument<Number>("maxBytes")?.toLong() ?: 0L
                 prefetchSegment(url, headers, maxBytes, result)
             }
+            // IQ_CODEC（2026-11-15）：设备能不能硬解 HEVC。
+            // Dart 侧首次查询后自己也会缓存，这里再缓存一层（见
+            // supportsHevcHardware 的说明）。
+            "supportsHevc" -> result.success(supportsHevcHardware())
             "state" -> result.success(snapshot())
             // NEXT_EPISODE_PRELOAD（改动 ⑥）：首帧 + 播放稳定 3 秒后，
             // Dart 把下一集的清单地址交进来，原生把清单 + 前 2 个分片
@@ -933,6 +1024,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "manifestProxied" to false,
             "timing" to FxTiming.summary(),
             "transportInfo" to "",
+            // IQ_CODEC：没有播放器时编码信息一律空，界面显示 "--"。
+            "videoCodec" to "",
+            "iqCodec" to IqProbe.codec,
+            "iqQuality" to IqProbe.quality,
             )
         }
         // 画面尺寸：FxPlayer 的 value.width/height 和分辨率胶囊都靠它，
@@ -991,6 +1086,13 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "timing" to FxTiming.summary(),
             // 传输层诊断摘要：DNS 命中 / 本地清单代理统计，方便用户截图反馈。
             "transportInfo" to (FxDns.stats() + " " + ManifestProxy.stats()),
+            // IQ_CODEC（2026-11-15）：诊断浮层「编码」行的数据源。
+            //   videoCodec：内核解出来的轨道编码（最可信）；
+            //   iqCodec / iqQuality：爱奇艺解析服务的响应头
+            //   `X-Iq-Codec` / `X-Iq-Quality`（清单抓取时顺手记下）。
+            "videoCodec" to codecNameOf(fmt?.sampleMimeType),
+            "iqCodec" to IqProbe.codec,
+            "iqQuality" to IqProbe.quality,
         )
     }
 
@@ -1016,6 +1118,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         FxTiming.begin(url, resolveMs)
         // CONNECTS：清零连接计数 / 吞吐统计，首帧回来时打 connects=N。
         PlayerHttp.resetConnectCount()
+        // IQ_CODEC：新的一次 open = 新的一条码流，上一集的编码 / 分辨率
+        // 不能留在诊断浮层上（否则降级之后那一行还写着上一集的 HEVC，
+        // 看上去像「降级没生效」）。
+        IqProbe.reset()
         // 播放诊断里「解析」段的落点：Dart 侧已经算好，这里只记日志。
         if (resolveMs > 0) {
             Log.i(LOG_TAG, "TIMING resolve=${resolveMs}ms（hxparse 302 → 最终地址）")

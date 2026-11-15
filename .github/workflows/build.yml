@@ -146,6 +146,14 @@ jobs:
           exit $code
       - name: Playback recovery regressions
         run: flutter test test/playback_regressions_test.dart
+      # ASPECT_REAL（2026-11-15）：画面比例几何回归。
+      #
+      # 用户实测「2.4:1 电影纵向拉长 / 1080×1920 竖屏短剧严重变形 / 4:3 老片
+      # 横向拉长」：容器写死 AspectRatio(16/9)，原生又是 MATCH_PARENT 的
+      # TextureView（它不认比例，谁摆多大就拉成多大）。这里钉住
+      # 「画面框比例 = 视频真实比例」以及 适应 / 填充 / 拉伸 三档的语义。
+      - name: Video aspect geometry regressions
+        run: flutter test test/fx_video_geometry_test.dart
       # LINES_ALL / HOT_ORDER（2026-11-15）：多线路解析 + 热播排序映射的回归。
       # 用真实接口数据（test/fixtures/detail_romelia.json，四条线路）钉住
       # 「详情页只显示一条线路」这个用户实测问题不再回来。
@@ -153,9 +161,39 @@ jobs:
         run: |
           flutter test test/cms_lines_test.dart
           flutter test test/cms_source_test.dart
+      # IQ_CODEC（2026-11-15）：爱奇艺线路按**设备硬解能力**选编码。
+      # 能硬解 HEVC 的机器要 1080P HEVC（地址追加 hevc=1），不能的才退
+      # 896×504 H.264；HEVC 起播失败（解码错误 / 首帧 8 秒）自动降级一次。
+      # 这里钉三件事：地址改写规则、候选序列、以及原生通道契约还在
+      # （supportsHevc 方法 / X-Iq-Codec 响应头）—— 少了任何一处，用户
+      # 看到的不是报错，而是「画质莫名其妙变糊」。
+      - name: iqiyi codec (HEVC/AVC) regressions
+        run: |
+          set -e
+          grep -q 'fun supportsHevcHardware' android_src/kotlin/com/huanxiang/fantasy_tv/ExoPlayerPlugin.kt
+          grep -q '"supportsHevc" ->' android_src/kotlin/com/huanxiang/fantasy_tv/ExoPlayerPlugin.kt
+          grep -q 'video/hevc' android_src/kotlin/com/huanxiang/fantasy_tv/ExoPlayerPlugin.kt
+          grep -q 'X-Iq-Codec' android_src/kotlin/com/huanxiang/fantasy_tv/ManifestProxy.kt
+          grep -q 'iqiyi downgrade hevc->avc' lib/services/iqiyi_codec.dart
+          flutter test test/iqiyi_codec_test.dart
       # SEARCH_RANK：搜索结果按「实际分辨率」跨源全局排序的回归。
       - name: Search rank regressions
         run: flutter test test/search_rank_test.dart
+      # SOURCE_LABEL（2026-11-15）：搜索结果卡片的「来源」标注回归。
+      #
+      # 用户实测同一部片一会儿「来源：云端」一会儿「来源：幻想」。规则是
+      # 「我们自己的源只叫幻想 / 肥猫源用自己名字 / 自加源用自己名字」，
+      # 而且判定只看 api，不看源的名字、也不看它是不是云端下发。
+      - name: Source label regressions
+        run: flutter test test/source_label_test.dart
+      # FX_FALLBACK（2026-11-15）：本片线路全失败后的三段降级
+      # （同源其他版本 → 跨源同名）。跳错片子比播不出来更糟，所以
+      # 片名归一化 / 年份上限 / 解说预告排除 / 集号对齐 / 进度接续
+      # 全部逐条钉住。
+      - name: Playback source fallback regressions
+        run: |
+          flutter test test/fallback_match_test.dart
+          dart run tools/test_fallback_match.dart
       # JAR_PLUGIN（2026-11-15）：肥猫那 41 个 csp_ 源的 jar 插件链路。
       # 原生侧进度 / 自检回传的结构 -> Dart 模型；失败原因必须能翻译成
       # 「类找不到 / 方法签名不匹配 / 缺依赖 / 源站异常」四类人话。

@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models.dart';
 import '../services/fx_display_settings.dart';
 import '../services/fx_player.dart';
+import '../services/fx_video_geometry.dart';
 import '../theme.dart';
 
 /// 播放器通用小工具：时间格式、进度持久化、白玻璃控件。
@@ -212,10 +213,32 @@ class FxPlayerSurface extends StatefulWidget {
 class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
   int _renderEpoch = 0;
 
+  /// 最近一次拿到的**真实**视频宽高比。
+  ///
+  /// 粘住的理由（ASPECT_NO_FLICKER 2026-11-15）：切集 / 换线时播放器会把
+  /// 宽高清成 null，再重新上报。如果这里跟着退回 16:9，容器会「16:9 → 真实
+  /// 比例」跳一次 —— 竖屏短剧就是肉眼可见的一下闪跳。所以只有拿到新的真实
+  /// 宽高才更新，拿不到就一直用上一次的值；从来没拿到过才退回 16:9。
+  double _videoRatio = kFxFallbackVideoAspect;
+
+  /// 只接受真实宽高；返回是否真的变了。
+  bool _syncVideoRatio() {
+    final v = widget.player.value;
+    final real = fxVideoAspectOf(v.width, v.height) ??
+        fxVideoAspectOf(v.videoWidth, v.videoHeight);
+    if (real == null || !real.isFinite || real <= 0) return false;
+    if ((real - _videoRatio).abs() < 0.001) return false;
+    _videoRatio = real;
+    return true;
+  }
+
   // 放在共享画面层处理，普通播放、直播、离线和一起看都不会漏接。
   void _onPlayerChanged() {
+    if (!mounted) return;
     final epoch = widget.player.renderEpoch;
-    if (!mounted || epoch == _renderEpoch) return;
+    // 比例变化也要重建：容器 / 画面框的尺寸就是按它算的。
+    final ratioChanged = _syncVideoRatio();
+    if (epoch == _renderEpoch && !ratioChanged) return;
     setState(() => _renderEpoch = epoch);
   }
 
@@ -225,6 +248,7 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     FxDisplaySettings.instance.addListener(_onSettingsChanged);
     widget.player.addListener(_onPlayerChanged);
     _renderEpoch = widget.player.renderEpoch;
+    _syncVideoRatio();
     // 幂等：读回已保存的画面比例 / 镜像档位，读完会再通知一次。
     unawaited(FxDisplaySettings.instance.ensureLoaded());
   }
@@ -236,6 +260,9 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     oldWidget.player.removeListener(_onPlayerChanged);
     widget.player.addListener(_onPlayerChanged);
     _renderEpoch = widget.player.renderEpoch;
+    // 换播放器（换片 / 换集新建实例）：先看新实例是否已有真实宽高，
+    // 没有就保持上一次的比例，避免闪跳。
+    _syncVideoRatio();
   }
 
   void _onSettingsChanged() {
@@ -255,24 +282,104 @@ class _FxPlayerSurfaceState extends State<FxPlayerSurface> {
     final settings = FxDisplaySettings.instance;
     final aspect = settings.aspect;
     final mirror = settings.mirror;
-    // 画面由 PlatformView 承载（ExoPlayer 的 PlayerView，useController=false）。
+    // 画面由 PlatformView 承载（ExoPlayer 的 TextureView，MATCH_PARENT）。
     // 换成 ExoPlayer 之后没有再「往纹理里写字幕」这回事：硬字幕是画面像素的
     // 一部分，镜像时会跟着翻；独立软字幕轨由 PlayerView 自己渲染。
     // 原来的 mpv sub-visibility / FxMirrorSubtitle 那一套随之去掉。
     final fit = fxAspectFit(aspect);
-    // key 带上档位：改「铺满 / 适应 / 拉伸」要重建 PlatformView，
-    // 否则 resizeMode 是创建时定的，切档不会有反应。
-    // 只按画面比例做 key：切集不重建画面层。
-    final surface = KeyedSubtree(
-      key: ValueKey<String>('surface-${aspect.name}'),
-      child: widget.player.buildVideo(fit: fit),
-    );
-    final framed = fxAspectFrame(aspect, surface);
+    // ASPECT_REAL（2026-11-15）：画面比例由 Flutter 侧几何决定，原生不再
+    // 参与 —— 所以切档**不需要**重建 PlatformView（以前按档位换 key，
+    // 每次改「适应 / 填充 / 拉伸」都要重新挂一次纹理，用户看到的就是黑一下）。
+    final surface = widget.player.buildVideo(fit: fit);
     // MIRROR_NATIVE（2026-11-14）：镜像不能再用 Transform.flip 包 PlatformView。
     // 混合合成下原生视图不跟随 Flutter 变换，翻不了（或翻一下就错位）。
     // 改成下发到原生，翻 PlayerView 自己的 scaleX/scaleY。
     widget.player.setMirror(flipX: mirror.flipX, flipY: mirror.flipY);
-    return framed;
+    // 注意：这里**不能**再包一层 [fxMirrorWrap] —— 镜像已经下发到原生
+    // （见上），Transform 对混合合成的原生视图不生效，包上反而会错位。
+    // 冻结帧那层（[FxAspectBox]）是纯 Flutter 绘制，才需要自己翻。
+    return FxVideoStage(
+      mode: aspect,
+      videoRatio: _videoRatio,
+      child: surface,
+    );
+  }
+}
+
+/// 播放画面几何：把原生画面摆进一个「比例正确」的框里。
+///
+/// 为什么必须在 Flutter 侧算：Android 那个 PlatformView 就是一块
+/// MATCH_PARENT 的 TextureView（`ExoPlayerPlugin.kt` 的 `ExoView`），它只把
+/// 视频纹理**铺满自己占的位置**，完全不看视频宽高比 —— 谁把它摆成多大，
+/// 画面就被拉成多大。所以「不变形」的唯一办法是：框的实际宽高比 = 视频
+/// 真实宽高比（见 [fxFitSize]）。
+///
+/// 三档语义：
+/// - [FxAspectMode.contain]（默认「适应」）：等比放大到完整放进容器，留黑边；
+/// - [FxAspectMode.cover]（「填充」）：等比放大到盖住容器，超出部分裁掉，
+///   **不改变比例**；
+/// - [FxAspectMode.fill]（「拉伸」）：直接铺满容器，会变形 —— 只有用户主动
+///   选它才这样。
+/// - 16:9 / 4:3 / 1:1 固定比例档：先把容器框成目标比例（框外黑边），
+///   视频在框内按「填充」裁满，和改版前的语义一致。
+class FxVideoStage extends StatelessWidget {
+  const FxVideoStage({
+    super.key,
+    required this.mode,
+    required this.videoRatio,
+    required this.child,
+  });
+
+  /// 当前画面比例档位（全局设置）。
+  final FxAspectMode mode;
+
+  /// 视频真实宽高比；拿不到时传 [kFxFallbackVideoAspect]。
+  final double videoRatio;
+
+  /// 画布本体（原生画面 / 冻结帧）。
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxWidth = constraints.maxWidth;
+        final maxHeight = constraints.maxHeight;
+        // 尺寸还没定（无限宽 / 无限高，比如塞进列表里）：不猜，原样交回去。
+        if (!maxWidth.isFinite ||
+            !maxHeight.isFinite ||
+            maxWidth <= 0 ||
+            maxHeight <= 0) {
+          return child;
+        }
+        final container = Size(maxWidth, maxHeight);
+        final frame = mode.frameRatio;
+        final Size box;
+        if (frame == null) {
+          // 适应 / 填充 / 拉伸：直接按视频比例算框。
+          box = fxFitSize(container, videoRatio, fxAspectFit(mode));
+        } else {
+          // 固定比例档：先框成目标比例，再让视频在框内裁满（不变形）。
+          final framed = fxFitSize(container, frame, BoxFit.contain);
+          box = fxFitSize(framed, videoRatio, BoxFit.cover);
+        }
+        if (!box.width.isFinite || !box.height.isFinite) return child;
+        if (box.width <= 0 || box.height <= 0) return child;
+        // OverflowBox：填充档的框比容器大，必须让它按真实尺寸排出去，
+        // 否则 SizedBox 会被父约束夹回容器尺寸 —— 那又变形了。
+        // 多出来的部分由外层 ClipRect 裁掉。
+        return ClipRect(
+          child: OverflowBox(
+            alignment: Alignment.center,
+            minWidth: 0,
+            maxWidth: double.infinity,
+            minHeight: 0,
+            maxHeight: double.infinity,
+            child: SizedBox.fromSize(size: box, child: child),
+          ),
+        );
+      },
+    );
   }
 }
 

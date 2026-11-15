@@ -10,6 +10,9 @@ import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/device_status.dart';
 import '../services/fx_player.dart';
+import '../services/iq_codec_gate.dart';
+import '../services/iqiyi_codec.dart';
+import '../services/play_log.dart';
 import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
 import '../services/video_marks.dart';
@@ -219,6 +222,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   bool _loading = false;
   bool _error = false;
   String _errorText = '';
+
+  /// FX_FALLBACK（2026-11-15）：全屏里的救援链已经把本片线路全部试过。
+  ///
+  /// 置位后一旦本集彻底打不开，就把现场（集号 + 进度）交回竖屏继续降级：
+  /// 竖屏会接着换线路 → 同源其他版本 → 跨源同名，全屏这边不等死。
+  bool _sourceExhausted = false;
   bool _sourceFailNotified = false;
   bool _ended = false;
 
@@ -807,8 +816,16 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!mounted || token != _loadToken) return;
 
     var ok = false;
-    for (final url in candidates) {
+    // IQ_CODEC（2026-11-15）：和竖屏播放页同一套规则 —— 能硬解 HEVC 的
+    // 机器先要 `hevc=1`（1920×1080），起播失败再落到同一条地址的 AVC
+    // （896×504）；不支持 HEVC 的机器直接用服务端默认码流。
+    await IqCodecGate.ensure();
+    if (!mounted || token != _loadToken) return;
+    final targets = IqCodecGate.plan(candidates);
+    for (final target in targets) {
       if (!mounted || token != _loadToken) return;
+      final url = target.url;
+      if (target.degradeFromHevc) fxPlayLog(iqDegradeLog(url));
       try {
         // 8 秒拿不到可播状态就判这条地址失败，避免黑屏一直转圈。
         await c
@@ -833,7 +850,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               onPlayExpired: _onPlatformExpired,
               rescueLines: _rescueLineSource,
             )
-            .timeout(_openReadyTimeout);
+            // IQ_CODEC：HEVC 候选只等 8 秒，失败就落到它的 AVC 地址。
+            .timeout(target.hevc ? IqCodecGate.hevcOpenTimeout : _openReadyTimeout);
         if (!mounted || token != _loadToken) return;
         final durationMs = c.value.duration.inMilliseconds;
         var start = resume;
@@ -876,6 +894,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
           _loadingHint = null;
         });
         _sourceFailNotified = false;
+        _sourceExhausted = false;
         ok = true;
         _wake();
         // 续播静默处理：直接停在上次位置，不弹「已跳到上次位置」提示。
@@ -1026,17 +1045,21 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         final freshUrl =
             CmsBridge.absolutePlayUrl(widget.videoId, fresh.url);
         if (freshUrl.isEmpty) continue;
+        // IQ_CODEC：救援换线同样按设备能力选编码（能力已缓存，同步可判）。
+        final adapted = IqCodecGate.adapt(freshUrl);
         FxPlayCache.invalidate(widget.videoId, _ep, _line);
         if (mounted) setState(() => _line = next.id);
         return FxLineSource(
-          url: freshUrl,
+          url: adapted,
           headers: fresh.headers,
-          direct: fxShouldUseHlsProxy(freshUrl, isHls: fresh.isHls),
+          direct: fxShouldUseHlsProxy(adapted, isHls: fresh.isHls),
         );
       } catch (_) {
         // 这条取不到地址就继续试下一条线路。
       }
     }
+    // 本片所有线路都取不到地址：标记「源已试尽」，失败收尾时交回竖屏。
+    _sourceExhausted = true;
     return null;
   }
 
@@ -1218,6 +1241,14 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     _freezeOpaque = false;
     if (_registerFailure()) return;
     if (!mounted) return;
+    // FX_FALLBACK：本片线路已在全屏里全部试过（救援链拿不到下一条），
+    // 不再让用户对着错误页干等 —— 带着集号与进度回竖屏，由竖屏继续
+    // 降级（换线路 → 同源其他版本 → 跨源同名），能换就接着这一集播。
+    if (_sourceExhausted && widget.canChangeLine && !_exiting) {
+      _sourceExhausted = false;
+      unawaited(_exit(requestLineChange: true, sourceFailed: true));
+      return;
+    }
     setState(() {
       _loading = false;
       _loadingHint = null;

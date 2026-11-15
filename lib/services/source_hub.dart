@@ -9,6 +9,7 @@ import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
+import 'fallback_match.dart' show fxNormTitle;
 import 'jar_spider.dart';
 import 'tvbox_crypto.dart';
 
@@ -1280,13 +1281,12 @@ class SourceHub extends ChangeNotifier {
   static String dedupeKey(VideoCard card) =>
       '${normTitle(card.title)}|${card.year}|${card.fromSource}';
 
-  static String normTitle(String raw) {
-    final text = raw
-        .trim()
-        .toLowerCase()
-        .replaceAll(RegExp(r'[\s\u3000·・•,，。.、:：;；!！?？\-—_/\\|｜()（）\[\]【】]'), '');
-    return text;
-  }
+  /// 片名归一化（去大小写 / 空白 / 标点）。
+  ///
+  /// FX_FALLBACK（2026-11-15）：规则本体搬到 `fallback_match.dart`
+  /// 的 [fxNormTitle]，播放失败后的跨源匹配用的是**同一个函数** ——
+  /// 两处各写一套归一化，迟早会出现「搜索页认作同一部、换源却认不出来」。
+  static String normTitle(String raw) => fxNormTitle(raw);
 
   /// 直播内容不能出现在搜索 / 分类 / 排行里（直播有独立入口）。
   static bool isLiveCard(VideoCard card) {

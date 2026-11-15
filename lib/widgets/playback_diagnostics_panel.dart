@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/fx_player.dart';
+import '../services/iqiyi_codec.dart';
 
 /// 播放诊断浮层。
 ///
@@ -29,6 +30,10 @@ class PlaybackDiagnosticsData {
     this.droppedFrames = 0,
     this.width = 0,
     this.height = 0,
+    this.videoCodec = '',
+    this.iqCodec = '',
+    this.iqQuality = '',
+    this.codecHint = '',
   });
 
   /// -1 = 还没到（界面显示「--」）。
@@ -52,6 +57,33 @@ class PlaybackDiagnosticsData {
   final int width;
   final int height;
 
+  /// 内核解出来的真实编码（`hevc` / `avc` …）；'' = 还没拿到视频轨。
+  ///
+  /// IQ_CODEC（2026-11-15）：爱奇艺线路分 HEVC（1920×1080）与 AVC
+  /// （896×504）两条码流，客户端按设备硬解能力选。「画质对不对」这件事
+  /// 只能靠这一行 + 分辨率说话，光看请求参数不够（服务端可能已经降级）。
+  final String videoCodec;
+
+  /// 服务端响应头 `X-Iq-Codec` / `X-Iq-Quality`（拿不到就是 ''）。
+  final String iqCodec;
+  final String iqQuality;
+
+  /// 本次**请求**的编码（`hevc` / `avc`）；'' = 不是爱奇艺线路 / 没请求。
+  final String codecHint;
+
+  /// 编码那一行的文案（`HEVC 1920x1080` / `H.264 896x504`）。
+  ///
+  /// 取值顺序：内核实测 → 服务端响应头 → 本次请求参数，规则在
+  /// [iqCodecText] 里（纯函数，单独可测）。
+  String get codecText => iqCodecText(
+        mime: videoCodec,
+        headerCodec: iqCodec,
+        headerQuality: iqQuality,
+        requested: codecHint,
+        width: width,
+        height: height,
+      );
+
   /// 从播放器状态直接映射（页面里少写一遍转字段的代码）。
   factory PlaybackDiagnosticsData.fromPlayer(FxPlayerValue value) {
     final timing = value.timing;
@@ -74,6 +106,10 @@ class PlaybackDiagnosticsData {
       droppedFrames: value.droppedFrames,
       width: rawW > 0 ? rawW : shownW,
       height: rawH > 0 ? rawH : shownH,
+      videoCodec: value.videoCodec,
+      iqCodec: value.iqCodec,
+      iqQuality: value.iqQuality,
+      codecHint: value.codecHint,
     );
   }
 }
@@ -148,6 +184,8 @@ class PlaybackDiagnosticsPanel extends StatelessWidget {
       _DiagRowData('码率', kbpsText, warn: false),
       _DiagRowData('丢帧', '${data.droppedFrames}', warn: false),
       _DiagRowData('分辨率', _sizeText(), warn: false),
+      // 编码：HEVC 硬解失败会降级成 AVC（896×504），这一行是唯一证据。
+      _DiagRowData('编码', data.codecText, warn: false),
     ];
   }
 

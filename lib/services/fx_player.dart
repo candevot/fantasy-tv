@@ -8,6 +8,7 @@ import '../models.dart';
 import 'cms_bridge.dart';
 import 'exo_player.dart';
 import 'hls_segment_index.dart';
+import 'iqiyi_codec.dart';
 import 'local_hls_proxy.dart';
 import 'playback_recovery.dart';
 
@@ -71,6 +72,10 @@ class FxPlayerValue {
     this.bufferedAhead = Duration.zero,
     this.bitrateKbps = 0,
     this.measuredKbps = 0,
+    this.videoCodec = '',
+    this.iqCodec = '',
+    this.iqQuality = '',
+    this.codecHint = '',
   });
 
   /// 是否已经拿到视频参数/时长，可以开始渲染与 seek。
@@ -153,6 +158,24 @@ class FxPlayerValue {
   /// OkHttp 实测吞吐（kbps）；0 = 还没测到。
   final int measuredKbps;
 
+  /// 真实解码出的视频编码短名：`hevc` / `avc` / `av1` / `vp9`；'' = 未知。
+  ///
+  /// IQ_CODEC（2026-11-15）：爱奇艺线路「请求 HEVC、实际给 AVC」这件事
+  /// 只有内核解出来的轨道说得清，诊断浮层的「编码」就取这里。
+  final String videoCodec;
+
+  /// 服务端响应头 `X-Iq-Codec`（`hevc` / `avc`）。
+  final String iqCodec;
+
+  /// 服务端响应头 `X-Iq-Quality`（如 `1920x1080`）。
+  final String iqQuality;
+
+  /// 本次 open 的地址**请求**的是哪种编码（`hevc` / `avc`）；'' = 非爱奇艺。
+  ///
+  /// 只是请求参数，不代表服务端真给了（降级后这里仍是 hevc），
+  /// 所以诊断浮层把它排在最后一位，前面两位才是实测。
+  final String codecHint;
+
   /// 画面尺寸，未就绪时宽高为 0。
   Size get size => Size((width ?? 0).toDouble(), (height ?? 0).toDouble());
 
@@ -214,6 +237,10 @@ class FxPlayerValue {
     Duration? bufferedAhead,
     int? bitrateKbps,
     int? measuredKbps,
+    String? videoCodec,
+    String? iqCodec,
+    String? iqQuality,
+    String? codecHint,
   }) {
     return FxPlayerValue(
       isInitialized: isInitialized ?? this.isInitialized,
@@ -239,6 +266,10 @@ class FxPlayerValue {
       bufferedAhead: bufferedAhead ?? this.bufferedAhead,
       bitrateKbps: bitrateKbps ?? this.bitrateKbps,
       measuredKbps: measuredKbps ?? this.measuredKbps,
+      videoCodec: videoCodec ?? this.videoCodec,
+      iqCodec: iqCodec ?? this.iqCodec,
+      iqQuality: iqQuality ?? this.iqQuality,
+      codecHint: codecHint ?? this.codecHint,
     );
   }
 }
@@ -462,21 +493,27 @@ class FxPlayer implements Listenable {
     BoxFit fit = BoxFit.contain,
     Alignment alignment = Alignment.center,
   }) {
-    // BoxFit → Media3 的缩放模式。不映射的话 PlayerView 永远按 FIT 缩放，
-    // 「铺满」「拉伸」两个档位会失效。
-    final mode = switch (fit) {
-      BoxFit.cover => exoResizeZoom,
-      BoxFit.fill => exoResizeFill,
-      _ => exoResizeFit,
-    };
+    // ASPECT_REAL（2026-11-15）：画面比例**不再**交给原生。
+    //
+    // 原生那个 PlatformView 是一块 MATCH_PARENT 的 TextureView
+    // （`ExoPlayerPlugin.kt` 的 `ExoView`），它不认 resizeMode —— 传过去的
+    // creationParams 只被原样收下、没有任何一处读取。以前指望它按
+    // FIT/ZOOM/FILL 缩放，结果「填充 / 拉伸」两个档位一直是空的，而且
+    // 「画面被拉成 16:9」正是它铺满容器造成的。
+    //
+    // 现在比例由 Flutter 侧的 [FxVideoStage] 算好框的尺寸，纹理铺满那个
+    // 比例正确的框就不会变形；[fit] 只留作语义标记（谁要用再把几何传下去）。
     return ColoredBox(
       color: Colors.black,
-      // 只按缩放模式做 key：切集 / 换线路**不重建** PlatformView。
-      // ExoPlayer 的 PlayerView 一直绑着同一个内核实例，重建只会多一次
-      // 纹理重新挂载，用户看到的就是切换瞬间的黑一下。
+      // key 固定：切集 / 换线路 / 切画面比例档位都**不重建** PlatformView。
+      // 重建只会多一次纹理重新挂载，用户看到的就是切换瞬间的黑一下。
       child: ExoPlayerView(
-        key: ValueKey<String>('exo-surface-$mode'),
-        resizeMode: mode,
+        key: const ValueKey<String>('exo-surface'),
+        resizeMode: switch (fit) {
+          BoxFit.cover => exoResizeZoom,
+          BoxFit.fill => exoResizeFill,
+          _ => exoResizeFit,
+        },
       ),
     );
   }
@@ -1121,6 +1158,11 @@ class FxPlayer implements Listenable {
       bufferedAhead: st.bufferedAhead,
       bitrateKbps: st.bitrateKbps,
       measuredKbps: st.measuredKbps,
+      // IQ_CODEC：编码信息原样透传（原生从 videoFormat / 响应头拿的）。
+      videoCodec: st.videoCodec,
+      iqCodec: st.iqCodec,
+      iqQuality: st.iqQuality,
+      codecHint: iqRequestedCodec(_sourceUrl),
     );
 
     final secondChanged = shown.inSeconds != _value.position.inSeconds;

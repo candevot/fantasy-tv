@@ -8,7 +8,12 @@ import '../main.dart' show Nav;
 import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../services/download_service.dart';
+import '../services/fallback_match.dart';
 import '../services/fx_player.dart';
+import '../services/play_log.dart';
+import '../services/source_fallback.dart';
+import '../services/source_hub.dart';
+import '../services/fx_video_geometry.dart';
 import '../widgets/detail_widgets.dart';
 import '../widgets/download_sheet.dart';
 import '../widgets/player_theme.dart';
@@ -32,6 +37,8 @@ class DetailPage extends StatefulWidget {
     this.title = '',
     this.year = 0,
     this.retried = false,
+    this.startSeconds,
+    this.fallbackHops = 0,
   });
 
   final String id;
@@ -49,6 +56,19 @@ class DetailPage extends StatefulWidget {
   /// 已经按片名重查过一次（换到新记录的那个页面不再重查，避免来回跳）。
   final bool retried;
 
+  /// 起播位置（秒），null = 按本地保存的进度续播。
+  ///
+  /// FX_FALLBACK（2026-11-15）：跨源换源会 pushReplacement 到这个页面打开
+  /// **另一条记录**；当前集号由 [ep] 带入，播放进度由它带入 ——
+  /// 「第 5 集看到 12:34，换源后还是第 5 集 12:34」。
+  final double? startSeconds;
+
+  /// 这次页面是「跨源换源」跳过来的第几次（FX_FALLBACK）。
+  ///
+  /// 只切一次：跳到目标记录时 +1，超过 [fxFallbackMaxHops] 时那条记录的
+  /// 线路也全失败就直接给最终提示，不会继续 A → B → C 地跳。
+  final int fallbackHops;
+
   @override
   State<DetailPage> createState() => _DetailPageState();
 }
@@ -56,6 +76,12 @@ class DetailPage extends StatefulWidget {
 class _DetailPageState extends State<DetailPage>
     with SingleTickerProviderStateMixin {
   final GlobalKey<PlayerViewState> _playerKey = GlobalKey<PlayerViewState>();
+
+  /// 内嵌播放画面的真实宽高比（默认 16:9，页面自绘的黑色留边即它的高度差）。
+  ///
+  /// 见 [fxPlayerStageHeight]：1920×800 的电影容器收窄、1080×1920 的竖屏
+  /// 短剧停在 16:9 高度左右留黑 —— 都不再被硬拉成 16:9。
+  double _videoAspect = kFxFallbackVideoAspect;
   final ScrollController _scroll = ScrollController();
   late final AnimationController _fade;
 
@@ -1033,21 +1059,170 @@ class _DetailPageState extends State<DetailPage>
     };
   }
 
-  /// 全部线路都试过仍不可播：在播放器里显示错误 + 重试/换线路按钮。
+  /* ---------------------------------------------- 三段降级（FX_FALLBACK） */
+
+  /// 本次播放会话的降级状态机：**跨源只切一次**、每个源只试一次。
+  FxSourceFallback? _fallback;
+
+  /// 正在跑第 2 / 3 段（防并发，UI 只弹一次「正在尝试其他源…」）。
+  bool _fallbackBusy = false;
+
+  /// 这一次播放会话的降级已经跑完且没找到：再失败就直接给最终提示，
+  /// 不重复搜一遍（「只尝试一次」的落地）。
+  bool _fallbackDone = false;
+
+  /// 当前记录属于哪个源（日志里的 `from=`）。外部 id 带 `@src:` 前缀，
+  /// 按它解回源名；主站 / 旧接口一律算「幻想」。
+  String _currentSourceName() {
+    final id = widget.id.trim();
+    if (id.startsWith(SourceHub.idMark)) {
+      final source = SourceHub.instance.decodeSource(id);
+      final label = (source?.resultLabel ?? '').trim();
+      if (label.isNotEmpty) return label;
+    }
+    // SOURCE_LABEL：「幻想」这个统一叫法定义在 [KSource] 上
+    // （片源对象），不是 SourceHub 的静态成员。
+    final own = KSource.ownResultLabel;
+    return own.isEmpty ? '幻想' : own;
+  }
+
+  /// 全部线路都试过仍不可播：先走第 2 / 3 段（同源其他版本 → 跨源同名），
+  /// 都不行才给最终提示。
+  ///
+  /// 三段降级的顺序：
+  /// ```
+  /// 第 1 段  本片其他线路     _switchNextLine（已有）
+  /// 第 2 段  同源其他版本     FxSourceFallback.find 内部先查我们自己的库
+  /// 第 3 段  跨源找同名       再去外部源（肥猫的 jar 源）搜
+  /// 全失败   「所有线路都尝试过了，暂时无法播放」
+  /// ```
   void _showPlaybackError({SourceIssue? issue}) {
     final lines = _detail?.lines ?? const <LineInfo>[];
-    final message = lines.isEmpty
-        ? '暂无线路，请稍后刷新重试'
-        : switch (issue) {
-            SourceIssue.parse => '所有线路暂不可直接播放，请重试或换线路',
-            SourceIssue.empty => '所有线路都没有可用播放地址，请稍后重试',
-            SourceIssue.expired => '该平台线路已失效，请切换线路',
-            _ => '所有线路都不可用，请重试或换线路',
-          };
+    if (lines.isEmpty || _detail == null) {
+      _showFinalPlaybackError(issue: issue);
+      return;
+    }
+    // 已经跨源切过一次（这条记录就是换过来的目标）：不再往外跳。
+    if (widget.fallbackHops >= fxFallbackMaxHops) {
+      _showFinalPlaybackError(issue: issue);
+      return;
+    }
+    if (_fallbackDone || _fallbackBusy) {
+      _showFinalPlaybackError(issue: issue);
+      return;
+    }
+    unawaited(_attemptSourceFallback(issue: issue));
+  }
+
+  /// 第 2 / 3 段：换到另一条记录 / 另一个源，**保持集号与进度**。
+  Future<void> _attemptSourceFallback({SourceIssue? issue}) async {
+    if (_fallbackBusy || _fallbackDone) return;
+    final detail = _detail;
+    if (detail == null) {
+      _showFinalPlaybackError(issue: issue);
+      return;
+    }
+    final fb = _fallback ??= FxSourceFallback(
+      title: detail.title.trim().isNotEmpty ? detail.title : widget.title,
+      year: detail.year > 0 ? detail.year : widget.year,
+      currentId: widget.id,
+      sourceName: _currentSourceName(),
+    );
+    if (fb.switched) {
+      _showFinalPlaybackError(issue: issue);
+      return;
+    }
+    _fallbackBusy = true;
+    // 换源前的现场：集号 + 位置 + 是否在播。位置优先取播放器可信进度，
+    // 播放器报错后位置可能被清零，播放页会退回「本集最后一次正常位置」。
+    final player = _playerKey.currentState;
+    final snap = player?.playbackSnapshot();
+    final ep = snap?.ep ?? _ep;
+    final position = snap?.seconds ?? 0;
+
+    // UI：切源时明确告诉用户在干什么（不是一直转圈）。
+    player?.showResolving(fxFallbackSearchingText);
+    if (mounted) fxToast(context, fxFallbackSearchingText);
+
+    FxFallbackOutcome outcome = const FxFallbackOutcome.miss();
+    try {
+      outcome = await fb.find(ep: ep, position: position);
+    } catch (_) {
+      // 降级只是兜底，任何异常都收敛成「没找到」，页面照常给最终提示。
+      outcome = const FxFallbackOutcome.miss(reason: 'exception');
+    }
+    _fallbackBusy = false;
+    if (!mounted) return;
+    final target = outcome.candidate;
+    if (target == null) {
+      _fallbackDone = true;
+      player?.clearResolving();
+      _showFinalPlaybackError(
+        issue: issue,
+        note: outcome.note,
+        jarSkipped: outcome.jarSkipped,
+      );
+      return;
+    }
+
+    // 命中：把「第 N 集 + 位置」原样带过去，整页换到目标记录。
+    player?.clearResolving();
+    fxPlayLog(
+      fxFallbackResumeLog(
+        ep: target.ep,
+        posMs: (position * 1000).round(),
+        from: fb.sourceName,
+        to: target.sourceName,
+      ),
+    );
+    final tail = outcome.note.trim();
+    fxToast(
+      context,
+      tail.isEmpty
+          ? fxFallbackSwitchedText(target.sourceName)
+          : '${fxFallbackSwitchedText(target.sourceName)} · $tail',
+    );
+    _failedLines.clear();
+    _autoLineTries = 0;
+    await Navigator.of(context).pushReplacement(
+      FxPageRoute(
+        builder: (_) => DetailPage(
+          id: target.videoId,
+          ep: target.ep,
+          line: target.lineId,
+          title: target.title,
+          year: detail.year,
+          // 新记录按这条线路的第一集开始播也不需要「从头」：位置跟着走。
+          startSeconds: position > 0 ? position : null,
+          retried: true,
+          fallbackHops: widget.fallbackHops + 1,
+        ),
+      ),
+    );
+  }
+
+  /// 三段全部失败：给明确提示，不停在转圈。
+  void _showFinalPlaybackError({
+    SourceIssue? issue,
+    String note = '',
+    bool jarSkipped = false,
+  }) {
+    final lines = _detail?.lines ?? const <LineInfo>[];
+    String message;
+    if (lines.isEmpty) {
+      message = '暂无线路，请稍后刷新重试';
+    } else {
+      message = fxFallbackAllFailedText;
+      final tail = note.trim();
+      if (tail.isNotEmpty) message = '$message（$tail）';
+      // 第 3 段因为 jar 没装被跳过：说清是「没装插件」，不是「没有这部片」。
+      if (jarSkipped) message = '$message · 装好 jar 插件（spider.jar）后可跨源再找一次';
+      if (issue == SourceIssue.parse) message = '$message · 这些线路都需要现场解析';
+    }
     final player = _playerKey.currentState;
     if (player != null) {
       player.showSourceError(message);
-    } else {
+    } else if (mounted) {
       fxToast(context, message);
     }
   }
@@ -1506,30 +1681,48 @@ class _DetailPageState extends State<DetailPage>
   }
 
   Widget _playerHeader(VideoDetail d) {
+    // ASPECT_REAL（2026-11-15）：播放区高度跟视频真实比例走，不写死 16:9。
     return ColoredBox(
       color: Colors.black,
-      child: AspectRatio(
-        aspectRatio: 16 / 9,
-        child: PlayerView(
-          key: _playerKey,
-          videoId: widget.id,
-          ep: _ep,
-          line: _lineId,
-          detail: d,
-          onEpChange: _onEpChange,
-          onSourceFailed: () => _reportLineIssue(SourceIssue.error),
-          onSourceIssue: _reportLineIssue,
-          onChangeLine: d.lines.length > 1 ? () => _switchNextLine() : null,
-          onLineFallback: _onLineFallback,
-          onSwitchingChanged: (busy) {
-            if (!mounted || _playerSwitchingLine == busy) return;
-            setState(() => _playerSwitchingLine = busy);
-          },
-          onPlaybackStarted: _onPlaybackStarted,
-          autoPlay: true,
-        ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          return SizedBox(
+            height: fxPlayerStageHeight(
+              width: constraints.maxWidth,
+              videoRatio: _videoAspect,
+            ),
+            child: PlayerView(
+              key: _playerKey,
+              videoId: widget.id,
+              ep: _ep,
+              line: _lineId,
+              detail: d,
+              onEpChange: _onEpChange,
+              onSourceFailed: () => _reportLineIssue(SourceIssue.error),
+              onSourceIssue: _reportLineIssue,
+              onChangeLine: d.lines.length > 1 ? () => _switchNextLine() : null,
+              onLineFallback: _onLineFallback,
+              onSwitchingChanged: (busy) {
+                if (!mounted || _playerSwitchingLine == busy) return;
+                setState(() => _playerSwitchingLine = busy);
+              },
+              onVideoAspect: _onVideoAspect,
+              onPlaybackStarted: _onPlaybackStarted,
+              autoPlay: true,
+              // FX_FALLBACK：跨源换源带过来的起播位置（保持原集号与原进度）。
+              startSeconds: widget.startSeconds,
+            ),
+          );
+        },
       ),
     );
+  }
+
+  /// 内嵌播放器上报真实比例 → 播放区高度跟着变（拿不到时保持上一次的值）。
+  void _onVideoAspect(double ratio) {
+    if (!mounted || !ratio.isFinite || ratio <= 0) return;
+    if ((ratio - _videoAspect).abs() < 0.001) return;
+    setState(() => _videoAspect = ratio);
   }
 
   Widget _topArea() {

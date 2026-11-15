@@ -366,6 +366,9 @@ object ManifestProxy {
                 Log.i(LOG_TAG, "mproxy HTTP ${response.code} $url")
                 return null
             }
+            // IQ_CODEC：爱奇艺解析服务在清单响应里带 X-Iq-Codec /
+            // X-Iq-Quality（实际编码 / 实际分辨率）。顺手记下来给诊断浮层。
+            IqProbe.recordFrom(response)
             val body = response.body ?: return null
             val stream = body.byteStream()
             val out = java.io.ByteArrayOutputStream()
@@ -644,5 +647,66 @@ object ManifestProxy {
         400 -> "Bad Request"
         404 -> "Not Found"
         else -> "OK"
+    }
+}
+
+/**
+ * 爱奇艺解析服务的编码回执（IQ_CODEC 2026-11-15）。
+ *
+ * 服务端实测会在播放清单的响应头里带：
+ * ```
+ * X-Iq-Codec:   hevc | avc     ← 这次实际给的编码
+ * X-Iq-Quality: 1920x1080      ← 这次实际给的分辨率
+ * ```
+ * 我们请求 `hevc=1` 只是「想要」，头里写的才是「给的是什么」——
+ * HEVC 起播失败降级到 AVC 之后，两者恰好不一样，诊断浮层必须显示后者。
+ *
+ * 头是在 [ManifestProxy] 抓清单时顺手读到的（清单本来就要抓，不额外发请求），
+ * 每次 `open` 由 [ExoPlayerPlugin] 调 [reset] 清空。
+ */
+object IqProbe {
+
+    @Volatile
+    var codec: String = ""
+        private set
+
+    @Volatile
+    var quality: String = ""
+        private set
+
+    /**
+     * 从一次响应（含 302 跳转链）里记回执。
+     *
+     * 爱奇艺的 `/play/iqiyi/<ep>/index.m3u8` 先 302 到 `/iqiyi.m3u8?tvid=…`，
+     * 头可能出现在跳转前后的**任意一跳**上，所以沿 [Response.priorResponse]
+     * 往回找（最多 5 跳，防异常环）。
+     */
+    fun recordFrom(response: Response) {
+        var hop: Response? = response
+        var depth = 0
+        while (hop != null && depth < 5) {
+            val c = hop.header("X-Iq-Codec")
+            val q = hop.header("X-Iq-Quality")
+            if (!c.isNullOrBlank() || !q.isNullOrBlank()) {
+                record(c, q)
+                return
+            }
+            hop = hop.priorResponse
+            depth++
+        }
+    }
+
+    /** 记一次响应：只有头里真有值时覆盖，别把上一次的结果冲成空。 */
+    fun record(codecHeader: String?, qualityHeader: String?) {
+        val c = (codecHeader ?: "").trim()
+        val q = (qualityHeader ?: "").trim()
+        if (c.isEmpty() && q.isEmpty()) return
+        if (c.isNotEmpty()) codec = c.lowercase()
+        if (q.isNotEmpty()) quality = q
+    }
+
+    fun reset() {
+        codec = ""
+        quality = ""
     }
 }

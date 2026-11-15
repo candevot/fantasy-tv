@@ -11,7 +11,10 @@ import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/exo_player.dart';
 import '../services/fx_player.dart';
+import '../services/fx_video_geometry.dart';
 import '../services/hls_segment_index.dart';
+import '../services/iq_codec_gate.dart';
+import '../services/iqiyi_codec.dart';
 import '../services/play_log.dart';
 import '../services/play_orientation.dart';
 import '../services/play_path.dart';
@@ -30,6 +33,28 @@ import '../utils/fx_route.dart';
 
 /// 当前线路不能直接播放的原因，交给外层决定换线路与提示文案。
 enum SourceIssue { parse, empty, expired, error }
+
+/// 换源 / 换线路降级前抓下来的「播放现场」（FX_FALLBACK，2026-11-15）。
+///
+/// 三段降级换的不只是线路，可能是**另一条记录 / 另一个源**，换完之后必须还能
+/// 接着看：集号、位置、是否在播都要带过去。位置优先取播放器真实进度，
+/// 播放器已经报错（位置可能被重置）时退回最后一次正常位置 / 切换期间锁定的进度。
+class FxPlaybackSnapshot {
+  const FxPlaybackSnapshot({
+    required this.ep,
+    required this.position,
+    required this.playing,
+    required this.lineId,
+  });
+
+  final int ep;
+  final Duration position;
+  final bool playing;
+  final String lineId;
+
+  /// 位置（秒）—— 换源后 seek 用它。
+  double get seconds => position.inMilliseconds / 1000.0;
+}
 
 /// 详情页内嵌播放器（16:9），也是独立播放页复用的播放控件。
 ///
@@ -53,13 +78,22 @@ class PlayerView extends StatefulWidget {
     this.onChangeLine,
     this.onLineFallback,
     this.onSwitchingChanged,
+    this.onVideoAspect,
     this.autoPlay = true,
+    this.startSeconds,
   });
 
   final String videoId;
   final int ep;
   final String line;
   final VideoDetail? detail;
+
+  /// 起播位置（秒），null = 按本地保存的进度续播。
+  ///
+  /// FX_FALLBACK（2026-11-15）：跨源换源是**换一条记录再打开**（详情页
+  /// pushReplacement），新页面的本地进度是空的；换源前把「第 N 集 + 当前
+  /// 进度」原样带过来，用户看到的才是「接着刚才的地方播」。
+  final double? startSeconds;
   final ValueChanged<int>? onEpChange;
   final VoidCallback? onFullscreen;
   final VoidCallback? onSourceFailed;
@@ -76,6 +110,12 @@ class PlayerView extends StatefulWidget {
 
   /// 线路切换开关状态：为 true 时外层应禁用线路卡片，避免重复点击并发 open。
   final ValueChanged<bool>? onSwitchingChanged;
+
+  /// 视频真实宽高比就绪 / 变化时回调（如 2.4:1 = 2.4、竖屏 9:16 ≈ 0.5625）。
+  ///
+  /// 外层页面拿它算播放区高度，让容器跟着视频比例变（ASPECT_REAL
+  /// 2026-11-15）。只报真实值，拿不到宽高时不回调 —— 外层保持上一次的值。
+  final ValueChanged<double>? onVideoAspect;
 
   final bool autoPlay;
 
@@ -174,6 +214,16 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   bool _controls = true;
   Timer? _hideTimer;
+
+  /// IQ_CODEC（2026-11-15）：这次 open 用的是 HEVC 还是降级后的 AVC。
+  ///
+  /// 只影响「通知条 / 日志怎么说」，不改播放行为 —— 地址选择在
+  /// [IqCodecGate.plan] 里已经定了。
+  bool _iqHevc = false;
+  bool _iqDegraded = false;
+
+  /// 已经提示过的「这集用什么编码」（`videoId|线路`，一集只提示一次）。
+  String _codecNoticeKey = '';
 
   /// 播放诊断浮层（默认关，持久化在 AppSettings.playbackDiagnostics）。
   ///
@@ -390,7 +440,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     });
     unawaited(_loadMark());
     unawaited(_restoreSleepTimer());
-    _bootstrap(seekToSaved: true, saveOld: false);
+    // FX_FALLBACK：跨源换源带来的「第 N 集 + 位置」优先于本地进度。
+    final start = widget.startSeconds;
+    _bootstrap(
+      seekToSaved: start == null,
+      saveOld: false,
+      resumeSeconds: start,
+    );
   }
 
   @override
@@ -1119,8 +1175,24 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // （原生走 stop + clearMediaItems + setMediaSource + prepare）。
     final reusable =
         (_controller != null && !_controller!.isDisposed) ? _controller : null;
-    for (final url in candidates) {
+    // IQ_CODEC（2026-11-15）：爱奇艺线路按**设备硬解能力**选编码。
+    //
+    // 「能硬解 HEVC 的机器要 1080P HEVC，不能的才退 896×504 H.264」——
+    // 能力探测在原生（`supportsHevc`），地址改写 / 失败降级在 IQ gate 里，
+    // 这里只是把候选地址换成「按能力排好的尝试序列」：
+    //   · 支持 HEVC → [hevc=1 的地址, 去掉 hevc 的同一条, …原来的其它候选]
+    //   · 不支持    → 原地址（服务端默认就是 AVC，896×504）
+    // HEVC 起播失败时循环自然落到下一条（AVC），降级只发生一次，
+    // 日志固定 `[FxPlay] iqiyi downgrade hevc->avc`。
+    await IqCodecGate.ensure();
+    if (!mounted || token != _loadToken) return false;
+    final targets = IqCodecGate.plan(candidates);
+    var openedHevc = false;
+    var openedDegraded = false;
+    for (final target in targets) {
       if (!mounted || token != _loadToken) return false;
+      final url = target.url;
+      if (target.degradeFromHevc) fxPlayLog(iqDegradeLog(url));
       final controller = reusable ?? FxPlayer.create();
       if (mounted) setState(() => _loadingPlayer = controller);
       try {
@@ -1196,7 +1268,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 return null;
               },
             )
-            .timeout(_openReadyTimeout);
+            // IQ_CODEC：HEVC 候选只等 8 秒（解码器起不来时不值得拖到 30 秒），
+            // 超时 / 解码报错都会落到 catch，下一条就是它的 AVC 地址。
+            .timeout(target.hevc ? IqCodecGate.hevcOpenTimeout : _openReadyTimeout);
         if (!mounted || token != _loadToken) {
           await controller.dispose();
           return false;
@@ -1250,6 +1324,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         if (commitLine) _line = line;
         _loadedEp = ep;
         controller.addListener(_onVideoValue);
+        // 复用实例时宽高早就有了，监听器不会为新一集再触发；这里补报一次，
+        // 页面的播放区高度才能跟上这一集的真实比例（ASPECT_REAL）。
+        _reportVideoAspect(controller);
         // 只有真的换了实例才释放旧的：复用路径下「旧的就是它自己」。
         if (!identical(previous, controller)) {
           unawaited(previous?.dispose());
@@ -1262,6 +1339,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         });
         _sourceFailNotified = false;
         _autoSwitchTries = 0;
+        openedHevc = target.hevc;
+        openedDegraded = target.degradeFromHevc;
+        _iqHevc = openedHevc;
+        _iqDegraded = openedDegraded;
         openWatch.stop();
         fxPlayLog(
           'OK line=$openLineName url=$url source=$openSource '
@@ -1278,6 +1359,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _frozenFallbackTimer = Timer(
             const Duration(seconds: 2),
             _fadeOutFrozenFrame,
+          );
+        }
+        if (openedHevc || openedDegraded) {
+          fxPlayLog(
+            'iqiyi codec=${openedDegraded ? 'avc(downgrade)' : 'hevc'} '
+            'url=$url',
           );
         }
         widget.onPlaybackStarted?.call();
@@ -1461,9 +1548,30 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 本次播放页已经记过的最小集合（避免每帧写一次）。
   final Set<String> _learnedResKeys = <String>{};
 
+  /// 上一次报给外层的真实宽高比（判重用，见 [_reportVideoAspect]）。
+  double? _lastStableAspect;
+
+  /// 每集最后一次「位置可信」的进度（FX_FALLBACK）。
+  ///
+  /// 播放器报错 / 换源后 `value.position` 会归零或乱跳，拿它当换源起点就会
+  /// 「回到片头」。按集号分别记一笔，降级时优先用它。
+  final Map<int, Duration> _goodPositions = <int, Duration>{};
+
   void _onVideoValue() {
     final c = _controller;
     if (c == null || !mounted) return;
+    // 位置可信时才记（换成另一条线路失败时，这里保留的还是上一次正常的位置）。
+    final live = c.value;
+    if (live.isInitialized && !live.hasError && live.position > Duration.zero) {
+      final prev = _goodPositions[_ep];
+      if (prev == null || live.position > prev) {
+        _goodPositions[_ep] = live.position;
+      }
+    }
+    // ASPECT_REAL：真实宽高一到就把比例报给页面（放在所有早退之前 ——
+    // 全屏、loading、error 时页面容器同样要按新比例定高，否则退出全屏 /
+    // 加载结束时容器会「跳」一下）。
+    _reportVideoAspect(c);
     // 新流首帧就绪（宽高出现）后淡出切换快照；loading / error 期间不动。
     if (!_fullscreenActive) _maybeFadeFrozenFrame();
     // NEXT_EPISODE_PRELOAD（改动 ⑥）：首帧 + 稳定播放 3 秒触发一次。
@@ -1473,6 +1581,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // `sourceKey|线路名|vodId → 实际高度`，下次搜索排序直接用真实分辨率
     // 覆盖线路名推断（第三层）。
     _rememberRealResolution(c.value);
+    // IQ_CODEC：首帧之后用通知条说明「实际用的是哪种编码」。
+    if (!_fullscreenActive) _maybeNotifyIqCodec(c.value);
     // 全屏期间由全屏页接管同一个播放器的事件（切集 / 结束 / 报错）；
     // loading 期间的错误由 _bootstrap 的 try/catch 处理。
     if (_fullscreenActive || _loading || _error) return;
@@ -1492,6 +1602,63 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (_ended) return;
     _ended = true;
     unawaited(_handleEnded());
+  }
+
+  /// IQ_CODEC（2026-11-15）：爱奇艺线路首帧后提示一次实际编码。
+  ///
+  /// 为什么要有它：设备能力探测 + 失败降级都在后台悄悄发生，用户只看到
+  /// 「画质好像不一样」。这里在首帧（不是 open 成功，那时还没有视频轨）
+  /// 之后把真实编码 / 分辨率和一句人话贴出来：
+  ///   · `爱奇艺：HEVC 1920x1080` —— 硬解生效；
+  ///   · `爱奇艺：HEVC 不可用，已降级 H.264 896x504` —— 走的是 AVC。
+  /// 同一部剧同一条线路只提示一次；非爱奇艺线路一声不响。
+  void _maybeNotifyIqCodec(FxPlayerValue v) {
+    if (!mounted || !v.hasRenderedFirstFrame) return;
+    final key = '${widget.videoId}|$_line';
+    if (_codecNoticeKey == key) return;
+    // 「请求参数」和「响应头」都空 = 这条线路跟爱奇艺没关系，一声不响。
+    // （响应头 X-Iq-Codec 在清单抓取时才到，实测编码要等视频轨，所以
+    //  只要两者之一有值就提示 —— 那时候信息已经够说清了。）
+    if (v.codecHint.isEmpty && v.iqCodec.isEmpty) return;
+    _codecNoticeKey = key;
+    final text = IqCodecGate.notice(
+      degraded: _iqDegraded,
+      mime: v.videoCodec,
+      headerCodec: v.iqCodec,
+      headerQuality: v.iqQuality,
+      width: v.videoWidth ?? 0,
+      height: v.videoHeight ?? 0,
+    );
+    fxPlayLog(
+      'iqiyi notice text=$text requested=${_iqHevc ? 'hevc' : 'avc'} '
+      'degraded=$_iqDegraded',
+    );
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  /// 把当前视频的真实宽高比报给外层（页面按它算播放区高度）。
+  ///
+  /// 只在「拿到真实宽高」且「比例真的变了」时回调：
+  /// - 拿不到（切集 / 换线刚开始时报 0×0）直接跳过，外层沿用上一次的比例；
+  /// - 同一个尺寸会被 `onVideoSizeChanged` / 每秒的状态回调反复报，不判重
+  ///   就会一直 setState 整页。
+  void _reportVideoAspect(FxPlayer c) {
+    final cb = widget.onVideoAspect;
+    if (cb == null) return;
+    final v = c.value;
+    final ratio = fxVideoAspectOf(v.width, v.height) ??
+        fxVideoAspectOf(v.videoWidth, v.videoHeight);
+    if (ratio == null || !ratio.isFinite || ratio <= 0) return;
+    final last = _lastStableAspect;
+    if (last != null && (last - ratio).abs() < 0.001) return;
+    _lastStableAspect = ratio;
+    cb(ratio);
   }
 
   /// 记一次真实分辨率（同一集只记一次，尺寸没变就不重复写盘）。
@@ -1688,6 +1855,32 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     setState(() => _resolvingText = text);
   }
 
+  /// 换源 / 换线路降级前抓一份「播放现场」：集号 + 位置 + 播放状态。
+  ///
+  /// 位置的可信顺序：播放器当前进度（正常推进时）→ 本集最后一次正常位置
+  /// （报错 / 换源把进度清零了）→ 切换期间锁定的 UI 进度。绝不直接读
+  /// `value.position` 就交出去 —— 播放器出错后它常常是 0。
+  FxPlaybackSnapshot playbackSnapshot() {
+    final v = _controller?.value;
+    final trusted = v != null && v.isInitialized && !v.hasError;
+    var pos = trusted ? v.position : Duration.zero;
+    if (!trusted || pos <= Duration.zero) {
+      final good = _goodPositions[_ep];
+      if (good != null && good > pos) pos = good;
+    }
+    final ui = _uiPosition;
+    if (ui != null && ui > pos) pos = ui;
+    final playing = v == null
+        ? true
+        : (v.isPlaying || !v.isInitialized || v.hasError || v.isCompleted);
+    return FxPlaybackSnapshot(
+      ep: _ep,
+      position: pos,
+      playing: playing,
+      lineId: _line,
+    );
+  }
+
   /// 解析结束（成功或失败）都收起提示；失败时由详情页弹 toast。
   void clearResolving() {
     if (!mounted || _resolvingText.isEmpty) return;
@@ -1875,6 +2068,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _error = true;
         _errorText = '播放中断，请重试或切换线路';
       });
+      // FX_FALLBACK：全屏里已经播不了，回竖屏必须继续走降级链
+      // （原线重试 → 换线路 → 跨源找同名），不能停在这一屏不动。
+      _notifySourceFailed();
     } else {
       _showControls();
     }
@@ -2573,11 +2769,57 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 比把 controller 提到页面再往下传改动小得多。
   final GlobalKey<PlayerViewState> _playerKey = GlobalKey<PlayerViewState>();
 
+  /// 当前播放画面的真实宽高比（ASPECT_REAL 2026-11-15）。
+  ///
+  /// 播放区的高度按它算，不再写死 16:9 —— 不然 1920×800 的宽银幕片上下
+  /// 留出多余黑边、1080×1920 的竖屏短剧被挤成一条，4:3 老片两头都被裁。
+  /// 拿不到时退回 [kFxFallbackVideoAspect]（16:9，老行为，保证有画面）。
+  ///
+  /// 只接受真实值：切集 / 换线期间播放器会短暂报不出宽高，这里**不**退回
+  /// 16:9（那会让容器跳一下），沿用上一次的比例直到新值到。
+  double _videoAspect = kFxFallbackVideoAspect;
+
   @override
   void initState() {
     super.initState();
     _ep = widget.ep;
     _load();
+  }
+
+  /// 内嵌播放器上报的真实比例：变了才重建（判定见 [fxVideoAspectOf]）。
+  void _onVideoAspect(double ratio) {
+    if (!mounted) return;
+    if (!ratio.isFinite || ratio <= 0) return;
+    if ((ratio - _videoAspect).abs() < 0.001) return;
+    setState(() => _videoAspect = ratio);
+  }
+
+  /// 播放区：宽度撑满，高度跟视频真实比例走。
+  ///
+  /// 比 16:9 更宽的片子容器跟着收窄（不留上下黑边），4:3 / 竖屏片停在
+  /// 16:9 的高度（画面铺满高度、左右留黑），规则在
+  /// [fxPlayerStageHeight] 里，单测钉住。
+  Widget _buildStage(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return SizedBox(
+          height: fxPlayerStageHeight(
+            width: constraints.maxWidth,
+            videoRatio: _videoAspect,
+          ),
+          child: PlayerView(
+            key: _playerKey,
+            videoId: widget.videoId,
+            ep: _ep,
+            line: widget.line,
+            detail: _detail,
+            onEpChange: _onEpChanged,
+            onChangeLine: () => Navigator.of(context).maybePop(),
+            onVideoAspect: _onVideoAspect,
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _load() async {
@@ -2645,18 +2887,7 @@ class _PlayerPageState extends State<PlayerPage> {
       body: SafeArea(
         child: Column(
           children: [
-            AspectRatio(
-              aspectRatio: 16 / 9,
-              child: PlayerView(
-                key: _playerKey,
-                videoId: widget.videoId,
-                ep: _ep,
-                line: widget.line,
-                detail: _detail,
-                onEpChange: _onEpChanged,
-                onChangeLine: () => Navigator.of(context).maybePop(),
-              ),
-            ),
+            _buildStage(context),
             if (_detail == null)
               Expanded(
                 child: Center(
