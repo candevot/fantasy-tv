@@ -365,13 +365,14 @@ class _SearchPageState extends State<SearchPage> {
       });
     });
     var firstBatch = true;
-    // SEARCH_MULTI_SOURCE（2026-11-16）：搜索结果**必须列出每个源各自的结果**，
-    // 不能按片名跨源合并。用户实测：搜「济公传」显示「已查 16/16 源 · 命中 123」，
-    // 但列出来的每条来源都是「咕噜」—— 咕噜和剧圈/苹果/布布/下饭 搜到的同名片
-    // 在去重时被合并成一条，其余 40 个源等于白搜。壳（OK/FongMi）是每个源各出一行。
-    // keepDuplicates=true → 外部源按卡片 id 去重（id 里带 @src:<源key>），
-    // 同源同片只留一条、不同源的同名片各占一行。
-    _sub = CmsBridge.searchStream(text, 1, keepDuplicates: true).listen(
+    // SEARCH_MERGE_SCOPE（2026-11-16）：**合并只发生在我们自己的线路内**。
+    //  · 我们自己的源（幻想）：同一部剧的多条记录按片名合并成一条（保持原逻辑）；
+    //  · 肥猫的源：**一律不合并**，每个源各自出各自的结果，和壳一致。
+    // 之前的问题是页面层 _appendUnique 用 sameRecord（忽略来源）把外部源也合并了，
+    // 导致 41 个源命中 123 条、列表里却只剩「咕噜」。
+    // 所以这里**不传 keepDuplicates**（我们的源继续按片名合并），
+    // 外部源的分源去重由 searchStream 内的 perSource 参数保证。
+    _sub = CmsBridge.searchStream(text, 1).listen(
       (batch) {
         _onBatch(batch, req, first: firstBatch);
         firstBatch = false;
