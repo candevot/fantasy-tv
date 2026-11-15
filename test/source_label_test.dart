@@ -146,7 +146,12 @@ void main() {
     });
 
     test('外部源仍然编码成 @src:<key>::<id>', () {
-      final s = src(name: '咕噜', api: 'csp_Gulu', kind: KSourceKind.jar);
+      final s = src(
+        key: '咕噜',
+        name: '咕噜 • APP',
+        api: 'csp_Gulu',
+        kind: KSourceKind.jar,
+      );
       expect(s.isOwnLibrary, isFalse);
       expect(s.cardIdOf('abc'), '${SourceHub.idMark}咕噜::abc');
       expect(SourceHub.rawIdOf(s.cardIdOf('abc')), 'abc');
