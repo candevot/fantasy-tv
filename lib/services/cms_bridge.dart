@@ -1187,7 +1187,9 @@ class _Dedupe {
   final Map<String, Set<int>> _seen = <String, Set<int>>{};
 
   bool fresh(VideoCard card) {
-    final key = SourceHub.normTitle(card.title);
+    // SOURCE_SPLIT（2026-11-15）：按「片名+片源」分桶 —— 幻想那条和
+    // 官采切片那条是两部「记录」，都要留在列表里。
+    final key = '${SourceHub.normTitle(card.title)}|${card.fromSource}';
     if (key.isEmpty) return true;
     final years = _seen.putIfAbsent(key, () => <int>{});
     if (card.year <= 0) {

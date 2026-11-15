@@ -151,6 +151,15 @@ class VideoCard {
   /// 两者都没有就留空，卡片不渲染这一行。
   final String sourceLabel;
 
+  /// 这条记录属于哪个**片源分组**：`hx`（幻想）/ `xo`（官采+切片），
+  /// 老数据 / 外部源为空串。
+  ///
+  /// SOURCE_SPLIT（2026-11-15）：服务端把同一部剧按片源拆成两条记录，
+  /// 各自带自己的线路。卡片和去重都必须带上它 —— 否则「济公传」的两条
+  /// （幻想一条、官采切片一条）会被按「片名+年份」合成一条，
+  /// 用户只能看到其中一半的线路。
+  final String fromSource;
+
   VideoCard({
     required this.id,
     required this.title,
@@ -168,29 +177,48 @@ class VideoCard {
     this.rank = 0,
     this.tags = const [],
     this.sourceLabel = '',
+    this.fromSource = '',
   });
 
-  factory VideoCard.fromJson(Map<String, dynamic> j) => VideoCard(
-        id: _asStr(j['id']),
-        title: _asStr(j['title']),
-        cover: _asStr(j['cover']),
-        rating: _asRating(j['rating']),
-        year: _asYear(j['year']),
-        status: _asStr(j['status']),
-        episodes: _asInt(j['episodes']),
-        category: _asStr(j['category']),
-        type: _asStr(j['type']),
-        area: _asStr(j['area']),
-        heat: _asStr(j['heat']),
-        desc: _cleanDescription(j['desc']),
-        time: _asStr(j['time']),
-        rank: _asInt(j['rank']),
-        tags: _asStrList(j['tags']),
-        sourceLabel: _cardSourceLabel(
-          j['sourceLabel'] ?? j['source'],
-          j['lines'],
-        ),
-      );
+  /// 片源分组的展示名：`hx`→「幻想」，`xo`→「官采切片」，其它→空串。
+  String get sourceGroupLabel => switch (fromSource.trim().toLowerCase()) {
+        'hx' => '幻想',
+        'xo' => '官采切片',
+        _ => '',
+      };
+
+  factory VideoCard.fromJson(Map<String, dynamic> j) {
+    final fromSource = _asStr(j['fromSource']).trim();
+    final group = switch (fromSource.toLowerCase()) {
+      'hx' => '幻想',
+      'xo' => '官采切片',
+      _ => '',
+    };
+    final base = _cardSourceLabel(j['sourceLabel'] ?? j['source'], j['lines']);
+    return VideoCard(
+      id: _asStr(j['id']),
+      title: _asStr(j['title']),
+      cover: _asStr(j['cover']),
+      rating: _asRating(j['rating']),
+      year: _asYear(j['year']),
+      status: _asStr(j['status']),
+      episodes: _asInt(j['episodes']),
+      category: _asStr(j['category']),
+      type: _asStr(j['type']),
+      area: _asStr(j['area']),
+      heat: _asStr(j['heat']),
+      desc: _cleanDescription(j['desc']),
+      time: _asStr(j['time']),
+      rank: _asInt(j['rank']),
+      tags: _asStrList(j['tags']),
+      fromSource: fromSource,
+      // 分组名拼在来源标记前面（「幻想 · 量子」）：一次改动就让所有列表 /
+      // 搜索 / 详情页的卡片都带上片源，不用逐个 UI 去加徽标。
+      sourceLabel: group.isEmpty
+          ? base
+          : (base.isEmpty ? group : '$group · $base'),
+    );
+  }
 }
 
 /// 卡片来源标记：优先接口 `source`，其次 `lines[0]` 的线路名 / 来源站名。

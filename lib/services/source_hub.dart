@@ -315,6 +315,9 @@ class SourceHub extends ChangeNotifier {
   /// jar 插件是否可用（没查过按「不可用」算，绝不乐观）。
   bool get jarReady => _jarReady == true;
 
+  /// 这台设备的源列表里有没有 jar 源（决定要不要自动装 spider.jar）。
+  bool get hasJarSources => _user.any((s) => s.kind == KSourceKind.jar);
+
   /// 有 jar 源、但插件没装 —— 这正是「肥猫的源完全不加载」的原因。
   bool get jarMissing =>
       _jarReady == false && _user.any((s) => s.kind == KSourceKind.jar);
@@ -1202,9 +1205,13 @@ class SourceHub extends ChangeNotifier {
 
   /* ------------------------------------------------------------ 卡片工具 */
 
-  /// 跨源去重键：片名（去空白与标点）+ 年份。
+  /// 跨源去重键：片名（去空白与标点）+ 年份 + **片源分组**。
+  ///
+  /// SOURCE_SPLIT（2026-11-15）：服务端把同一部剧按片源拆成多条记录
+  /// （hx=幻想 / xo=官采切片），两条都对、都要出现。所以去重只在
+  /// 「同一片源内」生效：片名+年份+片源 完全相同才算重复。
   static String dedupeKey(VideoCard card) =>
-      '${normTitle(card.title)}|${card.year}';
+      '${normTitle(card.title)}|${card.year}|${card.fromSource}';
 
   static String normTitle(String raw) {
     final text = raw
@@ -1245,6 +1252,8 @@ class SourceHub extends ChangeNotifier {
         rank: card.rank,
         tags: card.tags,
         sourceLabel: label,
+        // SOURCE_SPLIT：换标记不能把片源分组弄丢，去重键要用它。
+        fromSource: card.fromSource,
       );
 
   /* ------------------------------------------------------------ 持久化 */

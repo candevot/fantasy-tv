@@ -166,8 +166,11 @@ class SearchRank {
 
   static const int _limit = 4000;
 
+  /// SOURCE_SPLIT（2026-11-15）：同一部剧现在会按片源拆成多条记录
+  /// （hx=幻想 / xo=官采切片），各自带自己的线路 —— 分数必须按记录算，
+  /// 否则两条会互相覆盖，排出来的顺序是随机的。
   static String keyOf(VideoCard card) =>
-      '${_norm(card.title)}|${card.year}';
+      '${_norm(card.title)}|${card.year}|${card.fromSource}';
 
   /// 记录一条记录的分数。
   static void record(

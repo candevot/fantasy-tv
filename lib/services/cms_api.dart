@@ -421,6 +421,10 @@ class CmsApi {
       'desc': _descOf(vod),
       'tags': _tagsOf(vod),
       'sourceLabel': froms.isEmpty ? '' : froms.first,
+      // SOURCE_SPLIT（2026-11-15）：服务端把同一部剧按片源拆成多条记录，
+      // 每条多一个 vod_from_source（hx=幻想 / xo=官采切片）。卡片要把它带下去，
+      // 否则两条记录长得一模一样，用户会以为是重复项。
+      'fromSource': _str(vod['vod_from_source']),
     };
   }
 
