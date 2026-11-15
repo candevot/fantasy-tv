@@ -86,6 +86,31 @@ class ExoPlayerEngine {
   static const MethodChannel _prefetchChannel =
       MethodChannel('fantasy_tv/exo_player');
 
+  /// 把配置里的 `hosts` / `doh` 交给原生 DNS（PROTOCOL_FACE 阶段 1 · 第 6 条）。
+  ///
+  /// **只增不改**：这是通道上新增的一个方法，24 个既有方法的名称、入参键、
+  /// 事件快照键一个都没动；老 Dart 不调它、老原生不认它，两端都只是退回
+  /// 「系统 DNS + 自动钉 IP」的行为，不会报错。
+  ///
+  /// [hosts] 用壳配置里的原样格式 `["host=ip", …]`（原生按 `=` 切），
+  /// [doh] 是 DoH 端点（空串 = 保留原生默认端点）。
+  static Future<bool> setDnsProfile({
+    required List<String> hosts,
+    String doh = '',
+  }) async {
+    if (!isSupported) return false;
+    try {
+      final r = await _prefetchChannel.invokeMethod<bool>('setDnsProfile', {
+        'hosts': hosts,
+        'doh': doh,
+      });
+      return r ?? false;
+    } catch (_) {
+      // 老原生包没有这个方法：静默忽略，DNS 退回系统解析。
+      return false;
+    }
+  }
+
   /// 把**一个** HLS 分片下载进播放器同一份 SimpleCache（首页续播预取用）。
   ///
   /// 为什么不在这里用 Dart 的 http 自己拉：SimpleCache 是原生磁盘缓存，

@@ -380,7 +380,16 @@ class JarSpider {
   static const Duration installTimeout = Duration(minutes: 4);
 
   /// TVBox 默认的 VIP 解析标记：交给 jar 自己决定怎么用。
-  static const List<String> vipFlags = <String>[
+  ///
+  /// PROTOCOL_FACE（2026-11-15 · 阶段 1）：壳交给 `playerContent(flag, id, flags)`
+  /// 的第三个参数是**配置里的 `flags` 数组**（`VodConfig.get().getFlags()`，
+  /// 真配置里有 33 条：`youku` / `优酷` / `优 酷` / `腾讯视频` …）。我们原来
+  /// 传的是一份写死的名单，配置里写 `flags` 的 jar 源拿不到它自己那套线路名，
+  /// 于是「同一个 jar 在壳里能出地址、在我们这儿空」。
+  ///
+  /// 现在这份列表可以被配置替换（[setVipFlags]）；配置里没有 `flags` 时
+  /// 保持这份默认值，行为与改造前一致。
+  static const List<String> defaultVipFlags = <String>[
     'youku',
     'qq',
     'iqiyi',
@@ -393,6 +402,20 @@ class JarSpider {
     'wasu',
     'bilibili',
   ];
+
+  static List<String> _vipFlags = defaultVipFlags;
+
+  /// 当前生效的线路名表（默认值，或配置里的 `flags`）。
+  static List<String> get vipFlags => _vipFlags;
+
+  /// 用配置里的 `flags` 替换（空数组表示「没配」，保持默认）。
+  static void setVipFlags(List<String> flags) {
+    final cleaned = <String>[
+      for (final item in flags)
+        if (item.trim().isNotEmpty) item.trim(),
+    ];
+    _vipFlags = cleaned.isEmpty ? defaultVipFlags : List<String>.unmodifiable(cleaned);
+  }
 
   static const int _detailCacheLimit = 60;
   static const int _classCacheLimit = 24;

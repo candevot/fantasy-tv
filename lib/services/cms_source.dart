@@ -28,6 +28,7 @@ library;
 
 import '../models.dart';
 import 'play_path.dart';
+import 'sniff_rules.dart';
 
 /// 线路 / 集的分隔符（苹果CMS 固定用这三个）。
 const String kLineSep = r'$$$';
@@ -127,10 +128,29 @@ List<List<String>> epPairs(String block) {
 ///
 /// 规则本体在 `play_path.dart`（纯函数，可独立核验）。这一层保留同名入口，
 /// 是因为详情页 / 播放页 / 下载 / 单测都在用它，改名没有收益。
-bool isMediaUrl(String address) => isDirectAddress(address);
+///
+/// SNIFF_RULES（2026-11-15，移植阶段 1 第 5 条）：**配置里的 `rules` 优先**。
+///
+/// 以前这里只按后缀 / 形态猜，于是：
+///   · 抖音 / 火山那类 `https://…/video/tos/cn…`（没有媒体后缀）被判成
+///     「要解析」，白交给解析器一圈；
+///   · 磁力 / 广告站那类「域名 + 关键词」黑名单完全不生效。
+/// 现在先用 `TvBoxConfig.rules` 建的 [FxSniffer] 判一遍 —— 它和壳
+/// `Sniffer.isVideoFormat()` 同一套判定顺序（exclude → regex → 内置正则）。
+///
+/// 两者取**或**而不是取替：`play_path.dart` 认得我们自己那批「解析产物」
+/// 地址（`/hxparse/xo?u=…` 这类没有媒体后缀的包装清单），规则表里没有它们；
+/// 反过来规则表认得「无后缀的字节流地址」，后缀判定不认。两边都留着才不会
+/// 在某一类源上整批误判。
+bool isMediaUrl(String address) =>
+    isDirectAddress(address) || FxSniffer.active.isVideoFormat(address);
 
 /// 需要现场解析（不是直链）。
-bool needsParse(String address) => needsParseAddress(address);
+///
+/// SNIFF_RULES：与 [isMediaUrl] 严格互补 —— 线路的 `LineInfo.type`
+/// （`parse` / `hls`）就是用它算的，两边口径不一致会让「规则判成直链、
+/// 线路却标成要解析」，于是详情页先弹一次解析再去播同一段地址。
+bool needsParse(String address) => !isMediaUrl(address);
 
 /// 页面 / 令牌该找哪个解析器：`direct` / `iqiyi` / `fuying`。
 ///

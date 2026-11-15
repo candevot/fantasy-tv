@@ -56,6 +56,13 @@ object FxDns : Dns {
     /** DoH 兜底：阿里公共 DNS 的 JSON 接口（国内可达，不需要证书固定）。 */
     private const val DOH_ENDPOINT = "https://dns.alidns.com/resolve"
 
+    /**
+     * 当前生效的 DoH 端点。配置里带 `doh` 时换成配置那一个
+     * （PROTOCOL_FACE 2026-11-15：壳是从配置 / 设置里选端点，我们原来写死）。
+     */
+    @Volatile
+    private var dohEndpoint: String = DOH_ENDPOINT
+
     /** DoH 超时：兜底用，宁可放弃也不能拖。 */
     private const val DOH_TIMEOUT_MS = 1500
 
@@ -65,6 +72,15 @@ object FxDns : Dns {
 
     private val cache = ConcurrentHashMap<String, Entry>()
     private val pinned = ConcurrentHashMap<String, Pin>()
+
+    /**
+     * 配置里的 `hosts`（壳 `OkDns.addAll` 的入参：`host=ip`）。
+     *
+     * 与自动钉住（[pinned]）的区别：这是**人工**声明「这个域名就该解析到这个
+     * IP」，优先级最高、不过期；只有在它连不上（进了 [badUntil]）时才让位给
+     * 常规解析 —— 壳那边是硬覆盖，我们多这一层保护，因为写死的 IP 会过期。
+     */
+    private val configHosts = ConcurrentHashMap<String, String>()
 
     /** key = "host|ip"，value = 拉黑到期时间。 */
     private val badUntil = ConcurrentHashMap<String, Long>()
@@ -96,6 +112,13 @@ object FxDns : Dns {
         if (host.isEmpty()) return Dns.SYSTEM.lookup(hostname)
         // 字面量 IP：不用解析（OkHttp 也会先走到这里）。
         literalIp(host)?.let { return listOf(it) }
+
+        // 0) 配置里的 hosts（人工钉 IP，最高优先级）。
+        //
+        // 壳的行为是硬覆盖（`OkDns.get()` 直接返回映射值），我们多一条：
+        // 这个 IP 已经被实测拉黑（[badUntil]）时让位给下面的常规解析 ——
+        // 写死的 IP 会随 CDN 换节点过期，硬覆盖会让整个域名一起死。
+        configuredAddress(host)?.let { return it }
 
         // 1) 钉住的 IP（上次真的连通过的那条）—— 壳的 hosts 映射效果。
         //
@@ -213,7 +236,88 @@ object FxDns : Dns {
 
     /** 诊断 / 日志用的一行摘要。 */
     fun stats(): String =
-        "dns[system=$statSystem cached=$statCached pinned=$statPinned doh=$statDoh]"
+        "dns[system=$statSystem cached=$statCached pinned=$statPinned doh=$statDoh" +
+            " hosts=${configHosts.size}]"
+
+    /**
+     * 应用配置里的 DNS 画像（PROTOCOL_FACE 2026-11-15 · 第 6 条）。
+     *
+     * [hosts] 是壳配置里的原样格式（`["host=ip", …]`，`OkDns.addAll` 的口径）；
+     * [doh] 是 DoH 端点（空串表示保留当前端点，不重置 —— 配置里没写 `doh`
+     * 时不该把用户/默认的端点弄丢）。
+     *
+     * 调用点是 Dart 侧配置刷新之后（`DnsProfileInstaller`），**不在播放主路径上**。
+     */
+    fun applyProfile(hosts: List<String>, doh: String) {
+        var count = 0
+        if (hosts.isNotEmpty()) {
+            configHosts.clear()
+            for (line in hosts) {
+                val text = line?.trim().orEmpty()
+                if (text.isEmpty()) continue
+                val at = text.indexOf('=')
+                if (at <= 0) continue
+                val host = text.substring(0, at).trim().lowercase()
+                val ip = text.substring(at + 1).trim()
+                if (host.isEmpty() || ip.isEmpty()) continue
+                configHosts[host] = ip
+                count += 1
+            }
+        }
+        val endpoint = doh.trim()
+        if (endpoint.isNotEmpty() && endpoint != dohEndpoint) {
+            dohEndpoint = endpoint
+            Log.i(LOG_TAG, "dns 换 DoH 端点：$endpoint")
+        }
+        // hosts 变了：旧的解析缓存全部失效（那些都是按系统 DNS 算出来的）。
+        if (hosts.isNotEmpty()) cache.clear()
+        Log.i(LOG_TAG, "dns 应用配置 hosts=$count doh=${dohEndpoint}")
+    }
+
+    /** 清掉配置画像（配置里不再有 hosts / doh 时调用）。 */
+    fun clearProfile() {
+        configHosts.clear()
+        cache.clear()
+        dohEndpoint = DOH_ENDPOINT
+        Log.i(LOG_TAG, "dns 配置画像已清空")
+    }
+
+    /**
+     * 配置里的 host → IP（精确优先，其次子串 / 正则 —— 壳
+     * `OkDns.get()` 用 `Util.containOrMatch` 就是这两步）。
+     */
+    private fun configuredAddress(host: String): List<InetAddress>? {
+        if (configHosts.isEmpty()) return null
+        val key = host.lowercase()
+        val target = configHosts[key] ?: run {
+            for (entry in configHosts.entries) {
+                if (containOrMatch(key, entry.key)) return@run entry.value
+            }
+            null
+        } ?: return null
+        // 目标可能是 `1.2.3.4`，也可能是 `1.2.3.4:8443` / 多 IP（逗号分隔）。
+        val first = target.split(',')[0].substringBefore(':').trim()
+        val address = literalIp(first) ?: return null
+        if (isBad(key, address)) {
+            Log.i(LOG_TAG, "dns 配置 IP 已拉黑，改用常规解析 $key -> $first")
+            return null
+        }
+        statPinned += 1
+        return listOf(address)
+    }
+
+    /** 壳的 `Util.containOrMatch`：先子串，看起来像正则就再试一次正则匹配。 */
+    private fun containOrMatch(text: String, rule: String): Boolean {
+        val key = rule.trim().lowercase()
+        if (key.isEmpty()) return false
+        if (text.contains(key)) return true
+        if (!Regex("[\\\\^$.|?*+()\\[\\]{}]").containsMatchIn(key)) return false
+        return try {
+            Regex(key, RegexOption.IGNORE_CASE).containsMatchIn(text)
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     // ------------------------------------------------------------ 内部
 
@@ -263,7 +367,12 @@ object FxDns : Dns {
     private fun dohLookup(host: String): List<InetAddress> {
         var connection: HttpURLConnection? = null
         return try {
-            val url = URL("$DOH_ENDPOINT?name=${java.net.URLEncoder.encode(host, "UTF-8")}&type=A")
+            // 端点可被配置替换（`doh` 数组的第一个）；JSON 接口的查询串是
+            // 通用的：Google / Cloudflare / AdGuard 都认 `?name=&type=` +
+            // `Accept: application/dns-json`。
+            val endpoint = dohEndpoint
+            val sep = if (endpoint.contains("?")) "&" else "?"
+            val url = URL("$endpoint${sep}name=${java.net.URLEncoder.encode(host, "UTF-8")}&type=A")
             connection = url.openConnection() as HttpURLConnection
             connection.connectTimeout = DOH_TIMEOUT_MS
             connection.readTimeout = DOH_TIMEOUT_MS

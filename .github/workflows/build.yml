@@ -308,6 +308,40 @@ jobs:
             exit 1
           fi
           flutter test test/detail_source_fix_test.dart
+      # PROTOCOL_FACE（2026-11-15 · 移植阶段 1）：TVBox 配置协议面。
+      #
+      # 这一段钉住「壳的配置字段被丢弃」导致的整类问题 —— 它们不会报错，
+      # 只会让某个源「看起来能填、实际走错分支」：
+      #   · `parses` / `flags` / `ads` / `hosts` / `rules` / `doh` / `spider`
+      #     七个顶层键必须解析出来（少了就是解析器注册表整个不存在）；
+      #   · `sites` 的 12 个字段必须解析出来（少了 timeout 就会让慢源被全局
+      #     12 秒误杀，少了 header 就会让要 Referer 的源 403）；
+      #   · `json:` / `parse:` 寻址、`ac=` + `ext` 长度决定 GET/POST、
+      #     `rules` 嗅探、源级失败冷却，各自有单测。
+      - name: Protocol face (config / parse / rules / ledger) regressions
+        run: |
+          set -e
+          # 通道契约只增不改：新增 setDnsProfile 之外，既有方法一个都不许动。
+          for m in init open play pause seek rate mirror prefetchSegment \
+                   supportsHevc state preloadNext cancelPreload release \
+                   bgStart bgStop warmArtwork bgBattery bgBatteryIgnoring \
+                   bgConsumeHint; do
+            grep -q "\"$m\" ->" android_src/kotlin/com/huanxiang/fantasy_tv/ExoPlayerPlugin.kt
+          done
+          grep -q '"setDnsProfile" ->' android_src/kotlin/com/huanxiang/fantasy_tv/ExoPlayerPlugin.kt
+          grep -q 'fun applyProfile' android_src/kotlin/com/huanxiang/fantasy_tv/FxDns.kt
+          # 快照键（Dart 侧静默退化的重灾区）继续存在。
+          for k in bgTitle bgEp bgLine bgCover firstFrameRendered preloadedMs \
+                   retryResolveToken fatalError; do
+            grep -rq "$k" lib/services/exo_player.dart lib/services/fx_player.dart
+          done
+          flutter test test/tvbox_config_test.dart
+          flutter test test/parse_registry_test.dart
+          flutter test test/cms_request_test.dart
+          flutter test test/sniff_rules_test.dart
+          flutter test test/source_failure_test.dart
+          # 字段从配置落到 KSource / 站点画像这一段（timeout / header / playUrl）。
+          flutter test test/source_protocol_fields_test.dart
       # LINES_ALL / HOT_ORDER（2026-11-15）：多线路解析 + 热播排序映射的回归。
       # 用真实接口数据（test/fixtures/detail_romelia.json，四条线路）钉住
       # 「详情页只显示一条线路」这个用户实测问题不再回来。

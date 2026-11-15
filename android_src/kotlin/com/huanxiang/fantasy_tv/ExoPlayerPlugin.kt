@@ -1015,6 +1015,21 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "bgBatteryIgnoring" -> result.success(isIgnoringBatteryOptimizations())
             // 一次性提示：上次后台播放被系统压过内存 → 这次启动提示一次。
             "bgConsumeHint" -> result.success(consumeInterruptHint())
+            // PROTOCOL_FACE（2026-11-15 · 阶段 1 第 6 条）：把配置里的
+            // `hosts`（`host=ip`）和 `doh` 端点交给 [FxDns]。
+            //
+            // **只增不改**：这是通道上新增的方法。既有的 24 个方法名、
+            // 入参键、事件快照键一个都没动；老 Dart 不调它、老原生不认它，
+            // 两端都退回「系统 DNS + 自动钉 IP」的行为，不会静默退化。
+            //
+            // 参数走 List<String>（壳配置的原样格式）而不是 Map：跨通道最稳，
+            // 也免得 StandardMessageCodec 的 Map 泛型在两边对不上。
+            "setDnsProfile" -> {
+                val hosts = call.argument<List<String>>("hosts") ?: emptyList()
+                val doh = (call.argument<String>("doh") ?: "").trim()
+                FxDns.applyProfile(hosts, doh)
+                result.success(true)
+            }
             else -> result.notImplemented()
         }
     }
