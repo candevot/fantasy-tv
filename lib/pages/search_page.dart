@@ -61,6 +61,35 @@ class _SearchPageState extends State<SearchPage> {
   /// 空 6 · 超时 2 · 出错 1」。
   int _externalHits = 0;
   int _externalQueried = 0;
+
+  /// 按源筛选（SOURCE_FILTER 2026-11-16）：影视壳搜索页左侧是一列源名，
+  /// 点哪个就看哪个源的结果。用户口径「肥猫的源还是不全，要不然就改成
+  /// 影视壳一样的搜索」——把「每个源各自出了几条」直接摆出来，
+  /// 不用他猜是哪个源没出。
+  /// 空串 = 全部源。
+  String _sourceFilter = '';
+
+  /// 每个来源各有多少条（按 label 聚合，用于筛选条）。
+  Map<String, int> get _sourceCounts {
+    final map = <String, int>{};
+    for (final card in _external) {
+      final label = card.fromSource.trim();
+      if (label.isEmpty) continue;
+      map[label] = (map[label] ?? 0) + 1;
+    }
+    return map;
+  }
+
+  /// 应用当前的按源筛选。
+  List<VideoCard> _filterBySource(List<VideoCard> list) {
+    final f = _sourceFilter;
+    if (f.isEmpty) return list;
+    return <VideoCard>[
+      for (final card in list)
+        if (card.fromSource.trim() == f) card,
+    ];
+  }
+
   final Map<SourceSearchStatus, int> _externalStates =
       <SourceSearchStatus, int>{};
 
@@ -327,6 +356,8 @@ class _SearchPageState extends State<SearchPage> {
       _lastQuery = text;
       _results = [];
       _external = [];
+      // 新一轮搜索要清掉上一轮的按源筛选，否则列表会一直只剩某个源。
+      _sourceFilter = '';
       _error = null;
       _loading = true;
       _page = 1;
@@ -1074,7 +1105,7 @@ class _SearchPageState extends State<SearchPage> {
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     final ai = _mode == 'ai';
     final own = _ownRanked;
-    final external = _externalRanked;
+    final external = _filterBySource(_externalRanked);
     return Column(
       children: [
         _resultsHeader(),
@@ -1086,6 +1117,11 @@ class _SearchPageState extends State<SearchPage> {
               // 第一段：我们自己的片源（主站采集库 + 幻想线路）。
               if (own.isNotEmpty) _resultSliver(own),
               // 第二段：肥猫的 jar 源 + 自加的外部源，后补、单独一条分隔。
+              if (_external.isNotEmpty) ...<Widget>[
+                // SOURCE_FILTER：一列可点的来源（只列真的有结果的源），
+                // 点一下只看这个源 —— 和影视壳搜索页左侧那列源名一样。
+                SliverToBoxAdapter(child: _sourceFilterBar()),
+              ],
               if (external.isNotEmpty) ...<Widget>[
                 SliverToBoxAdapter(child: _externalHeader(external.length)),
                 _resultSliver(external),
@@ -1142,6 +1178,65 @@ class _SearchPageState extends State<SearchPage> {
           ),
         ),
       );
+
+  /// 按源筛选条（SOURCE_FILTER 2026-11-16）。
+  ///
+  /// 影视壳搜索页左边是一列源名，点哪个看哪个。这里做成横向可滚的一排胶囊：
+  ///   · 第一个是「全部 N」；
+  ///   · 之后每个「有结果的源」一个胶囊，带该源条数（`咕噜 8` / `苹果 3`）；
+  ///   · 一个源都没出结果时整条不显示（下面有专门的空态说明）。
+  ///
+  /// 只列「真的有结果」的源 —— 用户想知道的正是「哪些源出了、各出几条」，
+  /// 把 40 个空源也列出来只会更难找。
+  Widget _sourceFilterBar() {
+    final counts = _sourceCounts;
+    if (counts.isEmpty) return const SizedBox.shrink();
+    final entries = counts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final total = _external.length;
+    Widget chip(String label, int n, bool active, VoidCallback onTap) {
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: GestureDetector(
+          onTap: onTap,
+          behavior: HitTestBehavior.opaque,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: active ? Fx.accent : Fx.ink.withValues(alpha: .05),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Text(
+              '$label $n',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                color: active ? Colors.white : Fx.ink,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      height: 42,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
+        children: <Widget>[
+          chip('全部', total, _sourceFilter.isEmpty, () {
+            if (_sourceFilter.isEmpty) return;
+            setState(() => _sourceFilter = '');
+          }),
+          for (final e in entries)
+            chip(e.key, e.value, _sourceFilter == e.key, () {
+              setState(() => _sourceFilter = _sourceFilter == e.key ? '' : e.key);
+            }),
+        ],
+      ),
+    );
+  }
 
   /// 外部源分区的分隔标题：让用户一眼看出「下面这些来自肥猫的 jar 源」。
   Widget _externalHeader(int count) => Padding(
