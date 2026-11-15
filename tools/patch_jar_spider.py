@@ -61,6 +61,15 @@ PROGUARD_RULES = '''# FX_JAR_SPIDER —— jar 源（TVBox type 3）的 R8 保�
 -keep class org.apache.commons.** { *; }
 -dontwarn com.google.gson.**
 -dontwarn org.jsoup.**
+# MEDIA_SESSION（2026-11-15）：后台播放升级成 MediaSessionService 之后，
+# 系统是通过 **manifest 里的 intent-filter 字符串**去反射实例化这个服务的，
+# R8 看不见这层引用，会把 androidx.media3.session.** 整包剥掉 ——
+# 表现是编译能过、APK 校验门禁报「dex 里没有 MediaSessionService」，
+# 装到真机上就是「通知栏没有封面/进度条/锁屏控件」。
+-keep class androidx.media3.session.** { *; }
+-keep interface androidx.media3.session.** { *; }
+-keep class androidx.media3.common.** { *; }
+-dontwarn androidx.media3.session.**
 # 肥猫那份 spider.jar 里少数源引用了 rxhttp / zxing / kotlinx.coroutines；
 # 只有点到那些源时才会真正用到，缺失时由加载器兜成 {"error": ...}。
 -dontwarn rxhttp.**
