@@ -1578,7 +1578,7 @@ class _DetailPageState extends State<DetailPage>
       debugPrint('enrich failed: $e\n$st');
       return;
     }
-    if (!mounted || entry == null || entry.hits.isEmpty) return;
+    if (!mounted || entry == null || entry.usable.isEmpty) return;
     final current = _detail;
     if (current == null) return;
     final extra = LineEnrich.instance.linesOf(entry);
