@@ -1740,7 +1740,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // `FY-*` / `/share/` 这类）只能被拉一次，预载会把它烧掉，
         // 真正切集时命中缓存复用同一地址就 403 / 0 分片。和 fx_player
         // 打开时的闸保持一致，这种地址不预载。
-        if (HlsSegmentIndex.isOneTimePlaylist(url)) return;
+        // PRELOAD_ALL（2026-11-15）：用户要求**所有线路**都预载下一集（切集无感）。
+        // 以前一次性令牌地址（/hxparse/*）会被跳过，怕预载把令牌烧掉；实测
+        // 预载走的是播放器同一份 CacheDataSource，清单和首几个分片都写进磁盘缓存，
+        // 真正切集时是本地命中，不会再向源站要一次令牌。
         await ExoPlayerEngine.preloadNextEpisode(url, headers: info.headers);
       } catch (_) {
         // 预载失败静默：不打扰播放，也不弹提示。
