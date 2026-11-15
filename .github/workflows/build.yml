@@ -146,6 +146,17 @@ jobs:
           exit $code
       - name: Playback recovery regressions
         run: flutter test test/playback_regressions_test.dart
+      # PROBE / FLOW_WATCH（2026-11-15）：把「慢网不算失败、真失败才切」钉死。
+      #
+      # 两个工具都是纯 dart:io（不依赖 Flutter SDK），所以用 dart run 直接跑：
+      #   · test_line_probe：三级预检（连接 / 清单 / 首片）对 404 / 非 m3u8 /
+      #     0 分片 / 200KB/s 慢线路 / 只探清单 的判定；
+      #   · probe_scenarios：打印验收用的真实日志（404 立即切 / 200KB/s 首帧
+      #     20 秒不判失败 / 30 秒硬上限到点切），日志格式固定，方便回归对照。
+      - name: Line probe & slow-network judgment regressions
+        run: |
+          dart run tools/test_line_probe.dart
+          dart run tools/probe_scenarios.dart
       # ASPECT_REAL（2026-11-15）：画面比例几何回归。
       #
       # 用户实测「2.4:1 电影纵向拉长 / 1080×1920 竖屏短剧严重变形 / 4:3 老片

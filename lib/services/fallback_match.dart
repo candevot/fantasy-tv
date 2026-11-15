@@ -21,6 +21,8 @@
 /// ```
 library;
 
+import 'playback_progress.dart';
+
 /* ------------------------------------------------------------------ 文案 */
 
 /// 切源时盖在画面上的提示。
@@ -29,11 +31,19 @@ const String fxFallbackSearchingText = '当前源播放失败，正在尝试其�
 /// 自动换线路时的进度前缀，后面接「（2/11）」。
 const String fxTryingLinePrefix = '正在尝试其他线路';
 
-/// 起播无首帧就判失败的时间上限（每条线路最多等这么久）。
+/// 起播「连续无进展」判定窗口（8 秒）。
 ///
-/// 用户明确要求「每条线路只等 8 秒，不要 30 秒」：30 秒 × 十几条线路等于让
-/// 用户对着黑屏等好几分钟，中间还以为卡死了。
-const Duration fxOpenFirstFrameTimeout = Duration(seconds: 8);
+/// SLOW_NET（2026-11-15）：这个 8 秒**不再是**「总共只等 8 秒」。
+/// 用户明确反对「没加载出来就跳过」：
+///
+/// > 一定要是真失败才会跳过，而不是没有加载出来就跳过。
+/// > 比如用户网速是真的慢。
+///
+/// 现在 8 秒量的是「**一动不动**」：字节数 / 缓冲位置 / 播放位置三项
+/// 连续 8 秒全都没变化才算卡死；只要有一项在涨就一直等下去（上限
+/// [fxSlowStartupCap] 120 秒，到点交给用户选）。慢网 20 秒才出首帧
+/// 属于正常情况，绝不判失败切线路。
+const Duration fxOpenFirstFrameTimeout = fxStartupNoProgressWindow;
 
 /// 「正在尝试其他线路（2/11）」——自动换线路时画面上显示这一句。
 String fxTryingLineText(int attempt, int total) {
@@ -88,18 +98,37 @@ bool fxCoolingActive(int failedAtMs, int nowMs) {
 
 /// 单条线路的失败原因归类（日志里的 `reason=`，也是冷却判定的依据）。
 ///
-/// 判定规则（用户定稿）：
+/// SLOW_NET（2026-11-15）判定规则改为「真失败优先，慢不算失败」：
 /// ```
-/// 8 秒没出首帧             → no_first_frame
-/// 首帧出了但缓冲超过 10 秒  → buffering_timeout
-/// 直接 403 / 404 / 解析错误 → http_403 / http_404 / parse_error（不等 8 秒）
-/// 其它                     → open_failed
+/// HTTP 401/403/404/410/500/502/503      → http_<code>
+/// DNS 失败 / 连接被拒 / TLS 失败         → dns_error / connect_refused / tls_error
+/// 清单非法（不是 #EXTM3U）/ 0 个分片     → parse_error / manifest_invalid / no_segments
+/// 有进展（字节 / 缓冲 / 位置在涨）       → slow_progress（**不是失败**，别换线）
+/// 连续 8 秒三项全不动                   → stuck_no_progress（真卡死）
+/// 卡了 8 秒但调用方没给进展信息          → no_first_frame（旧口径兜底）
+/// 其它                                  → open_failed
 /// ```
+///
+/// `progressing` / `stalledFor` 由调用方从 [FxProgressWindow] 取：判定依据是
+/// **真实进展**，不是「等了多久」。
 String fxOpenFailReason({
   required int elapsedMs,
   String error = '',
+  bool progressing = false,
+  Duration? stalledFor,
 }) {
   final text = error.trim().toLowerCase();
+  // PROBE（2026-11-15）：起播前的线路预检失败 —— 原因要原样报出来
+  // （`线路预检失败(http_404)` → `http_404`），这样日志里一眼能看出
+  // 「是线路坏了」而不是「网慢」。
+  final probe = RegExp(r'线路预检失败\(([^)]+)\)').firstMatch(error);
+  if (probe != null) {
+    final code = (probe.group(1) ?? '').trim();
+    if (code.isNotEmpty) return code;
+    return 'probe_failed';
+  }
+  // 慢网 30 秒硬上限：不是卡死，是「有数据但太慢」。
+  if (text.contains('慢网超时')) return 'slow_network';
   if (text.contains('403') || text.contains('forbidden')) return 'http_403';
   if (text.contains('404') || text.contains('not found')) return 'http_404';
   if (text.contains('解析') ||
@@ -107,14 +136,25 @@ String fxOpenFailReason({
       text.contains('unsupported')) {
     return 'parse_error';
   }
+  // 真失败（DNS / 连接被拒 / TLS / 5xx / 清单没了）：不看时间，立即失败。
+  final immediate = fxImmediateFailCode(error: error);
+  if (immediate.isNotEmpty) return immediate;
+  // 有进展 = 只是慢：不是失败，绝不能拿去换线路。
+  if (progressing) return 'slow_progress';
+  final stalled = stalledFor;
+  if (stalled != null && stalled >= fxStartupNoProgressWindow) {
+    return 'stuck_no_progress';
+  }
   if (elapsedMs >= fxOpenFirstFrameTimeout.inMilliseconds - 500) {
     return 'no_first_frame';
   }
   return 'open_failed';
 }
 
-/// 首帧之后连续缓冲多久算失败（用户定稿：10 秒）。
-const Duration fxBufferingFailTimeout = Duration(seconds: 10);
+/// 首帧之后连续多久**没有任何进展**才算失败（10 秒）。
+///
+/// 和起播同一个口径：缓冲位置 / 字节数只要有一项在涨就不算失败。
+const Duration fxBufferingFailTimeout = fxStallNoProgressWindow;
 
 /* -------------------------------------------------------------- 片名归一化 */
 

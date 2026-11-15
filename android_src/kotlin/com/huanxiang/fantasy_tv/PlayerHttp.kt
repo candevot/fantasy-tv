@@ -9,10 +9,15 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import okhttp3.Call
 import okhttp3.ConnectionPool
 import okhttp3.EventListener
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody
+import okio.Buffer
+import okio.BufferedSource
+import okio.ForwardingSource
+import okio.buffer
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Proxy
@@ -68,6 +73,20 @@ object PlayerHttp {
 
     /** 实测吞吐的时间原点（[resetConnectCount] 时重置）。 */
     private val windowStartNanos = AtomicLong(System.nanoTime())
+
+    /**
+     * 滚动 1 秒窗口：窗口起点 / 起点时的累计字节 / 上一次算出来的速度。
+     *
+     * SLOW_NET（2026-11-15）：界面上的「实时网速」和「慢网还是卡死」的判定
+     * 都吃这个值。为什么不用「缓冲位置推进量 ÷ 时间」估算：HLS 分片是整块
+     * 落盘的，一片 3MB 在 200KB/s 下要下 15 秒，这 15 秒里 bufferedPosition
+     * 一动不动 —— 估算值是一直 0，看起来和卡死一样。字节数才是在真涨。
+     */
+    private val speedWindowStartNanos = AtomicLong(0)
+
+    private val speedWindowBytes = AtomicLong(0)
+
+    private val speedRate = AtomicLong(0)
 
     private val trustManagerRef: X509TrustManager by lazy { createTrustAllManager() }
 
@@ -127,10 +146,14 @@ object PlayerHttp {
                 if (address != null) FxDns.noteConnectFailed(host, address)
             }
 
-            // 实测吞吐（诊断浮层「码率（实测）」那一行）：分片的字节数是
-            // 真实下载量，比 media3 的 BandwidthMeter 更贴近用户看到的网速。
+            // 兜底计数：正常路径由 [countingInterceptor] 按块累加（更实时），
+            // 这一条只在 body 走了非 source() 路径时补上；两边同时命中时会
+            // 多算一次，所以只在 body 未被包装时使用（见 [CountingBody]）。
             override fun responseBodyEnd(call: Call, byteCount: Long) {
-                if (byteCount > 0) totalBytes.addAndGet(byteCount)
+                if (byteCount > 0 && !countingBodyUsed.get()) {
+                    totalBytes.addAndGet(byteCount)
+                    speedWindowBytes.addAndGet(byteCount)
+                }
             }
         }
     }
@@ -165,6 +188,8 @@ object PlayerHttp {
             // 失败才退系统 DNS / DoH。**不阻塞**播放主路径。
             .dns(FxDns)
             .eventListenerFactory(connectCounter)
+            // SLOW_NET：按块统计真实收到的字节（实时网速 / 「在不在动」都用它）。
+            .addNetworkInterceptor(countingInterceptor)
             .build()
     }
 
@@ -249,6 +274,57 @@ object PlayerHttp {
         return merged
     }
 
+    /** 有 body 已经被 [CountingBody] 按块计数（避免和 responseBodyEnd 双算）。 */
+    private val countingBodyUsed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 按块计数的拦截器：每读到一块就累加字节。
+     *
+     * `responseBodyEnd` 只在 body **读完**时触发一次，HLS 一个分片在慢网下要
+     * 下十几秒 —— 那十几秒里字节数完全不动，界面上的「实时网速」会是 0、
+     * 「有没有进展」也会判成卡死。所以计数必须按块来。
+     */
+    private val countingInterceptor = Interceptor { chain ->
+        val response = chain.proceed(chain.request())
+        val body = response.body ?: return@Interceptor response
+        // 只统计媒体 / 清单这类「下载」响应，跳过没有 body 的。
+        countingBodyUsed.set(true)
+        response.newBuilder()
+            .body(
+                CountingBody(body) { read ->
+                    totalBytes.addAndGet(read)
+                    speedWindowBytes.addAndGet(read)
+                },
+            )
+            .build()
+    }
+
+    /**
+     * 包一层 body：读到多少字节就累加多少。
+     *
+     * 读的是 okio 的 source，media3 的 OkHttpDataSource 无论用 `source()` 还是
+     * `byteStream()` 都会经过它，所以统计不会漏。
+     */
+    private class CountingBody(
+        private val origin: ResponseBody,
+        private val onBytes: (Long) -> Unit,
+    ) : ResponseBody() {
+        override fun contentType() = origin.contentType()
+
+        override fun contentLength() = origin.contentLength()
+
+        override fun source(): BufferedSource {
+            val counting = object : ForwardingSource(origin.source()) {
+                override fun read(sink: Buffer, byteCount: Long): Long {
+                    val read = super.read(sink, byteCount)
+                    if (read > 0) onBytes(read)
+                    return read
+                }
+            }
+            return counting.buffer()
+        }
+    }
+
     /** 实际会发出去的 UA（日志用）。 */
     fun userAgent(headers: Map<String, String>): String =
         headers.entries
@@ -290,9 +366,53 @@ object PlayerHttp {
         connectCount.set(0)
         totalBytes.set(0)
         windowStartNanos.set(System.nanoTime())
+        speedWindowStartNanos.set(0)
+        speedWindowBytes.set(0)
+        speedRate.set(0)
+        countingBodyUsed.set(false)
     }
 
     fun connectCount(): Int = connectCount.get()
+
+    /**
+     * 本次 open 至今收到的正文字节数（累计）。
+     *
+     * Dart 用它判断「有没有在动」：连续 8 秒这个数不变、buffered 也不变，
+     * 才算真卡死；只要在涨就是网慢，继续等。
+     */
+    fun bytesLoaded(): Long = totalBytes.get()
+
+    /**
+     * 实时网速（字节/秒）：最近约 1 秒窗口的真实增量。
+     *
+     * 界面上的「1.8 MB/s」/「0 KB/s」就是它。0 表示这一秒没收到任何字节 ——
+     * 界面显示 0 KB/s，不要留着上一个数（用户会以为还在下）。
+     *
+     * 不是每 1 秒强制采样：Dart 侧 250ms 轮询一次快照，这里按「距上个窗口
+     * >= 400ms 就换一个窗口」滚动计算，取到的永远是最新一段的真实速率。
+     */
+    @Synchronized
+    fun bytesPerSec(): Int {
+        val now = System.nanoTime()
+        val bytes = totalBytes.get()
+        val start = speedWindowStartNanos.get()
+        if (start == 0L) {
+            speedWindowStartNanos.set(now)
+            speedWindowBytes.set(bytes)
+            return 0
+        }
+        val elapsed = now - start
+        if (elapsed < 400_000_000L) {
+            val cached = speedRate.get()
+            return if (cached > Int.MAX_VALUE) Int.MAX_VALUE else cached.toInt()
+        }
+        val delta = bytes - speedWindowBytes.get()
+        val rate = if (elapsed <= 0L) 0L else (delta * 1_000_000_000L / elapsed)
+        speedWindowStartNanos.set(now)
+        speedWindowBytes.set(bytes)
+        speedRate.set(if (rate < 0L) 0L else rate)
+        return if (rate > Int.MAX_VALUE) Int.MAX_VALUE else rate.toInt()
+    }
 
     /**
      * 本次 open 至今的实测吞吐（kbps，按已收到的正文字节 ÷ 经过时间）。

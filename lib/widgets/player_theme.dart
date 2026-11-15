@@ -119,6 +119,20 @@ String fxPercentLabel(double percent) {
   return '${p.round()}%';
 }
 
+/// 实时网速文案：`1.8 MB/s` / `320 KB/s` / `0 KB/s`。
+///
+/// BUFFER_UI（2026-11-15）：0 必须显示「0 KB/s」，不能返回空串、也不能
+/// 留着上一个数 —— 用户是靠这一行判断「还在不在下」，藏着只会让他以为卡死。
+String fxSpeedLabel(double bytesPerSecond) {
+  final b = bytesPerSecond.isFinite && bytesPerSecond > 0
+      ? bytesPerSecond
+      : 0.0;
+  if (b <= 0) return '0 KB/s';
+  if (b >= 1024 * 1024) return '${(b / 1024 / 1024).toStringAsFixed(1)} MB/s';
+  if (b >= 1024) return '${(b / 1024).round()} KB/s';
+  return '<1 KB/s';
+}
+
 /// 缓冲层标题：拿不到真实比例就说「缓冲中…」，绝不编数字。
 String fxBufferingText(double? percent) {
   if (percent == null) return '缓冲中…';
@@ -938,18 +952,22 @@ class _FxSeekRowState extends State<FxSeekRow> {
 
 /// 播放器加载 / 缓冲浮层。
 ///
-/// - 切集、切线路、首帧未出：圆环 + 单行「正在加载 线路名 · 第01集」；
-/// - 播放中缓冲：圆环 +「缓冲中 42%」（`bufferedPosition / duration`
-///   的真实比例）；拿不到时不确定圆环 +「缓冲中…」，绝不编数字；
-/// - 时长未知：不确定圆环 +「缓冲中…」。
-///
-/// 只有一行文案：线路名已经拼在 [title] 里，不再单独叠副文案。
+/// BUFFER_UI（2026-11-15，用户口径）：**去掉假进度**。
+/// ```
+/// 以前   一个圆环 + 百分比（bufferedPosition / duration，用户看着像进度，
+///        其实和「还要等多久」没关系，缓到 42% 可能还要等十秒）
+/// 现在   只有不确定进度的转圈；下面一行实时网速「1.8 MB/s」/「320 KB/s」，
+///        网速为 0 就写「0 KB/s」（不留上一个数）；再下面是
+///        「正在尝试其他线路（2/11）」或 15 秒后的「网速较慢（已等 18 秒）」
+/// ```
+/// 一律小字、半透明，不抢画面：这层是解释「在等什么」，不是让用户读的字。
 class FxLoadingOverlay extends StatelessWidget {
   const FxLoadingOverlay({
     super.key,
     required this.title,
-    this.percent,
     this.speedText = '',
+    this.attemptText = '',
+    this.noteText = '',
     this.dim = true,
     this.compact = false,
   });
@@ -957,29 +975,25 @@ class FxLoadingOverlay extends StatelessWidget {
   /// 主文案（加载页由 [fxLoadingLineText] 生成，含当前线路名）。
   final String title;
 
-  /// 0–100；为 null 时圆环不确定进度。
+  /// 实时网速文案（`1.8 MB/s` / `320 KB/s` / `0 KB/s`）。
   ///
-  /// 传进来的必须是真实值（`bufferedPosition / duration`）。这里**不再**
-  /// 把百分比夹到 99：以前那个 `clamp(0, 99)` 就是「缓冲永远 99%」的直接
-  /// 原因之一 —— 真实值到顶了也只能显示 99，看起来永远不动。
-  final double? percent;
-
-  /// 实时网速文案（如「3.2 MB/s」）；空串不显示。
+  /// 传 [fxSpeedLabel] 的结果：**0 也照实显示**「0 KB/s」，不要藏着或
+  /// 留着上一秒的数字 —— 用户是靠这一行判断「到底还在不在下」的。
   final String speedText;
+
+  /// 「正在尝试其他线路（2/11）」这类线路轮换提示；空串不显示。
+  final String attemptText;
+
+  /// 「网速较慢（已等 18 秒）」这类说明；空串不显示。
+  final String noteText;
 
   final bool dim;
   final bool compact;
 
   @override
   Widget build(BuildContext context) {
-    // 只做数值兜底（NaN / 越界），不再把真实值伪装成 99。
-    final safePercent = percent == null
-        ? null
-        : percent!.isFinite
-        ? percent!.clamp(0.0, 100.0).toDouble()
-        : null;
-    final value = safePercent == null ? null : safePercent / 100;
     final ring = compact ? 44.0 : 62.0;
+    final muted = Colors.white.withValues(alpha: .72);
     return IgnorePointer(
       child: Container(
         color: dim ? Colors.black.withValues(alpha: .26) : Colors.transparent,
@@ -1010,34 +1024,64 @@ class FxLoadingOverlay extends StatelessWidget {
                     ],
                   ),
                   alignment: Alignment.center,
+                  // 只有转圈：**不确定进度**，不画进度环、不写百分比。
                   child: SizedBox(
-                    width: ring * .72,
-                    height: ring * .72,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        CircularProgressIndicator(
-                          value: value,
-                          strokeWidth: compact ? 2.4 : 3,
-                          color: Colors.white,
-                          backgroundColor: Colors.white.withValues(alpha: .18),
-                        ),
-                        if (safePercent != null)
-                          Text(
-                            fxPercentLabel(safePercent),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                      ],
+                    width: ring * .44,
+                    height: ring * .44,
+                    child: CircularProgressIndicator(
+                      strokeWidth: compact ? 2.4 : 3,
+                      color: Colors.white,
+                      backgroundColor: Colors.white.withValues(alpha: .18),
                     ),
                   ),
                 ),
               ),
             ),
-            const SizedBox(height: 12),
+            // 实时网速：紧跟图标下面，小字、半透明。
+            if (speedText.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                speedText,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: muted,
+                  fontSize: compact ? 10 : 11,
+                  fontWeight: FontWeight.w600,
+                  height: 1.2,
+                ),
+              ),
+            ],
+            // 线路轮换提示：「正在尝试其他线路（2/11）」放在网速下面。
+            if (attemptText.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                attemptText,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: muted,
+                  fontSize: compact ? 10 : 11,
+                  fontWeight: FontWeight.w600,
+                  height: 1.2,
+                ),
+              ),
+            ],
+            // 慢网说明：「网速较慢（已等 18 秒）」——告诉用户在等什么，
+            // 30 秒硬上限到点内核会直接切下一条，不需要他点任何按钮。
+            if (noteText.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                noteText,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: .62),
+                  fontSize: compact ? 9.5 : 10.5,
+                  fontWeight: FontWeight.w500,
+                  height: 1.25,
+                ),
+              ),
+            ],
+            // 主文案（线路名 / 第几集）：放最后，只当背景信息。
+            const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
               decoration: BoxDecoration(
@@ -1066,18 +1110,6 @@ class FxLoadingOverlay extends StatelessWidget {
                 ),
               ),
             ),
-            // 实时网速：让用户看到「在动」，而不是盯着不动的圆环猜。
-            if (speedText.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                speedText,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: .72),
-                  fontSize: compact ? 10 : 11,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
           ],
         ),
       ),

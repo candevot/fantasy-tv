@@ -450,6 +450,10 @@ class ExoPlayerState {
     this.videoCodec = '',
     this.iqCodec = '',
     this.iqQuality = '',
+    this.bytesLoaded = -1,
+    this.bytesLoadedPerSec = 0,
+    this.isLoading = true,
+    this.fatalError = '',
   });
 
   final Duration position;
@@ -541,6 +545,29 @@ class ExoPlayerState {
   /// 服务端响应头 `X-Iq-Quality`：实际给的分辨率，如 `1920x1080`。
   final String iqQuality;
 
+  /// 本次 open 至今收到多少正文字节（原生 `bytesLoaded`）；-1 = 老原生包没有。
+  ///
+  /// SLOW_NET（2026-11-15）：这是「有没有真的在下」最硬的证据 ——
+  /// 缓冲位置会按分片粒度整段推进（一片没下完就一直不动），字节数是连续涨的，
+  /// 几十 KB/s 的慢网一眼就能看出来在走。
+  final int bytesLoaded;
+
+  /// 原生按 1 秒采样算出来的下载速度（字节/秒）。
+  ///
+  /// 和按缓冲推进估算的 [measuredKbps] 不同：这个是**真实网络字节**，
+  /// 不受「分片整段落盘」影响，慢网时界面能显示「38KB/s」而不是 0。
+  final int bytesLoadedPerSec;
+
+  /// 内核是否仍在加载（`STATE_BUFFERING` 或首帧还没渲染）。
+  final bool isLoading;
+
+  /// 原生判定的「真失败」码（`http_404` / `dns_error` / `tls_error` /
+  /// `connect_refused` / `manifest_invalid` / `no_segments`）；空串 = 没有。
+  ///
+  /// SLOW_NET（2026-11-15）：这类错误**不等任何窗口**，拿到就立刻换线路 ——
+  /// 它不可能是「网慢」，等下去也没有意义。
+  final String fatalError;
+
   factory ExoPlayerState.fromMap(Map<String, dynamic> m) {
     Duration d(String k) =>
         Duration(milliseconds: (m[k] as num?)?.toInt() ?? 0);
@@ -583,6 +610,13 @@ class ExoPlayerState {
       videoCodec: _str(m['videoCodec']),
       iqCodec: _str(m['iqCodec']),
       iqQuality: _str(m['iqQuality']),
+      bytesLoaded: (m['bytesLoaded'] as num?)?.toInt() ?? -1,
+      bytesLoadedPerSec: (m['bytesLoadedPerSec'] as num?)?.toInt() ?? 0,
+      // 老原生包没有这个键：退化成 buffering（只要有一项在涨就不会判卡死）。
+      isLoading: m['isLoading'] == null
+          ? (m['buffering'] == true)
+          : m['isLoading'] == true,
+      fatalError: _str(m['fatalError']),
     );
   }
 
@@ -610,6 +644,9 @@ class ExoPlayerState {
       'frame=${timing.firstFrameMs}ms, drops=$droppedFrames, '
       'kbps=${bitrateKbps > 0 ? bitrateKbps : measuredKbps}, '
       'codec=${videoCodec.isEmpty ? '-' : videoCodec}, '
+      // SLOW_NET：慢网排查看这一段（bytes 在涨 = 线路活着，只是慢）。
+      'bytes=$bytesLoaded(+$bytesLoadedPerSec/s), loading=$isLoading, '
+      'fatal=${fatalError.isEmpty ? '-' : fatalError}, '
       'err=$error)';
 }
 

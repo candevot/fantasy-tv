@@ -1,4 +1,20 @@
 /// 重连期间的进度保护与落点判定。纯 Dart，便于独立回归验证。
+///
+/// FLOW_WATCH（2026-11-15，用户口径）：「该不该切下一条」只看**还有没有
+/// 数据在动**，不看等了多久 ——
+/// ```
+/// 真失败（立即切）  401/403/404/410/500/502/503、解析错误、清单不是
+///                   #EXTM3U、DNS / 连接被拒 / TLS、清单 0 分片、分片全 4xx
+/// 真卡死（判失败）  连续 8 秒 bytes 和 buffered 都不动（起播阶段）
+///                   首帧出来之后：连续 6 秒 buffered 不涨
+/// 慢网（继续等）    只要还在动就等，但有数据也没首帧时最多 30 秒硬上限
+/// ```
+/// 三条门槛的**唯一出处**是 `playback_progress.dart`，这里只做引用，
+/// 不许再出现第二份数字。
+library;
+
+import 'playback_progress.dart';
+
 bool recoverySeekLanded({
   required bool live,
   required Duration target,
@@ -14,29 +30,24 @@ Duration recoveryVisiblePosition({
   required Duration incoming,
 }) => holding ? previous : incoming;
 
-/// 起播阶段的卡住门槛（首帧还没渲染出来）。
+/// 起播阶段「连续无进展」门槛 —— 引用 `playback_progress.dart` 的
+/// [fxStartupNoProgressWindow]（8 秒），不在这里写数字。
 ///
-/// ALIGN_FONGMI（2026-11-15）：门槛从 6 秒抬到 15 秒。
-///
-/// 原生层已经改成「和壳一致」的传输参数（连接 / 读超时都是 30s、错误交给
-/// media3 默认的 3 次重试、不再按状态码一次判死）。6 秒的门槛比传输层
-/// 短得多，正常但有波动的线路（解析 302 冷启动 3s + 清单 + 首片）会被它
-/// 误判成死线路，然后走救援链换线路重开 —— 用户看到的就是「壳秒开、
-/// 我们一直在转圈/换线」。
-/// 15 秒仍然比「一个完整读超时」短一半：真死了的地址照样会被放弃，
-/// 不会拖到 30 秒以上。
-const Duration startupStallTimeout = Duration(seconds: 15);
+/// 以前这一层是「起播 15 秒 / 首帧后 12 秒」的**固定总时长**门槛，慢网
+/// （限速 200KB/s 起播 20 秒才出首帧）必然被误杀。现在 8 秒量的是
+/// 「**一动不动**」：bytes / buffered 连续 8 秒都没变化才算卡死。
+const Duration startupStallTimeout = fxStartupNoProgressWindow;
 
-/// 首帧已经渲染之后的停摆门槛（12 秒）。
+/// 首帧出来之后的卡顿门槛：连续 **6 秒** buffered 不涨就切下一条。
 ///
-/// 首帧之后播放器已经在出画面，卡顿多半是某一片在重试：media3 默认
-/// 0 / 1s / 2s 三次退避最多约 3 秒，12 秒足够吃掉两轮，不会误杀。
-const Duration playbackStallTimeout = Duration(seconds: 12);
+/// 同样只引用一处：[fxStallNoProgressWindow]。已经出过画面说明线路本身
+/// 是好的，这时候卡住多半是某一片重试；6 秒足够吃掉 media3 默认一次退避
+/// （0/1s/2s），又不至于让用户干等。
+const Duration playbackStallTimeout = fxStallNoProgressWindow;
 
 /// 按「首帧是否已渲染」选停摆门槛。
 Duration stallTimeoutFor({required bool hasRenderedFirstFrame}) =>
     hasRenderedFirstFrame ? playbackStallTimeout : startupStallTimeout;
-
 /// 坏地址账本：同一个播放地址累计失败到 [failThreshold] 次就判死，
 /// 后续救援链直接跳过重试；解析类失败（列表拿不到 / 不是 m3u8）一次即判死。
 ///

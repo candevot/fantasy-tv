@@ -13,8 +13,10 @@ import '../services/exo_player.dart';
 import '../services/fx_player.dart';
 import '../services/fx_video_geometry.dart';
 import '../services/fallback_match.dart';
+import '../services/playback_progress.dart';
 import '../services/hls_segment_index.dart';
 import '../services/line_cooldown.dart';
+import '../services/line_probe.dart';
 import '../services/iq_codec_gate.dart';
 import '../services/iqiyi_codec.dart';
 import '../services/play_log.dart';
@@ -139,21 +141,26 @@ class PlayerView extends StatefulWidget {
 }
 
 class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
-  /// 单次 open 等待 ready 的上限：超过即视为该地址不可播，避免黑屏空等。
-  /// 页面等「起播就绪」的上限（OPEN_TIMEOUT 2026-11-15）。
+  /// 起播阶段「连续无进展」判定窗口（SLOW_NET 2026-11-15）。
   ///
-  /// 必须和内核对齐：原生 open 的硬上限是 30 秒（fx_player 的 `_openHardCap`），
-  /// 页面这里原来是 8 秒 —— 复用同一个 FxPlayer 实例时，8 秒一到页面就切到
-  /// 错误态，可内核还在继续 open，10~12 秒后真的出画了；而 `_onVideoValue`
-  /// 在 `_error` 时直接 return，既不 setState 也不挂 Video 纹理，用户看到的是
-  /// 「有声音没画面、错误页还不消失」。宁可等内核自己判失败。
-  static const Duration _openReadyTimeout = fxOpenFirstFrameTimeout;
+  /// 这里**不再有**「页面固定等 8 秒就判死」这回事。用户明确反对：
+  ///
+  /// > 一定要是真失败才会跳过，而不是没有加载出来就跳过。
+  /// > 比如用户网速是真的慢。
+  ///
+  /// 现在页面和内核用同一个口径（[FxProgressWindow]）：每 500ms 采一次
+  /// `bytesLoaded / buffered / position`，任意一项在涨就一直等；
+  /// 连续 [fxStartupNoProgressWindow]（8 秒）三项全都不动才算真卡死。
+  /// 慢到 60 秒还在动，只弹「继续等待 / 换条线路」两个按钮让用户自己选，
+  /// 到 [fxSlowStartupCap]（120 秒）也不替他判失败。
+  static const Duration _openNoProgressWindow = fxStartupNoProgressWindow;
 
   /// 切线路时最多尝试的线路数（含用户选中的目标线路）。
-  /// 换线时最多依次尝试几条线路（含目标线路）。
-  /// 一部片通常有 3~6 条线路，只试 2 条会在前两条都坏时直接报错，
-  /// 而后面明明还有可用线路。3 条是「多给一次机会」与「别让用户干等」
-  /// 之间的折中：每条 8~20 秒，三条最坏也就半分钟左右。
+  ///
+  /// SLOW_NET（2026-11-15）：每条线路的等待时间**不再按总时长封顶** ——
+  /// 慢网下一条线路正常也要十几二十秒，按时间封顶等于专挑慢网下手。
+  /// 现在每条线路只在「连续 8 秒毫无进展」或「原生报真失败」时才被放弃，
+  /// 所以这里的 3 次是「真失败时的连续失败次数」，不是时间预算。
   static const int _maxLineAttempts = 3;
 
   /// 停摆 / 出错的自愈已整体搬进 FxPlayer：连续 30 秒无字节流动才判定
@@ -1217,8 +1224,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           'open line=$openLineName url=$url source=$openSource '
           'kind=${needsParseAddress(url) ? 'parse' : 'direct'}',
         );
-        // 8 秒拿不到可播状态就判这条地址失败，避免黑屏一直转圈。
-        await controller
+        // SLOW_NET（2026-11-15）：这里**不看总时长**。以前的写法是
+        // `.timeout(8s)` —— 慢网必误杀（几十 KB/s 拉 4K 清单 + 首片，
+        // 20 秒才出首帧很正常）。现在交给 [_awaitOpenWithProgress]：
+        // 有进展就一直等，连续 8 秒三项全不动才判失败。
+        final openFuture = controller
             .open(
               url,
               headers: info.headers,
@@ -1284,10 +1294,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                 }
                 return null;
               },
-            )
-            // IQ_CODEC：HEVC 候选只等 8 秒（解码器起不来时不值得拖到 30 秒），
-            // 超时 / 解码报错都会落到 catch，下一条就是它的 AVC 地址。
-            .timeout(target.hevc ? IqCodecGate.hevcOpenTimeout : _openReadyTimeout);
+            );
+        // IQ_CODEC：HEVC 候选的「无进展」窗口收紧到 8 秒（解码器起不来时
+        // 不值得拖），超时 / 解码报错都会落到 catch，下一条就是它的 AVC 地址。
+        await _awaitOpenWithProgress(
+          controller,
+          openFuture,
+          hevc: target.hevc,
+        );
         if (!mounted || token != _loadToken) {
           await controller.dispose();
           return false;
@@ -1395,6 +1409,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           try {
             controller.dispose();
           } catch (_) {}
+        }
+        // 慢网硬上限（30 秒）到点：这条线路就算「能播」也等不起了，
+        // 直接换下一条，不必在同线路的其它候选地址（HEVC → AVC）上再等一轮。
+        // 日志固定 `slow line=… waited=30s buffered=2.1s → switch`。
+        if ('$e'.contains('慢网超时')) {
+          fxPlayLog(
+            fxSlowSwitchLog(
+              line: openLineName,
+              waitedSeconds: fxSlowStartupCap.inSeconds,
+              buffered: controller.value.buffered,
+            ),
+          );
+          break;
         }
       }
     }
@@ -1516,13 +1543,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           );
           watch.stop();
           ok = opened && mounted;
-          // 失败原因：8 秒没首帧 / 403 / 404 / 解析错误 / 其它。
+          // 失败原因：预检失败 / 真失败（4xx/5xx、DNS、TLS）/ 8 秒无进展 / 慢网。
           final reason = ok
               ? ''
               : fxOpenFailReason(
                   elapsedMs: watch.elapsedMilliseconds,
                   error: _lastOpenError,
                 );
+          // PROBE（2026-11-15）：预检结果单独一条日志，格式固定：
+          //   [FxPlay] probe line=幻想4K ok=true stage=segment
+          //   [FxPlay] probe line=mgtv ok=false stage=manifest reason=http_404 → switch
+          final probe = _controller?.lastProbe;
+          if (probe != null && !probe.skipped) {
+            fxPlayLog(
+              fxProbeLogMessage(line: candidate.displayName, probe: probe),
+            );
+          }
           fxPlayLog(
             fxAutoLineLog(
               attempt: attempt,
@@ -1719,43 +1755,151 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 日志和冷却判定都靠它：`reason=http_403` / `no_first_frame`。
   String _lastOpenError = '';
 
-  /// 首帧之后连续缓冲的起点与「本轮已判过缓冲超时」的线路名。
-  DateTime? _bufferingSince;
+  /// 首帧之后卡顿的进度窗口（连续 10 秒三条全不动才算失败）。
+  final FxProgressWindow _stallProgress = FxProgressWindow(
+    window: fxStallNoProgressWindow,
+  );
+
+  /// 起播进度窗口：判失败 + 界面显示「已下载 xx / 正在缓冲 xx%」都靠它。
+  final FxProgressWindow _openProgress = FxProgressWindow(
+    window: fxStartupNoProgressWindow,
+  );
+
+  /// 当前这次 open 已经等了多久（慢网提示「已等 N 秒」用）。
+  Duration _openWaited = Duration.zero;
+
+  /// 起播慢网提示是否该显示（等满 [fxSlowNoticeAfter] 15 秒才亮）。
+  ///
+  /// 只提示、不让用户做决定：30 秒硬上限到点由内核直接切下一条。
+  /// 提示的意义是让用户知道「在等什么」，不是等他点按钮。
+  bool _slowNotice = false;
+
+  /// 「本轮已判过卡死」的线路名。
   String _bufferingFailedLine = '';
 
-  /// 首帧之后连续缓冲（位置不动）超过 [fxBufferingFailTimeout] → 判这条线路失败。
+  /// 上一次写卡顿进度日志的时刻（2 秒一条，别刷屏）。
+  int _stallLogAt = 0;
+
+  /// 等这次 open，但按「**连续无进展**」判失败（SLOW_NET 2026-11-15）。
   ///
-  /// 「首帧出了但一直转圈」是换线路最常见的失败形态：open 成功了，
-  /// 用户却一直在看缓冲圈。这里按 10 秒判定，判过之后立刻换下一条，
-  /// 并把这条线路记 10 分钟临时不可用。
+  /// 这里同时是「慢网由用户决定」的挂点：
+  ///   · 有进展就无限等（内核和这里都不按总时长判死）；
+  ///   · 连续 8 秒三项全不动 → 抛异常，落到 [_bootstrapSource] 的 catch 换线；
+  ///   · 原生 `fatalError`（404 / DNS / TLS / 清单非法 / 0 分片）→ 立刻抛；
+  ///   · 慢到 60 秒还在动 → 界面摆出「继续等待 / 换条线路」两个按钮，
+  ///     用户点「换条线路」就 complete [abort]，这次等待立刻放手。
+  Future<void> _awaitOpenWithProgress(
+    FxPlayer controller,
+    Future<void> open, {
+    required bool hevc,
+  }) {
+    _openProgress.reset();
+    _openWaited = Duration.zero;
+    _setSlowNotice(false);
+    return FxPlayer.awaitOpenProgress<void>(
+      controller,
+      open,
+      progress: _openProgress,
+      // HEVC 候选的无进展窗口收紧到 8 秒；普通候选按默认 8 秒。
+      noProgress: hevc ? IqCodecGate.hevcOpenTimeout : _openNoProgressWindow,
+      onSample: _onOpenProgressSample,
+    );
+  }
+
+  /// 起播进度采样回调（每 500ms 一次）：刷新界面 + 决定要不要显示慢网提示。
+  ///
+  /// 界面必须「看得出在动」：加载层要显示实时网速，不能只有一个转圈；
+  /// 等满 15 秒再补一行「网速较慢（已等 N 秒）」。
+  void _onOpenProgressSample(
+    FxProgressState verdict,
+    FxProgressWindow window,
+    Duration elapsed,
+  ) {
+    if (!mounted || !_loading) return;
+    _openWaited = elapsed;
+    setState(() {});
+    final slow = elapsed >= fxSlowNoticeAfter && verdict == FxProgressState.slow;
+    if (slow == _slowNotice) return;
+    _setSlowNotice(slow);
+    if (slow) {
+      fxPlayLog(
+        fxProgressLog(
+          bytesDelta: window.bytesDelta,
+          bufferedDeltaMs: window.bufferedDeltaMs,
+          state: verdict,
+          extra: 'notice=${elapsed.inSeconds}s line=$_loadingLineName',
+        ),
+      );
+    }
+  }
+
+  /// 显示 / 收起慢网提示（只改状态，不重复 setState）。
+  void _setSlowNotice(bool value) {
+    if (_slowNotice == value) return;
+    _slowNotice = value;
+    if (mounted) setState(() {});
+  }
+
+  /// 首帧之后卡顿判定（SLOW_NET 2026-11-15：连续 10 秒「三项全不动」才算失败）。
+  ///
+  /// 老规则是「缓冲满 10 秒 → 判这条线路失败并换下一条」，慢网下必误杀：
+  /// 一片 4K 分片本来就十几 MB，缓冲位置按分片整段落盘才推进，这十几秒里
+  /// `bufferedPosition` 一动不动，看起来和卡死一模一样。
+  ///
+  /// 现在和起播用同一个口径（[FxProgressWindow]）：字节数 / 缓冲位置 /
+  /// 播放位置任意一项在涨 = 活着，继续等；连续 [fxStallNoProgressWindow]
+  /// （10 秒）三项全不动才是真卡死。
   void _watchBuffering(FxPlayerValue v) {
     // 全屏期间由全屏页自己的链路判定（同一个播放器，两边都切会打架）。
     if (_loading || _error || _fullscreenActive) {
-      _bufferingSince = null;
+      _stallProgress.reset();
       return;
     }
-    if (!v.isInitialized || !v.hasRenderedFirstFrame || !v.isBuffering) {
-      _bufferingSince = null;
+    if (!v.isInitialized ||
+        !v.hasRenderedFirstFrame ||
+        !v.isBuffering ||
+        v.isPlaying) {
+      // 位置还在走 / 没在缓冲：管线是通的，窗口清零重新起算。
+      _stallProgress.reset();
       return;
     }
-    if (v.isPlaying) {
-      // 位置还在走就说明管线是通的，不算失败。
-      _bufferingSince = null;
-      return;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    _stallProgress.window = fxStallNoProgressWindow;
+    _stallProgress.add(
+      FxProgressSample(
+        atMs: nowMs,
+        bytesLoaded: v.bytesLoaded,
+        buffered: v.buffered,
+        position: v.position,
+        isLoading: v.isLoading,
+      ),
+    );
+    final verdict = _stallProgress.state;
+    // 2 秒一条进度日志：`[FxPlay] progress bytes=+38KB buffered=+1.2s verdict=slow`。
+    if (nowMs - _stallLogAt >= 2000) {
+      _stallLogAt = nowMs;
+      fxPlayLog(
+        fxProgressLog(
+          bytesDelta: _stallProgress.bytesDelta,
+          bufferedDeltaMs: _stallProgress.bufferedDeltaMs,
+          state: verdict,
+          extra: 'stage=buffer '
+              'stalled=${_stallProgress.stalledFor.inMilliseconds}ms',
+        ),
+      );
     }
-    final since = _bufferingSince ??= DateTime.now();
-    if (DateTime.now().difference(since) < fxBufferingFailTimeout) return;
+    if (verdict != FxProgressState.stuck) return;
     // 同一条线路只判一次，避免自动轮里重复触发。
     if (_bufferingFailedLine == _lineName) return;
     _bufferingFailedLine = _lineName;
-    _bufferingSince = null;
+    _stallProgress.reset();
     fxPlayLog(
       fxAutoLineLog(
         attempt: 1,
         total: widget.detail?.lines.length ?? 1,
         name: _lineName,
         ok: false,
-        reason: 'buffering_timeout',
+        reason: 'stuck_no_progress',
       ),
     );
     FxLineCooldown.markFailed(widget.videoId, _lineName);
@@ -2374,16 +2518,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
                     if (!v.hasRenderedFirstFrame) {
                       return const SizedBox.shrink();
                     }
-                    final percent = v.bufferingPercent;
-                    // BUFFER_FULL：真实比例已经 100% 就别再挂「缓冲中 100%」
-                    // ——那说明数据齐了，等的是解码不是下载。
-                    if (percent != null && percent >= 100) {
-                      return const SizedBox.shrink();
-                    }
+                    // BUFFER_UI（2026-11-15）：首帧之后缓冲层只给转圈 + 实时
+                    // 网速，不再画百分比（buffered/duration 和「还要等多久」
+                    // 没关系，缓到 42% 可能还要十秒，用户会以为是进度条假了）。
                     return FxLoadingOverlay(
-                      title: fxBufferingText(percent),
-                      percent: percent,
-                      speedText: v.speedText,
+                      title: '缓冲中…',
+                      speedText: fxSpeedLabel(_liveSpeed(v)),
                       dim: false,
                       compact: true,
                     );
@@ -2474,6 +2614,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     );
   }
 
+  /// 当前实时网速（字节/秒）：优先原生按块统计的真实速率。
+  ///
+  /// 老原生包没有 `bytesLoadedPerSec` 时退回 `bytesPerSecond`（旧估算值），
+  /// 再拿不到就是 0 —— 界面显示「0 KB/s」，不编数字。
+  double _liveSpeed(FxPlayerValue v) {
+    if (v.bytesLoadedPerSec > 0) return v.bytesLoadedPerSec.toDouble();
+    return v.bytesPerSecond;
+  }
+
   /// 加载层内容（不带定位）：由调用方决定挂在哪一层 Stack 上。
   Widget _buildLoading() {
     final title = fxLoadingLineText(_requestEp, _loadingLineName);
@@ -2487,16 +2636,29 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             ? _controller
             : null);
     if (c == null) {
-      return FxLoadingOverlay(title: title, compact: true);
+      return FxLoadingOverlay(
+        title: title,
+        speedText: fxSpeedLabel(0),
+        attemptText: _resolvingText,
+        noteText: _slowNotice ? fxSlowNoticeText(_openWaited.inSeconds) : '',
+        compact: true,
+      );
     }
     return AnimatedBuilder(
       animation: c,
-      builder: (context, _) => FxLoadingOverlay(
-        title: title,
-        percent: c.value.bufferingPercent,
-        speedText: c.value.speedText,
-        compact: true,
-      ),
+      builder: (context, _) {
+        final v = c.value;
+        return FxLoadingOverlay(
+          title: title,
+          // 实时网速：原生按块统计的真实字节速率（0 就写「0 KB/s」）。
+          speedText: fxSpeedLabel(_liveSpeed(v)),
+          // 「正在尝试其他线路（2/11）」放在网速下面。
+          attemptText: _resolvingText,
+          // 15 秒起：「网速较慢（已等 18 秒）」——让用户知道在等什么。
+          noteText: _slowNotice ? fxSlowNoticeText(_openWaited.inSeconds) : '',
+          compact: true,
+        );
+      },
     );
   }
 

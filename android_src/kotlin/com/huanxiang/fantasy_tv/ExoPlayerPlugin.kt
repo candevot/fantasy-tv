@@ -22,6 +22,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.cache.CacheDataSource
@@ -284,6 +285,25 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     )
 
     private var lastError: String? = null
+
+    /**
+     * 「真失败」码（SLOW_NET 2026-11-15，Dart 侧 `fatalError` 字段）。
+     *
+     * 空串 = 没有真失败（可能只是网慢）。非空就是这条线路**真的**不能播：
+     * ```
+     * http_401 / http_403 / http_404 / http_410 / http_500 / http_502 / http_503
+     * dns_error         DNS 解析不到主机
+     * connect_refused   TCP 连接被拒
+     * tls_error         证书 / 握手失败
+     * manifest_invalid  清单不是 #EXTM3U / 解析不了
+     * no_segments       清单里 0 个分片 / 所有分片都 4xx
+     * ```
+     * Dart 拿到它**不等任何窗口**，立刻换下一条 —— 这些错误不可能是网慢。
+     */
+    private var fatalErrorCode: String = ""
+
+    /** 上一次报给 Dart 的真失败码（同一个错误只处理一次）。 */
+    private var reportedFatalCode: String = ""
 
     // ------------------------------------------------ 下一集预载（改动 ⑥）
 
@@ -937,6 +957,67 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     }
 
     /**
+     * 把一次播放错误归类成「真失败」码（SLOW_NET 2026-11-15）。
+     *
+     * 返回空串 = 不是真失败（可能只是网慢 / 抖动），交给重试与 Dart 的
+     * 「有没有进展」判定；非空 = 这条线路真的不能播，Dart 立刻换下一条。
+     *
+     * 判定顺序刻意「先具体后笼统」：HTTP 状态码最硬（OkHttp / media3 都会
+     * 带 `InvalidResponseCodeException`），其次是 DNS / 连接 / TLS 这三类
+     * 传输层异常，最后才是错误码名（清单解析类）。
+     */
+    private fun classifyFatal(error: PlaybackException): String {
+        val fatalStatus = setOf(401, 403, 404, 410, 500, 502, 503)
+        var cause: Throwable? = error
+        var depth = 0
+        while (cause != null && depth < 6) {
+            if (cause is HttpDataSource.InvalidResponseCodeException) {
+                val code = cause.responseCode
+                if (code in fatalStatus) return "http_$code"
+            }
+            val simple = cause.javaClass.simpleName
+            val message = (cause.message ?: "").lowercase()
+            if (cause is java.net.UnknownHostException ||
+                message.contains("unable to resolve host") ||
+                message.contains("no address associated") ||
+                message.contains("name or service not known")
+            ) {
+                return "dns_error"
+            }
+            if (cause is java.net.ConnectException ||
+                message.contains("connection refused") ||
+                message.contains("failed to connect")
+            ) {
+                return "connect_refused"
+            }
+            if (cause is javax.net.ssl.SSLException || message.contains("handshake") ||
+                message.contains("certificate")
+            ) {
+                return "tls_error"
+            }
+            if (simple.contains("UnrecognizedInputFormat") ||
+                simple.contains("ParserException") || simple.contains("Malformed")
+            ) {
+                return "manifest_invalid"
+            }
+            if (simple.contains("HttpDataSource")) {
+                val code = Regex("(?:invalid response code|response code):?\\s*(\\d{3})")
+                    .find(message)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                if (code != null && code in fatalStatus) return "http_$code"
+            }
+            cause = cause.cause
+            depth++
+        }
+        val name = error.errorCodeName
+        return when {
+            name.contains("PARSING_MANIFEST") ||
+                name.contains("PARSING_CONTAINER") ||
+                name == "ERROR_CODE_IO_INVALID_HTTP_CONTENT_TYPE" -> "manifest_invalid"
+            else -> ""
+        }
+    }
+
+    /**
      * 播放层分级重试（在 [Player.Listener.onPlayerError] 里调用）。
      *
      * 返回 true = 本次错误已经在原生侧吃掉重试，**不要**上报给 Dart
@@ -1192,6 +1273,22 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             override fun onPlayerError(error: PlaybackException) {
                 lastError = error.errorCodeName + ": " + (error.message ?: "")
                 endSeekAudioGate()
+                // SLOW_NET（2026-11-15，用户口径）：先判「真失败」。
+                // 401/403/404/410/500/502/503、DNS 不通、连接被拒、TLS 失败、
+                // 清单非法、0 分片 —— 这些重试没有任何意义，直接给 Dart 一个
+                // fatalError 码，让它**立刻**换下一条，不等 8 秒窗口。
+                val fatal = classifyFatal(error)
+                if (fatal.isNotEmpty() && fatal != reportedFatalCode) {
+                    fatalErrorCode = fatal
+                    reportedFatalCode = fatal
+                    Log.i(
+                        LOG_TAG,
+                        "fatal=$fatal code=${error.errorCodeName} → 直接换线路 " +
+                            "(不重试) url=${openedItem?.url ?: "-"}",
+                    )
+                    emit()
+                    return
+                }
                 // LAYERED_RETRY（改动 ⑤）：同一集同一线路最多在原生侧重试 2 次
                 // （IO → 重新 resolve 地址；解码 → 切解码模式）。
                 //
@@ -1235,6 +1332,11 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "videoCodec" to "",
             "iqCodec" to IqProbe.codec,
             "iqQuality" to IqProbe.quality,
+            // SLOW_NET：没有播放器 = 一个字节都没收到。
+            "bytesLoaded" to PlayerHttp.bytesLoaded(),
+            "bytesLoadedPerSec" to 0,
+            "isLoading" to true,
+            "fatalError" to fatalErrorCode,
             )
         }
         // 画面尺寸：FxPlayer 的 value.width/height 和分辨率胶囊都靠它，
@@ -1300,6 +1402,16 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             "videoCodec" to codecNameOf(fmt?.sampleMimeType),
             "iqCodec" to IqProbe.codec,
             "iqQuality" to IqProbe.quality,
+            // SLOW_NET（2026-11-15）：界面「实时网速」和「慢网 / 卡死」判定
+            // 的全部数据来源。
+            //   bytesLoaded        本次 open 累计收到的正文字节（按块累加，
+            //                      慢网下也是一直在涨的）
+            //   bytesLoadedPerSec  滚动 1 秒窗口的真实速率（B/s）
+            //   isLoading          正在缓冲**且**用户没按暂停
+            "bytesLoaded" to PlayerHttp.bytesLoaded(),
+            "bytesLoadedPerSec" to PlayerHttp.bytesPerSec(),
+            "isLoading" to (buffering && p.playWhenReady),
+            "fatalError" to fatalErrorCode,
         )
     }
 
@@ -1321,6 +1433,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
     ) {
         ensurePlayer()
         lastError = null
+        // SLOW_NET：新的一次 open = 新的失败现场，别把上一条线路的
+        // 真失败码带过来（否则一开播就被判死）。
+        fatalErrorCode = ""
+        reportedFatalCode = ""
         // TIMING_PROBE：开一条新时间线。t=0 = 用户点播放（含 Dart 解析段）。
         FxTiming.begin(url, resolveMs)
         // CONNECTS：清零连接计数 / 吞吐统计，首帧回来时打 connects=N。

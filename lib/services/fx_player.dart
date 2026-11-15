@@ -9,8 +9,11 @@ import 'cms_bridge.dart';
 import 'exo_player.dart';
 import 'hls_segment_index.dart';
 import 'iqiyi_codec.dart';
+import 'line_probe.dart';
 import 'local_hls_proxy.dart';
+import 'playback_progress.dart';
 import 'playback_recovery.dart';
+import 'play_log.dart';
 
 /// FxPlayer 打开/播放失败时抛出的异常，调用方可据此尝试备用地址。
 class FxPlayerException implements Exception {
@@ -76,6 +79,10 @@ class FxPlayerValue {
     this.iqCodec = '',
     this.iqQuality = '',
     this.codecHint = '',
+    this.bytesLoaded = -1,
+    this.bytesLoadedPerSec = 0,
+    this.isLoading = true,
+    this.fatalError = '',
   });
 
   /// 是否已经拿到视频参数/时长，可以开始渲染与 seek。
@@ -176,6 +183,46 @@ class FxPlayerValue {
   /// 所以诊断浮层把它排在最后一位，前面两位才是实测。
   final String codecHint;
 
+  /// 本次 open 至今收到的正文字节；-1 = 老原生包 / 还没开始。
+  ///
+  /// SLOW_NET（2026-11-15）：「慢」和「死」的区别就在这几个数上 ——
+  /// 字节在涨说明数据真的在下来（几十 KB/s 也是在下），
+  /// 连续 8 秒三项全不动才是真卡死。
+  final int bytesLoaded;
+
+  /// 原生 1 秒采样算出的下载速度（字节/秒）；0 = 还没测到。
+  final int bytesLoadedPerSec;
+
+  /// 内核是否仍在加载（buffering / 首帧未渲染）。
+  final bool isLoading;
+
+  /// 原生判定的「真失败」码；空串 = 没有。
+  ///
+  /// 401/403/404/410/500/502/503、DNS、连接被拒、TLS、清单非法、0 分片
+  /// 都归到这里：这些**不等 8 秒窗口**，拿到就立刻换线路。
+  final String fatalError;
+
+  /// 已下载量文案（`已下载 1.2MB`）；拿不到字节时为空串。
+  ///
+  /// 取原生字节数与「缓冲增量预估」的较大者：老原生包没有 bytesLoaded 时
+  /// 仍然能给用户一个「在动」的数字。
+  String get loadedText {
+    final real = bytesLoaded;
+    if (real > 0) return fxLoadedText(real);
+    return '';
+  }
+
+  /// 真实网速文案（优先原生 1 秒采样的字节速度，退回缓冲估算）。
+  String get realSpeedText {
+    final b = bytesLoadedPerSec > 0
+        ? bytesLoadedPerSec.toDouble()
+        : bytesPerSecond;
+    if (b <= 0) return '';
+    if (b >= 1024 * 1024) return '${(b / 1024 / 1024).toStringAsFixed(1)} MB/s';
+    if (b >= 1024) return '${(b / 1024).round()} KB/s';
+    return '${b.toStringAsFixed(0)} B/s';
+  }
+
   /// 画面尺寸，未就绪时宽高为 0。
   Size get size => Size((width ?? 0).toDouble(), (height ?? 0).toDouble());
 
@@ -241,6 +288,10 @@ class FxPlayerValue {
     String? iqCodec,
     String? iqQuality,
     String? codecHint,
+    int? bytesLoaded,
+    int? bytesLoadedPerSec,
+    bool? isLoading,
+    String? fatalError,
   }) {
     return FxPlayerValue(
       isInitialized: isInitialized ?? this.isInitialized,
@@ -270,6 +321,10 @@ class FxPlayerValue {
       iqCodec: iqCodec ?? this.iqCodec,
       iqQuality: iqQuality ?? this.iqQuality,
       codecHint: codecHint ?? this.codecHint,
+      bytesLoaded: bytesLoaded ?? this.bytesLoaded,
+      bytesLoadedPerSec: bytesLoadedPerSec ?? this.bytesLoadedPerSec,
+      isLoading: isLoading ?? this.isLoading,
+      fatalError: fatalError ?? this.fatalError,
     );
   }
 }
@@ -317,10 +372,30 @@ class FxPlayer implements Listenable {
     );
   }
 
-  /// 起播「还在进展」时的最长等待：只要还在往下拉就一直等，
-  /// 避免把「大分片加载慢」误判成「线路不可用」并自动换线。
-  /// 硬上限：再慢也不等超过这个时间。
-  static const Duration _openHardCap = Duration(seconds: 30);
+  /// 原生 `open` 这一次 MethodChannel 调用本身的超时（不含等首帧）。
+  ///
+  /// 原生在 `prepare()` 发出后立刻回包，正常 1~2 秒；30 秒只兜住
+  /// 「原生一句话都不说」这种病态情况（JSON/线程卡死），不是首帧等待上限。
+  static const Duration _openCallTimeout = Duration(seconds: 30);
+
+  /// 慢网但**有进展**时的自动等待上限（SLOW_NET 2026-11-15）。
+  ///
+  /// 用户定稿：「只要任意一项在涨就无限延长等待（上限 120 秒）」。
+  /// 所以这里到点**不判失败** —— 只写一条日志，把决定权交给页面上的
+  /// 「继续等待 / 换条线路」两个按钮（见 `player_page.dart`）。
+  /// 真卡死（连续 [fxStartupNoProgressWindow] 三项全不动）照旧立刻放弃。
+  static const Duration _openSlowCap = fxSlowStartupCap;
+
+  /// 上一次已处理过的「真失败」码（同一条地址只处理一次）。
+  String _lastFatalCode = '';
+
+  /// 本次 open 起播前对线路做健康预检的结果；null = 这次没预检。
+  ///
+  /// 页面用它打「probe line=幻想4K ok=true stage=segment」这类日志：
+  /// 播放器不知道线路名，线路名只有页面有。
+  FxLineProbeResult? get lastProbe => _lastProbe;
+
+  FxLineProbeResult? _lastProbe;
 
   /// 看门狗采样间隔。ExoPlayer 的状态事件本来就不密，4 秒够。
   static const Duration _watchdogTick = Duration(seconds: 4);
@@ -362,6 +437,110 @@ class FxPlayer implements Listenable {
     Duration readyTimeout = const Duration(seconds: 10),
   }) {
     return FxPlayer._(readyTimeout: readyTimeout);
+  }
+
+  /// 等一次 `open` 完成，但按「**连续无进展**」判失败（SLOW_NET 2026-11-15）。
+  ///
+  /// 页面层原来写的是 `controller.open(...).timeout(8s)` —— 固定 8 秒，
+  /// 慢网（几十 KB/s 拉 4K）必然误杀，于是「本来能播的线路被判死、越切越糟」。
+  /// 现在页面层不再按总时长判，只做三件事：
+  ///
+  ///   1. 每 [fxProgressSampleInterval] 采一次 `bytesLoaded / buffered / position`
+  ///      喂给 [progress]（页面也用它画「正在缓冲 xx% / 已下载 xx」）；
+  ///   2. 连续 [noProgress]（默认 8 秒）三项全不动 → 抛 [FxPlayerException]，
+  ///      这才叫真卡死；
+  ///   3. 原生 `fatalError`（404 / DNS / TLS / 清单非法 / 0 分片）→ 立刻抛，
+  ///      不等窗口。
+  ///
+  /// 慢但有进展时最多等 [fxSlowStartupCap]（30 秒硬上限）：到点直接抛，
+  /// 页面立刻换下一条（不弹二选一）。
+  static Future<T> awaitOpenProgress<T>(
+    FxPlayer player,
+    Future<T> open, {
+    FxProgressWindow? progress,
+    Duration? noProgress,
+    void Function(
+      FxProgressState verdict,
+      FxProgressWindow window,
+      Duration elapsed,
+    )? onSample,
+  }) async {
+    final watch = Stopwatch()..start();
+    final window =
+        progress ?? FxProgressWindow(window: noProgress ?? fxStartupNoProgressWindow);
+    if (noProgress != null) window.window = noProgress;
+    var slowCapMs = fxSlowStartupCap.inMilliseconds;
+    var lastLogMs = -1000;
+    var finished = false;
+    T? result;
+    Object? error;
+    StackTrace? stack;
+    // 不 await：一边等 open，一边采样。open 自己的异常留到最后再抛，
+    // 保证抛出的类型 / 栈和调用方直接 await 时一致。
+    unawaited(
+      open.then<void>(
+        (v) {
+          result = v;
+          finished = true;
+        },
+        onError: (Object e, StackTrace st) {
+          error = e;
+          stack = st;
+          finished = true;
+        },
+      ),
+    );
+    while (!finished) {
+      await Future<void>.delayed(fxProgressSampleInterval);
+      if (finished) break;
+      final v = player.value;
+      window.add(
+        FxProgressSample(
+          atMs: watch.elapsedMilliseconds,
+          bytesLoaded: v.bytesLoaded,
+          buffered: v.buffered,
+          position: v.position,
+          isLoading: v.isLoading,
+        ),
+      );
+      final verdict = window.state;
+      if (watch.elapsedMilliseconds - lastLogMs >= 2000) {
+        lastLogMs = watch.elapsedMilliseconds;
+        fxPlayLog(
+          fxProgressLog(
+            bytesDelta: window.bytesDelta,
+            bufferedDeltaMs: window.bufferedDeltaMs,
+            state: verdict,
+            extra: 'stage=open firstFrame=${v.hasRenderedFirstFrame} '
+                'stalled=${window.stalledFor.inMilliseconds}ms',
+          ),
+        );
+      }
+      onSample?.call(verdict, window, watch.elapsed);
+      if (v.fatalError.isNotEmpty) {
+        throw FxPlayerException('线路不可用(${v.fatalError})');
+      }
+      if (verdict == FxProgressState.stuck) {
+        throw FxPlayerException('连续 ${window.stalledFor.inSeconds} 秒无进展');
+      }
+      if (watch.elapsedMilliseconds >= slowCapMs) {
+        // 慢但一直在动：到 30 秒硬上限**直接切**（用户口径：到点就切，
+        // 不弹「继续等待 / 换条线路」——问了也不会点，反而更烦）。
+        fxPlayLog(
+          fxSlowSwitchLog(
+            line: '',
+            waitedSeconds: watch.elapsed.inSeconds,
+            buffered: v.buffered,
+          ),
+        );
+        throw const FxPlayerException('慢网超时(30s)');
+      }
+    }
+    final err = error;
+    if (err != null) {
+      Error.throwWithStackTrace(err, stack ?? StackTrace.current);
+    }
+    return result as T;
   }
 
   /// 打开地址后等首帧的最长时间。
@@ -440,6 +619,9 @@ class FxPlayer implements Listenable {
   Duration _lastFlowPos = Duration.zero;
   Duration _lastFlowBuffered = Duration.zero;
   int _lastFlowState = -1;
+
+  /// 上一次看到的已收字节数（慢网下「字节在涨」也算有流动）。
+  int _lastFlowBytes = -1;
 
   /// 救援链正在执行（防止看门狗 / 错误事件重复进入）。
   bool _rescueBusy = false;
@@ -597,6 +779,7 @@ class FxPlayer implements Listenable {
     _rescueBusy = false;
     _rescueRounds = 0;
     _lastHandledError = '';
+    _lastProbe = null;
     // 记下服务端声明的类型，供 _openMedia / 救援重开使用。
     _typeHint = isHls;
     final startMs = startPosition.inMilliseconds < 0
@@ -698,6 +881,23 @@ class FxPlayer implements Listenable {
         if (identical(_ready, ready)) _ready = null;
         return;
       }
+      // PROBE（2026-11-15）：起播前先确认这条线路本身是好的。
+      // 预检失败 = 线路坏了（不是网慢）→ 立刻判失败，页面马上换下一条，
+      // 不用等 8 秒无进展窗口；预检通过才交给播放器去等首帧（慢网最多 30 秒）。
+      final probe = await _probeSource(source, token, startPositionMs);
+      if (probe == null) {
+        if (identical(_ready, ready)) _ready = null;
+        return;
+      }
+      if (!probe.ok) {
+        _noteStartupFailure(
+          probe.failureCode,
+          resolveFailure: fxIsResolveFailureCode(probe.failureCode),
+        );
+        _fail('线路预检失败（${probe.stage}:${probe.reason}）');
+        if (identical(_ready, ready)) _ready = null;
+        throw FxPlayerException('线路预检失败(${probe.failureCode})');
+      }
       opened = source;
       await _openMedia(
         source,
@@ -709,7 +909,7 @@ class FxPlayer implements Listenable {
         // 之前，属于同一次「用户点播放」的等待。
         resolveMs:
             resolveWatch.elapsedMilliseconds + FxPlayCache.recentResolveMs(),
-      ).timeout(_openHardCap);
+      ).timeout(_openCallTimeout);
     } catch (error) {
       if (_disposed || token != _openToken) {
         if (identical(_ready, ready)) _ready = null;
@@ -749,58 +949,167 @@ class FxPlayer implements Listenable {
     }
   }
 
-  /// 等首帧，但把「还在下载」和「卡死」区分开。
+  /// 等首帧，但把「还在下载（慢）」和「卡死（真失败）」区分开。
   ///
-  /// 判据是 ExoPlayer 上报的缓冲位置 / 播放位置：在动就说明线路活着，
-  /// 继续等；停摆超过门槛才算这次 open 失败。
+  /// SLOW_NET（2026-11-15）用户定稿：
   ///
-  /// 门槛按「首帧是否已渲染」分两档（[stallTimeoutFor]）—— 起播 15 秒，
-  /// 首帧出来后 12 秒。另外起播阶段即使缓冲还在慢慢涨，只要门槛内没把
-  /// 首帧送上屏，同样算卡住：用户看到的就是转圈，等下去只有旧实例继续
-  /// 占带宽。（ALIGN_FONGMI 2026-11-15：原值为 6 / 8 秒，比传输层还紧。）
+  /// > 一定要是真失败才会跳过，而不是没有加载出来就跳过。比如用户网速是真的慢。
+  ///
+  /// 所以这里**删掉了「总共等 N 秒没首帧就算失败」那一条**（原来起播 15 秒、
+  /// 首帧后 12 秒，更早是 6 / 8 秒）—— 慢网拉 4K 清单 + 首片 20 秒才出首帧
+  /// 很常见，按总时长判定只会把本来能播的线路判死。
+  ///
+  /// 现在的判据（[FxProgressWindow]）：
+  ///   · 每 [fxProgressSampleInterval] 采一次 `bytesLoaded / buffered / position`；
+  ///   · 任意一项在涨 = 慢，**无限延长等待**（上限 [fxSlowStartupCap] 只用来
+  ///     提示用户，不判失败）；
+  ///   · 连续 [fxStartupNoProgressWindow]（8 秒）三项全都不动 = 真卡死，放弃；
+  ///   · 原生报「真失败」（`fatalError`：401/403/404/410/500/502/503、DNS、
+  ///     连接被拒、TLS、清单非法、0 分片）→ **立刻**放弃，不等窗口。
   Future<void> _awaitReadyOrProgress(Future<void> ready, int token) async {
-    final startedAt = DateTime.now();
-    var lastMs = -1;
-    var lastProgressAt = DateTime.now();
+    final watch = Stopwatch()..start();
+    final progress = FxProgressWindow(window: fxStartupNoProgressWindow);
+    var slowCapMs = _openSlowCap.inMilliseconds;
+    var lastLogMs = -1000;
     while (true) {
       if (_disposed || token != _openToken) return;
       try {
-        await ready.timeout(const Duration(seconds: 1));
-        return; // 首帧到了
+        await ready.timeout(fxProgressSampleInterval);
+        return; // 首帧 / 媒体就绪
       } on TimeoutException {
-        // 还没好，继续看有没有进展。
+        // 还没好：看有没有真的在下。
       }
       if (_disposed || token != _openToken) return;
 
       final st = _engine.state.value;
       final firstFrame =
           st.hasRenderedFirstFrame || _value.hasRenderedFirstFrame;
-      final ms = st.buffered.inMilliseconds + st.position.inMilliseconds;
-      final now = DateTime.now();
-      if (ms > lastMs) {
-        lastMs = ms;
-        lastProgressAt = now;
+      // 首帧前后用同一个「无进展」口径，只是窗口长度不同（8s / 10s）。
+      progress.window = stallTimeoutFor(hasRenderedFirstFrame: firstFrame);
+      progress.add(
+        FxProgressSample(
+          atMs: watch.elapsedMilliseconds,
+          bytesLoaded: st.bytesLoaded,
+          buffered: st.buffered,
+          position: st.position,
+          isLoading: st.isLoading,
+        ),
+      );
+      final verdict = progress.state;
+      // 日志 2 秒一条：`[FxPlay] progress bytes=+38KB buffered=+1.2s verdict=slow`。
+      if (watch.elapsedMilliseconds - lastLogMs >= 2000) {
+        lastLogMs = watch.elapsedMilliseconds;
+        fxPlayLog(
+          fxProgressLog(
+            bytesDelta: progress.bytesDelta,
+            bufferedDeltaMs: progress.bufferedDeltaMs,
+            state: verdict,
+            extra: 'firstFrame=$firstFrame '
+                'stalled=${progress.stalledFor.inMilliseconds}ms',
+          ),
+        );
       }
-      final stallLimit = stallTimeoutFor(hasRenderedFirstFrame: firstFrame);
-      if (now.difference(lastProgressAt) >= stallLimit) {
-        _logFx('OPEN 放弃：${stallLimit.inSeconds}s 无进展');
-        _noteStartupFailure(firstFrame ? 'stall' : 'no_progress');
+      // 真失败：地址已经 404 / DNS 不通 / 清单非法，等下去没有任何意义。
+      final fatal = st.fatalError;
+      if (fatal.isNotEmpty && fatal != _lastFatalCode) {
+        _lastFatalCode = fatal;
+        _logFx('OPEN 放弃：真失败 $fatal ${_shortUrl(_sourceUrl)}');
+        _noteStartupFailure(fatal, resolveFailure: fxIsResolveFailureCode(fatal));
+        _fail('线路不可用($fatal)');
+        throw FxPlayerException('线路不可用($fatal)');
+      }
+      if (verdict == FxProgressState.stuck) {
+        // 连续一个窗口字节、缓冲、位置全都一动不动 —— 这是真卡死。
+        _logFx(
+          'OPEN 放弃：连续 ${progress.stalledFor.inSeconds}s 无进展'
+          '（bytes=${st.bytesLoaded} buffered=${st.buffered.inMilliseconds}ms）',
+        );
+        _noteStartupFailure('stuck_no_progress');
         _fail('播放超时，线路可能不可用');
         throw const FxPlayerException('播放超时');
       }
-      if (!firstFrame && now.difference(startedAt) >= stallLimit) {
-        _logFx('OPEN 放弃：${stallLimit.inSeconds}s 首帧未渲染');
-        _noteStartupFailure('first_frame_timeout');
-        _fail('播放超时，线路可能不可用');
-        throw const FxPlayerException('播放超时');
-      }
-      if (now.difference(startedAt) >= _openHardCap) {
-        _logFx('OPEN 放弃：超过硬上限 ${_openHardCap.inSeconds}');
-        _noteStartupFailure('hard_cap');
-        _fail('播放超时，线路可能不可用');
-        throw const FxPlayerException('播放超时');
+      // 慢但一直在走：到 30 秒硬上限**直接切下一条**。
+      // 用户口径：30 秒是硬上限，不是弹性值 —— 再多就等不了了；
+      // 而且不弹「继续等待 / 换条线路」，到点直接换。
+      if (watch.elapsedMilliseconds >= slowCapMs) {
+        _logFx(
+          'OPEN 放弃：慢网 ${_openSlowCap.inSeconds}s 硬上限 → 换下一条'
+          '（buffered=${st.buffered.inMilliseconds}ms bytes=${st.bytesLoaded}）',
+        );
+        fxPlayLog(
+          fxSlowSwitchLog(
+            line: '',
+            waitedSeconds: watch.elapsed.inSeconds,
+            buffered: st.buffered,
+          ),
+        );
+        _noteStartupFailure('slow_network');
+        _fail('网速太慢，已自动换下一条线路');
+        throw const FxPlayerException('慢网超时(30s)');
       }
     }
+  }
+
+  /// 起播前的线路健康预检（PROBE 2026-11-15，用户口径）。
+  ///
+  /// 三级：能连上 → 清单是 #EXTM3U 且有分片 → 第一个分片能下到字节。
+  /// 每项最多 3 秒、总共 8 秒（见 [probeLine]）—— 预检自己不许卡住。
+  ///
+  /// 什么情况**不探**（探了只会多一次请求，甚至把整集搞废）：
+  ///   · 本地代理 / 本地文件（`127.0.0.1`、`file:`、`content:`）；
+  ///   · 一次性令牌清单（探一次就把令牌烧掉，播放器那条反而 403）；
+  ///   · 10 分钟内已经探通过的地址（救援链「同地址重开」不必再探）；
+  ///   · 从中间续播（[startPositionMs] > 0）：线路早就在放了，不用再验；
+  ///   · 非 HLS（mp4 直链没有清单，探了必然「不是 #EXTM3U」）。
+  ///
+  /// 返回 null = 这次 open 已被新的请求取代。
+  Future<FxLineProbeResult?> _probeSource(
+    _PlaybackSource source,
+    int token,
+    int startPositionMs,
+  ) async {
+    _lastProbe = null;
+    if (!FxLineProbeCache.enabled) return const FxLineProbeResult.skipped();
+    final url = source.url.trim();
+    if (url.isEmpty) return const FxLineProbeResult.skipped();
+    final lower = url.toLowerCase();
+    if (lower.startsWith('file:') ||
+        lower.startsWith('content:') ||
+        lower.startsWith('/')) {
+      return const FxLineProbeResult.skipped();
+    }
+    final host = Uri.tryParse(url)?.host ?? '';
+    if (host == '127.0.0.1' || host == 'localhost') {
+      return const FxLineProbeResult.skipped();
+    }
+    final looksHls = _typeHint ?? _looksLikeHls(url);
+    if (!looksHls) {
+      // 预检只对「清单型」地址有意义：mp4 直链没有 #EXTM3U。
+      return const FxLineProbeResult.skipped();
+    }
+    if (HlsSegmentIndex.isOneTimePlaylist(url)) {
+      _logFx('PROBE 跳过：一次性令牌清单（再抓一次会把令牌烧掉）');
+      return const FxLineProbeResult.skipped();
+    }
+    if (FxLineProbeCache.isHealthy(url)) {
+      _logFx('PROBE 跳过：10 分钟内已探通');
+      return const FxLineProbeResult.skipped();
+    }
+    if (startPositionMs > 0) {
+      _logFx('PROBE 跳过：续播位置 $startPositionMs ms 的线路已在用');
+      return const FxLineProbeResult.skipped();
+    }
+    final probe = await probeLine(url, headers: source.headers);
+    if (_disposed || token != _openToken) return null;
+    _lastProbe = probe;
+    _logFx(
+      'PROBE ${probe.ok ? '通过' : '失败'} stage=${probe.stage} '
+      'reason=${probe.reason.isEmpty ? '-' : probe.reason} '
+      'segs=${probe.segments} ${probe.elapsed.inMilliseconds}ms '
+      '${_shortUrl(url)}',
+    );
+    if (probe.ok) FxLineProbeCache.markHealthy(url);
+    return probe;
   }
 
   /// 解析出真正交给内核的地址：直链先过本地分片代理（默认关闭），
@@ -1215,6 +1524,11 @@ class FxPlayer implements Listenable {
       iqCodec: st.iqCodec,
       iqQuality: st.iqQuality,
       codecHint: iqRequestedCodec(_sourceUrl),
+      // SLOW_NET（2026-11-15）：「慢」和「死」的区别全在这三个字段上。
+      bytesLoaded: st.bytesLoaded,
+      bytesLoadedPerSec: st.bytesLoadedPerSec,
+      isLoading: st.isLoading,
+      fatalError: st.fatalError,
     );
 
     final secondChanged = shown.inSeconds != _value.position.inSeconds;
@@ -1228,8 +1542,32 @@ class FxPlayer implements Listenable {
         next.width != _value.width ||
         // DIAG（2026-11-15）：首帧耗时是逐毫秒变的（原生每轮快照都重算），
         // 不并进通知判据的话诊断浮层要等别的状态变化才刷新，看起来像卡住。
-        next.timing.firstFrameMs != _value.timing.firstFrameMs;
+        next.timing.firstFrameMs != _value.timing.firstFrameMs ||
+        // BUFFER_UI（2026-11-15）：实时网速要每秒刷新。缓冲中位置不动、
+        // 其它字段也不变，不把网速并进判据的话，加载层会一直显示旧值
+        // （用户看到「1.8 MB/s」卡住不动，和假进度没区别）。
+        next.bytesLoadedPerSec != _value.bytesLoadedPerSec;
     _value = next;
+    // SLOW_NET：原生已经判定「真失败」（404 / DNS / TLS / 清单非法 /
+    // 0 分片）—— 这类错误不可能是「网慢」，不等任何窗口，立刻处理：
+    //   · 起播阶段（ready 还没完成）：记一次账本并直接判失败，页面马上换线；
+    //   · 首帧之后：让它走救援链（换签名 / 同地址重开 / 换线路），
+    //     不等看门狗那 10 秒无进展窗口。
+    final fatal = next.fatalError;
+    if (fatal.isNotEmpty && fatal != _lastFatalCode) {
+      _lastFatalCode = fatal;
+      _logFx('真失败 code=$fatal，不等待窗口直接处理 ${_shortUrl(_sourceUrl)}');
+      _noteStartupFailure(fatal, resolveFailure: fxIsResolveFailureCode(fatal));
+      if (next.isInitialized) {
+        unawaited(_runRescue('真失败 $fatal'));
+      } else {
+        _setValue(next.copyWith(hasError: true, errorText: '线路不可用($fatal)'));
+        final pending = _ready;
+        if (pending != null && !pending.isCompleted) {
+          pending.completeError(FxPlayerException('线路不可用($fatal)'));
+        }
+      }
+    }
     // 首帧 / 时长就绪就立刻放行 open，不能等 _setValue ——
     // 这条路径不走 _setValue，之前漏了这一步，结果每次 open 都要
     // 干等到 30 秒停摆门槛或 2 分钟硬上限才返回（表现出来就是「加载很慢」）。
@@ -1480,17 +1818,24 @@ class FxPlayer implements Listenable {
     unawaited(_runRescue('连续 ${stalled.inSeconds}s 无进展'));
   }
 
-  /// 播放位置 / 缓冲位置 / 内核状态任一有变化即算「还在流动」。
+  /// 播放位置 / 缓冲位置 / 收到的字节数 / 内核状态，任一有变化即算「还在流动」。
+  ///
+  /// SLOW_NET（2026-11-15）：加了**字节数**这一项 —— 慢网下一个分片要下
+  /// 十几秒，期间 bufferedPosition 一动不动（分片整段落盘才推进），
+  /// 只看缓冲位置会把「正在慢慢下」误判成「卡死」。字节在涨就是活着。
   bool _flowing() {
     final v = _value;
     final st = _engine.state.value;
     final posMoved = v.position != _lastFlowPos;
     final bufferedMoved = v.buffered != _lastFlowBuffered;
     final stateMoved = st.state != _lastFlowState;
+    final bytesMoved =
+        st.bytesLoaded >= 0 && st.bytesLoaded != _lastFlowBytes;
+    if (bytesMoved) _lastFlowBytes = st.bytesLoaded;
     _lastFlowPos = v.position;
     _lastFlowBuffered = v.buffered;
     _lastFlowState = st.state;
-    return posMoved || bufferedMoved || stateMoved;
+    return posMoved || bufferedMoved || stateMoved || bytesMoved;
   }
 
   /// 字节恢复流动 / 暂停：熄灭我们自己点亮的「缓冲中」。

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../api.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
+import '../services/playback_progress.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
 import '../services/device_status.dart';
@@ -146,12 +147,16 @@ class FullPlayerPage extends StatefulWidget {
 
 class _FullPlayerPageState extends State<FullPlayerPage>
     with WidgetsBindingObserver {
-  /// 单次 open 等待 ready 的上限：超过即视为该地址不可播，避免黑屏空等。
-  static const Duration _openReadyTimeout = Duration(seconds: 8);
+  /// 起播「连续无进展」窗口（SLOW_NET 2026-11-15）。
+  ///
+  /// 这里**不再**是「页面固定等 8 秒」：慢网下 20 秒才出首帧很正常，
+  /// 按总时长判死等于专挑慢网下手。现在只要字节 / 缓冲 / 位置在涨就一直等，
+  /// 连续 [fxStartupNoProgressWindow] 三项全不动才算真卡死。
+  static const Duration _openNoProgressWindow = fxStartupNoProgressWindow;
 
-  /// 首帧等待上限：open 成功但 10 秒内仍没有画面（红屏 / 黑屏不播）时
-  /// 进入错误页；用户点「重试」重新 open 当前地址，连续失败 2 次自动换线路。
-  static const Duration _firstFrameTimeout = Duration(seconds: 10);
+  /// 首帧看门狗：open 成功但这么久仍没有画面时**检查有没有进展** ——
+  /// 有进展就继续等（慢网），连续无进展才进错误页。
+  static const Duration _firstFrameTimeout = fxStallNoProgressWindow;
 
   /// 连续播放失败次数；首帧真正出现后清零。
 
@@ -827,8 +832,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       final url = target.url;
       if (target.degradeFromHevc) fxPlayLog(iqDegradeLog(url));
       try {
-        // 8 秒拿不到可播状态就判这条地址失败，避免黑屏一直转圈。
-        await c
+        // SLOW_NET：不按总时长判失败 —— 有进展就一直等（见
+        // [FxPlayer.awaitOpenProgress]）。慢网 20 秒才出首帧是正常情况。
+        final openFuture = c
             .open(
               url,
               headers: source.headers,
@@ -849,9 +855,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               refreshPlay: _refreshPlatformUrl,
               onPlayExpired: _onPlatformExpired,
               rescueLines: _rescueLineSource,
-            )
-            // IQ_CODEC：HEVC 候选只等 8 秒，失败就落到它的 AVC 地址。
-            .timeout(target.hevc ? IqCodecGate.hevcOpenTimeout : _openReadyTimeout);
+            );
+        // IQ_CODEC：HEVC 候选的无进展窗口收紧到 8 秒，失败就落到 AVC 地址。
+        await FxPlayer.awaitOpenProgress<void>(
+          c,
+          openFuture,
+          noProgress: target.hevc ? IqCodecGate.hevcOpenTimeout : null,
+        );
         if (!mounted || token != _loadToken) return;
         final durationMs = c.value.duration.inMilliseconds;
         var start = resume;
@@ -934,7 +944,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
     _firstFrame = false;
     try {
-      await c
+      final reopen = c
           .open(
             url,
             headers: headers,
@@ -947,8 +957,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             refreshPlay: _refreshPlatformUrl,
             onPlayExpired: _onPlatformExpired,
             rescueLines: _rescueLineSource,
-          )
-          .timeout(_openReadyTimeout);
+          );
+      await FxPlayer.awaitOpenProgress<void>(
+        c,
+        reopen,
+        noProgress: _openNoProgressWindow,
+      );
       if (!mounted) return false;
       final duration = c.value.duration;
       var target = resume;
@@ -1130,26 +1144,64 @@ class _FullPlayerPageState extends State<FullPlayerPage>
 
   void _armFirstFrameTimer() {
     _firstFrameTimer?.cancel();
+    _firstFrameWatch.reset();
+    final baseline = _controller?.value;
+    if (baseline != null) {
+      _firstFrameWatch.add(
+        _sampleOf(baseline, DateTime.now().millisecondsSinceEpoch),
+      );
+    }
     _firstFrameTimer = Timer(_firstFrameTimeout, () {
-      _firstFrameTimer = null;
       if (!mounted || _error || _exiting) return;
       if (!_firstFrame && _hasFirstFrame(_controller)) {
         _firstFrame = true;
+        _firstFrameTimer = null;
         setState(() {});
         return;
       }
-      if (_firstFrame) return;
-      // FIRST_FRAME：首帧判据改用原生 onRenderedFirstFrame 之后，个别 4K
-      // HEVC 片子解码慢，10 秒内可能还没回调。只要播放位置已经在走，就
-      // 说明这条流是活的，继续等首帧、不判失败（停摆另有看门狗兜底）。
-      final v = _controller?.value;
-      if (v != null && v.isInitialized && v.position.inMilliseconds > 800) {
-        debugPrint('FxPlayer: 首帧等待超过 10s，但位置已到 ${v.position}，继续等');
+      if (_firstFrame) {
+        _firstFrameTimer = null;
         return;
       }
+      // SLOW_NET（2026-11-15）：首帧等这么久**不代表失败**。
+      // 判据换成「这段时间有没有进展」：字节 / 缓冲 / 位置任意一项在涨就是
+      // 慢网，继续等（再挂一轮看门狗）；三项全不动才是真卡死。
+      final v = _controller?.value;
+      if (v != null) {
+        _firstFrameWatch.add(
+          _sampleOf(v, DateTime.now().millisecondsSinceEpoch),
+        );
+      }
+      if (v != null && _firstFrameWatch.progressing) {
+        fxPlayLog(
+          fxProgressLog(
+            bytesDelta: _firstFrameWatch.bytesDelta,
+            bufferedDeltaMs: _firstFrameWatch.bufferedDeltaMs,
+            state: _firstFrameWatch.state,
+            extra: 'stage=firstFrame 继续等待（不判失败）',
+          ),
+        );
+        _armFirstFrameTimer();
+        return;
+      }
+      _firstFrameTimer = null;
       unawaited(_onPlaybackFailure());
     });
   }
+
+  /// 首帧看门狗用的进度窗口（连续无进展才判失败）。
+  final FxProgressWindow _firstFrameWatch = FxProgressWindow(
+    window: fxStartupNoProgressWindow,
+  );
+
+  static FxProgressSample _sampleOf(FxPlayerValue v, int atMs) =>
+      FxProgressSample(
+        atMs: atMs,
+        bytesLoaded: v.bytesLoaded,
+        buffered: v.buffered,
+        position: v.position,
+        isLoading: v.isLoading,
+      );
 
   void _cancelFirstFrameTimer() {
     _firstFrameTimer?.cancel();
@@ -2204,6 +2256,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     );
   }
 
+  /// 实时网速（字节/秒）：优先原生按块统计的真实速率，0 就是 0。
+  double _liveSpeed(FxPlayerValue v) {
+    if (v.bytesLoadedPerSec > 0) return v.bytesLoadedPerSec.toDouble();
+    return v.bytesPerSecond;
+  }
+
   /// 首帧 / 加载 / 缓冲统一浮层。
   Widget _buildStatusOverlay(FxPlayer c) {
     final v = c.value;
@@ -2220,8 +2278,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!_firstFrame || _loading || !v.hasRenderedFirstFrame) {
       return FxLoadingOverlay(
         title: loading,
-        percent: v.bufferingPercent,
-        speedText: v.speedText,
+        speedText: fxSpeedLabel(_liveSpeed(v)),
         dim: _frozenFrame == null,
       );
     }
@@ -2229,15 +2286,10 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     if (!v.isBuffering || v.isPlaying) return const SizedBox.shrink();
     // FIRST_FRAME：首帧没上屏时由上面的加载层负责，别叠两个圈。
     if (!v.hasRenderedFirstFrame) return const SizedBox.shrink();
-    final percent = v.bufferingPercent;
-    // BUFFER_FULL：真实比例已经 100% 说明数据齐了，等的是解码不是下载。
-    if (percent != null && percent >= 100) {
-      return const SizedBox.shrink();
-    }
+    // BUFFER_UI（2026-11-15）：只给转圈 + 实时网速，不再画百分比。
     return FxLoadingOverlay(
-      title: fxBufferingText(percent),
-      percent: percent,
-      speedText: v.speedText,
+      title: '缓冲中…',
+      speedText: fxSpeedLabel(_liveSpeed(v)),
       dim: false,
       compact: true,
     );

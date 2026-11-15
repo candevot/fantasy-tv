@@ -11,6 +11,7 @@ import '../services/download_service.dart';
 import '../services/fallback_match.dart';
 import '../services/fx_player.dart';
 import '../services/line_cooldown.dart';
+import '../services/line_health.dart';
 import '../services/play_log.dart';
 import '../services/source_fallback.dart';
 import '../services/source_hub.dart';
@@ -278,7 +279,13 @@ class _DetailPageState extends State<DetailPage>
         fxToast(context, '这部片暂无可播放地址，换一部试试');
       }
       setState(() {
-        _detail = d;
+        // LINE_HEALTH（2026-11-15）：健康度高的线路排前面，已知坏的沉后。
+        // 只调顺序、不隐藏：探测也可能误判，用户想点坏的照样能点
+        // （播放页里它会被自动跳过）。这里和服务端的 degraded 排序叠加，
+        // 服务端标记 degraded 的仍然在最后。
+        _detail = d.copyWith(
+          lines: LineHealth.instance.rankLines(widget.id, d.lines),
+        );
         _lineId = lineId;
         _ep = ep;
         _error = lines.isEmpty ? '这部片暂无可播放地址' : null;

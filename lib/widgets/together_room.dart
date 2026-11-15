@@ -558,16 +558,14 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                     if (!value.hasRenderedFirstFrame) {
                       return const SizedBox.shrink();
                     }
-                    // 只认内核上报的真实填充进度（buffered / duration）；
-                    // 拿不到就不显示数字，只给「缓冲中…」+ 不确定转圈。
-                    final percent = value.bufferingPercent;
-                    // BUFFER_FULL：真实比例 100% 说明数据齐了，等的是解码。
-                    if (percent != null && percent >= 100) {
-                      return const SizedBox.shrink();
-                    }
+                    // BUFFER_UI（2026-11-15）：转圈 + 实时网速，不画百分比。
                     return FxLoadingOverlay(
-                      title: fxBufferingText(percent),
-                      percent: percent,
+                      title: '缓冲中…',
+                      speedText: fxSpeedLabel(
+                        value.bytesLoadedPerSec > 0
+                            ? value.bytesLoadedPerSec.toDouble()
+                            : value.bytesPerSecond,
+                      ),
                       dim: false,
                       compact: true,
                     );

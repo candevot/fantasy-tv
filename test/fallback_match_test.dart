@@ -72,7 +72,8 @@ void main() {
       match.fxOpenFailReason(elapsedMs: 100, error: '解析失败'),
       'parse_error',
     );
-    expect(match.fxBufferingFailTimeout, const Duration(seconds: 10));
+    // FLOW_WATCH（2026-11-15）：首帧后 6 秒不动就换线（原 10 秒）。
+    expect(match.fxBufferingFailTimeout, const Duration(seconds: 6));
   });
 
   test('降级日志与用户提示文案固定', () {

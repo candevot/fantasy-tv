@@ -1,4 +1,5 @@
 import '../lib/services/fallback_match.dart';
+import '../lib/services/playback_progress.dart';
 
 /// 三段降级（FX_FALLBACK 2026-11-15）匹配规则的回归。
 ///
@@ -201,9 +202,15 @@ void main() {
     fxOpenFailReason(elapsedMs: 1500, error: 'boom') == 'open_failed',
     '其它失败归 open_failed',
   );
+  // FLOW_WATCH（2026-11-15，用户最终口径）：首帧之后连续 **6 秒** buffered
+  // 不涨就切下一条（原来 10 秒），并且只引用唯一出处 fxStallNoProgressWindow。
   check(
-    fxBufferingFailTimeout == const Duration(seconds: 10),
-    '首帧后连续缓冲 10 秒判失败',
+    fxBufferingFailTimeout == fxStallNoProgressWindow,
+    '首帧后卡顿门槛引用 fxStallNoProgressWindow',
+  );
+  check(
+    fxBufferingFailTimeout == const Duration(seconds: 6),
+    '首帧后连续 6 秒不动就换线',
   );
 
   // ------------------------------------------------------------ 冷却期

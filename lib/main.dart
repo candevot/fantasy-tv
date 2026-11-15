@@ -13,7 +13,10 @@ import 'fx_globals.dart';
 import 'services/app_update_service.dart';
 import 'services/download_service.dart';
 import 'services/jar_plugin.dart';
+import 'services/cms_bridge.dart';
+import 'services/line_health.dart';
 import 'services/source_hub.dart';
+import 'models.dart';
 import 'theme.dart';
 import 'widgets/update_dialog.dart';
 import 'pages/home_page.dart';
@@ -144,6 +147,19 @@ class Boot {
       }
     }());
 
+    // LINE_HEALTH（2026-11-15，用户要求）：启动即后台检查线路健康度。
+    //
+    // 不阻塞首屏：fire-and-forget，结果写本地档案（30 分钟有效），
+    // 进详情页时健康的线路排前面。并发 ≤3、只探可见的那批（推荐 + 一个
+    // 分类首页），纯移动网络下只探清单不探分片（省流量）。
+    unawaited(() async {
+      try {
+        await LineHealth.instance.probeBoot(_bootProbeTargets);
+      } catch (e, st) {
+        AppLog.write('boot.lineHealth', e, st);
+      }
+    }());
+
     try {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
@@ -162,6 +178,76 @@ class Boot {
     failure.value = failed;
     _running = false;
   }
+}
+
+/// 启动探针的目标：当前可见的那批片单里，每部片抽一条线路（第 1 集）。
+///
+/// 只取「推荐行 + 一个分类首页」，**不做全库扫描**：启动时把网络占满，
+/// 用户点开播放反而变慢，那就本末倒置了。每部片只探第一条线路
+/// （优先级最高的那条），失败的那条才是用户最先点到的。
+Future<List<LineHealthTarget>> _bootProbeTargets() async {
+  const int maxCards = 16;
+  final cards = <VideoCard>[];
+  final seen = <String>{};
+
+  void take(Iterable<VideoCard> source, int limit) {
+    var taken = 0;
+    for (final card in source) {
+      if (cards.length >= maxCards || taken >= limit) return;
+      if (card.id.trim().isEmpty || !seen.add(card.id)) continue;
+      cards.add(card);
+      taken++;
+    }
+  }
+
+  try {
+    final home = await CmsBridge.home('').timeout(const Duration(seconds: 8));
+    for (final section in home.sections) {
+      take(section.items, 20);
+      if (cards.length >= 10) break;
+    }
+  } catch (_) {
+    // 首页拿不到就只靠分类页；探针失败不影响任何播放逻辑。
+  }
+  try {
+    final channels = CmsBridge.channels;
+    if (channels.isNotEmpty) {
+      final page = await CmsBridge.categoryPage(type: channels.first.key)
+          .timeout(const Duration(seconds: 8));
+      take(page.items, 10);
+    }
+  } catch (_) {}
+
+  final targets = <LineHealthTarget>[];
+  for (final card in cards) {
+    try {
+      final detail = await CmsBridge.detail(card.id)
+          .timeout(const Duration(seconds: 6));
+      LineInfo? line;
+      for (final candidate in detail.lines) {
+        if (candidate.id.trim().isEmpty || candidate.degraded) continue;
+        line = candidate;
+        break;
+      }
+      if (line == null) continue;
+      final url = await CmsBridge.playUrl(
+        card.id,
+        line.id,
+        1,
+      ).timeout(const Duration(seconds: 6));
+      if (url.trim().isEmpty) continue;
+      targets.add(
+        LineHealthTarget(
+          vodId: card.id,
+          lineName: line.displayName,
+          url: url,
+        ),
+      );
+    } catch (_) {
+      // 单部片拿不到地址就跳过：探针是「尽量多探到几条」，不是硬依赖。
+    }
+  }
+  return targets;
 }
 
 /// 本地崩溃日志：`<ApplicationSupport>/logs/app.log`，只保留最近 200 条。
