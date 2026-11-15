@@ -185,7 +185,11 @@ class CmsApi {
   }) async {
     try {
       final vods = await listVod(type: type, page: page, sort: sort, src: src);
-      return <VideoCard>[for (final vod in vods) cardOf(vod)];
+      // 同样在列表阶段滤掉「没有任何可用线路」的记录（首页 / 分类页共用）。
+      return <VideoCard>[
+        for (final vod in vods)
+          if (usableLineCount(vod) > 0) cardOf(vod),
+      ];
     } catch (e) {
       final original = e;
       if (fallback) {
@@ -261,6 +265,27 @@ class CmsApi {
     return false;
   }
 
+  /// 有几条线路是**真的能播**的（`vod_play_from` 与 `vod_play_url` 的段
+  /// 一一对应，只有两边都非空、且该段能解析出至少一集才算一条）。
+  ///
+  /// UNUSABLE_RECORD（2026-11-15）：搜索结果里那些「`vod_play_from` 有一堆
+  /// 线路名、`vod_play_url` 却是空段 / `about:blank` 占位」的记录，
+  /// 点进去必然加载失败。这个计数既用来过滤（0 条 = 整条记录丢掉），
+  /// 也用来做同名去重（线路多的那条胜出）。
+  static int usableLineCount(Map<String, dynamic> vod) {
+    final froms = splitRaw(_str(vod['vod_play_from']), kLineSep);
+    final urls = splitRaw(_str(vod['vod_play_url']), kLineSep);
+    var n = 0;
+    final total = urls.isEmpty ? 0 : urls.length;
+    for (var i = 0; i < total; i++) {
+      if (epPairs(urls[i]).isEmpty) continue;
+      // 线路名缺失不算毛病（有的源只给地址），只有「两段都对不上」才丢。
+      if (froms.isNotEmpty && i >= froms.length) continue;
+      n++;
+    }
+    return n;
+  }
+
   /// 分类列表（首页横向卡片行 / 分类页用的入口）：`categoryList(typeId, page)`。
   ///
   /// 等价于 [list]，只是把「分类 id + 页码」的调用形态固定下来 ——
@@ -280,7 +305,13 @@ class CmsApi {
         'wd': q,
         'pg': '$page',
       });
-      return <VideoCard>[for (final vod in _items(body)) cardOf(vod)];
+      return <VideoCard>[
+        // UNUSABLE_RECORD（2026-11-15）：搜索结果里混着「一条能播的线路都
+        // 没有」的记录（`vod_play_url` 全空 / 只有占位）。点进去必然加载失败，
+        // 留着只是占位置，所以在**转卡片之前**就滤掉。
+        for (final vod in _items(body))
+          if (usableLineCount(vod) > 0) cardOf(vod),
+      ];
     } catch (e) {
       final original = e;
       if (fallback) {
@@ -297,10 +328,20 @@ class CmsApi {
   /// 详情：`ac=detail&ids=<vod_id>`。
   ///
   /// [fresh] = true 时跳过本地缓存（下拉刷新、线路变化后重新拉）。
-  static Future<VideoDetail> detail(String id, {bool fresh = false}) async {
+  ///
+  /// LINE_SLICE（2026-11-15）：[line] 非空时请求带上 `?line=<线路名>`。
+  /// 平台线路切片（`?line=幻想爱奇艺`）给出的记录用的是**切片空间的 vod_id**
+  /// （实测 900000003），主库 `ac=detail&ids=900000003` 返回空列表 ——
+  /// 这就是「搜索结果里有一条我们自己的记录，点进去必加载失败」的根因。
+  /// 带上同一个 `line` 参数，服务端才会按切片库解析这条 id。
+  static Future<VideoDetail> detail(
+    String id, {
+    bool fresh = false,
+    String line = '',
+  }) async {
     final key = id.trim();
     if (key.isEmpty) throw ApiException('缺少影片 id');
-    final entry = await _entry(key, fresh: fresh);
+    final entry = await _entry(key, fresh: fresh, line: line);
     final related = await _relatedCards(entry.vod);
     return detailOf(entry.vod, entry.lines, related: related);
   }
@@ -335,8 +376,13 @@ class CmsApi {
   /// 播放：`play(vod_id, 第几集, 线路 id)` → [PlayInfo]。
   ///
   /// 线路 id / 集号都来自本层 [detailOf] / [linesOf] 产出，UI 只管原样回传。
-  static Future<PlayInfo> play(String vodId, int ep, String lineId) async {
-    final entry = await _entry(vodId);
+  static Future<PlayInfo> play(
+    String vodId,
+    int ep,
+    String lineId, {
+    String sliceLine = '',
+  }) async {
+    final entry = await _entry(vodId, line: sliceLine);
     final line = findLine(entry.lines, lineId);
     if (line == null) throw ApiException('线路不存在，请刷新后重试');
     return _play(entry, line, ep);
@@ -350,9 +396,10 @@ class CmsApi {
   static Future<PlayInfo> playEpisode(
     String vodId,
     String lineName,
-    int epIndex,
-  ) async {
-    final entry = await _entry(vodId);
+    int epIndex, {
+    String sliceLine = '',
+  }) async {
+    final entry = await _entry(vodId, line: sliceLine);
     if (entry.lines.isEmpty) throw ApiException('该影片暂无播放地址');
     final line = findLine(entry.lines, lineName) ?? entry.lines.first;
     return _play(entry, line, epIndex);
@@ -362,9 +409,15 @@ class CmsApi {
   static Future<String> playUrl(
     String vodId,
     String lineName,
-    int epIndex,
-  ) async =>
-      (await playEpisode(vodId, lineName, epIndex)).url;
+    int epIndex, {
+    String sliceLine = '',
+  }) async =>
+      (await playEpisode(
+        vodId,
+        lineName,
+        epIndex,
+        sliceLine: sliceLine,
+      )).url;
 
   static Future<PlayInfo> _play(_CmsEntry entry, CmsLine line, int ep) async {
     if (line.count == 0) throw ApiException('该线路没有可用播放地址');
@@ -476,6 +529,9 @@ class CmsApi {
     }
     return <String, dynamic>{
       'id': _str(vod['vod_id']),
+      // LINES_COUNT：这条记录有几条**能解析出地址**的线路，同名去重时
+      // 「优先保留有内容的那条」靠它比较（见 SourceHub.sameRecord）。
+      'lineCount': usableLineCount(vod),
       'title': _str(vod['vod_name']),
       'cover': _str(vod['vod_pic']),
       'rating': _str(vod['vod_score']),
@@ -622,8 +678,16 @@ class CmsApi {
   };
 
   /// 详情里的记录（`ids=` 只回一条；`wd=` 回一批，取第一条）。
-  static Future<Map<String, dynamic>> _detailVod(String id) async {
-    final body = await _vod(<String, String>{'ac': 'detail', 'ids': id});
+  static Future<Map<String, dynamic>> _detailVod(
+    String id, {
+    String line = '',
+  }) async {
+    final slice = line.trim();
+    final body = await _vod(<String, String>{
+      'ac': 'detail',
+      'ids': id,
+      if (slice.isNotEmpty) 'line': slice,
+    });
     final items = _items(body);
     if (items.isEmpty) throw ApiException('没有找到这部影片');
     return items.first;
@@ -798,15 +862,23 @@ class CmsApi {
   static const int _cacheLimit = 12;
 
   /// 详情按 vod_id 缓存：播放时线路地址只在详情里给，命中缓存就不重复请求。
-  static Future<_CmsEntry> _entry(String vodId, {bool fresh = false}) async {
+  static Future<_CmsEntry> _entry(
+    String vodId, {
+    bool fresh = false,
+    String line = '',
+  }) async {
     final key = vodId.trim();
     if (key.isEmpty) throw ApiException('缺少影片 id');
-    final hit = _cache[key];
+    final slice = line.trim();
+    // 切片记录的 id 空间和主库不同，缓存键必须带上线路名，否则「主库的 123」
+    // 与「幻想爱奇艺切片的 123」会互相顶掉。
+    final cacheKey = slice.isEmpty ? key : '$slice|$key';
+    final hit = _cache[cacheKey];
     if (hit != null && !fresh) return hit;
-    final vod = await _detailVod(key);
+    final vod = await _detailVod(key, line: slice);
     final entry = _CmsEntry(vod, linesOf(vod));
     if (_cache.length >= _cacheLimit) _cache.remove(_cache.keys.first);
-    _cache[key] = entry;
+    _cache[cacheKey] = entry;
     return entry;
   }
 }

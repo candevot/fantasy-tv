@@ -699,20 +699,14 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
         onMore: () {},
         onRotate: widget.onRotate,
         actions: <Widget>[
-          PGlassIcon(
+          PGlassIcon.fs(
             icon: Icons.alt_route_rounded,
-            size: 32,
-            iconSize: 17,
-            tint: .18,
             tooltip: '换源',
             onTap: widget.onSwitchLine,
           ),
           if (!widget.isLive)
-            PGlassIcon(
+            PGlassIcon.fs(
               icon: Icons.movie_filter_rounded,
-              size: 32,
-              iconSize: 17,
-              tint: .18,
               tooltip: '换剧',
               onTap: widget.onChangeDrama,
             ),
@@ -720,7 +714,7 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
             behavior: HitTestBehavior.opaque,
             onTap: widget.onMembers,
             child: PGlassPill(
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 9),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -743,19 +737,13 @@ class _TogetherFullscreenViewState extends State<TogetherFullscreenView> {
               ),
             ),
           ),
-          PGlassIcon(
+          PGlassIcon.fs(
             icon: Icons.person_add_alt_1_rounded,
-            size: 32,
-            iconSize: 17,
-            tint: .18,
             tooltip: '邀请好友',
             onTap: widget.onInvite,
           ),
-          PGlassIcon(
+          PGlassIcon.fs(
             icon: Icons.logout_rounded,
-            size: 32,
-            iconSize: 17,
-            tint: .18,
             tooltip: '退出房间',
             onTap: widget.onExitRoom,
           ),

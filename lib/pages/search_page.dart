@@ -408,7 +408,18 @@ class _SearchPageState extends State<SearchPage> {
     if (items.isEmpty) return;
     final seen = <String>{for (final card in target) card.id};
     for (final card in items) {
-      if (seen.add(card.id)) target.add(card);
+      if (!seen.add(card.id)) continue;
+      // DEDUPE_LINES（2026-11-15）：同一条记录（片名+年份+片源，片源为空是
+      // 通配）后到的一版**线路更多**就替换掉先到的那版。
+      // 典型场景：主库先回了「济公传」（2 条线路），线路切片后回一条同名的
+      // 「济公传」（1 条线路）。以前两条都在列表里，且切片那条点进去必失败；
+      // 现在只留线路多的主库那条。
+      final at = target.indexWhere((c) => SourceHub.sameRecord(c, card));
+      if (at < 0) {
+        target.add(card);
+      } else if (SourceHub.betterRecord(card, target[at])) {
+        target[at] = card;
+      }
     }
   }
 
@@ -537,7 +548,21 @@ class _SearchPageState extends State<SearchPage> {
   void _openDetail(String id, {String title = '', int year = 0}) {
     Navigator.of(context).push(
       FxPageRoute(
-        builder: (_) => DetailPage(id: id, title: title, year: year),
+        builder: (_) => DetailPage(
+          id: id,
+          title: title,
+          year: year,
+          // DEAD_CARD（2026-11-15）：这条记录在详情里被判定失效（404 /
+          // 主库查不到）时，把它从搜索结果里摘掉 —— 不能让它继续占位置，
+          // 用户下一次还会点到同一条打不开的卡片。
+          onInvalid: (deadId) {
+            if (!mounted) return;
+            setState(() {
+              _results.removeWhere((c) => c.id == deadId);
+              _external.removeWhere((c) => c.id == deadId);
+            });
+          },
+        ),
       ),
     );
   }

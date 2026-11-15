@@ -676,12 +676,8 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              PGlassIcon(
+              PGlassIcon.fs(
                 icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                size: 30,
-                iconSize: 19,
-                tint: .13,
-                hitSize: 44,
                 tooltip: playing ? '暂停' : '播放',
                 onTap: _togglePlay,
               ),
@@ -707,12 +703,8 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
                   onTap: widget.onEpisodes,
                 ),
               const SizedBox(width: 6),
-              PGlassIcon(
+              PGlassIcon.fs(
                 icon: Icons.fullscreen_rounded,
-                size: 30,
-                iconSize: 20,
-                tint: .13,
-                hitSize: 44,
                 tooltip: '全屏',
                 onTap: () {
                   _wake();

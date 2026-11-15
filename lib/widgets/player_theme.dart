@@ -459,6 +459,26 @@ void fxToast(BuildContext context, String message) {
 /// 续播不弹任何提示：静默 seek 回上次位置（见播放页 / 全屏页），
 /// 播放期间不允许有遮挡画面的浮层文案。
 
+/* ---------------------------------------------------------------- 全屏控件规格 */
+
+/// FS_ICON_SPEC（2026-11-15）：全屏播放器里**所有**圆形按钮的唯一规格。
+///
+/// 用户报的原话：「有的图标有圆底气泡，有的没有」—— 原因是各个控件各自传
+/// size / iconSize / tint：返回 34、转屏 32、投屏 32、锁 42、快进 44、
+/// 底栏播放 34，底色 .16 / .18 混着来。同一层级看着就是两套设计。
+///
+/// 现在全部走 [PGlassIcon.fs]（就是下面这几个数），改规格只改这一处：
+///   · 玻璃底直径 30dp（圆角 15dp），图标 19.5dp；
+///   · 底色 `Colors.white × .13`，描边 `white × .32`，投影与原来一致；
+///   · 热区 44dp（视觉不变，只有命中框放大，`hitSize` 机制）；
+///   · 文字胶囊 / 状态胶囊与圆底**同高同圆角**（30dp / r15），见 [PGlassPill]。
+const double kFsControlSize = 30;
+const double kFsControlGlyph = 19.5;
+const double kFsControlHit = 44;
+const double kFsControlTint = .13;
+const double kFsPillHeight = kFsControlSize;
+const double kFsPillRadius = kFsPillHeight / 2;
+
 /// 播放器圆形玻璃按钮
 class PGlassIcon extends StatelessWidget {
   const PGlassIcon({
@@ -473,6 +493,22 @@ class PGlassIcon extends StatelessWidget {
     this.iconColor = Colors.white,
     this.hitSize = 0,
   });
+
+  /// 全屏控件的统一规格（见 [kFsControlSize] 那一组常量）。
+  ///
+  /// 只开放 icon / onTap / active / tooltip：尺寸和底色不给调用方改，
+  /// 「统一」才是硬的。
+  const PGlassIcon.fs({
+    super.key,
+    required this.icon,
+    this.onTap,
+    this.active = false,
+    this.tooltip,
+    this.iconColor = Colors.white,
+  })  : size = kFsControlSize,
+        iconSize = kFsControlGlyph,
+        tint = kFsControlTint,
+        hitSize = kFsControlHit;
 
   final IconData icon;
   final VoidCallback? onTap;
@@ -531,28 +567,45 @@ class PGlassIcon extends StatelessWidget {
   }
 }
 
-/// 白玻璃胶囊（电量 / 时间 / 信息）
+/// 白玻璃胶囊（电量 / 时间 / 信息 / 画质 / 文字按钮）
+///
+/// PILL_ALIGN（2026-11-15）：胶囊的**高度与圆角跟圆形图标底对齐** ——
+/// 30dp 高、15dp 圆角（= 30/2，视觉上就是「胶囊两端是半圆」）。
+/// 原来是内容撑高（≈26dp）+ 圆角 20，和 30dp 的圆钮并排时中间差 4dp，
+/// 一排控件看着就是高低不齐。
 class PGlassPill extends StatelessWidget {
   const PGlassPill({
     super.key,
     required this.child,
     this.onTap,
-    this.padding = const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+    this.padding = const EdgeInsets.symmetric(horizontal: 10),
+    this.height = kFsPillHeight,
+    this.tint = kFsControlTint,
   });
 
   final Widget child;
   final VoidCallback? onTap;
   final EdgeInsets padding;
 
+  /// 胶囊高度（默认与圆形底同高 30dp）；传 0 表示按内容撑高（旧行为）。
+  final double height;
+
+  /// 底色透明度，默认与圆形底一致 .13。
+  final double tint;
+
   @override
   Widget build(BuildContext context) {
     final box = Container(
+      height: height <= 0 ? null : height,
       padding: padding,
+      alignment: Alignment.center,
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .14),
-        borderRadius: BorderRadius.circular(20),
+        color: Colors.white.withValues(alpha: tint),
+        borderRadius: BorderRadius.circular(
+          height <= 0 ? 20 : height / 2,
+        ),
         border: Border.all(
-          color: Colors.white.withValues(alpha: .28),
+          color: Colors.white.withValues(alpha: .32),
           width: 1,
         ),
       ),

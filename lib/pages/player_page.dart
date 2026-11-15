@@ -3237,6 +3237,9 @@ class _PlayerPageState extends State<PlayerPage> {
           height: fxPlayerStageHeight(
             width: constraints.maxWidth,
             videoRatio: _videoAspect,
+            // 与详情页同一条规则（STAGE_FULLWIDTH）：宽度撑满、比例按视频，
+            // 竖屏短剧最多占 62% 屏高。
+            maxHeight: MediaQuery.sizeOf(context).height * .62,
           ),
           child: PlayerView(
             key: _playerKey,

@@ -58,20 +58,32 @@ Size fxFitSize(Size container, double ratio, BoxFit fit) {
 /// 竖屏播放区的高度：宽 [width] 的容器，装一个 [videoRatio] 比例的片子，
 /// 容器该多高。
 ///
-/// 规则（对应用户要的三类片）：
-/// - 比 16:9 更宽的片子（2.4:1 电影）：容器跟着收窄到真实比例，上下不留黑边；
-/// - 更方的片子（4:3 老片、竖屏短剧 9:16）：容器停在 16:9 的高度，
-///   画面在里面「铺满高度、左右留黑」，而不是把容器拉成一条竖长条。
+/// STAGE_FULLWIDTH（2026-11-15）：**宽度撑满，高度按视频自己的比例**。
 ///
-/// 这样既不会浪费屏幕，也不会因为竖屏短剧把整个页面顶下去 —— 详情页 /
-/// 播放页下方的简介、选集都还能一眼看到。
+/// 上一版把容器夹在 16:9 以内（`natural < baseline ? natural : baseline`），
+/// 结果是：比 16:9 更方的片子一律停在 16:9 高度、左右留黑 —— 竖屏短剧在
+/// 手机上被挤成中间一条窄画面，用户看到的就是「视频区比原来小很多」。
+/// 现在的规则：
+/// - 竖屏 / 4:3 这类「比 16:9 更方」的片子：容器按自身比例变高
+///   （9:16 → 宽的 1.78 倍），画面铺满整个容器，不再左右留大黑边；
+/// - 比 16:9 更宽的片子（2.4:1 电影）：容器**不低于 16:9**，画面宽度铺满，
+///   上下只有很窄的黑边（把容器收窄到 2.4 才是「上下大留白」的元凶）；
+/// - 比例未知 / 非法：16:9。
+///
+/// [maxHeight] 是外层给的上限（详情页 / 播放页按屏高比例给），
+/// 但它**永远不会把容器压到 16:9 以下** —— 那又会变回「画面被挤小」。
 double fxPlayerStageHeight({
   required double width,
   required double videoRatio,
+  double maxHeight = double.infinity,
 }) {
   if (width <= 0) return 0;
-  final baseline = width * 9 / 16; // 原来的 16:9 高度
-  if (!videoRatio.isFinite || videoRatio <= 0) return baseline;
-  final natural = width / videoRatio; // 按宽度铺满时的高度
-  return natural < baseline ? natural : baseline;
+  final baseline = width * 9 / 16; // 16:9 高度（历史基线，也是下限）
+  final ratio =
+      (videoRatio.isFinite && videoRatio > 0) ? videoRatio : 16 / 9;
+  final natural = width / ratio; // 宽度撑满时的高度
+  final height = natural < baseline ? baseline : natural;
+  // 上限只裁「按自身比例变高」的那部分，绝不裁到 16:9 以下。
+  final limit = maxHeight > baseline ? maxHeight : baseline;
+  return height > limit ? limit : height;
 }

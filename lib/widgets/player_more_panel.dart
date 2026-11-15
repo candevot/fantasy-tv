@@ -1,9 +1,32 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
 import '../services/fx_display_settings.dart';
 import '../theme.dart';
+
+/// 播放设置面板的高度上限（PANEL_CAP 2026-11-15）。
+///
+/// 面板是底部弹层，内容固定 8 行左右；不给上限时 `mainAxisSize.min`
+/// 会把它撑到整屏高（横屏屏高只有 300–400dp，一开面板整屏就被盖住）。
+///
+/// 规则：
+///   · 横屏（宽 > 高）：上限 = 屏高 × 55%，且**绝对不超过 360dp**；
+///   · 竖屏：上限 = 屏高 × 40%，且不超过 480dp。
+///
+/// 面板内部的列表在超过这个高度时自己滚（见 [showFxMorePanel] 的
+/// `Flexible + SingleChildScrollView`），所以「永远不盖满屏」是硬的，
+/// 不是靠内容多少碰巧成立。
+double fxMorePanelMaxHeight(BuildContext context) {
+  final size = MediaQuery.sizeOf(context);
+  final landscape = size.width > size.height;
+  final ratio = landscape ? .55 : .40;
+  final cap = landscape ? 360.0 : 480.0;
+  final limit = math.min(size.height * ratio, cap);
+  // 极端矮屏（投屏到电视 / 分屏）兜一个最小可用高度：至少能看到标题 + 一行。
+  return math.max(limit, 180.0);
+}
 
 /// 循环播放模式：单集循环 / 关闭（对应 mpv setLooping）。
 /// 「列表循环」已移除：连播交给设置页的「自动下一集」开关。
@@ -77,6 +100,15 @@ Future<void> showFxMorePanel(
           }
 
           return Container(
+            // PANEL_CAP（2026-11-15）：面板**永远不盖满屏**。
+            //
+            // 旧实现只有 `mainAxisSize.min`：内容一多（竖屏 8 行 + 图标行）
+            // 面板就顶到整屏高；横屏更糟 —— 屏高本来就小（≈360dp），
+            // 面板直接把画面全遮住，用户点「播放设置」等于切走一屏。
+            // 现在按屏幕方向给高度上限，超过就**面板内部滚动**：
+            //   · 横屏（宽 > 高）：55% 屏高，且绝对不超过 360dp；
+            //   · 竖屏：40% 屏高，且不超过 480dp。
+            constraints: BoxConstraints(maxHeight: fxMorePanelMaxHeight(context)),
             padding: EdgeInsets.fromLTRB(
               20,
               12,
@@ -129,6 +161,14 @@ Future<void> showFxMorePanel(
                   ],
                 ),
                 const SizedBox(height: 16),
+                // 标题行下面的一切都可以滚：横屏 55% 放不下 8 行时，
+                // 用户往下滑就能看到「播放诊断 / 问题反馈」，不会卡在屏外。
+                Flexible(
+                  child: SingleChildScrollView(
+                    physics: const ClampingScrollPhysics(),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
                 Row(
                   children: [
                     _MoreAction(
@@ -216,10 +256,14 @@ Future<void> showFxMorePanel(
                       diagnosticsChanged(diagnostics);
                     },
                   ),
-                _MoreRow(
-                  icon: Icons.feedback_outlined,
-                  title: '问题反馈',
-                  onTap: () => closeThen(onFeedback),
+                        _MoreRow(
+                          icon: Icons.feedback_outlined,
+                          title: '问题反馈',
+                          onTap: () => closeThen(onFeedback),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ],
             ),

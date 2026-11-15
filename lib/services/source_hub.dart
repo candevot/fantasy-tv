@@ -1281,6 +1281,39 @@ class SourceHub extends ChangeNotifier {
   static String dedupeKey(VideoCard card) =>
       '${normTitle(card.title)}|${card.year}|${card.fromSource}';
 
+  /// 两张卡片是不是「同一条记录」（DEDUPE_LINES 2026-11-15）。
+  ///
+  /// 判据：片名（归一化）+ 年份要一致，且片源分组相同**或任一方为空**。
+  /// 「片源分组为空」= 线路切片 / 外部源 / 老数据，它们没有 `vod_from`，
+  /// 会并进同名的片源记录里 —— 这正是搜索「济公传」时那条重复且点不开的
+  /// 记录被主库记录吸收的判据。hx 与 xo 两条不同片源的记录不算同一条
+  /// （SOURCE_SPLIT 要求它们并存）。
+  static bool sameRecord(VideoCard a, VideoCard b) {
+    if (a.id.trim().isNotEmpty && a.id.trim() == b.id.trim()) return true;
+    final ta = normTitle(a.title);
+    if (ta.isEmpty || ta != normTitle(b.title)) return false;
+    final fa = a.fromSource.trim();
+    final fb = b.fromSource.trim();
+    if (fa != fb && fa.isNotEmpty && fb.isNotEmpty) return false;
+    if (a.year > 0 && b.year > 0 && a.year != b.year) return false;
+    return true;
+  }
+
+  /// 同名记录里谁更该留下（DEDUPE_LINES 2026-11-15）。
+  ///
+  /// 规则：**可用线路多的优先**；线路数一样时**片源分组非空的优先**
+  /// （主库记录 `hx`/`xo` 的线路表是全的；线路切片 / 外部源的卡片没有
+  /// `vod_from`，主站搜索接口给它的线路常常是截断的一条）。
+  /// 两条都不满足（完全同级）时保持先到的那条，列表不会跟着批次顺序乱跳。
+  static bool betterRecord(VideoCard candidate, VideoCard current) {
+    if (candidate.lineCount != current.lineCount) {
+      return candidate.lineCount > current.lineCount;
+    }
+    final cFrom = candidate.fromSource.trim().isNotEmpty;
+    final oFrom = current.fromSource.trim().isNotEmpty;
+    return cFrom && !oFrom;
+  }
+
   /// 片名归一化（去大小写 / 空白 / 标点）。
   ///
   /// FX_FALLBACK（2026-11-15）：规则本体搬到 `fallback_match.dart`
@@ -1321,6 +1354,9 @@ class SourceHub extends ChangeNotifier {
         sourceLabel: label,
         // SOURCE_SPLIT：换标记不能把片源分组弄丢，去重键要用它。
         fromSource: card.fromSource,
+        // LINES_COUNT：线路数也一起带上 —— 丢了它，同名记录去重就会以为
+        // 两边都是 0 条线路，赢家变成「谁先到」，等于没修。
+        lineCount: card.lineCount,
       );
 
   /* ------------------------------------------------------------ 持久化 */

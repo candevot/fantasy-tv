@@ -86,23 +86,25 @@ void main() {
   });
 
   group('播放区高度', () {
-    test('宽片容器收窄，竖屏 / 4:3 停在 16:9 高度', () {
+    test('宽度撑满：高度 = 宽度 / 视频比例，且不低于 16:9（STAGE_FULLWIDTH）', () {
       const width = 400.0;
-      final baseline = width * 9 / 16; // 225
-      // 1920×800 电影：按真实比例算，不留多余黑边。
+      final baseline = width * 9 / 16; // 225（16:9 基线，也是下限）
+      // 2.4:1 宽片：容器保持 16:9 满宽（画面上下只有窄黑边），
+      // 不再收窄到 width/2.4 —— 那正是「视频区比原来小很多」的原因。
       expect(
         fxPlayerStageHeight(width: width, videoRatio: 2.4),
-        closeTo(width / 2.4, 1e-6),
+        closeTo(baseline, 1e-6),
       );
-      // 1080×1920 竖屏短剧：停在 16:9 高度，画面铺满高度、左右留黑。
+      // 1080×1920 竖屏短剧：按自身比例变高（400 / 0.5625 = 711），
+      // 画面铺满整个容器，不再被夹在 16:9 里左右留大黑边。
       expect(
         fxPlayerStageHeight(width: width, videoRatio: 1080 / 1920),
-        closeTo(baseline, 1e-6),
+        closeTo(width / (1080 / 1920), 1e-6),
       );
-      // 4:3 老片同理。
+      // 4:3 老片：同样按自身比例（400 / 1.333 = 300）。
       expect(
         fxPlayerStageHeight(width: width, videoRatio: 4 / 3),
-        closeTo(baseline, 1e-6),
+        closeTo(width / (4 / 3), 1e-6),
       );
       // 正好 16:9：还是原来那个高度。
       expect(
@@ -121,13 +123,40 @@ void main() {
       expect(fxPlayerStageHeight(width: 0, videoRatio: 16 / 9), 0);
     });
 
+    test('maxHeight 只裁「比 16:9 更高」的部分，绝不压到 16:9 以下', () {
+      const width = 400.0;
+      final baseline = width * 9 / 16; // 225
+      // 竖屏短剧：屏高上限 500 → 铺满到 500（按比例放大，不变形）。
+      expect(
+        fxPlayerStageHeight(
+          width: width,
+          videoRatio: 1080 / 1920,
+          maxHeight: 500,
+        ),
+        closeTo(500, 1e-6),
+      );
+      // 上限比 16:9 还小时（横屏手机看详情页），仍然保 16:9 —— 画面不被挤小。
+      expect(
+        fxPlayerStageHeight(width: width, videoRatio: 2.4, maxHeight: 120),
+        closeTo(baseline, 1e-6),
+      );
+      expect(
+        fxPlayerStageHeight(
+          width: width,
+          videoRatio: 1080 / 1920,
+          maxHeight: 120,
+        ),
+        closeTo(baseline, 1e-6),
+      );
+    });
+
     test('容器比例 = 视频比例（所以纹理不会被拉变形）', () {
       for (final ratio in <double>[2.4, 16 / 9, 4 / 3, 1, 9 / 16]) {
         const width = 360.0;
         final height = fxPlayerStageHeight(width: width, videoRatio: ratio);
         final box = fxFitSize(Size(width, height), ratio, BoxFit.contain);
-        // 高度不超过 16:9 基准；宽片正好铺满宽，更方的片子铺满高。
-        expect(height, lessThanOrEqualTo(width * 9 / 16 + 1e-9));
+        // 高度不低于 16:9 基准；宽片之外正好是视频比例。
+        expect(height, greaterThanOrEqualTo(width * 9 / 16 - 1e-9));
         expect(
           box.width / box.height,
           closeTo(ratio, 1e-6),

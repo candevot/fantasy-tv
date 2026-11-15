@@ -11,7 +11,15 @@ import 'player_theme.dart';
 /*  样式与竖屏播放器一致：半透明白玻璃 + 细白描边 + 柔和投影                      */
 /* ========================================================================== */
 
-/// 白玻璃文字胶囊：片头/尾、倍速、选集这类短标签按钮
+/// 白玻璃文字胶囊：片头/尾、倍速、清晰度这类短标签按钮。
+///
+/// FS_ICON_SPEC（2026-11-15）：**样式与圆形图标底完全同源** ——
+/// 高度 30dp、圆角 15dp、底色 white×.13、描边 white×.32、热区 44dp。
+/// 以前这里是「内容撑高 + 圆角 18 + 底色 .13 + 描边 .30」，和圆钮并排
+/// 时高度差 4dp、圆角差 3dp，一排按钮看着就是两种风格。
+///
+/// 「选集」不再用这个胶囊：它在同一层级里是个**图标按钮**，改用
+/// `PGlassIcon.fs`（见 fs_panels 底栏），这一层只留真正需要文字的入口。
 class FsTextAction extends StatelessWidget {
   const FsTextAction({
     super.key,
@@ -20,7 +28,7 @@ class FsTextAction extends StatelessWidget {
     this.onTap,
     this.active = false,
     this.size = 1,
-    this.tapHeight = 0,
+    this.tapHeight = kFsControlHit,
   });
 
   final String text;
@@ -28,8 +36,7 @@ class FsTextAction extends StatelessWidget {
   final VoidCallback? onTap;
   final bool active;
 
-  /// 最小点击热区高度（dp）。0 = 跟胶囊一样高（主播放保持原样）；
-  /// 一起看视频区传 44，胶囊视觉不变、热区变大。
+  /// 最小点击热区高度（dp），默认 44 与圆形按钮一致；0 = 跟胶囊一样高。
   final double tapHeight;
 
   /// 相对缩放：1 = 标准，紧凑布局传 .88
@@ -37,22 +44,22 @@ class FsTextAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final height = kFsPillHeight * size;
     final pill = GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: EdgeInsets.symmetric(
-          horizontal: 12 * size,
-          vertical: 7 * size,
-        ),
+        height: height,
+        padding: EdgeInsets.symmetric(horizontal: 12 * size),
+        alignment: Alignment.center,
         decoration: BoxDecoration(
           color: active
               ? Fx.accent.withValues(alpha: .86)
-              : Colors.white.withValues(alpha: .13),
-          borderRadius: BorderRadius.circular(18),
+              : Colors.white.withValues(alpha: kFsControlTint),
+          borderRadius: BorderRadius.circular(height / 2),
           border: Border.all(
-            color: Colors.white.withValues(alpha: .30),
+            color: Colors.white.withValues(alpha: .32),
             width: 1,
           ),
           boxShadow: [
@@ -85,7 +92,7 @@ class FsTextAction extends StatelessWidget {
     );
     if (tapHeight <= 0) return pill;
     return SizedBox(
-      height: tapHeight,
+      height: tapHeight < height ? height : tapHeight,
       child: Center(child: pill),
     );
   }
@@ -111,7 +118,8 @@ class FsQualityPill extends StatelessWidget {
     return SizedBox(
       width: fixedWidth * size,
       child: PGlassPill(
-        padding: EdgeInsets.symmetric(horizontal: 8 * size, vertical: 5 * size),
+        height: kFsPillHeight * size,
+        padding: EdgeInsets.symmetric(horizontal: 8 * size),
         child: FittedBox(
           fit: BoxFit.scaleDown,
           child: Text(
@@ -164,10 +172,8 @@ class _FsClockPillState extends State<FsClockPill> {
   @override
   Widget build(BuildContext context) {
     return PGlassPill(
-      padding: EdgeInsets.symmetric(
-        horizontal: 10 * widget.size,
-        vertical: 5 * widget.size,
-      ),
+      height: kFsPillHeight * widget.size,
+      padding: EdgeInsets.symmetric(horizontal: 10 * widget.size),
       child: Text(
         _text,
         style: TextStyle(
@@ -282,15 +288,14 @@ class FsTopBar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          PGlassIcon(
+          // FS_ICON_SPEC：返回与投屏 / 设置 / 选集 / 锁 / 快进**同一规格**
+          // （30dp 圆底 / 19.5 图标 / tint .13 / 44dp 热区）。
+          PGlassIcon.fs(
             icon: Icons.arrow_back_ios_new_rounded,
-            size: 34 * s,
-            iconSize: 17 * s,
-            tint: .16,
             tooltip: '退出全屏',
             onTap: onBack,
           ),
-          const SizedBox(width: 9),
+          const SizedBox(width: 6),
           Expanded(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -362,7 +367,7 @@ class FsTopBar extends StatelessWidget {
                     behavior: HitTestBehavior.opaque,
                     onLongPress: onLongPressQuality,
                     child: SizedBox(
-                      height: 26 * s,
+                      height: kFsPillHeight * s,
                       child: Center(
                         child: FsQualityPill(label: qualityLabel, size: s),
                       ),
@@ -380,24 +385,18 @@ class FsTopBar extends StatelessWidget {
                     const SizedBox(width: 6),
                     // 手动转屏：竖着看短剧想横过来、或反过来时用。点过一次之后
                     // 本次播放内不再自动跟着分辨率切（页面记 user override）。
-                    PGlassIcon(
+                    PGlassIcon.fs(
                       icon: rotatedToPortrait
                           ? Icons.crop_landscape_rounded
                           : Icons.crop_portrait_rounded,
-                      size: 32 * s,
-                      iconSize: 17 * s,
-                      tint: .18,
                       tooltip: rotatedToPortrait ? '转成横屏' : '转成竖屏',
                       onTap: onRotate,
                     ),
                   ],
                   if (showCast) ...[
                     const SizedBox(width: 6),
-                    PGlassIcon(
+                    PGlassIcon.fs(
                       icon: Icons.cast_rounded,
-                      size: 32 * s,
-                      iconSize: 17 * s,
-                      tint: .18,
                       tooltip: '投屏',
                       onTap: onCast,
                     ),
@@ -445,13 +444,10 @@ class FsSideControls extends StatelessWidget {
           top: safe.top,
           bottom: safe.bottom,
           child: Center(
-            child: PGlassIcon(
+            child: PGlassIcon.fs(
               // 未锁定态：闭合的锁 + 「锁定屏幕」，与锁定态的打开锁形成
               // 明确对比，一眼能看出当前是否已锁定。
               icon: Icons.lock_rounded,
-              size: 42,
-              iconSize: 21,
-              tint: .16,
               tooltip: '锁定屏幕',
               onTap: onLock,
             ),
@@ -468,20 +464,15 @@ class FsSideControls extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  PGlassIcon(
+                  PGlassIcon.fs(
                     icon: Icons.forward_10_rounded,
-                    size: 44,
-                    iconSize: 23,
-                    tint: .16,
                     tooltip: '快进 10 秒',
                     onTap: () => onSeekBy(10),
                   ),
-                  const SizedBox(height: 22),
-                  PGlassIcon(
+                  // 两个按钮的视觉间距 = 44dp 热区之间的空隙（14dp 视觉留白）。
+                  const SizedBox(height: 4),
+                  PGlassIcon.fs(
                     icon: Icons.replay_10_rounded,
-                    size: 44,
-                    iconSize: 23,
-                    tint: .16,
                     tooltip: '后退 10 秒',
                     onTap: () => onSeekBy(-10),
                   ),
@@ -505,7 +496,6 @@ class FsUnlockButton extends StatelessWidget {
     required this.onUnlock,
     this.visible = true,
     this.alignment = const Alignment(-.96, 0),
-    this.size = 40,
   });
 
   final VoidCallback onUnlock;
@@ -513,7 +503,6 @@ class FsUnlockButton extends StatelessWidget {
   /// 是否显示；隐藏时不可点击，淡出后完全让出触摸。
   final bool visible;
   final Alignment alignment;
-  final double size;
 
   @override
   Widget build(BuildContext context) {
@@ -526,14 +515,11 @@ class FsUnlockButton extends StatelessWidget {
           alignment: alignment,
           child: Opacity(
             opacity: .62,
-            child: PGlassIcon(
+            child: PGlassIcon.fs(
               // 锁定态必须是「打开的锁」：旧实现用 Icons.lock_rounded
               // （闭合锁），和未锁定态的锁屏按钮长得一样，用户看到的就是
               // 「开锁 / 解锁都显示锁上」，分不清当前到底锁没锁。
               icon: Icons.lock_open_rounded,
-              size: size,
-              iconSize: size * .48,
-              tint: .12,
               tooltip: '点击解锁',
               onTap: onUnlock,
             ),
@@ -544,10 +530,11 @@ class FsUnlockButton extends StatelessWidget {
   }
 }
 
-/// 顶栏小胶囊：网速 / 时间这类纯文字信息。
+/// 顶栏小胶囊：网速这类纯文字信息。
 ///
-/// 统一圆角 + 半透明黑底，和 FsQualityPill 同一套视觉，
-/// 避免文字直接飘在画面上看不清。
+/// PILL_ALIGN（2026-11-15）：改用 [PGlassPill]（白玻璃 + 30dp 高 + r15），
+/// 和分辨率 / 电量 / 时钟胶囊、圆形图标底**完全同高同圆角**。
+/// 旧实现是黑底 7dp 圆角的矮条，夹在 30dp 圆钮中间高低不一。
 class _TopChip extends StatelessWidget {
   const _TopChip({required this.text, this.size = 1});
 
@@ -556,19 +543,17 @@ class _TopChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: 7 * size, vertical: 3 * size),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: .34),
-        borderRadius: BorderRadius.circular(7 * size),
-      ),
+    return PGlassPill(
+      height: kFsPillHeight * size,
+      padding: EdgeInsets.symmetric(horizontal: 8 * size),
       child: Text(
         text,
         style: TextStyle(
           color: Colors.white.withValues(alpha: .92),
-          fontSize: 10 * size,
-          fontWeight: FontWeight.w600,
+          fontSize: 11 * size,
+          fontWeight: FontWeight.w700,
           height: 1.2,
+          shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
         ),
       ),
     );
@@ -606,15 +591,10 @@ class _BatteryChip extends StatelessWidget {
                               : (lv >= 20
                                     ? Icons.battery_3_bar_rounded
                                     : Icons.battery_1_bar_rounded))));
-        return Container(
-          padding: EdgeInsets.symmetric(
-            horizontal: 7 * size,
-            vertical: 3 * size,
-          ),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: .34),
-            borderRadius: BorderRadius.circular(7 * size),
-          ),
+        // 与图标底 / 其它胶囊同规格：30dp 高、r15、白玻璃 .13。
+        return PGlassPill(
+          height: kFsPillHeight * size,
+          padding: EdgeInsets.symmetric(horizontal: 8 * size),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -624,9 +604,10 @@ class _BatteryChip extends StatelessWidget {
                 '$lv%',
                 style: TextStyle(
                   color: color,
-                  fontSize: 10 * size,
+                  fontSize: 11 * size,
                   fontWeight: FontWeight.w700,
                   height: 1.2,
+                  shadows: const [Shadow(color: Colors.black54, blurRadius: 3)],
                 ),
               ),
             ],

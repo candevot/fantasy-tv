@@ -42,6 +42,7 @@ class DetailPage extends StatefulWidget {
     this.retried = false,
     this.startSeconds,
     this.fallbackHops = 0,
+    this.onInvalid,
   });
 
   final String id;
@@ -65,6 +66,13 @@ class DetailPage extends StatefulWidget {
   /// **另一条记录**；当前集号由 [ep] 带入，播放进度由它带入 ——
   /// 「第 5 集看到 12:34，换源后还是第 5 集 12:34」。
   final double? startSeconds;
+
+  /// 这条记录被判定失效时回调一次（参数是进入页面时的 id）。
+  ///
+  /// DEAD_CARD（2026-11-15）：搜索结果里可能混进一条打不开的记录（空壳 /
+  /// 服务端已删），详情页确认失效后要告诉来源页把它摘掉 —— 否则它会一直
+  /// 占着位置，用户下次还会点到。只在 [id] 上生效，不涉及导航。
+  final ValueChanged<String>? onInvalid;
 
   /// 这次页面是「跨源换源」跳过来的第几次（FX_FALLBACK）。
   ///
@@ -339,6 +347,8 @@ class _DetailPageState extends State<DetailPage>
             _invalid = true;
             _error = '该视频已失效';
           });
+          // 通知来源页（搜索结果）把这条摘掉，别再占位置。
+          widget.onInvalid?.call(widget.id);
         }
         return;
       }
@@ -1776,10 +1786,16 @@ class _DetailPageState extends State<DetailPage>
       color: Colors.black,
       child: LayoutBuilder(
         builder: (context, constraints) {
+          // STAGE_FULLWIDTH（2026-11-15）：宽度撑满、高度 = 宽度 / 视频比例，
+          // 且绝不低于 16:9（上一版把宽片收窄到 2.4:1、把竖屏短剧夹在 16:9，
+          // 视频区明显变小）。竖屏短剧按自身比例变高，上限 62% 屏高，
+          // 否则 9:16 的片子会把整页顶下去、选集要滑很远。
+          final screenHeight = MediaQuery.sizeOf(context).height;
           return SizedBox(
             height: fxPlayerStageHeight(
               width: constraints.maxWidth,
               videoRatio: _videoAspect,
+              maxHeight: screenHeight * .62,
             ),
             child: PlayerView(
               key: _playerKey,

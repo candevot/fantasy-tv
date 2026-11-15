@@ -177,23 +177,19 @@ class FsBottomBar extends StatelessWidget {
           Row(
             children: [
               // ── 左组：播放 / 下一集（不压缩）──
-              PGlassIcon(
+              // FS_ICON_SPEC：底栏所有圆钮与顶栏 / 侧栏同一规格（30dp 底、
+              // 19.5 图标、tint .13、44dp 热区），间距交给热区自带的留白。
+              PGlassIcon.fs(
                 icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                size: 34 * s,
-                iconSize: 19 * s,
-                tint: .16,
                 tooltip: playing ? '暂停' : '播放',
                 onTap: onTogglePlay,
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 2),
               if (live) ...[
                 const _FsLiveBadge(),
               ] else ...[
-                PGlassIcon(
+                PGlassIcon.fs(
                   icon: Icons.skip_next_rounded,
-                  size: 34 * s,
-                  iconSize: 19 * s,
-                  tint: .16,
                   tooltip: '下一集',
                   onTap: onNext,
                 ),
@@ -212,6 +208,8 @@ class FsBottomBar extends StatelessWidget {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      // 文字胶囊只留给真正要看字的入口（片头尾 / 倍速 /
+                      // 清晰度）：样式已与圆底同高同圆角同底色，见 FsTextAction。
                       if (!live && !narrow && onJump != null) ...[
                         FsTextAction(
                           text: '片头/尾',
@@ -219,7 +217,7 @@ class FsBottomBar extends StatelessWidget {
                           active: jumpActive,
                           onTap: onJump,
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: 8),
                       ],
                       if (!live && !narrow && onSpeed != null) ...[
                         FsTextAction(
@@ -228,7 +226,7 @@ class FsBottomBar extends StatelessWidget {
                           active: (rate - 1).abs() > .001,
                           onTap: onSpeed,
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: 8),
                       ],
                       if (qualityLabel.isNotEmpty) ...[
                         FsTextAction(
@@ -237,28 +235,28 @@ class FsBottomBar extends StatelessWidget {
                           active: qualityActive,
                           onTap: onQuality,
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: 8),
                       ],
+                      // 「选集」是图标入口：改用统一规格的玻璃圆底，
+                      // 不再用文字胶囊（用户要求同一层级外观一致）。
                       if (!live && onEpisodes != null) ...[
-                        FsTextAction(text: '选集', size: s, onTap: onEpisodes),
-                        const SizedBox(width: 10),
+                        PGlassIcon.fs(
+                          icon: Icons.playlist_play_rounded,
+                          tooltip: '选集',
+                          onTap: onEpisodes,
+                        ),
+                        const SizedBox(width: 2),
                       ],
                       if (onMore != null) ...[
-                        PGlassIcon(
+                        PGlassIcon.fs(
                           icon: Icons.settings_rounded,
-                          size: 34 * s,
-                          iconSize: 19 * s,
-                          tint: .16,
                           tooltip: '播放设置',
                           onTap: onMore,
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 2),
                       ],
-                      PGlassIcon(
+                      PGlassIcon.fs(
                         icon: Icons.fullscreen_exit_rounded,
-                        size: 34 * s,
-                        iconSize: 20 * s,
-                        tint: .16,
                         tooltip: '退出全屏',
                         onTap: onExit,
                       ),

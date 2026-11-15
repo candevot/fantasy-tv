@@ -542,12 +542,22 @@ class JarSpider {
   }
 
   /// 搜索。
+  ///
+  /// SEARCH_QUICK（2026-11-15）：[quick] 默认 **false**。
+  ///
+  /// FongMi / TVBox 里 `searchContent(key, quick)` 的 `quick` 是「快速搜索」：
+  /// 为 true 时允许 spider 直接用**本地 / 首页那批缓存**回答，不真去站点搜。
+  /// 我们原来写死 true，等于给每个 jar 源开了「走缓存」的许可 —— 某些源实现
+  /// 得很粗糙（把缓存整段返回、不做关键词过滤），搜索词就被无视了，列表里
+  /// 出现与该词毫无关系的片（现场：搜「济公传」出来「背着善宰跑」「与恶魔
+  /// 有约」这类首页热门）。改成 false 走真搜索；客户端还有一道
+  /// [fxRelevantCards] 相关性闸门兜底。
   static Future<List<VideoCard>> search({
     required String api,
     required String ext,
     required String key,
     int page = 1,
-    bool quick = true,
+    bool quick = false,
   }) async {
     final q = key.trim();
     if (q.isEmpty) return const <VideoCard>[];
@@ -632,6 +642,11 @@ class JarSpider {
   static List<VideoCard> cardsOf(Object? body) {
     final out = <VideoCard>[];
     for (final vod in _vodsOf(body)) {
+      // UNUSABLE_RECORD（2026-11-15）：**带了播放字段却一条能播的线路都没有**
+      // 的记录直接丢掉（空壳）。注意 TVBox 的搜索响应本来就不带
+      // `vod_play_from` / `vod_play_url`，那种卡片必须保留 —— 只判「有字段
+      // 但全空」这一种，不能把整个搜索结果误杀。
+      if (!_playableOrUnspecified(vod)) continue;
       try {
         final card = CmsApi.cardOf(vod);
         if (card.id.trim().isEmpty) continue;
@@ -641,6 +656,15 @@ class JarSpider {
       }
     }
     return out;
+  }
+
+  /// 这条记录能不能留：没给播放字段（搜索接口常态）= 能留；
+  /// 给了但全是空段 / 占位 = 空壳，丢掉。
+  static bool _playableOrUnspecified(Map<String, dynamic> vod) {
+    final hasField = vod.containsKey('vod_play_url') ||
+        vod.containsKey('vod_play_from');
+    if (!hasField) return true;
+    return CmsApi.usableLineCount(vod) > 0;
   }
 
   /// `{"list":[{…vod…}]}` → 详情（线路 / 选集全走 cms_source 的既有规则）。

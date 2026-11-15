@@ -151,6 +151,14 @@ class VideoCard {
   /// 两者都没有就留空，卡片不渲染这一行。
   final String sourceLabel;
 
+  /// 这条记录**有几条可用线路**（`vod_play_from` 里能解析出地址的段数）。
+  ///
+  /// LINES_COUNT（2026-11-15）：同名记录去重要「优先保留有内容的那条」，
+  /// 就必须能比较两条记录的线路数。列表 / 搜索接口本来就把
+  /// `vod_play_from` / `vod_play_url` 一起带回来了，转换时数一下即可，
+  /// 不需要额外请求。0 = 未知（外部源 / 老数据）。
+  final int lineCount;
+
   /// 这条记录属于哪个**片源分组**：`hx`（幻想）/ `xo`（官采+切片），
   /// 老数据 / 外部源为空串。
   ///
@@ -178,6 +186,7 @@ class VideoCard {
     this.tags = const [],
     this.sourceLabel = '',
     this.fromSource = '',
+    this.lineCount = 0,
   });
 
   /// 片源分组的展示名：`hx`→「幻想」，`xo`→「官采切片」，其它→空串。
@@ -212,6 +221,7 @@ class VideoCard {
       rank: _asInt(j['rank']),
       tags: _asStrList(j['tags']),
       fromSource: fromSource,
+      lineCount: _asInt(j['lineCount']),
       // CARD_SOURCE（2026-11-15）：卡片下方的来源小字只写**线路名**
       // （「幻想4K」），不再拼分组名 —— 之前是「幻想 · 幻想4K」，同一件事
       // 写了两遍，用户一眼就看成重复。分组名并没有丢：`fromSource` /

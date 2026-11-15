@@ -8,6 +8,7 @@ import 'jar_spider.dart';
 import 'play_log.dart';
 import 'play_path.dart';
 import 'search_rank.dart';
+import 'search_relevance.dart';
 import 'source_hub.dart';
 
 /// CMS 数据层 ↔ 现有 UI 的接线层（CMS_WIRING，2026-11-14）。
@@ -517,10 +518,16 @@ class CmsBridge {
   static List<VideoCard> _ownLabeled(
     List<VideoCard> cards, {
     bool stripSourceId = false,
+    String sliceLine = '',
   }) {
     final out = <VideoCard>[];
     for (final card in cards) {
-      final id = stripSourceId ? SourceHub.rawIdOf(card.id) : card.id;
+      var id = stripSourceId ? SourceHub.rawIdOf(card.id) : card.id;
+      // LINE_SLICE：线路切片的卡片必须记住「这条是哪个切片查出来的」，
+      // 否则点进详情就丢了 line 参数，平台线（爱奇艺）的记录必然查不到。
+      if (sliceLine.trim().isNotEmpty) {
+        id = sliceId(sliceLine, SourceHub.rawIdOf(id));
+      }
       _mark(id, CmsOrigin.cms);
       out.add(SourceHub.relabel(
         card,
@@ -607,7 +614,12 @@ class CmsBridge {
     void emit(List<VideoCard> cards, {required bool external, int page = 1}) {
       if (closed) return;
       final kept = <VideoCard>[];
-      for (final card in cards) {
+      // SEARCH_RELEVANCE（2026-11-15）：外部源（肥猫的 jar 源）不保证按关键词
+      // 搜 —— 有的 jar 直接把关键词当分类 id（见 search_relevance.dart 头注释），
+      // 返回的是源站首页那批片。片名和关键词无关的一律丢掉：
+      // 整段都没相关的就整段不显示，绝不拿首页数据冒充搜索结果。
+      final judged = external ? fxRelevantCards(cards, q) : cards;
+      for (final card in judged) {
         if (SourceHub.isLiveCard(card)) continue;
         if (!dedupe.fresh(card)) continue;
         kept.add(card);
@@ -688,10 +700,13 @@ class CmsBridge {
               )
               .catchError((Object _) => const <VideoCard>[]);
           done++;
-          // 线路切片查的是**同一个主站**：id 必须是裸 vod_id（`rawIdOf` 兜底，
-          // 否则卡片带着 `@src:line_xxx::` 前缀，点进详情会被当成外部源、
-          // 路由不到任何源 → 「没有找到这部影片」），标签统一标「幻想」。
-          emit(_ownLabeled(cards, stripSourceId: true), external: false);
+          // 线路切片查的是**同一个主站**：id 用裸 vod_id + 切片线路名
+          // （`@line:<线路>::<vod_id>`，见 [sliceId]）。不能只用裸 id ——
+          // 平台线切片（幻想爱奇艺）的 id 主库不认，点进去必然加载失败。
+          emit(
+            _ownLabeled(cards, stripSourceId: true, sliceLine: label),
+            external: false,
+          );
         }());
       }
 
@@ -888,6 +903,69 @@ class CmsBridge {
     return <VideoCard>[for (final entry in indexed) entry.value];
   }
 
+  /* -------------------------------------------------- 线路切片 id（LINE_SLICE） */
+
+  /// 平台线路切片的卡片 id 前缀。
+  ///
+  /// LINE_SLICE（2026-11-15）：搜索会并行查「幻想爱奇艺 / 量子 / 红牛」这些
+  /// **线路切片**（`?line=<线路名>`）。切片返回的是该线路自己的记录，其中
+  /// 平台线（爱奇艺）用的是**切片空间的 vod_id** —— 实测 `济公传` 的
+  /// `900000003` 只在 `?line=幻想爱奇艺&ac=detail&ids=900000003` 下存在，
+  /// 拿掉 `line` 参数去主库查，服务端返回空列表，用户看到的就是
+  /// 「搜索结果里有一条我们自己的记录，点进去必加载失败」。
+  ///
+  /// 修法：切片卡片保留线路名（编码进 id），详情 / 播放都带同一个 `line`
+  /// 回同一个切片库；主库查得到时仍然走主库（`_sliceOf` 为 null 的普通 id）。
+  static const String sliceMark = '@line:';
+
+  /// 编码一张切片卡片的 id：`@line:幻想爱奇艺::900000003`。
+  static String sliceId(String lineName, String vodId) {
+    final name = lineName.trim();
+    final id = vodId.trim();
+    if (name.isEmpty || id.isEmpty) return id;
+    return '$sliceMark$name::$id';
+  }
+
+  /// 拆出切片 id：返回 `(线路名, vod_id)`；不是切片 id 返回 null。
+  static (String, String)? sliceOf(String id) {
+    final raw = id.trim();
+    if (!raw.startsWith(sliceMark)) return null;
+    final rest = raw.substring(sliceMark.length);
+    final at = rest.indexOf('::');
+    if (at <= 0) return null;
+    final line = rest.substring(0, at).trim();
+    final vodId = rest.substring(at + 2).trim();
+    if (line.isEmpty || vodId.isEmpty) return null;
+    return (line, vodId);
+  }
+
+  /// 带切片 id 的调用：**主库优先，切片库兜底**。
+  ///
+  /// 切片记录的 id 有两种：量子 / 红牛这类切片给的是**主库真实 id**
+  /// （主库能查到，而且线路更全），幻想爱奇艺这类平台线给的是**切片空间
+  /// 的 id**（主库查不到）。所以顺序必须是「先主库、失败再带 line 参数」——
+  /// 反过来（直接带 line）会让本来有 2 条线路的记录只剩切片那 1 条。
+  static Future<T> _withSlice<T>(
+    String id,
+    Future<T> Function(String vodId) main,
+    Future<T> Function(String vodId, String line) sliced,
+  ) async {
+    final slice = sliceOf(id);
+    if (slice == null) return main(id);
+    try {
+      return await main(slice.$2);
+    } catch (_) {
+      return sliced(slice.$2, slice.$1);
+    }
+  }
+
+  /// 去掉切片前缀后的裸 vod_id（历史 / 收藏 / 播放缓存都按它存）。
+  static String bareIdOf(String id) {
+    final slice = sliceOf(id);
+    if (slice != null) return slice.$2;
+    return SourceHub.rawIdOf(id);
+  }
+
   /* ------------------------------------------------------------ 详情 */
 
   /// 详情：CMS `ac=detail&ids=<vod_id>` → [VideoDetail]（线路 / 选集 / 剧集
@@ -922,8 +1000,14 @@ class CmsBridge {
     }
     final origin = _originOf(id);
     if (origin == CmsOrigin.legacy) return _legacyDetail(id);
+    // 切片 id：先用主库查（多数切片 id 主库也有、线路更全），失败再带
+    // line 参数去切片库查 —— 这正是「那一条点进去必失败」的修法。
     try {
-      final detail = await CmsApi.detail(id, fresh: fresh);
+      final detail = await _withSlice(
+        id,
+        (vodId) => CmsApi.detail(vodId, fresh: fresh),
+        (vodId, line) => CmsApi.detail(vodId, fresh: fresh, line: line),
+      );
       _mark(id, CmsOrigin.cms);
       return detail;
     } catch (e) {
@@ -1050,7 +1134,16 @@ class CmsBridge {
       fxPlayLog('line=$line source=legacy url=8787/api/play ep=$ep');
       return Api.play(vodId, ep, line, fresh: fresh);
     }
-    final info = await CmsApi.playEpisode(vodId, line, ep);
+    final info = await _withSlice(
+      vodId,
+      (id) => CmsApi.playEpisode(id, line, ep),
+      (id, sliceLine) => CmsApi.playEpisode(
+        id,
+        line,
+        ep,
+        sliceLine: sliceLine,
+      ),
+    );
     _mark(vodId, CmsOrigin.cms);
     return info;
   }
@@ -1085,7 +1178,16 @@ class CmsBridge {
     )) {
       return Api.play(vodId, ep, line).then((info) => info.url);
     }
-    return CmsApi.playUrl(vodId, line, ep);
+    return _withSlice(
+      vodId,
+      (id) => CmsApi.playUrl(id, line, ep),
+      (id, sliceLine) => CmsApi.playUrl(
+        id,
+        line,
+        ep,
+        sliceLine: sliceLine,
+      ),
+    );
   }
 
   /// 片源侧的可读提示（目前只有「jar 插件没装」这一条），没话可说返回空串。
@@ -1108,7 +1210,9 @@ class CmsBridge {
   /// 外部源（云端 / 自加）的卡片 id 带 `@src:` 前缀，同样按 CMS 处理，
   /// 否则详情页会为它去查旧接口的平台线路。
   static bool isCms(String id) =>
-      id.trim().startsWith(SourceHub.idMark) || _originOf(id) == CmsOrigin.cms;
+      id.trim().startsWith(SourceHub.idMark) ||
+      id.trim().startsWith(sliceMark) ||
+      _originOf(id) == CmsOrigin.cms;
 
   /* ------------------------------------------------------ jar 源兜底 */
 
@@ -1281,28 +1385,70 @@ class CmsChannel {
 /// 年份未知（0）的那条只要同名片已经出现过就算重复；年份已知的按年份比，
 /// 同名不同年（翻拍版）仍然各留一条。渐进检索要把这个账本一路带下去，
 /// 每批都过一遍，才能保证「外部源结果」里不会冒出上面已经有的片子。
+/// 搜索结果的跨批去重（渐进检索：一批一批来，去重必须跨批记住）。
+///
+/// DEDUPE_LINES（2026-11-15）：
+///   · 身份 = 「片名（归一化） + 年份 + 片源分组」，同一身份只留一条；
+///   · **片源分组为空的是通配**（线路切片 / 外部源 / 老数据）：它没有
+///     `vod_from`，会并进同名的任一条片源记录里 —— 搜索「济公传」时
+///     主库给的是 `济公传`（hx，2 条线路），`?line=幻想爱奇艺` 又给一条
+///     `济公传`（无片源、1 条线路、切片 id 主库不认），合并后只留主库那条，
+///     那条「点进去必失败」的重复记录就不会再占位置；
+///   · 同名记录撞车时**保留线路多的那条**（`lineCount`），少的直接丢掉。
 class _Dedupe {
   _Dedupe({this.byId = false});
 
-  final Map<String, Set<int>> _seen = <String, Set<int>>{};
+  /// 身份 → 已收录的卡片（同一身份下按年份分开，翻拍剧不算重复）。
+  final Map<String, List<VideoCard>> _seen = <String, List<VideoCard>>{};
 
   /// 按卡片 id 去重（跨源不合并）：一起看建房要列出「同一部片在各个源」。
   final bool byId;
 
   bool fresh(VideoCard card) {
-    if (byId) return _seen.putIfAbsent('id:${card.id}', () => <int>{}).add(0);
-    // SOURCE_SPLIT（2026-11-15）：按「片名+片源」分桶 —— 幻想那条和
-    // 官采切片那条是两部「记录」，都要留在列表里。
-    final key = '${SourceHub.normTitle(card.title)}|${card.fromSource}';
-    if (key.isEmpty) return true;
-    final years = _seen.putIfAbsent(key, () => <int>{});
-    if (card.year <= 0) {
-      if (years.isNotEmpty) return false;
-      years.add(0);
+    if (byId) {
+      final hit = _seen.putIfAbsent('id:${card.id}', () => <VideoCard>[]);
+      if (hit.isNotEmpty) return false;
+      hit.add(card);
       return true;
     }
-    if (years.contains(card.year) || years.contains(0)) return false;
-    years.add(card.year);
-    return true;
+    final title = SourceHub.normTitle(card.title);
+    if (title.isEmpty) return true;
+    final from = card.fromSource.trim();
+    final wild = '$title|';
+    final exact = '$title|$from';
+    // 通配桶：同名的全部记录（不分片源分组），碰撞判定都用它。
+    final all = _seen.putIfAbsent(wild, () => <VideoCard>[]);
+    final mine = exact == wild ? all : _seen.putIfAbsent(exact, () => <VideoCard>[]);
+
+    VideoCard? collide;
+    for (final other in all) {
+      final otherFrom = other.fromSource.trim();
+      // 片源分组相同、或任一方为空（通配）才算同一条；
+      // hx 与 xo 两条**不同片源**的记录要继续并存（SOURCE_SPLIT）。
+      final sameFrom =
+          otherFrom == from || otherFrom.isEmpty || from.isEmpty;
+      if (!sameFrom) continue;
+      // 年份都已知且不同 → 重拍 / 同名不同剧，不算重复；
+      // 有一方年份未知就按同一条处理（宁可少一条，不留点不开的重复）。
+      if (card.year > 0 && other.year > 0 && other.year != card.year) continue;
+      collide = other;
+      break;
+    }
+    if (collide == null) {
+      all.add(card);
+      if (exact != wild) mine.add(card);
+      return true;
+    }
+    // 撞车：线路多的胜出（一样多时主库记录胜出，见 SourceHub.betterRecord）。
+    // 新人更优 → 放行（页面按身份替换旧卡片，见 SearchPage._appendUnique），
+    // 否则丢掉，列表里不再多出点不开的一条。
+    if (SourceHub.betterRecord(card, collide)) {
+      all.remove(collide);
+      mine.remove(collide);
+      all.add(card);
+      if (exact != wild) mine.add(card);
+      return true;
+    }
+    return false;
   }
 }
