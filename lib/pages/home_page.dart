@@ -170,7 +170,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         // 推荐页的网格渲染这一份（滚动到底会继续往后追加）。
         _sections = arranged;
         _feedPage = 1;
-        _feedMore = arranged.any((s) => s.items.length >= _feedPageSize);
+        // 首页每个分区只先给 10 条，所以「还有没有更多」不能按条数判：
+        // 只要有分区就先允许往下追加，追加到一页没新内容才写「到底啦」。
+        _feedMore = arranged.isNotEmpty;
         _feedPaging = false;
       });
       _precacheFirstCovers(arranged, channel);
@@ -314,7 +316,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         setState(() {
           _sections = arranged;
           _feedPage = 1;
-          _feedMore = arranged.any((s) => s.items.length >= _feedPageSize);
+          _feedMore = arranged.isNotEmpty;
           _feedPaging = false;
         });
       }
@@ -404,9 +406,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 今日热播 / 最新更新放最前，然后电影 / 剧集 / 综艺 / 动漫。
   /// 首页分区顺序：CMS 的六个一级栏目在前（电影 → 电视剧 → 动漫 →
   /// 综艺 → 短剧 → 少儿），旧接口的热播 / 高分分区排在后面兜底。
-  /// 首页每页的条数（和 CMS `limit=20` 一致）：追加下一页时按它判断还有没有。
-  static const int _feedPageSize = 20;
-
   static const List<String> _sectionOrder = <String>[
     '电影',
     '剧集',

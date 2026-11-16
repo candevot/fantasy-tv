@@ -209,14 +209,15 @@ class CmsBridge {
     KSource source,
     CmsChannel? ch,
   ) async {
+    // jar 源没装 jar 插件就**别逐行去敲**（每个源 12 秒，六行能把首屏拖到
+    // 一分钟以上）；直接判定「这个源出不了内容」，交给幻想兜底。
+    if (!await _sourceReady(source)) return null;
     final rows = (ch == null || ch.typeId <= 0) ? _homeRows : <CmsChannel>[ch];
-    final lists = <List<VideoCard>?>[];
-    var anyOk = false;
-    for (final row in rows) {
-      final cards = await _pickedRowCards(source, row.key, page: 1);
-      if (cards != null) anyOk = true;
-      lists.add(cards);
-    }
+    // 六行并行：壳的首页也是并发拉，串行只会让首屏越来越慢。
+    final lists = await Future.wait(<Future<List<VideoCard>?>>[
+      for (final row in rows) _pickedRowCards(source, row.key, page: 1),
+    ]);
+    final anyOk = lists.any((list) => list != null);
     if (!anyOk) return null;
     final sections = <HomeSection>[];
     for (var i = 0; i < rows.length; i++) {
@@ -238,6 +239,19 @@ class CmsBridge {
       ],
       sections,
     );
+  }
+
+  /// 这个源现在能不能出内容（jar 源要先装 jar 插件）。
+  ///
+  /// 顺手把 jar 状态查一次（内部 2 秒兜底），免得和首页首屏抢跑：
+  /// 状态未知时按「先查、查不到就当没装」处理，绝不乐观地逐行去敲 jar。
+  static Future<bool> _sourceReady(KSource source) async {
+    final hub = SourceHub.instance;
+    if (source.kind == KSourceKind.jar) {
+      await hub.ensureJarStatus();
+      return hub.jarReady;
+    }
+    return hub.canServeContent(source);
   }
 
   /// 取某个源的一个频道（首页 / 分类共用）。
@@ -527,6 +541,7 @@ class CmsBridge {
     required String year,
     required int page,
   }) async {
+    if (!await _sourceReady(source)) return null;
     final channel = channelOf(type);
     final channelKey = channel?.key ?? type.trim();
     final wanted = _filterWanted(area: area, year: year);
