@@ -1544,6 +1544,8 @@ class SourceHub extends ChangeNotifier {
     var skipped = 0;
     var selfSkipped = 0;
     var jarNotice = false;
+    // 接口里 `type: live` 的站点地址（没有顶层 lives / live_url 时用它）。
+    var liveFromSites = '';
     for (final site in config.sites) {
       final name = site.name;
       final api = site.api;
@@ -1559,9 +1561,15 @@ class SourceHub extends ChangeNotifier {
         notes.add('「$name」${_reasonOf(site.type, kind)}，已跳过');
         continue;
       }
+      // LIVE_FOLLOW_INTERFACE（2026-11-17）：直播**跟着接口走**。
+      // 用户口径：片源管理里不出现任何「添加直播源」的入口，直播页的数据
+      // 来自已导入接口的 lives 字段。所以这里不再把直播列表当成「跳过并
+      // 提示去直播页添加」，而是把它的地址记成当前直播源（后面 `lives`
+      // 顶层字段 / `live_url` 优先级更高）。
       if (kind == KSourceKind.live) {
+        if (liveFromSites.isEmpty && api.isNotEmpty) liveFromSites = api;
         skipped++;
-        notes.add('「$name」是直播列表，请到「直播」页添加');
+        notes.add('「$name」是直播列表，已接到「直播」页');
         continue;
       }
       final dedupeKey = kind == KSourceKind.jar ? '$api|${site.ext}' : api;
@@ -1580,6 +1588,15 @@ class SourceHub extends ChangeNotifier {
     }
     if (selfSkipped > 0 && added.isEmpty) {
       throw ApiException('这份配置里的源都是本站内置的，没有需要导入的');
+    }
+    // 直播跟着接口走：顶层 `lives` / `live_url` 优先，其次 type=live 的站点。
+    final liveUrl = config.liveUrl.trim().isNotEmpty
+        ? config.liveUrl.trim()
+        : liveFromSites.trim();
+    if (liveUrl.isNotEmpty && liveUrl != _liveUrl) {
+      _liveUrl = liveUrl;
+      await _saveLiveUrl();
+      notes.add('直播源已跟着接口更新');
     }
     final withTimeout = added.where((s) => s.timeout > 0).length;
     final withHeader = added.where((s) => s.header.isNotEmpty).length;
@@ -2239,6 +2256,13 @@ class SourceHub extends ChangeNotifier {
       await sp.setStringList(_kPinned, _pinned.toList());
       await sp.setBool(_kBundledHidden, _bundledHidden);
       await sp.setString(_kProtocol, jsonEncode(_protocol.protocolToMap()));
+    } catch (_) {}
+  }
+
+  Future<void> _saveLiveUrl() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString(_kLiveUrl, _liveUrl);
     } catch (_) {}
   }
 

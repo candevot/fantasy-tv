@@ -102,7 +102,9 @@ class LiveSourceService {
         _last = catalog;
         return catalog;
       }
-      throw ApiException('后台还没配直播接口地址');
+      // LIVE_FOLLOW_INTERFACE（2026-11-17）：接口没带 lives 就说这个，
+      // 页面对应的是**空态**（不是错误），措辞也别再说「后台没配」。
+      throw ApiException('当前接口没有直播源');
     }
     if (!force && _last != null && _last?.sourceUrl == url) return _last!;
     final running = _running;

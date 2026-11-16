@@ -4,6 +4,7 @@ import '../api.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../services/live_source.dart';
+import '../services/source_hub.dart';
 import '../theme.dart';
 import '../utils/fx_route.dart';
 import 'category_page.dart' show fxErrorText;
@@ -35,6 +36,12 @@ class _LiveAllPageState extends State<LiveAllPage> {
   bool _loading = true;
   bool _refreshing = false;
   String? _error;
+
+  /// LIVE_FOLLOW_INTERFACE（2026-11-17）：当前导入的接口里**没有**直播源。
+  ///
+  /// 用户口径：「接口没带 lives → 直播页显示『当前接口没有直播源』，
+  /// 不报错、不白屏」。所以这是空态，不是错误态。
+  bool _noLive = false;
   bool _fromLegacy = false;
   int _req = 0;
 
@@ -51,6 +58,7 @@ class _LiveAllPageState extends State<LiveAllPage> {
         _loading = _catalog == null;
         _refreshing = _catalog != null;
         _error = null;
+        _noLive = false;
       });
     }
     try {
@@ -63,10 +71,22 @@ class _LiveAllPageState extends State<LiveAllPage> {
         _fromLegacy = false;
         _loading = false;
         _refreshing = false;
-        _error = sections.isEmpty ? '直播列表里没有可用频道，检查后台配置' : null;
+        _noLive = false;
+        _error = sections.isEmpty ? '直播列表里没有可用频道' : null;
       });
     } catch (e) {
       if (!mounted || req != _req) return;
+      // 接口没带 lives：这是空态，不是错误（不弹「加载失败」、不白屏）。
+      if (SourceHub.instance.liveUrl.trim().isEmpty) {
+        setState(() {
+          _loading = false;
+          _refreshing = false;
+          _error = null;
+          _noLive = true;
+          _sections = const <LiveSection>[];
+        });
+        return;
+      }
       if (!CmsBridge.legacyEnabled) {
         // 旧接口（8787）已随迁移下线：不再拿它兜底，直接把真实原因说清楚。
         // 「后台还没配直播接口地址」比先转 16 秒（8 秒超时 ×2 次重试）再报
@@ -146,6 +166,7 @@ class _LiveAllPageState extends State<LiveAllPage> {
 
   Widget _body() {
     if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_noLive && _sections.isEmpty) return _noLiveView();
     if (_error != null && _sections.isEmpty) {
       return Center(
         child: Column(
@@ -163,7 +184,7 @@ class _LiveAllPageState extends State<LiveAllPage> {
             ),
             const SizedBox(height: 6),
             const Text(
-              '直播地址在「设置 → 片源管理」里配置（后台下发）',
+              '直播跟着接口走：导入的接口里带 lives 才有频道',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 11, color: Color(0xFFA6B1C2)),
             ),
@@ -185,6 +206,48 @@ class _LiveAllPageState extends State<LiveAllPage> {
           if (i == 0) return _statusBar();
           return _section(_sections[i - 1]);
         },
+      ),
+    );
+  }
+
+  /// 接口里没有直播源时的空态（不报错、不白屏）。
+  Widget _noLiveView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.live_tv_rounded, size: 40, color: Fx.sub),
+            const SizedBox(height: 10),
+            const Text(
+              '当前接口没有直播源',
+              style: TextStyle(fontSize: 14, color: Fx.ink),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '直播跟着接口走：导入的接口里带 lives（TVBox 配置的直播列表）时，'
+              '频道会自动出现在这里。',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 11, height: 1.5, color: Fx.sub),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FilledButton(
+                  onPressed: () => _load(force: true),
+                  child: const Text('刷新'),
+                ),
+                const SizedBox(width: 10),
+                TextButton(
+                  onPressed: _openSettings,
+                  child: const Text('片源管理'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
