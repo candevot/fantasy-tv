@@ -1306,9 +1306,6 @@ class _SearchPageState extends State<SearchPage> {
     required double railWidth,
     required bool last,
   }) {
-    final width = MediaQuery.sizeOf(context).width;
-    // 竖排列表：右侧可用宽度 = 屏宽 − 左栏 − 左右内边距。
-    final usable = width - railWidth - 16 * 2;
     return SliverMainAxisGroup(
       slivers: [
         PinnedHeaderSliver(child: _groupHeader(group)),
