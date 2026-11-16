@@ -687,18 +687,28 @@ class DownloadService extends ChangeNotifier {
     return bytes;
   }
 
-  /// 整剧缓存进度 = 所有任务进度之和 / 总集数；只下了一部分时进度条
-  /// 停在「已缓存比例」上，和「已缓存 12/58 集」文案一致。
+  /// 缓存进度条的值（EP_PROGRESS 2026-11-17）。
+  ///
+  /// 用户实测：只下了 1 集，进度条却在按「整部剧 58 集」算 —— 那一集下满了
+  /// 也只有 1/58≈1.7%，永远看不到进度。
+  ///
+  /// 口径（用户明确要求）：**进度条只表示当前这一集的 0→100**；
+  /// 下完一集换下一集时从头再来（0→100）。所以这里返回「当前在下的那一集」
+  /// 的进度，没有在下的任务时按「已完成集数 / 本次排队的集数」兜底
+  /// （全部下完 = 1）。
+  ///
+  /// 注意分母是**排队集数**（tasksForSeries().length），不是整部剧的集数 ——
+  /// 用户只选 1 集时，下完就是 100%，不会卡在 1/58。
   double seriesProgress(String id) {
     final list = tasksForSeries(id);
     if (list.isEmpty) return 0;
-    var sum = 0.0;
-    for (final t in list) {
-      sum += t.progressValue;
-    }
-    final total = seriesTotalEpisodes(id);
-    if (total <= 0) return 0;
-    return (sum / total).clamp(0.0, 1.0);
+    final current = seriesCurrentTask(id);
+    if (current != null) return current.progressValue;
+    final done = list
+        .where((t) => t.status == DownloadStatus.completed)
+        .length;
+    if (done >= list.length) return 1;
+    return (done / list.length).clamp(0.0, 1.0);
   }
 
   DownloadStatus seriesStatus(String id) {

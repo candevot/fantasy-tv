@@ -561,10 +561,21 @@ class _DownloadsPageState extends State<DownloadsPage>
     );
   }
 
+  /// 「已缓存 X/Y 集」：Y 用**本次排队的集数**，整部剧集数不同时补一个「全 N 集」。
+  String _cachedLabel(int cached, int queued, int total) {
+    if (queued <= 0) return '已缓存 $cached/$total 集';
+    if (queued >= total) return '已缓存 $cached/$queued 集';
+    return '已缓存 $cached/$queued 集 · 全 $total 集';
+  }
+
   Widget _seriesCard(_SeriesGroup group, {required bool downloadingTab}) {
     final id = group.id;
     final status = _service.seriesStatus(id);
     final total = _service.seriesTotalEpisodes(id);
+    // EP_PROGRESS（2026-11-17）：本次实际排队的集数（用户只选 1 集就是 1）。
+    // 「已缓存 0/58 集」里的 58 是整部剧的集数，只下 1 集时看着像排了 58 集，
+    // 文案改成「已缓存 0/1 集 · 全 58 集」。
+    final queuedEpisodes = _service.tasksForSeries(id).length;
     final cached = _service.seriesCachedCount(id);
     final bytes = _service.seriesCachedBytes(id);
     final progress = _service.seriesProgress(id);
@@ -589,12 +600,12 @@ class _DownloadsPageState extends State<DownloadsPage>
       } else if (failed) {
         detail = '$failedCount 集下载失败 · 点击继续重试';
       } else {
-        detail = '已缓存 $cached/$total 集';
+        detail = _cachedLabel(cached, queuedEpisodes, total);
       }
     } else {
       detail = completed
           ? '已全部缓存 · ${fxBytes(bytes)}'
-          : '已缓存 $cached/$total 集 · ${fxBytes(bytes)}';
+          : '${_cachedLabel(cached, queuedEpisodes, total)} · ${fxBytes(bytes)}';
     }
 
     return GlassCard(
@@ -705,7 +716,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                         child: Text(
                           group.sample.isMovie
                               ? '已缓存 · ${fxBytes(bytes)}'
-                              : '已缓存 $cached/$total 集 · ${fxBytes(bytes)}',
+                              : '${_cachedLabel(cached, queuedEpisodes, total)} · ${fxBytes(bytes)}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style:
