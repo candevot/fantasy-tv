@@ -1342,16 +1342,7 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  /// 竖屏 3 列 / 横屏 5 列（对齐壳 `Product.getColumn`：竖屏基数 5、size 默认 2）。
-  int _gridColumns() {
-    final size = MediaQuery.sizeOf(context);
-    final land = size.width > size.height;
-    // COLUMNS（2026-11-16）：用户实测 3 列太挤，片名被截成「济公传[电影…」
-    // 「新编济公传…」，看不全。竖屏改 2 列（每张海报宽约屏宽 1/3，片名能放
-    // 两行放得下），横屏 3 列。壳的分类页是 3 列，但那是**分类页**，搜索结果
-    // 要能一眼看清片名，宁可行数多一点。
-    return land ? 3 : 2;
-  }
+
 
   /// 一个源的组标题（吸顶）：`源名 · N 部`，我们自己的源多一个「优先」标记。
   Widget _groupHeader(FxSourceGroup group) {
