@@ -679,7 +679,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   /// 「咕噜 · APP」/「幻想 · APP」：玻璃胶囊 + 弹面板的箭头。热区 44dp。
+  ///
+  /// 窄屏（< 380dp）只留源名：行里已经有 logo + 三枚 44dp 圆钮 + 一起看，
+  /// 再塞「· APP」会被截成省略号，不如直接省掉后缀。
   Widget _sourceTitle() {
+    final narrow = MediaQuery.sizeOf(context).width < 380;
+    final text = narrow ? _hub.homeSourceName : _hub.homeSourceTitle;
     return Semantics(
       button: true,
       label: '选择接口：${_hub.homeSourceName}',
@@ -696,7 +701,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               children: [
                 Flexible(
                   child: Text(
-                    _hub.homeSourceTitle,
+                    text,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(

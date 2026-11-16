@@ -317,6 +317,11 @@ class FxPosterBadge extends StatelessWidget {
   }
 }
 
+/// 海报底部那条半透明信息条上的文字：**只写真实集数状态**
+/// （更新至第26集 / 全27集 / 完结），没有状态时返回空串 ——
+/// 不能拿「年份 · 类型」凑数，那样每张卡底部都写「2026 · 电影」，很吵。
+String fxPosterEpisodeLine(VideoCard item) => item.status.trim();
+
 /// 海报下方唯一的一行状态：优先服务端 status，其次「年份 · 类型」。
 String fxPosterStatusLine(VideoCard item) {
   final s = item.status.trim();
@@ -487,7 +492,7 @@ class FxPosterTile extends StatelessWidget {
                       child: FxPosterBadge(badge),
                     ),
                   if (statusOverlay)
-                    FxPosterStatusOverlay(fxPosterStatusLine(item)),
+                    FxPosterStatusOverlay(fxPosterEpisodeLine(item)),
                 ],
               ),
             ),
