@@ -795,9 +795,7 @@ class _CategoryPageState extends State<CategoryPage> {
   }
 
   Widget _buildContent(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    // 与首页一致：4 列、2:3、间距 8，下方留片名 1 行 + 状态 1 行。
-    final itemWidth = (width - 16 * 2 - 8 * 3) / 4;
+    // SHELL_LIST：分类页已改竖排列表，不再需要按列宽算卡片宽度。
     return RefreshIndicator(
       color: Fx.accent,
       backgroundColor: Colors.white,
@@ -843,24 +841,24 @@ class _CategoryPageState extends State<CategoryPage> {
               ),
             )
           else ...[
+            // SHELL_LIST（2026-11-16）：分类页也改成影视壳的**竖排列表**。
+            // 之前是 4 列海报网格，片名挤成「济公传[电影…」，用户看不清；
+            // 竖向一行一张：左 84×112 海报 + 右两行片名 + 来源 + 状态，
+            // 和搜索结果页保持一致（两边都是「往下滑挑片」）。
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-              sliver: SliverGrid(
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 4,
-                  crossAxisSpacing: 8,
-                  mainAxisSpacing: 8,
-                  mainAxisExtent: itemWidth * 1.5 +
-                      fxPosterMetaExtent(context,
-                          withSource: _items
-                              .any((e) => e.sourceLabel.trim().isNotEmpty)),
-                ),
+              sliver: SliverList(
                 delegate: SliverChildBuilderDelegate(
                   (ctx, i) {
                     final item = _items[i];
-                    return FxPosterTile(
-                      item: item,
-                      onTap: () => _openDetail(item.id),
+                    return Padding(
+                      padding: EdgeInsets.only(
+                        bottom: i == _items.length - 1 ? 0 : 10,
+                      ),
+                      child: FxSearchResultTile(
+                        item: item,
+                        onTap: () => _openDetail(item.id),
+                      ),
                     );
                   },
                   childCount: _items.length,
