@@ -812,8 +812,8 @@ class _CategoryPageState extends State<CategoryPage> {
             const SliverToBoxAdapter(
               child: FxSkeletonPulse(
                 child: FxPosterGridSkeleton(
-                  crossAxisCount: 4,
-                  itemCount: 16,
+                  crossAxisCount: 3,
+                  itemCount: 15,
                   padding: EdgeInsets.fromLTRB(16, 2, 16, 0),
                 ),
               ),
@@ -841,24 +841,31 @@ class _CategoryPageState extends State<CategoryPage> {
               ),
             )
           else ...[
-            // SHELL_LIST（2026-11-16）：分类页也改成影视壳的**竖排列表**。
-            // 之前是 4 列海报网格，片名挤成「济公传[电影…」，用户看不清；
-            // 竖向一行一张：左 84×112 海报 + 右两行片名 + 来源 + 状态，
-            // 和搜索结果页保持一致（两边都是「往下滑挑片」）。
+            // SHELL_GRID（2026-11-17）：分类页回到**3 列网格**（壳的样子）：
+            // 左上年份角标 + 海报底部集数渐变条 + 片名一行居中；
+            // 竖排列表那种「一行一张」不再用了。
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-              sliver: SliverList(
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  crossAxisSpacing: 9,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: .55,
+                ),
                 delegate: SliverChildBuilderDelegate(
                   (ctx, i) {
                     final item = _items[i];
-                    return Padding(
-                      padding: EdgeInsets.only(
-                        bottom: i == _items.length - 1 ? 0 : 10,
-                      ),
-                      child: FxSearchResultTile(
-                        item: item,
-                        onTap: () => _openDetail(item.id),
-                      ),
+                    return FxPosterTile(
+                      item: item,
+                      radius: 12,
+                      titleSize: 12,
+                      titleLines: 1,
+                      centerTitle: true,
+                      showYearBadge: true,
+                      statusOverlay: true,
+                      showStatus: false,
+                      onTap: () => _openDetail(item.id),
                     );
                   },
                   childCount: _items.length,

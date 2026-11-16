@@ -328,7 +328,95 @@ String fxPosterStatusLine(VideoCard item) {
   return parts.join(' · ');
 }
 
-/// 2:3 海报 + 左上角角标 + 片名 1 行省略 + 状态 1 行
+/// 左上角「年份」角标（影视壳那种：半透明深色玻璃 + 白字）。
+///
+/// SHELL_GRID（2026-11-17）：壳的 3 列网格里，海报左上角是蓝色年份角标
+/// （2026 / 2025…），不是「更新 / 全 N 集」那种角标 —— 集数信息挪到海报
+/// 底部的半透明条（见 [FxPosterStatusOverlay]）。
+class FxYearBadge extends StatelessWidget {
+  const FxYearBadge(this.year, {super.key});
+
+  final int year;
+
+  @override
+  Widget build(BuildContext context) {
+    if (year <= 0) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        // 半透明深色玻璃：不是实心黑块，海报透得出来。
+        color: const Color(0xFF2B3440).withValues(alpha: .55),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white.withValues(alpha: .22)),
+      ),
+      child: Text(
+        '$year',
+        maxLines: 1,
+        style: const TextStyle(
+          fontSize: 9.5,
+          height: 1.15,
+          fontWeight: FontWeight.w600,
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
+}
+
+/// 海报底部的半透明信息条：`更新至第26集` / `全27集` / `完结`。
+///
+/// GLASS_UI（2026-11-17）：用户要求「渐变到透明（底部深、顶部透明），
+/// 不要实心黑条」，所以底色是 LinearGradient 而不是纯色。
+class FxPosterStatusOverlay extends StatelessWidget {
+  const FxPosterStatusOverlay(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    if (text.trim().isEmpty) return const SizedBox.shrink();
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(7, 12, 7, 5),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.black.withValues(alpha: 0),
+              Colors.black.withValues(alpha: .28),
+              Colors.black.withValues(alpha: .62),
+            ],
+            stops: const [0, .45, 1],
+          ),
+          borderRadius: BorderRadius.vertical(
+            bottom: Radius.circular(0),
+          ),
+        ),
+        child: Text(
+          text.trim(),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            fontSize: 10,
+            height: 1.2,
+            fontWeight: FontWeight.w500,
+            color: Colors.white,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 2:3 海报 + 左上角标（年份 / 更新）+ 海报底部集数条 + 片名 + 状态
+///
+/// SHELL_GRID（2026-11-17）：3 列网格用的就是这一套 —— `showYearBadge`
+/// 打开左上年份角标、`statusOverlay` 打开海报底部的「更新至第 N 集」渐变条、
+/// `centerTitle` 让片名居中一行。首页 / 分类页 / 搜索网格都走它。
 class FxPosterTile extends StatelessWidget {
   const FxPosterTile({
     super.key,
@@ -339,6 +427,10 @@ class FxPosterTile extends StatelessWidget {
     this.titleSize = 12.5,
     this.showTitle = true,
     this.showStatus = true,
+    this.showYearBadge = false,
+    this.statusOverlay = false,
+    this.centerTitle = false,
+    this.titleLines = 2,
   });
 
   final VideoCard item;
@@ -349,15 +441,31 @@ class FxPosterTile extends StatelessWidget {
   final bool showTitle;
   final bool showStatus;
 
+  /// 左上角显示「年份」角标（壳的 3 列网格用）；为 false 时退回原来的
+  /// 「新 / 更新 / 全 N 集」角标。
+  final bool showYearBadge;
+
+  /// 海报底部叠一条「更新至第 N 集 / 全 N 集 / 完结」的渐变信息条。
+  /// 打开它一般把 [showStatus] 关掉，避免同一句话出现两次。
+  final bool statusOverlay;
+
+  /// 片名居中（壳的网格卡片是居中的）。
+  final bool centerTitle;
+
+  /// 片名最多几行（3 列网格给 1 行，搜索结果给 2 行）。
+  final int titleLines;
+
   @override
   Widget build(BuildContext context) {
     final badge = showBadge ? fxBadgeText(item) : null;
+    final yearBadge = showYearBadge && item.year > 0;
     return RepaintBoundary(
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: onTap,
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              centerTitle ? CrossAxisAlignment.center : CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
             AspectRatio(
@@ -366,12 +474,20 @@ class FxPosterTile extends StatelessWidget {
                 fit: StackFit.expand,
                 children: [
                   FxCover(url: item.cover, title: item.title, radius: radius),
-                  if (badge != null)
+                  if (yearBadge)
+                    Positioned(
+                      left: 5,
+                      top: 5,
+                      child: FxYearBadge(item.year),
+                    )
+                  else if (badge != null)
                     Positioned(
                       left: 5,
                       top: 5,
                       child: FxPosterBadge(badge),
                     ),
+                  if (statusOverlay)
+                    FxPosterStatusOverlay(fxPosterStatusLine(item)),
                 ],
               ),
             ),
@@ -379,10 +495,8 @@ class FxPosterTile extends StatelessWidget {
               const SizedBox(height: 5),
               Text(
                 item.title,
-                // TITLE_2LINE（2026-11-16）：搜索结果 2 列后每张卡更宽，
-                // 片名给两行 —— 之前 1 行把「济公传[电影解说]」「新编济公传
-                // 奇国语」全截成省略号，用户看不全名字。
-                maxLines: 2,
+                textAlign: centerTitle ? TextAlign.center : TextAlign.start,
+                maxLines: titleLines,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: titleSize,
@@ -391,7 +505,7 @@ class FxPosterTile extends StatelessWidget {
                   color: Fx.ink,
                 ),
               ),
-              if (item.sourceLabel.trim().isNotEmpty) ...[
+              if (!centerTitle && item.sourceLabel.trim().isNotEmpty) ...[
                 const SizedBox(height: 2),
                 FxSourceLabel(item.sourceLabel.trim()),
               ],

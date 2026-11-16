@@ -682,6 +682,9 @@ class SourceHub extends ChangeNotifier {
         // 通道没起来 / 非 Android：按没装处理，jar 源跳过。
         _jarReady = false;
       }
+      // 状态出来之后标题可能要降级（默认源是 jar 源、但没装 jar），
+      // 通知一次让首页 / 片源页跟着变。
+      _notifySafely();
     }();
     _jarChecking = task;
     return task.whenComplete(() {
@@ -857,19 +860,30 @@ class SourceHub extends ChangeNotifier {
   /// 「幻想」这个默认项在面板里的 key（它不是云端 key，用一个固定标记）。
   static const String ownSourceKey = '@own';
 
+  /// 这个源现在**真能出内容**吗（jar 源要先装 jar 插件）。
+  ///
+  /// 用它做「标题降级」的判据：默认源是咕噜、但这台机器没装 jar 插件时，
+  /// 首页实际取到的是幻想的内容 —— 标题就必须显示「幻想 · APP」，
+  /// 绝不能出现「标题写咕噜、内容是幻想」的错位。
+  bool canServeContent(KSource source) {
+    if (!usableForContent(source)) return false;
+    if (source.kind == KSourceKind.jar) return _jarReady != false;
+    return true;
+  }
+
   /// 配置里的第一个源：肥猫那批按导入顺序，其次自加源，最后云端幻想线路。
   ///
   /// 壳的默认源就是「配置 sites 的第一条」，这里按同一口径取，
   /// **不做任何重排**（推荐 / 置顶只影响片源管理页里的排序）。
   KSource? get firstConfigSource {
     for (final s in bundledSources) {
-      if (usableForContent(s)) return s;
+      if (canServeContent(s)) return s;
     }
     for (final s in userSources) {
-      if (usableForContent(s)) return s;
+      if (canServeContent(s)) return s;
     }
     for (final s in visibleCloud) {
-      if (usableForContent(s)) return s;
+      if (canServeContent(s)) return s;
     }
     return null;
   }
@@ -880,10 +894,12 @@ class SourceHub extends ChangeNotifier {
     if (key == ownSourceKey) return null;
     if (key.isEmpty) return firstConfigSource;
     for (final s in _cloud) {
-      if (s.key == key) return usableForContent(s) ? s : firstConfigSource;
+      // 选中的源出不了内容（没装 jar / 非影视源 / 被删掉）→ 标题和内容都
+      // 降级到幻想，不留「标题写咕噜、内容是幻想」的错位。
+      if (s.key == key) return canServeContent(s) ? s : firstConfigSource;
     }
     for (final s in _user) {
-      if (s.key == key) return usableForContent(s) ? s : firstConfigSource;
+      if (s.key == key) return canServeContent(s) ? s : firstConfigSource;
     }
     // 源被删了 / 被禁用了：当作「自动」，回到配置第一个可用源
     // （没有就是幻想）。

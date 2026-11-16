@@ -240,7 +240,7 @@ class _SourceSheetState extends State<_SourceSheet> {
       source.kindLabel,
       if (_hub.isPinned(source.key)) '推荐',
       if (blocked.isNotEmpty) blocked,
-      if (blocked.isEmpty && !usable) '装好 jar 插件才出内容',
+      if (blocked.isEmpty && !usable) '需要 jar 插件',
     ].join(' · ');
     return _row(
       name: name,

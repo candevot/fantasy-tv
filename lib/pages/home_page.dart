@@ -42,6 +42,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 不会残留上一个源的卡片。
   int _sourceRev = 0;
 
+  /// 推荐页的列表控制器（无限下滑要用它判断「快到底了」）。
+  final ScrollController _feedScroll = ScrollController();
+
+  /// 推荐页渲染用的分区（滚动到底会往每个分区后面追加下一页）。
+  List<HomeSection> _sections = const <HomeSection>[];
+
+  /// 推荐页已经追加到第几页（第 1 页 = `CmsBridge.home` 给的那批）。
+  int _feedPage = 1;
+  bool _feedMore = true;
+  bool _feedPaging = false;
+
   Timer? _timer;
   String _channel = 'recommend';
 
@@ -74,6 +85,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _hub.addListener(_onHubChanged);
+    // 源面板标题要按「这个源现在能不能出内容」降级（jar 源没装 jar 插件时
+    // 标题显示幻想），所以启动就查一次 jar 状态。
+    unawaited(_hub.ensureJarStatus());
+    _feedScroll.addListener(_onFeedScroll);
     _load();
     // BG_SERVICE（2026-11-15）：上次后台播放被系统压过内存 → 启动后提示一次。
     unawaited(_maybeShowBackgroundHint());
@@ -127,6 +142,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _hub.removeListener(_onHubChanged);
     _tickerMode?.removeListener(_onTickerModeChanged);
     _timer?.cancel();
+    _feedScroll.dispose();
     _bannerCtrl.dispose();
     _bannerPage.dispose();
     super.dispose();
@@ -145,13 +161,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       final data = await CmsBridge.home(channel);
       if (!mounted || req != _req || channel != _channel) return;
+      final arranged = _arrangeSections(data.sections);
       setState(() {
         _cache[channel] = data;
         _loading = false;
         _error = null;
         _bannerPage.value = 0;
+        // 推荐页的网格渲染这一份（滚动到底会继续往后追加）。
+        _sections = arranged;
+        _feedPage = 1;
+        _feedMore = arranged.any((s) => s.items.length >= _feedPageSize);
+        _feedPaging = false;
       });
-      _precacheFirstCovers(_arrangeSections(data.sections), channel);
+      _precacheFirstCovers(arranged, channel);
       _restartAuto();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _bannerCtrl.hasClients) {
@@ -368,6 +390,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 今日热播 / 最新更新放最前，然后电影 / 剧集 / 综艺 / 动漫。
   /// 首页分区顺序：CMS 的六个一级栏目在前（电影 → 电视剧 → 动漫 →
   /// 综艺 → 短剧 → 少儿），旧接口的热播 / 高分分区排在后面兜底。
+  /// 首页每页的条数（和 CMS `limit=20` 一致）：追加下一页时按它判断还有没有。
+  static const int _feedPageSize = 20;
+
   static const List<String> _sectionOrder = <String>[
     '电影',
     '剧集',
@@ -470,6 +495,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       backgroundColor: Colors.white,
       onRefresh: () => _load(force: true),
       child: CustomScrollView(
+        controller: _feedScroll,
         keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
         physics: const AlwaysScrollableScrollPhysics(
           parent: BouncingScrollPhysics(),
@@ -499,7 +525,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       ];
     }
 
-    final sections = _arrangeSections(data.sections);
+    final sections = _sections.isNotEmpty || data.sections.isEmpty
+        ? _sections
+        : _arrangeSections(data.sections);
     if (data.banners.isEmpty && sections.isEmpty) {
       return [
         SliverFillRemaining(
@@ -524,29 +552,43 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           childCount: sections.length,
         ),
       ),
+      // 无限下滑：快到底时自动往后追加，追加中显示转圈，真到底才写「到底啦」。
       SliverToBoxAdapter(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(0, 24, 0, 0),
-          child: Column(
-            children: [
-              Container(
-                width: 26,
-                height: 3,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFD9E2F0),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                '已经到底啦 · 发现更多好片',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w400,
-                  color: Color(0xFFA6B1C2),
-                ),
-              ),
-            ],
+          padding: const EdgeInsets.fromLTRB(0, 22, 0, 0),
+          child: Center(
+            child: _feedPaging
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Fx.accent),
+                    ),
+                  )
+                : _feedMore
+                    ? const SizedBox(height: 20)
+                    : Column(
+                        children: [
+                          Container(
+                            width: 26,
+                            height: 3,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFD9E2F0),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            '已经到底啦 · 发现更多好片',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w400,
+                              color: Color(0xFFA6B1C2),
+                            ),
+                          ),
+                        ],
+                      ),
           ),
         ),
       ),
@@ -1055,14 +1097,142 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
+  /// 推荐页滚到快到底就往后追加一页（影视壳那种「无限下滑」）。
+  void _onFeedScroll() {
+    if (!_feedScroll.hasClients) return;
+    final p = _feedScroll.position;
+    if (p.pixels >= p.maxScrollExtent - 420) {
+      unawaited(_loadMoreFeed());
+    }
+  }
+
+  /// 给每个分区各追加下一页（分区 = CMS 一级栏目，各自独立翻页）。
+  ///
+  /// 每个分区用 `CmsBridge.categoryPage(type: 频道键, page: n, sort: hot)`，
+  /// 和分类 tab 走同一条数据路径，所以首页往下滑看到的就是该分类的热播
+  /// 往后排，不会混进别的源 / 别的片源分组。
+  Future<void> _loadMoreFeed() async {
+    if (_feedPaging || !_feedMore || _channel != 'recommend') return;
+    final current = _sections;
+    if (current.isEmpty) return;
+    setState(() => _feedPaging = true);
+    final next = _feedPage + 1;
+    final merged = <HomeSection>[];
+    var more = false;
+    for (final section in current) {
+      final channel = CmsBridge.channelOfLabel(section.title);
+      if (channel == null || channel.typeId <= 0) {
+        merged.add(section);
+        continue;
+      }
+      try {
+        final page = await CmsBridge.categoryPage(
+          type: channel.key,
+          page: next,
+          sort: 'hot',
+        );
+        final seen = <String>{for (final c in section.items) c.id};
+        final added = <VideoCard>[
+          for (final card in page.items)
+            if (seen.add(card.id)) card,
+        ];
+        merged.add(
+          added.isEmpty
+              ? section
+              : HomeSection(section.title, <VideoCard>[
+                  ...section.items,
+                  ...added,
+                ]),
+        );
+        if (page.hasMore && added.isNotEmpty) more = true;
+      } catch (_) {
+        merged.add(section);
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _sections = merged;
+      _feedPage = next;
+      _feedMore = more;
+      _feedPaging = false;
+    });
+  }
+
+  /// 一个分区 = 标题行（+ 更多）+ 3 列海报网格（影视壳的样式）。
+  ///
+  /// SHELL_GRID（2026-11-17）：原来是「一行 4 张横滑」，现在改成 3 列网格：
+  /// 左上年份角标、海报底部集数渐变条、片名一行居中。
   Widget _section(HomeSection s) {
     return Padding(
-      padding: const EdgeInsets.only(top: 20),
-      child: FxSectionRow(
-        title: s.title,
-        items: s.items,
-        onMore: () => _openSectionMore(s),
-        onTapItem: (item) => _openDetail(item.id),
+      padding: const EdgeInsets.only(top: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 8, 8),
+            child: Row(
+              children: [
+                Text(
+                  s.title,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    height: 1.2,
+                    fontWeight: FontWeight.w600,
+                    color: Fx.ink,
+                  ),
+                ),
+                const Spacer(),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => _openSectionMore(s),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '更多',
+                          style: TextStyle(fontSize: 12, color: Fx.sub),
+                        ),
+                        Icon(
+                          Icons.chevron_right_rounded,
+                          size: 16,
+                          color: Fx.sub,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          GridView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            physics: const NeverScrollableScrollPhysics(),
+            shrinkWrap: true,
+            itemCount: s.items.length,
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 3,
+              crossAxisSpacing: 9,
+              mainAxisSpacing: 12,
+              childAspectRatio: .55,
+            ),
+            itemBuilder: (ctx, i) {
+              final item = s.items[i];
+              return FxPosterTile(
+                item: item,
+                radius: 12,
+                titleSize: 12,
+                titleLines: 1,
+                centerTitle: true,
+                showYearBadge: true,
+                statusOverlay: true,
+                showStatus: false,
+                onTap: () => _openDetail(item.id),
+              );
+            },
+          ),
+        ],
       ),
     );
   }
@@ -1081,10 +1251,14 @@ class _HomeSkeleton extends StatelessWidget {
           children: [
             const FxSkeletonBox(height: 176, radius: 18),
             const SizedBox(height: 22),
-            for (var i = 0; i < 3; i++) ...[
+            for (var i = 0; i < 2; i++) ...[
               const FxSkeletonBox(height: 17, width: 132, radius: 6),
               const SizedBox(height: 12),
-              const FxPosterRowSkeleton(horizontalPadding: 0),
+              const FxPosterGridSkeleton(
+                crossAxisCount: 3,
+                itemCount: 6,
+                padding: EdgeInsets.zero,
+              ),
               const SizedBox(height: 22),
             ],
           ],
