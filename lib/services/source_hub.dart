@@ -948,8 +948,9 @@ class SourceHub extends ChangeNotifier {
           if (s.searchable) s,
         for (final s in userSources)
           if (s.searchable) s,
-        for (final s in visibleCloud)
-          if (s.searchable) s,
+        // 云端那几条「幻想4K / 幻想蓝光 / 量子 / 红牛」是**幻想自己的线路
+        // 切片**，面板里由最后那一行「幻想」统一代表（壳的面板也是一条
+        // 幻想），不重复铺 7 条 —— 要单独增删它们去「片源管理」。
       ];
 
   /* ------------------------------------------------------ 推荐 / 置顶 */
