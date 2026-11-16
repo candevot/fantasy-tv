@@ -222,7 +222,7 @@ void main() {
         ),
         isFalse,
       );
-      // 同一动作连续重复才是重复广播。
+      // 同一动作 + 同一 detail 连续重复才是重复广播。
       expect(
         togetherShouldSkipOp(
           lastSignature: togetherOpSignature(by: 'g_me', action: 'play'),
@@ -230,6 +230,18 @@ void main() {
           action: 'play',
         ),
         isTrue,
+      );
+      // OP_NOT_SWALLOW：同一动作但 detail 不同 = 另一次真实操作，不能吞。
+      expect(
+        togetherShouldSkipOp(
+          lastSignature: togetherOpSignature(by: 'g_me', action: 'seek'),
+          by: 'g_me',
+          action: 'seek',
+          detail: '13:07',
+          lastDetail: '5:00',
+        ),
+        isFalse,
+        reason: '拖到 13:07 是一次新操作，不是重复广播',
       );
       // 不同的人互不影响。
       expect(

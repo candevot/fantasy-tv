@@ -171,6 +171,10 @@ class _TogetherPageState extends State<TogetherPage>
   /// 上一条操作流水的 `by|action` 签名：连续重复的同人同动作直接丢弃。
   String _lastOperationSignature = '';
 
+  /// 上一条操作流水之间的「细节」（seek 位置 / 集号 / 倍速 / 线路名）。
+  /// 去重必须带上它，否则同一动作的第二次真实操作会被吞掉。
+  String _lastOperationDetail = '';
+
   /// 正在把远端权威状态写进本地播放器（含随之而来的内核事件）。
   ///
   /// OP_REENTRY_GUARD（2026-11-16）：本地 apply 远端状态会触发内核的
@@ -990,7 +994,18 @@ class _TogetherPageState extends State<TogetherPage>
       label: op.label,
       mine: mine,
     );
-    _appendOperation(text, action: op.action, by: op.id.isEmpty ? op.name : op.id);
+    _appendOperation(
+      text,
+      action: op.action,
+      by: op.id.isEmpty ? op.name : op.id,
+      // detail 用来区分「同一动作的不同一次」：seek 的目标位置、集号、
+      // 倍速、线路名 —— 拖到 5:00 和拖到 13:07 是两件事，不能算重复。
+      detail: togetherOpDetail(
+        action: op.action,
+        to: op.to,
+        text: op.label,
+      ),
+    );
   }
 
   /// 追加一条操作流水。
@@ -1005,17 +1020,26 @@ class _TogetherPageState extends State<TogetherPage>
     String text, {
     required String action,
     String by = '',
+    String detail = '',
   }) {
     final now = DateTime.now();
     final signature = togetherOpSignature(by: by, action: action);
-    if (togetherShouldSkipOp(
+    // OP_NOT_SWALLOW（2026-11-16）：**不再按「人|动作」无脑去重**。
+    // 用户实测「点第一次有提示，点第二次就没有了」—— 之前只比 人|动作，
+    // 第二次真实操作被当成重复广播吞掉了。现在多比一层 detail
+    //（seek 的目标位置 / 集号 / 倍速 / 线路名），只有三者全同才算重复。
+    final skip = togetherShouldSkipOp(
       lastSignature: _lastOperationSignature,
       by: by,
       action: action,
-    )) {
-      _logSync('丢弃重复操作提示：$signature');
+      detail: detail,
+      lastDetail: _lastOperationDetail,
+    );
+    if (skip) {
+      _logSync('丢弃重复操作提示：$signature detail=$detail');
       return;
     }
+    _lastOperationDetail = detail;
     final last = _messages.isEmpty ? null : _messages.last;
     final lastBy = _lastOperationBy;
     if (last != null &&

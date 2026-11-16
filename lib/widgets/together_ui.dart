@@ -597,15 +597,38 @@ bool togetherShouldSkipOp({
   required String lastSignature,
   required String by,
   required String action,
+  String detail = '',
+  String lastDetail = '',
 }) {
   if (lastSignature.isEmpty) return false;
   final key = '${by.trim()}|${action.trim()}';
-  return lastSignature == key;
+  if (lastSignature != key) return false;
+  // OP_NOT_SWALLOW（2026-11-16）：**只丢真正重复的那条**。
+  //
+  // 用户实测：点第一次有提示，点第二次就没有了 —— 因为签名只看
+  // 「人|动作」，同一个动作第二次出现时签名相同就被吞了，哪怕那是
+  // 一次真实的新操作（比如又拖到另一个时间点）。
+  // 现在再比一层 detail（seek 用目标位置、episode 用集号、rate 用倍速）：
+  // 动作相同但 detail 不同 = 新事件，照常记录。
+  // 只有「人、动作、detail 全都一样」才算重复广播。
+  return detail.trim() == lastDetail.trim();
 }
 
 /// 操作签名：`by|action`，[togetherShouldSkipOp] 用它判「同一个重复动作」。
 String togetherOpSignature({required String by, required String action}) =>
     '${by.trim()}|${action.trim()}';
+
+/// 操作细节：seek 传目标位置、episode 传集号、rate 传倍速、switchLine 传线路名。
+/// 用来区分「同一个动作的不同一次」（拖动到 5:00 和拖到 13:07 是两件事）。
+String togetherOpDetail({
+  required String action,
+  String to = '',
+  String text = '',
+}) {
+  final t = to.trim();
+  if (t.isNotEmpty) return t;
+  return text.trim();
+}
 
 /// 播放操作白名单：只有**用户主动做**的这些动作才生成操作提示。
 ///
