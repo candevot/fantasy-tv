@@ -1306,34 +1306,30 @@ class _SearchPageState extends State<SearchPage> {
     required double railWidth,
     required bool last,
   }) {
-    final columns = _gridColumns();
     final width = MediaQuery.sizeOf(context).width;
-    // 网格可用宽度 = 屏宽 − 左栏 − 左右内边距(16×2) − 列间距（留 2px 余量防溢出）。
-    final usable = width - railWidth - 16 * 2 - 8 * (columns - 1) - 2;
-    final itemWidth = usable / columns;
+    // 竖排列表：右侧可用宽度 = 屏宽 − 左栏 − 左右内边距。
+    final usable = width - railWidth - 16 * 2;
     return SliverMainAxisGroup(
       slivers: [
         PinnedHeaderSliver(child: _groupHeader(group)),
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-          sliver: SliverGrid(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              crossAxisSpacing: 8,
-              mainAxisSpacing: 8,
-              // FxPosterTile 会渲染「片名 + 来源小字 + 状态行」，
-              // 来源小字必须计入高度（withSource: true），否则每组最后一行
-              // 会被裁掉半个字。
-              mainAxisExtent: itemWidth * 1.5 +
-                  fxPosterMetaExtent(context, withSource: true),
-            ),
+          // VERTICAL_LIST（2026-11-16）：用户要「两侧竖排」——左边竖排源栏，
+          // 右边也是竖排列表（每部片一整行），不是海报网格。
+          // 网格里片名只放得下一行，2~3 列必然截断（「济公传[电影…」），
+          // 竖排行左侧有 84×112 海报 + 右侧两行片名 + 来源 + 状态，名字看得全。
+          sliver: SliverList(
             delegate: SliverChildBuilderDelegate(
               (ctx, i) {
                 final item = group.cards[i];
-                return FxPosterTile(
-                  item: item,
-                  onTap: () => _openResult(item),
-                  showStatus: false,
+                return Padding(
+                  padding: EdgeInsets.only(
+                    bottom: i == group.cards.length - 1 ? 0 : 10,
+                  ),
+                  child: FxSearchResultTile(
+                    item: item,
+                    onTap: () => _openResult(item),
+                  ),
                 );
               },
               childCount: group.cards.length,
@@ -1348,9 +1344,13 @@ class _SearchPageState extends State<SearchPage> {
 
   /// 竖屏 3 列 / 横屏 5 列（对齐壳 `Product.getColumn`：竖屏基数 5、size 默认 2）。
   int _gridColumns() {
-    final width = MediaQuery.sizeOf(context).width;
-    final land = width > MediaQuery.sizeOf(context).height;
-    return land ? 5 : 3;
+    final size = MediaQuery.sizeOf(context);
+    final land = size.width > size.height;
+    // COLUMNS（2026-11-16）：用户实测 3 列太挤，片名被截成「济公传[电影…」
+    // 「新编济公传…」，看不全。竖屏改 2 列（每张海报宽约屏宽 1/3，片名能放
+    // 两行放得下），横屏 3 列。壳的分类页是 3 列，但那是**分类页**，搜索结果
+    // 要能一眼看清片名，宁可行数多一点。
+    return land ? 3 : 2;
   }
 
   /// 一个源的组标题（吸顶）：`源名 · N 部`，我们自己的源多一个「优先」标记。

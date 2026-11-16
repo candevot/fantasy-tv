@@ -113,10 +113,18 @@ class FxCover extends StatelessWidget {
 /// 网格 / 横滑列表用它算 mainAxisExtent，1.3 倍大字体下也不会裁字。
 /// [withSource] 为 true 时多留一行来源小字（10.5sp + 2dp 间距）；
 /// 列表里没有任何来源时保持原高度，不白占位。
-double fxPosterMetaExtent(BuildContext context, {bool withSource = false}) {
+double fxPosterMetaExtent(
+  BuildContext context, {
+  bool withSource = false,
+  int titleLines = 1,
+}) {
   final scaler = MediaQuery.textScalerOf(context);
   final source = withSource ? 2 + scaler.scale(10.5 * 1.2) : 0.0;
-  return 8 + scaler.scale(12.5 * 1.3) + source + scaler.scale(11 * 1.2) + 3;
+  final lines = titleLines < 1 ? 1 : titleLines;
+  // TITLE_2LINE（2026-11-16）：片名允许两行时高度必须跟着加，
+  // 否则第二行被裁掉一半（3 列改 2 列后片名更容易超一行）。
+  final title = scaler.scale(12.5 * 1.3) * lines;
+  return 8 + title + source + scaler.scale(11 * 1.2) + 3;
 }
 
 /// 片名下的来源小字：10.5sp、灰 #8A8FA3、单行省略。
@@ -371,7 +379,10 @@ class FxPosterTile extends StatelessWidget {
               const SizedBox(height: 5),
               Text(
                 item.title,
-                maxLines: 1,
+                // TITLE_2LINE（2026-11-16）：搜索结果 2 列后每张卡更宽，
+                // 片名给两行 —— 之前 1 行把「济公传[电影解说]」「新编济公传
+                // 奇国语」全截成省略号，用户看不全名字。
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   fontSize: titleSize,

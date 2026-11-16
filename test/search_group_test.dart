@@ -13,13 +13,26 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:fantasy_tv/models.dart';
 import 'package:fantasy_tv/services/search_group.dart';
 
+/// 造一张外部源的卡片：id 按 `@src:<源key>::<vodId>` 编（和线上一致），
+/// `sourceLabel` 故意塞**分类名**，用来证明分组键不看它。
 VideoCard _card(String title, {String source = '', int year = 2024}) =>
     VideoCard(
-      id: '$source::$title',
+      id: source.isEmpty ? 'main-$title' : '@src:$source::$title',
       title: title,
       cover: '',
       year: year,
       sourceLabel: source,
+      fromSource: '',
+      lineCount: 1,
+    );
+
+/// 造一张「sourceLabel 被分类名污染」的卡片（jar 源真实情况）。
+VideoCard _pollutedCard(String title, String sourceKey) => VideoCard(
+      id: '@src:$sourceKey::$title',
+      title: title,
+      cover: '',
+      year: 2024,
+      sourceLabel: '小学',
       fromSource: '',
       lineCount: 1,
     );
@@ -30,6 +43,18 @@ List<VideoCard> _reverse(List<VideoCard> cards) =>
 
 void main() {
   group('fxGroupBySource', () {
+    test('分组键只认 id 里的 @src:<源key>，sourceLabel 是分类名也不影响', () {
+      // 线上真实情况：jar 源返回的 source 字段是「小学」，但 id 里带源 key。
+      final groups = fxGroupBySource(<VideoCard>[
+        _pollutedCard('梦幻西游', '咕噜'),
+        _pollutedCard('梦幻西游2', '咕噜'),
+        _pollutedCard('梦幻西游3', '下饭'),
+      ]);
+      expect(groups.map((g) => g.label).toList(), <String>['咕噜', '下饭']);
+      expect(groups.every((g) => g.label != '小学'), isTrue);
+    });
+
+
     test('按 sourceLabel 分组，每组条数正确', () {
       final groups = fxGroupBySource(<VideoCard>[
         _card('济公传', source: '咕噜'),

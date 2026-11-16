@@ -52,6 +52,45 @@ class FxSourceGroup {
 
 /// 把 [cards] 按源分组，返回已经排好序的组列表。
 ///
+/// 卡片的**真实来源名**（分组键 / 左栏条目）：
+///   1. id 形如 `@src:<源key>::<vodId>` → 取 `<源key>`（配置里的源名）；
+///   2. 否则是我们自己的记录（主站 id）→ [kOwnSourceLabel]。
+///
+/// 为什么不直接用 `card.sourceLabel`：那个字段会被接口返回的 `source`
+/// 或第一个线路名覆盖，jar 源常把**分类名**（小学/初中/明星/高中）塞在
+/// `source` 里，用它分组会得到一堆假「源」。
+String fxSourceKeyOf(VideoCard card) {
+  final id = card.id.trim();
+  const mark = '@src:';
+  if (id.startsWith(mark)) {
+    final rest = id.substring(mark.length);
+    final at = rest.indexOf('::');
+    final key = at > 0 ? rest.substring(0, at).trim() : '';
+    if (key.isNotEmpty) return key;
+  }
+  // 退路：没有 `@src:` 前缀时（老数据 / 我们自己主站的记录），
+  // 用 sourceLabel 里带 `•` 的那个名字 —— 但**只在它不像分类名时**。
+  // jar 源的 `source` 字段常塞分类名（小学/初中/明星/高中），
+  // 这些不能当源名；认不出就当是我们自己的源。
+  final label = card.sourceLabel.trim();
+  if (label.isNotEmpty && !fxLooksLikeCategory(label)) return label;
+  return kOwnSourceLabel;
+}
+
+/// 这些是源站「分类」的名字，不是源名 —— jar 源常把分类塞进 `source`。
+/// 用它们做分组键会把左栏和组标题变成一堆「小学 / 初中 / 明星 / 高中」。
+const Set<String> _kCategoryLike = <String>{
+  '小学', '初中', '高中', '大学', '幼儿', '少儿', '儿童',
+  '明星', '综艺', '电影', '电视剧', '动漫', '动画', '纪录片',
+  '短剧', '微短剧', '体育', '直播', '预告', '片花', '解说',
+  '动作片', '喜剧片', '爱情片', '科幻片', '恐怖片', '剧情片',
+  '国产剧', '港台剧', '日韩剧', '欧美剧', '海外剧',
+  '最新', '热门', '推荐', '排行', '全部',
+};
+
+/// 这个名字像不像「分类名」而不是源名。
+bool fxLooksLikeCategory(String name) => _kCategoryLike.contains(name.trim());
+
 /// [filter] 非空时只保留该源（左侧源栏点某个源）。
 /// [sortCards] 决定组内顺序；不传就保持原顺序（测试 / 不需要排序的调用方）。
 /// [ownLabel] 是「我们自己的源」的标签，默认 [kOwnSourceLabel]。
@@ -64,9 +103,15 @@ List<FxSourceGroup> fxGroupBySource(
   final wanted = filter.trim();
   final buckets = <String, List<VideoCard>>{};
   for (final card in cards) {
-    final raw = card.sourceLabel.trim();
-    // 没标来源的归到我们自己的源：宁可归错组，也不要出现一个空名字的分区。
-    final key = raw.isEmpty ? ownLabel : raw;
+    // GROUP_KEY（2026-11-16）：分组键**只认卡片 id 里的 `@src:<源key>`**。
+    //
+    // 根因：之前用 `card.sourceLabel`，而那个字段会被 `_cardSourceLabel`
+    // 用 `j['source']` / 第一个线路名顶上 —— jar 源返回的 `source` 常常是
+    // **分类名**（「小学」「初中」「明星」「高中」），于是左边栏和组标题
+    // 变成一堆分类名，真正的源名（咕噜/下饭/韩圈…）反而没显示出来。
+    // 卡片的 id 是 `SourceHub.relabel` 按 `@src:<源key>::<vodId>` 编的，
+    // 源 key 就是配置里的 key（咕噜/下饭/韩圈…），不会串。
+    final key = fxSourceKeyOf(card);
     if (wanted.isNotEmpty && key != wanted) continue;
     (buckets[key] ??= <VideoCard>[]).add(card);
   }
