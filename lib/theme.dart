@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -579,6 +580,67 @@ class GlassCard extends StatelessWidget {
     );
     if (onTap == null) return box;
     return GestureDetector(onTap: onTap, child: box);
+  }
+}
+
+/// GLASS_UI（2026-11-17）：全 App 统一的液态玻璃面板底板。
+///
+/// 用户口径：「每个新做的界面 / 组件都必须走液态玻璃透明风格，不许出现
+/// 实心白块、纯色卡片」。模糊参数与播放器全屏控件一致：
+/// `ImageFilter.blur(sigmaX: 18, sigmaY: 18)`、底色 `white × .62`、
+/// 描边 `white × .9`。所有新面板 / 胶囊容器都套这一层，别再自己
+/// `Container(color: …)`。
+class FxGlassPanel extends StatelessWidget {
+  const FxGlassPanel({
+    super.key,
+    required this.child,
+    this.radius = 22,
+    this.padding = EdgeInsets.zero,
+    this.tint = .62,
+    this.borderColor,
+    this.margin,
+  });
+
+  /// 统一的模糊半径（和全屏控件同一档）。
+  static const double blurSigma = 18;
+
+  /// 统一的玻璃底色 / 描边透明度。
+  static const double glassTint = .62;
+  static const double glassBorder = .9;
+
+  final Widget child;
+  final double radius;
+  final EdgeInsets padding;
+  final double tint;
+  final Color? borderColor;
+  final EdgeInsets? margin;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: margin,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(
+            sigmaX: blurSigma,
+            sigmaY: blurSigma,
+          ),
+          child: Container(
+            padding: padding,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: tint),
+              borderRadius: BorderRadius.circular(radius),
+              border: Border.all(
+                color: borderColor ?? Colors.white.withValues(alpha: glassBorder),
+                width: 1,
+              ),
+            ),
+            child: child,
+          ),
+        ),
+      ),
+    );
   }
 }
 

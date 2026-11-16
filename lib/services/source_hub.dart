@@ -541,6 +541,65 @@ class SourceHub extends ChangeNotifier {
   /// 源级失败账本的落盘键（[SourceFailureLedger]）。
   static const String _kSourceFailure = 'fx_source_failure_v1';
 
+  /// 首页当前用哪个源（源选择面板的结果）；空串 = 幻想（默认）。
+  static const String _kHomeSource = 'fx_home_source_v1';
+
+  /// 「推荐 / 置顶」标记（片源管理里手动钉上去的源）。
+  static const String _kPinned = 'fx_sources_pinned_v1';
+
+  /// 肥猫那一批（TVBox 批量导入）是否被用户在片源管理里删掉。
+  static const String _kBundledHidden = 'fx_sources_bundled_hidden_v1';
+
+  /// 「幻想」这个默认源在界面上的名字（源选择面板固定第一项）。
+  ///
+  /// SOURCE_PICK_DEFAULT（2026-11-17）：壳（FongMi / OK影视）的源面板里
+  /// 默认选中它自己那份配置的源（咕噜）；我们是「幻想」，所以幻想必须
+  /// **永远排第一、永远是默认选中**，咕噜 / 豆瓣 / 配置中心这些肥猫源
+  /// 一律排在它后面。默认源的 key 用空串表示，这样它不依赖云端配置里
+  /// 某个具体 key（换 key / 重新下发也不会把默认项弄丢）。
+  static const String ownSourceName = '幻想';
+
+  /// 源面板标题的后缀（壳的写法是「名字 · APP」）。
+  static const String sourceTitleSuffix = ' · APP';
+
+  /* ------------------------------------------------------ 非影视源 */
+
+  /// 源名里出现这些词 = 非影视源（网盘 / 课堂 / 体育 / 音频 / 配置中心）。
+  ///
+  /// SOURCE_BLOCK（2026-11-17）：壳的源面板里这些源也是 ⊘ 状态。用户口径：
+  /// 「照常列出（能看到全部）但点不动，不参与首页/分类/排行榜的默认源，
+  /// 也不参与搜索」。判定写死成关键词，不靠人工维护名单 —— 肥猫配置里这类
+  /// 源有几十个，名字还会变（「夸克·网盘」「123·云盘」「小学·课堂」…）。
+  static const List<String> blockedNameWords = <String>[
+    '网盘', '云盘', '课堂', '教育', '儿童', '少儿', '体育', '看球',
+    'FM', 'DJ', '听书', '音乐', '相声', '小品', '戏曲', '教学',
+    '养生', '配置',
+  ];
+
+  /// 这个源是不是「非影视源」：名字命中黑名单词、`type=0`（直接地址），
+  /// 或者 `api` 是一个 `.py` 脚本（我们没有 Python 运行时）。
+  static bool isBlockedSource(KSource source) =>
+      blockedReasonOf(source).isNotEmpty;
+
+  /// 不可用的原因（空串 = 可用）。源面板拿它显示一行小字。
+  static String blockedReasonOf(KSource source) {
+    final api = source.api.trim().toLowerCase();
+    if (api.isEmpty) return '没有地址';
+    if (api.endsWith('.py') || api.contains('.py?') || api.contains('.py/')) {
+      return 'Python 脚本，暂不支持';
+    }
+    if (source.kind == KSourceKind.direct) return '直接地址，不是影视接口';
+    final name = '${source.name} ${source.shortName}'.toUpperCase();
+    for (final word in blockedNameWords) {
+      if (name.contains(word.toUpperCase())) return '非影视源（$word）';
+    }
+    return '';
+  }
+
+  /// 这个源能不能参与内容检索 / 作为首页默认源。
+  static bool usableForContent(KSource source) =>
+      source.searchable && !isBlockedSource(source);
+
   /// 配置地址 → 能真正发出去的 [Uri]（顺手把中文域名换成 punycode）。
   static Uri requestUri(String raw) {
     var url = raw.trim();
@@ -643,6 +702,9 @@ class SourceHub extends ChangeNotifier {
   List<KSource> _cloud = const <KSource>[];
   List<KSource> _user = const <KSource>[];
   Set<String> _removed = <String>{};
+  String _homeKey = '';
+  Set<String> _pinned = <String>{};
+  bool _bundledHidden = false;
   String _liveUrl = '';
   int _fetchedAt = 0;
   String _error = '';
@@ -749,10 +811,17 @@ class SourceHub extends ChangeNotifier {
       ]);
 
   /// 「肥猫」带来的源（TVBox 配置批量导入），界面只算一条。
-  List<KSource> get bundledSources => List<KSource>.unmodifiable(<KSource>[
-        for (final s in _user)
-          if (isBundledSource(s)) s,
-      ]);
+  ///
+  /// 用户在片源管理里删掉这一条时只置 [bundledHidden]：导入结果原样留着，
+  /// 「恢复」不需要重新联网拉配置。
+  List<KSource> get bundledSources => List<KSource>.unmodifiable(
+        _bundledHidden
+            ? const <KSource>[]
+            : <KSource>[
+                for (final s in _user)
+                  if (isBundledSource(s)) s,
+              ],
+      );
 
   /// 我们自己的一批源（云端下发的幻想线路）：检索时先查、先渲染。
   List<KSource> get ownSources => List<KSource>.unmodifiable(<KSource>[
@@ -769,6 +838,131 @@ class SourceHub extends ChangeNotifier {
           if (!_removed.contains(s.key) && s.enabled) s,
       ];
 
+  /// 云端源里被用户删掉的（片源管理的「已移除」分组，可恢复）。
+  List<KSource> get removedCloudSources => <KSource>[
+        for (final s in _cloud)
+          if (_removed.contains(s.key)) s,
+      ];
+
+  /* ------------------------------------------------------ 首页当前源 */
+
+  /// 首页 / 分类 / 排行榜当前用哪个源。
+  ///
+  /// 三种取值（SOURCE_PICK_ORDER，2026-11-17 定稿）：
+  ///   · 空串 = **自动**：配置里的第一个源（壳的默认项，肥猫配置里就是咕噜）；
+  ///   · [ownSourceKey]（`@own`）= 幻想（我们自己的 hx 库）；
+  ///   · 其它 = 某个具体源的 key。
+  String get homeSourceKey => _homeKey;
+
+  /// 「幻想」这个默认项在面板里的 key（它不是云端 key，用一个固定标记）。
+  static const String ownSourceKey = '@own';
+
+  /// 配置里的第一个源：肥猫那批按导入顺序，其次自加源，最后云端幻想线路。
+  ///
+  /// 壳的默认源就是「配置 sites 的第一条」，这里按同一口径取，
+  /// **不做任何重排**（推荐 / 置顶只影响片源管理页里的排序）。
+  KSource? get firstConfigSource {
+    for (final s in bundledSources) {
+      if (usableForContent(s)) return s;
+    }
+    for (final s in userSources) {
+      if (usableForContent(s)) return s;
+    }
+    for (final s in visibleCloud) {
+      if (usableForContent(s)) return s;
+    }
+    return null;
+  }
+
+  /// 当前选中的源；null = 幻想（主站 hx 库那条默认路径）。
+  KSource? get homeSource {
+    final key = _homeKey.trim();
+    if (key == ownSourceKey) return null;
+    if (key.isEmpty) return firstConfigSource;
+    for (final s in _cloud) {
+      if (s.key == key) return usableForContent(s) ? s : firstConfigSource;
+    }
+    for (final s in _user) {
+      if (s.key == key) return usableForContent(s) ? s : firstConfigSource;
+    }
+    // 源被删了 / 被禁用了：当作「自动」，回到配置第一个可用源
+    // （没有就是幻想）。
+    return firstConfigSource;
+  }
+
+  /// 当前是不是选中了「幻想」。
+  bool get isOwnSourceSelected => homeSource == null;
+
+  /// 首页标题栏上的源名（壳的写法「名字 · APP」里那个名字）。
+  String get homeSourceName {
+    final picked = homeSource;
+    if (picked == null) return ownSourceName;
+    final short = picked.shortName;
+    return short.isEmpty ? picked.name : short;
+  }
+
+  /// 首页标题栏那一行字：`咕噜 · APP` / `幻想 · APP`。
+  String get homeSourceTitle => '$homeSourceName$sourceTitleSuffix';
+
+  /// 选中一个源作为首页的数据源（[ownSourceKey] = 幻想）。
+  ///
+  /// 传进来一个不认识 / 已被删掉的 key 会被忽略，不会把首页弄成空白。
+  Future<void> selectHomeSource(String key) async {
+    final want = key.trim();
+    if (want.isNotEmpty && want != ownSourceKey) {
+      final known = <KSource>[..._cloud, ..._user]
+          .any((s) => s.key == want && usableForContent(s));
+      if (!known) return;
+    }
+    if (_homeKey == want) return;
+    _homeKey = want;
+    await _saveHomeSource();
+    notifyListeners();
+  }
+
+  /// 源面板里的条目：**就是配置里的原始顺序**，一项都不重排。
+  ///
+  /// 顺序（定稿口径）：肥猫那批（sites 原顺序：咕噜 / 豆瓣 / 配置中心 / …）
+  /// → 自加源 → 云端幻想线路。面板把「幻想」单列成最后一行（它不是一个
+  /// sites 条目，是我们自己的 hx 库）。
+  List<KSource> get pickerSources => <KSource>[
+        // 非影视源也照常列出（用户要求「能看到全部」），面板把它们画成
+        // ⊘ 不可选；这里只滤掉彻底不可搜 / 已删掉的条目。
+        for (final s in bundledSources)
+          if (s.searchable) s,
+        for (final s in userSources)
+          if (s.searchable) s,
+        for (final s in visibleCloud)
+          if (s.searchable) s,
+      ];
+
+  /* ------------------------------------------------------ 推荐 / 置顶 */
+
+  /// 这个源被标成「推荐」了吗（片源管理里手动点的）。
+  bool isPinned(String key) => _pinned.contains(key.trim());
+
+  /// 推荐 / 取消推荐。标记会持久化，并影响源面板与片源管理的排序。
+  Future<void> togglePinned(String key) async {
+    final k = key.trim();
+    if (k.isEmpty) return;
+    if (!_pinned.remove(k)) _pinned.add(k);
+    await _savePinned();
+    notifyListeners();
+  }
+
+  /* ------------------------------------------------------ 肥猫那一批 */
+
+  /// 肥猫（TVBox 批量导入）那一批是否被删掉了。
+  bool get bundledHidden => _bundledHidden;
+
+  /// 删掉 / 恢复肥猫那一批（只隐藏，不销毁导入结果 —— 恢复不需要联网）。
+  Future<void> setBundledHidden(bool hidden) async {
+    if (_bundledHidden == hidden) return;
+    _bundledHidden = hidden;
+    await _saveBundledHidden();
+    notifyListeners();
+  }
+
   /// 参与搜索 / 分类的源：云端生效的 + 用户自加的全部。
   ///
   /// 同一个地址只留一份（云端和用户各加一遍很常见），直播源不在此列。
@@ -776,7 +970,9 @@ class SourceHub extends ChangeNotifier {
     final out = <KSource>[];
     final seen = <String>{};
     void take(KSource s) {
-      if (!s.searchable) return;
+      // SOURCE_BLOCK：网盘 / 课堂 / 体育 / 音频 / 配置文件这类源
+      // 不参与检索（面板里仍会列出来，只是点不动）。
+      if (!usableForContent(s)) return;
       // FAIL_LEDGER（第 8 条）：这个源正在冷却 —— 批量检索跳过它，
       // 别让一轮搜索在死源上白等。用户主动点进详情 / 播放不受影响。
       if (_failures.shouldSkip(s.key)) return;
@@ -849,7 +1045,7 @@ class SourceHub extends ChangeNotifier {
     final ownSeen = <String>{};
     final extSeen = <String>{};
     bool usable(KSource s) =>
-        s.searchable &&
+        usableForContent(s) &&
         !(s.kind == KSourceKind.jar && _jarReady == false) &&
         // 冷却中的源不参与本轮（`SourceFailureLedger`）。
         !_failures.shouldSkip(s.key);
@@ -1174,6 +1370,21 @@ class SourceHub extends ChangeNotifier {
     await _saveRemoved();
     notifyListeners();
   }
+
+  /// 恢复**单个**被删掉的云端源（片源管理「已移除」分组里的「恢复」）。
+  ///
+  /// RESTORE_ONE（2026-11-17）：用户要的是「删错了能挑一条恢复」，
+  /// 不想为了一条源把其它删掉的全放回来 —— 那等于把「删」白做一遍。
+  Future<void> restoreCloud(String key) async {
+    final k = key.trim();
+    if (k.isEmpty || !_removed.contains(k)) return;
+    _removed = <String>{..._removed}..remove(k);
+    await _saveRemoved();
+    notifyListeners();
+  }
+
+  /// 这个源的「恢复」是否可用（被删掉、且云端配置里还有它）。
+  bool canRestoreCloud(String key) => isRemoved(key);
 
   /// 用户自加一个源。地址为空抛 [ApiException]，由 UI 直接 toast。
   Future<KSource> addUser({
@@ -1948,6 +2159,10 @@ class SourceHub extends ChangeNotifier {
       }
       final removedRaw = sp.getStringList(_kRemoved);
       if (removedRaw != null) _removed = removedRaw.toSet();
+      _homeKey = (sp.getString(_kHomeSource) ?? '').trim();
+      final pinnedRaw = sp.getStringList(_kPinned);
+      if (pinnedRaw != null) _pinned = pinnedRaw.toSet();
+      _bundledHidden = sp.getBool(_kBundledHidden) ?? false;
       _liveUrl = sp.getString(_kLiveUrl) ?? '';
       _fetchedAt = sp.getInt(_kFetchedAt) ?? 0;
       final protocolRaw = sp.getString(_kProtocol);
@@ -2004,7 +2219,31 @@ class SourceHub extends ChangeNotifier {
       );
       await sp.setString(_kLiveUrl, _liveUrl);
       await sp.setStringList(_kRemoved, _removed.toList());
+      await sp.setString(_kHomeSource, _homeKey);
+      await sp.setStringList(_kPinned, _pinned.toList());
+      await sp.setBool(_kBundledHidden, _bundledHidden);
       await sp.setString(_kProtocol, jsonEncode(_protocol.protocolToMap()));
+    } catch (_) {}
+  }
+
+  Future<void> _saveHomeSource() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString(_kHomeSource, _homeKey);
+    } catch (_) {}
+  }
+
+  Future<void> _savePinned() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setStringList(_kPinned, _pinned.toList());
+    } catch (_) {}
+  }
+
+  Future<void> _saveBundledHidden() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setBool(_kBundledHidden, _bundledHidden);
     } catch (_) {}
   }
 
@@ -2041,6 +2280,9 @@ class SourceHub extends ChangeNotifier {
     _user = const <KSource>[];
     _liveUrl = '';
     _fetchedAt = 0;
+    _homeKey = '';
+    _pinned = <String>{};
+    _bundledHidden = false;
     try {
       final sp = await SharedPreferences.getInstance();
       await sp.remove(_kCloud);
@@ -2051,6 +2293,9 @@ class SourceHub extends ChangeNotifier {
       await sp.remove(_kAutoImported);
       await sp.remove(_kProtocol);
       await sp.remove(_kSourceFailure);
+      await sp.remove(_kHomeSource);
+      await sp.remove(_kPinned);
+      await sp.remove(_kBundledHidden);
     } catch (_) {}
     _protocol = const TvBoxConfig();
     ParseRegistry.install(ParseRegistry.empty);

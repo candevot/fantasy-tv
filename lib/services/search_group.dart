@@ -94,11 +94,14 @@ bool fxLooksLikeCategory(String name) => _kCategoryLike.contains(name.trim());
 /// [filter] 非空时只保留该源（左侧源栏点某个源）。
 /// [sortCards] 决定组内顺序；不传就保持原顺序（测试 / 不需要排序的调用方）。
 /// [ownLabel] 是「我们自己的源」的标签，默认 [kOwnSourceLabel]。
+/// [arrivalOrder] 给了就按它排组（SHELL_ARRIVAL，2026-11-17：搜索页
+/// 「谁先返回谁先上屏」），不再套「自己的源优先 → 条数多的在前」那套排序。
 List<FxSourceGroup> fxGroupBySource(
   List<VideoCard> cards, {
   String filter = '',
   List<VideoCard> Function(List<VideoCard> cards)? sortCards,
   String ownLabel = kOwnSourceLabel,
+  List<String>? arrivalOrder,
 }) {
   final wanted = filter.trim();
   final buckets = <String, List<VideoCard>>{};
@@ -125,6 +128,23 @@ List<FxSourceGroup> fxGroupBySource(
       ),
   ];
 
+  final order = arrivalOrder;
+  if (order != null) {
+    // SHELL_ARRIVAL（2026-11-17）：搜索页不干预源顺序 —— 组顺序就是结果
+    // 到达顺序（哪个源先返回内容，它那一组就先上屏）。配置里靠后的源
+    // 只要先回来了，也照样排在前面。
+    int rank(String label) {
+      final at = order.indexOf(label);
+      return at < 0 ? order.length : at;
+    }
+
+    groups.sort((a, b) {
+      final byArrival = rank(a.label).compareTo(rank(b.label));
+      if (byArrival != 0) return byArrival;
+      return a.label.compareTo(b.label);
+    });
+    return groups;
+  }
   groups.sort((a, b) {
     // 1. 我们自己的源永远在最前（用户口径：自己的先出）。
     if (a.own != b.own) return a.own ? -1 : 1;

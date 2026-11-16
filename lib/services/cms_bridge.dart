@@ -147,6 +147,16 @@ class CmsBridge {
   static Future<HomeData> home(String channel) async {
     _boot();
     final ch = channelOf(channel);
+    // SOURCE_PICK（2026-11-17）：用户在首页标题栏选了别的源，首页就按那个
+    // 源出片（走它自己的 CMS 接口）；没选（`homeSource == null`）时仍然是
+    // 「幻想」——也就是原来 `src=hx` 这条默认路径，一行都没变。
+    final picked = SourceHub.instance.homeSource;
+    if (picked != null) {
+      final feed = await _pickedHome(picked, ch);
+      // 那个源整页都请求失败时退回幻想，别把首页弄成空白（选择器的错，
+      // 不该让用户看一屏「加载失败」）。
+      if (feed != null) return feed;
+    }
     final rows = (ch == null || ch.typeId <= 0) ? _homeRows : <CmsChannel>[ch];
     Object? failure;
     final lists = await Future.wait(<Future<List<VideoCard>?>>[
@@ -188,6 +198,112 @@ class CmsBridge {
         BannerItem(card.id, card.title, card.cover, card.desc, card.rating),
     ];
     return HomeData(banners, sections);
+  }
+
+  /// 按用户选中的源铺首页（推荐 = 六个分类行，单分类频道 = 这一行）。
+  ///
+  /// 返回 null 表示「这个源整页请求都失败」——调用方退回幻想那条默认路径，
+  /// 用户至少还能看到内容；返回空 sections 则是「这个源就是没有片」，
+  /// 页面照实显示空态（不是错误）。
+  static Future<HomeData?> _pickedHome(
+    KSource source,
+    CmsChannel? ch,
+  ) async {
+    final rows = (ch == null || ch.typeId <= 0) ? _homeRows : <CmsChannel>[ch];
+    final lists = <List<VideoCard>?>[];
+    var anyOk = false;
+    for (final row in rows) {
+      final cards = await _pickedRowCards(source, row.key, page: 1);
+      if (cards != null) anyOk = true;
+      lists.add(cards);
+    }
+    if (!anyOk) return null;
+    final sections = <HomeSection>[];
+    for (var i = 0; i < rows.length; i++) {
+      final items = lists[i];
+      if (items == null || items.isEmpty) continue;
+      sections.add(HomeSection(rows[i].label, items.take(_rowCount).toList()));
+    }
+    var bannerSource = const <VideoCard>[];
+    for (final list in lists) {
+      if (list != null && list.isNotEmpty) {
+        bannerSource = list;
+        break;
+      }
+    }
+    return HomeData(
+      <BannerItem>[
+        for (final card in bannerSource.take(_bannerCount))
+          BannerItem(card.id, card.title, card.cover, card.desc, card.rating),
+      ],
+      sections,
+    );
+  }
+
+  /// 取某个源的一个频道（首页 / 分类共用）。
+  ///
+  /// jar 源（TVBox type 3）没有 CMS 的 `class` 接口，走
+  /// `JarSpider.homeClasses → typeIdOfChannel → category` 这条链，和壳的
+  /// `homeContent / categoryContent` 一一对应；CMS 源就走它自己的
+  /// `class → list`。返回 null = 这个源没有这个频道（或请求失败）。
+  static Future<List<VideoCard>?> _pickedRowCards(
+    KSource source,
+    String channelKey, {
+    required int page,
+  }) async {
+    try {
+      if (source.kind == KSourceKind.jar) {
+        final tid = await JarSpider.typeIdOfChannel(
+          source.api,
+          source.ext,
+          channelKey,
+        );
+        if (tid.isEmpty) return null;
+        final cards = await JarSpider.category(
+          api: source.api,
+          ext: source.ext,
+          tid: tid,
+          page: page,
+        );
+        return _pickedCards(source, cards);
+      }
+      final client = CmsClient.of(source.api);
+      await client.classes();
+      final typeId = client.typeIdOfChannel(channelKey);
+      if (typeId <= 0) return null;
+      return _pickedCards(source, await client.list(type: typeId, page: page));
+    } catch (_) {
+      // 单行失败只当「这个频道没有」，整页还有其它行；全失败才回退幻想。
+      return null;
+    }
+  }
+
+  /// 某个源返回的卡片 → 能直接上首页的样子（来源标注 + id 路由 + 封面补全）。
+  static List<VideoCard> _pickedCards(
+    KSource source,
+    List<VideoCard> cards,
+  ) {
+    final out = <VideoCard>[];
+    final seen = <String>{};
+    for (final card in cards) {
+      if (SourceHub.isLiveCard(card)) continue;
+      final id = source.cardIdOf(card.id);
+      if (!seen.add(id)) continue;
+      // 我们自己的 hx 库用裸 vod_id（详情 / 播放仍走主站）；外部源编码成
+      // `@src:<key>::<id>`，详情按前缀路由回它的接口。
+      if (source.isOwnLibrary && !id.startsWith(SourceHub.idMark)) {
+        _mark(id, CmsOrigin.cms);
+      }
+      out.add(
+        SourceHub.relabel(
+          card,
+          label: source.resultLabel,
+          id: id,
+          cover: Api.coverOf(card.cover, root: source.api),
+        ),
+      );
+    }
+    return out;
   }
 
   /// 取一行；失败抛出去，由 [home] 决定是回落还是报错。
@@ -306,6 +422,19 @@ class CmsBridge {
     int page = 1,
   }) async {
     _boot();
+    // SOURCE_PICK（2026-11-17）：用户选了别的源，分类页也从那个源取 ——
+    // 首页和分类不能一半这个源一半那个源。
+    final picked = SourceHub.instance.homeSource;
+    if (picked != null) {
+      final pickedPage = await _pickedCategory(
+        picked,
+        type: type,
+        area: area,
+        year: year,
+        page: page,
+      );
+      if (pickedPage != null) return pickedPage;
+    }
     final typeId = CmsApi.typeIdOf(type);
     // RULE_SRC（2026-11-15）：分类页只用**我们自己的片源**。
     //
@@ -387,6 +516,36 @@ class CmsBridge {
       _filter(legacy, area: area, year: year),
       hasMore: legacy.length >= _pageSize,
     );
+  }
+
+  /// 按用户选中的源取一页分类（SOURCE_PICK）。null = 这个源给不出内容，
+  /// 调用方退回幻想那条默认路径。
+  static Future<CmsPage?> _pickedCategory(
+    KSource source, {
+    required String type,
+    required String area,
+    required String year,
+    required int page,
+  }) async {
+    final channel = channelOf(type);
+    final channelKey = channel?.key ?? type.trim();
+    final wanted = _filterWanted(area: area, year: year);
+    final scan = wanted ? _scanPages : 1;
+    final raw = <VideoCard>[];
+    var hasMore = false;
+    var anyOk = false;
+    for (var i = 0; i < scan; i++) {
+      final rawPage = (page - 1) * scan + i + 1;
+      final chunk = await _pickedRowCards(source, channelKey, page: rawPage);
+      if (chunk == null) break;
+      anyOk = true;
+      raw.addAll(chunk);
+      // 源没有 pagecount 可读：按「这一页给满了没有」判断有没有更多。
+      hasMore = chunk.length >= _pageSize;
+      if (!hasMore) break;
+    }
+    if (!anyOk) return null;
+    return CmsPage(_filter(raw, area: area, year: year), hasMore: hasMore);
   }
 
   /// 地区 / 年份的前端过滤。
@@ -813,7 +972,10 @@ class CmsBridge {
       // 不是等 15 秒后一次性出现（壳的体验就是这样）。
       // 某个源超时 / 出错只影响它自己：已上屏的结果不动，进度继续往前走。
       final jarGate = _ConcurrencyGate(JarSpider.maxConcurrentSearches);
-      for (final source in _prioritizeExternal(plan.external)) {
+      // SHELL_ARRIVAL（2026-11-17）：搜索页**不对源做任何优先级排序** ——
+      // 不把幻想提前、也不把它垫底，就按配置里的源顺序原样并发发车，
+      // 谁先回来谁先上屏（页面按到达顺序分组渲染）。
+      for (final source in plan.external) {
         tasks.add(() async {
           // JAR_CONCURRENCY：原生侧只有 6 条 worker 线程，Dart 一次发 41 个
           // 请求只会让后 35 个在队列里超时（排队时间也算在 guard 的超时里）。
@@ -899,65 +1061,13 @@ class CmsBridge {
     return ctrl.stream;
   }
 
-  /// 外部源的发车顺序：**先发最可能返回影视结果的源**。
+  /// SEARCH_ORDER（2026-11-17）：搜索**不对源做任何优先级 / 排序干预**。
   ///
-  /// JAR_ORDER（2026-11-15）：41 个 jar 源同时发，谁先回来谁先上屏 —— 但
-  /// 「谁先回来」取决于源站，先发的那些决定第一屏看到什么。肥猫那份配置里
-  /// 混着一堆**不搜影视**的源（豆瓣预告 / 配置中心 / 酷狗音乐 / 小学课堂 /
-  /// 急救教学 / 直播 / 网盘），它们的 `searchContent` 要么回别的类型、要么
-  /// 直接空；`csp_Bili` 更特殊 —— 反编译确认它把关键词当分类 id，
-  /// 只会回首页/合集（客户端只能靠相关性闸门丢掉）。
-  ///
-  /// 所以按「能真搜影视」→「只回分类」→「其它」排序。排序只影响先后，
-  /// **不影响是否参与**：后面的照样会查，只是不再占着第一屏。
-  static List<KSource> _prioritizeExternal(List<KSource> sources) {
-    int rank(KSource s) {
-      if (s.kind != KSourceKind.jar) return 1;
-      final api = s.api.trim().toLowerCase();
-      final name = api.replaceFirst('csp_', '');
-      if (_jarCategoryOnly.contains(name)) return 3;
-      if (_jarSearchable.contains(name)) return 0;
-      return 2;
-    }
-
-    final indexed = <MapEntry<int, int>>[
-      for (var i = 0; i < sources.length; i++) MapEntry<int, int>(i, rank(sources[i])),
-    ];
-    indexed.sort((a, b) {
-      final r = a.value.compareTo(b.value);
-      return r != 0 ? r : a.key.compareTo(b.key);
-    });
-    return <KSource>[for (final e in indexed) sources[e.key]];
-  }
-
-  /// 实测「真的按关键词搜」的类（`searchContent` 里把 key 编进了请求）。
-  ///
-  /// 名字是 `api` 去掉 `csp_` 再转小写（配置写 `csp_Gulu`，jar 里类叫 `Gulu`）。
-  ///
-  /// JAR_ORDER_MEASURED（2026-11-16）：这份名单原来是反编译「看代码猜」的，
-  /// 现在有 116 个源逐个实测的结果（`docs/JAR-SOURCE-PROBE-2026-11-16.md`），
-  /// 按**真的搜出「济公传」**的 24 个源重排。前一组是实测有结果的，
-  /// 后一组是「反编译看着像真搜、实测这部片没有」的（留着，换关键词会命中）。
-  ///
-  /// 为什么要按这个顺序发车：这些源一个批次一个批次地回来，先发的那批决定
-  /// 用户第一屏看到什么。实测 86 个可搜源 / 20 并发，3 秒内有 14 个源出结果 ——
-  /// 其中 12 个来自这份名单的前两行。
-  static const Set<String> _jarSearchable = <String>{
-    // 实测命中（按条数）：下饭 40 / 韩圈 21 / 荐片 20 / 河马短剧 15 / 七猫短剧 10
-    // 听友听书 10 / 懂片 8 / 金牌 8 / 看剧 8 / 赏月 7 / 一起 4 / 星辰 4 / 蜻蜓FM 4
-    // 骚火 4 / 半日 3 / 咕噜 3 / 1905 2 / 剧圈 2 / 马猴 2 / 博看 1 / 布布 1 /
-    // 种子 1 / 飞娱 1
-    'juxiafan', 'hxq', 'jianpian', 'shorthema', 'shortqimao', 'tingtingyou',
-    'dongpian', 'jpys', 'kanjuai', 'animetsukimi', 'appyqk',
-    'xingchen', 'qingtingfm', 'saohuo', 'app99', 'gulu', 'web1905', 'app3q',
-    'tingbokan', 'yunduo', 'seedhub', 'feiyu',
-    // 实测这部片没有、但确认是按关键词搜的（换关键词会命中）
-    'gz360', 'appget', 'appqi', 'apprj', 'push', 'czsapp', 'sp360', 'ygp',
-    'jike', 'kule', 'fengye', 'djuu', 'wogg', 'xbpq', 'new6v', 'renren',
-  };
-
-  /// 反编译确认「无视关键词、只回分类/首页」的类（结果靠闸门丢）。
-  static const Set<String> _jarCategoryOnly = <String>{'bili'};
+  /// 原先这里有一套 `_prioritizeExternal` + `_jarSearchable` 名单，按
+  /// 「实测能真搜影视的类优先」重排外部源的发车顺序。用户口径改成
+  /// 「搜索不管顺序、不把幻想提前也不垫底、谁先返回谁先上屏」，所以那套
+  /// 排序整块删掉了：现在发车顺序就是配置里的原始顺序，页面按**到达顺序**
+  /// 分组渲染（见 `SearchPage._arrived`）。
 
   /// 单条记录转卡片；坏数据返回 null，**不能**让一条脏记录炸掉整页。
   ///

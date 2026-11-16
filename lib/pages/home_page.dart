@@ -9,10 +9,15 @@ import '../services/cms_bridge.dart';
 import '../services/exo_player.dart';
 import '../theme.dart';
 import 'category_page.dart';
+import 'favorite_page.dart';
+import 'history_page.dart';
 import 'detail_page.dart';
 import 'search_page.dart';
 import 'together_page.dart';
 import '../utils/fx_route.dart';
+import '../services/source_hub.dart';
+import '../widgets/fx_source_sheet.dart';
+import '../widgets/player_theme.dart' show PGlassIcon, PGlassPill;
 import '../widgets/fx_resume_bar.dart' show FxResumeBarHost;
 
 class HomePage extends StatefulWidget {
@@ -29,6 +34,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   final PageController _bannerCtrl = PageController(viewportFraction: .88);
   final Map<String, HomeData> _cache = {};
+
+  /// 源选择面板 / 片源管理改了东西时，标题栏要立刻跟着变。
+  final SourceHub _hub = SourceHub.instance;
+
+  /// 换源次数：分类 tab 的 key 带上它，换源时旧列表整体重建，
+  /// 不会残留上一个源的卡片。
+  int _sourceRev = 0;
 
   Timer? _timer;
   String _channel = 'recommend';
@@ -61,6 +73,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _hub.addListener(_onHubChanged);
     _load();
     // BG_SERVICE（2026-11-15）：上次后台播放被系统压过内存 → 启动后提示一次。
     unawaited(_maybeShowBackgroundHint());
@@ -81,6 +94,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _tickerMode = mode..addListener(_onTickerModeChanged);
       _tabVisible = mode.value.enabled;
     }
+  }
+
+  void _onHubChanged() {
+    if (mounted) setState(() {});
   }
 
   void _onTickerModeChanged() {
@@ -107,6 +124,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _hub.removeListener(_onHubChanged);
     _tickerMode?.removeListener(_onTickerModeChanged);
     _timer?.cancel();
     _bannerCtrl.dispose();
@@ -431,7 +449,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _header(),
         Expanded(
           child: CategoryPage(
-            key: ValueKey<String>('feed-${ch.key}'),
+            // 换源时 key 一起变：旧的分类列表整体销毁重建，
+            // 不会残留上一个源的卡片。
+            key: ValueKey<String>('feed-${ch.key}-$_sourceRev'),
             initialType: ch.key,
             initialTitle: ch.label,
             initialSort: 'hot',
@@ -543,222 +563,304 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           Row(
             children: [
-              Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(11),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Fx.accent.withValues(alpha: .18),
-                      blurRadius: 14,
-                      offset: const Offset(0, 5),
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(11),
-                  child: Image.asset(
-                    'assets/logo.png',
-                    fit: BoxFit.cover,
-                    cacheWidth: (36 * MediaQuery.devicePixelRatioOf(context))
-                        .round()
-                        .clamp(36, 216),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text(
-                      '幻想影视',
-                      style: TextStyle(
-                        fontSize: 20,
-                        height: 1.2,
-                        fontWeight: FontWeight.w600,
-                        color: Fx.ink,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '高画 · 免费 · 无广',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w400,
-                        color: Fx.sub,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              _logo(),
               const SizedBox(width: 8),
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.of(
-                  context,
-                ).push(FxPageRoute(builder: (_) => const TogetherPage())),
-                child: Tooltip(
-                  message: '一起看',
-                  child: Semantics(
-                    button: true,
-                    label: '一起看',
-                    child: Container(
-                      height: 36,
-                      padding: const EdgeInsets.symmetric(horizontal: 11),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: .72),
-                        borderRadius: BorderRadius.circular(18),
-                        border: Border.all(color: Colors.white),
-                        boxShadow: [
-                          BoxShadow(
-                            color: const Color(
-                              0xFF50729F,
-                            ).withValues(alpha: .08),
-                            blurRadius: 12,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.groups_rounded,
-                            size: 16,
-                            color: Fx.accent,
-                          ),
-                          SizedBox(width: 5),
-                          Text(
-                            '一起看',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: Fx.ink,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
+              // 源名（壳的写法「名字 · APP」）：点一下弹源选择面板。
+              Expanded(child: _sourceTitle()),
+              _iconButton(
+                icon: Icons.search_rounded,
+                label: '搜索',
+                onTap: _openSearch,
               ),
+              _iconButton(
+                icon: Icons.star_rounded,
+                label: '收藏',
+                onTap: _openFavorites,
+              ),
+              _iconButton(
+                icon: Icons.history_rounded,
+                label: '历史',
+                onTap: _openHistory,
+              ),
+              const SizedBox(width: 4),
+              _togetherChip(),
             ],
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 12),
           _searchBar(),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           _channelTabs(),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
         ],
       ),
     );
   }
 
-  Widget _searchBar() {
+  /// 圆形 logo（assets/logo.png 圆形裁切）。
+  Widget _logo() {
     return Container(
-      height: 44,
+      width: 34,
+      height: 34,
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .72),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: Colors.white.withValues(alpha: .95)),
+        shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF50729F).withValues(alpha: .08),
-            blurRadius: 18,
-            offset: const Offset(0, 6),
+            color: Fx.accent.withValues(alpha: .20),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
           ),
         ],
       ),
+      child: ClipOval(
+        child: Image.asset(
+          'assets/logo.png',
+          fit: BoxFit.cover,
+          cacheWidth: (34 * MediaQuery.devicePixelRatioOf(context))
+              .round()
+              .clamp(34, 204),
+        ),
+      ),
+    );
+  }
+
+  /// 「咕噜 · APP」/「幻想 · APP」：玻璃胶囊 + 弹面板的箭头。热区 44dp。
+  Widget _sourceTitle() {
+    return Semantics(
+      button: true,
+      label: '选择接口：${_hub.homeSourceName}',
+      child: SizedBox(
+        height: 44,
+        child: Center(
+          child: PGlassPill(
+            height: 34,
+            tint: .62,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            onTap: _pickSource,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    _hub.homeSourceTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 14.5,
+                      height: 1.2,
+                      fontWeight: FontWeight.w600,
+                      color: Fx.ink,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                const Icon(
+                  Icons.expand_more_rounded,
+                  size: 16,
+                  color: Fx.sub,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 圆形玻璃按钮：走 PGlassIcon（玻璃底 + 白描边 + 44dp 热区）。
+  Widget _iconButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return PGlassIcon(
+      icon: icon,
+      onTap: onTap,
+      size: 34,
+      iconSize: 17,
+      tint: .62,
+      iconColor: Fx.ink,
+      hitSize: 44,
+      tooltip: label,
+    );
+  }
+
+  /// 源选择面板：选完就按那个源重拉首页（幻想是默认，永远第一项）。
+  Future<void> _pickSource() async {
+    final choice = await showFxSourceSheet(context);
+    if (!mounted || choice == null) return;
+    final hub = SourceHub.instance;
+    if (choice.key != hub.homeSourceKey) {
+      await hub.selectHomeSource(choice.key);
+      if (!mounted) return;
+      // 换源 = 换一整套数据：清缓存、回到「推荐」、重新拉。
+      setState(() {
+        _cache.clear();
+        _channel = 'recommend';
+        _bannerPage.value = 0;
+        _sourceRev++;
+      });
+      await _load(force: true);
+      if (!mounted) return;
+      _toast('已切换到「${hub.homeSourceName}」');
+      return;
+    }
+    // 点的是当前源那一行的刷新图标：只重拉首页。
+    await _load(force: true);
+    if (!mounted) return;
+    _toast('「${hub.homeSourceName}」已刷新');
+  }
+
+  void _openFavorites() {
+    Navigator.of(
+      context,
+    ).push(FxPageRoute(builder: (_) => const FavoritePage()));
+  }
+
+  void _openHistory() {
+    Navigator.of(
+      context,
+    ).push(FxPageRoute(builder: (_) => const HistoryPage()));
+  }
+
+  /// 一起看（用户明确要求保留，放在最右）。玻璃胶囊，和左边的圆钮同高。
+  Widget _togetherChip() {
+    return Semantics(
+      button: true,
+      label: '一起看',
+      child: PGlassPill(
+        height: 34,
+        tint: .62,
+        padding: const EdgeInsets.symmetric(horizontal: 9),
+        onTap: () => Navigator.of(
+          context,
+        ).push(FxPageRoute(builder: (_) => const TogetherPage())),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.groups_rounded, size: 15, color: Fx.accent),
+            SizedBox(width: 4),
+            Text(
+              '一起看',
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+                color: Fx.ink,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 搜索框：玻璃胶囊（毛玻璃底 + 白描边），和壳的搜索框一致。
+  Widget _searchBar() {
+    return FxGlassPanel(
+      radius: 22,
       padding: const EdgeInsets.symmetric(horizontal: 14),
-      child: Row(
-        children: [
-          const Icon(Icons.search_rounded, size: 18, color: Fx.sub),
-          const SizedBox(width: 8),
-          Expanded(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () => _openSearch(),
-              child: const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  '搜索片名、演员、导演',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w400,
-                    color: Fx.sub,
+      child: SizedBox(
+        height: 44,
+        child: Row(
+          children: [
+            const Icon(Icons.search_rounded, size: 18, color: Fx.sub),
+            const SizedBox(width: 8),
+            Expanded(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => _openSearch(),
+                child: const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '搜索片名、演员、导演',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w400,
+                      color: Fx.sub,
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
-  /// 顶部频道栏：七个频道放不进一行，改成横向滚动（视觉仍是同一块胶囊底）。
-  ///
-  /// 之前是 5 个 `Expanded` 平分一行；CMS 换成「推荐 + 六个分类」后
-  /// 用固定宽度 + 横滑，字号和胶囊高度都不变。
+  /// 分类胶囊条（壳的样式）：玻璃底条 + 选中态**实心主题色胶囊**、
+  /// 未选中透明；最右边一枚 ☰ 是「全部片库」入口。
   Widget _channelTabs() {
-    return Container(
-      height: 42,
+    return FxGlassPanel(
+      radius: 21,
       padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .58),
-        borderRadius: BorderRadius.circular(21),
-        border: Border.all(color: Colors.white.withValues(alpha: .92)),
-      ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
+      child: SizedBox(
+        height: 34,
         child: Row(
           children: [
-            for (final c in _channels)
-              SizedBox(
-                width: 72,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => _selectChannel(c.key),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 220),
-                    curve: Curves.easeOutCubic,
-                    decoration: BoxDecoration(
-                      gradient: c.key == _channel ? Fx.brand : null,
-                      borderRadius: BorderRadius.circular(17),
-                      boxShadow: c.key == _channel
-                          ? [
-                              BoxShadow(
-                                color: Fx.accent.withValues(alpha: .22),
-                                blurRadius: 10,
-                                offset: const Offset(0, 3),
-                              ),
-                            ]
-                          : null,
-                    ),
-                    child: Center(
-                      child: Text(
-                        c.label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: c.key == _channel
-                              ? FontWeight.w600
-                              : FontWeight.w400,
-                          color: c.key == _channel ? Colors.white : Fx.sub,
-                        ),
-                      ),
-                    ),
-                  ),
+            Expanded(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                child: Row(
+                  children: [
+                    for (final c in _channels)
+                      _channelChip(c),
+                  ],
                 ),
               ),
+            ),
+            const SizedBox(width: 4),
+            // ☰：拉出完整分类页（壳的「更多分类」）。
+            PGlassIcon(
+              icon: Icons.menu_rounded,
+              size: 30,
+              iconSize: 16,
+              tint: .18,
+              iconColor: Fx.sub,
+              hitSize: 34,
+              tooltip: '全部分类',
+              onTap: () => _openCategory('', '全部片库'),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 一枚分类胶囊：选中 = 实心主题色 + 白字；未选中 = 透明 + 灰字。
+  Widget _channelChip(CmsChannel c) {
+    final on = c.key == _channel;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _selectChannel(c.key),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOutCubic,
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: on ? Fx.accent : Colors.transparent,
+          borderRadius: BorderRadius.circular(17),
+          boxShadow: on
+              ? [
+                  BoxShadow(
+                    color: Fx.accent.withValues(alpha: .28),
+                    blurRadius: 10,
+                    offset: const Offset(0, 3),
+                  ),
+                ]
+              : null,
+        ),
+        child: Text(
+          c.label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 13.5,
+            fontWeight: on ? FontWeight.w600 : FontWeight.w400,
+            color: on ? Colors.white : Fx.sub,
+          ),
         ),
       ),
     );

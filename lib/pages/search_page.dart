@@ -44,6 +44,16 @@ class _SearchPageState extends State<SearchPage> {
   /// 「外部源结果」分区里。
   List<VideoCard> _external = [];
 
+  /// SHA_ARRIVAL / SHELL_ARRIVAL（2026-11-17）：**结果上屏顺序**。
+  ///
+  /// 用户口径：「搜索不管顺序、不把幻想提前也不垫底，谁先返回谁先上屏」。
+  /// 所以渲染只看这一份按到达顺序累加的列表，不再用 `[..._results,
+  /// ..._external]` 那种「自己的永远在前」的拼接方式。
+  List<VideoCard> _arrived = [];
+
+  /// 源的到达顺序：哪个源先回内容，它那一组就先上屏。
+  List<String> _arrivalOrder = [];
+
   /// 渐进检索的订阅：换关键词 / 离开页面时要取消，旧结果不许再回填。
   StreamSubscription<SearchBatch>? _sub;
 
@@ -341,6 +351,8 @@ class _SearchPageState extends State<SearchPage> {
       _lastQuery = text;
       _results = [];
       _external = [];
+      _arrived = [];
+      _arrivalOrder = [];
       // 新一轮搜索要清掉上一轮的按源筛选，否则列表会一直只剩某个源。
       _sourceFilter = '';
       _error = null;
@@ -435,6 +447,8 @@ class _SearchPageState extends State<SearchPage> {
       // 追加时按 id 去重：流里除了第 1 页还会补一波第 2 页，上拉再取同一页
       // 时不能把同一部片挂两遍。
       _appendUnique(batch.external ? _external : _results, batch.items);
+      // 到达顺序：**谁先回来谁先上屏**（不受源在配置里的位置影响）。
+      _noteArrival(batch.items);
       _done = batch.done;
       _total = batch.total;
       // 外部源：一个源一批，按结局记账（页面上要能看出是「空」还是「超时」）。
@@ -521,6 +535,23 @@ class _SearchPageState extends State<SearchPage> {
     }
   }
 
+  /// 记录一批刚到的结果（到达顺序 = 上屏顺序）。
+  ///
+  /// 只按 id 去重，不做任何跨源合并：咕噜 / 剧圈 / 幻想各自搜到的同名片
+  /// 各占一行（MULTI_SOURCE_DROP 的口径），顺序就是它们回来的先后。
+  void _noteArrival(List<VideoCard> items) {
+    if (items.isEmpty) return;
+    final seen = <String>{for (final card in _arrived) card.id};
+    for (final card in items) {
+      if (!seen.add(card.id)) continue;
+      _arrived.add(card);
+      final key = fxSourceKeyOf(card);
+      if (key.isNotEmpty && !_arrivalOrder.contains(key)) {
+        _arrivalOrder.add(key);
+      }
+    }
+  }
+
   Future<void> _loadMore() async {
     if (_mode != 'search' || _loading || _loadingMore || !_hasMore) return;
     final q = _lastQuery;
@@ -539,6 +570,7 @@ class _SearchPageState extends State<SearchPage> {
       final before = _results.length;
       setState(() {
         _appendUnique(_results, list);
+        _noteArrival(list);
         _page = next;
         _loadingMore = false;
         // 去重后没长出来也算「没有更多」：否则上拉会一直空转。
@@ -576,6 +608,8 @@ class _SearchPageState extends State<SearchPage> {
       _lastQuery = prompt;
       _results = [];
       _external = [];
+      _arrived = [];
+      _arrivalOrder = [];
       _error = null;
       _loading = true;
       _hasMore = false;
@@ -590,6 +624,10 @@ class _SearchPageState extends State<SearchPage> {
       if (!mounted || req != _req) return;
       setState(() {
         _results = list;
+        // AI 结果同样走「到达顺序」那一条渲染路径（_arrived）。
+        _arrived = [];
+        _arrivalOrder = [];
+        _noteArrival(list);
         _loading = false;
       });
       if (_scroll.hasClients) _scroll.jumpTo(0);
@@ -613,6 +651,10 @@ class _SearchPageState extends State<SearchPage> {
       _lastQuery = null;
       _results = [];
       _external = [];
+      _arrived = [];
+      _arrivalOrder = [];
+      _arrived = [];
+      _arrivalOrder = [];
       _error = null;
       _loading = false;
       _loadingMore = false;
@@ -669,6 +711,7 @@ class _SearchPageState extends State<SearchPage> {
             setState(() {
               _results.removeWhere((c) => c.id == deadId);
               _external.removeWhere((c) => c.id == deadId);
+              _arrived.removeWhere((c) => c.id == deadId);
             });
           },
         ),
@@ -1176,10 +1219,12 @@ class _SearchPageState extends State<SearchPage> {
   /// 空源（0 条 / 超时 / 出错）不进分组 —— 组是「有内容的分区」；
   /// 它们只在左侧源栏出现（[fxRailEntries]），点进去给「该源没有这部片」。
   List<FxSourceGroup> _sourceGroups() => fxGroupBySource(
-        <VideoCard>[..._results, ..._external],
+        // 渲染口径：按到达顺序累加的那一份（谁先回来谁先上屏）。
+        _arrived,
         filter: _sourceFilter,
         sortCards: SearchRank.sort,
         ownLabel: KSource.ownResultLabel,
+        arrivalOrder: _arrivalOrder,
       );
 
   /// 左侧源栏的条目：「全部」+ 每个源（有结果的带条数，没结果的 0 条）。
@@ -1190,7 +1235,7 @@ class _SearchPageState extends State<SearchPage> {
   List<FxRailEntry> _railEntries(List<FxSourceGroup> groups) {
     final plan = SourceHub.instance.searchPlan;
     return fxRailEntries(
-      <VideoCard>[..._results, ..._external],
+      _arrived,
       emptyLabels: <String>[
         for (final s in <KSource>[...plan.own, ...plan.external])
           if (s.resultLabel.trim().isNotEmpty) s.resultLabel.trim(),
@@ -1710,6 +1755,8 @@ class _SearchPageState extends State<SearchPage> {
                 _mode = null;
                 _lastQuery = null;
                 _results = [];
+                _arrived = [];
+                _arrivalOrder = [];
               });
               _aiFocus.requestFocus();
             } else {
