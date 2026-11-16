@@ -374,6 +374,12 @@ class JarSpider {
   /// 实测 41 个源、单源 12 秒预算，并发 6 的话排在后面的 30+ 个源根
   /// 本轮不到（搜「济公传」时只跑了 16/41 个）。壳是多源并行。
   /// 这里提到 20 —— 原生线程池必须同步提到 20（JarSpiderLoader）。
+  ///
+  /// INIT_TIMEOUT（2026-11-16）：线上这份 `hx_all.json` 其实是 **116 个 type3
+  /// 源**。116 源 / 20 并发 / 12 秒单源预算，实测 12 秒内跑完 82 个、
+  /// 20 秒跑完 111 个 —— 所以 20 这个数够用，真正卡住并发的不是它，
+  /// 而是原生侧「实例化 + init」曾整段在全局锁里（`csp_SaoHuo.init()` 33 秒，
+  /// 一个慢源堵死全部）。那个问题在 JarSpiderLoader 里单独修了。
   static const int maxConcurrentSearches = 20;
 
   /// 一轮搜索里单个源的**总**预算（quick=false + quick=true 两次尝试之和）。

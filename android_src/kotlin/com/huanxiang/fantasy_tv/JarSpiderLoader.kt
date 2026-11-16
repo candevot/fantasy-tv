@@ -115,6 +115,32 @@ class JarSpiderLoader(
          * 会一直转。超时同样返回结构化结果（stage=timeout）。
          */
         const val SELF_TEST_TIMEOUT_MS = 25_000L
+
+        /**
+         * 单个源的 `init` 上限：**10 秒**（INIT_TIMEOUT 2026-11-16）。
+         *
+         * 实测（116 源逐个跑 `searchContent("济公传")`）：`csp_SaoHuo.init()`
+         * 会同步抓 `http://shapp.us/`，**33 秒**才返回；`csp_Gulu.init()` 174ms。
+         * 以前 init 和实例创建一起放在全局 `synchronized(lock)` 里，一个 33 秒的
+         * init 就把**所有**源堵在锁外 —— 12 秒单源预算下，116 个源只跑得完 23 个，
+         * 用户看到的就是「只出咕噜」。
+         *
+         * 现在：实例创建仍然短锁，init 挪到锁外、走独立线程池，并在这里限时。
+         * 超时的源按「init 超时」记账，[INIT_FAIL_COOLDOWN_MS] 内不再试。
+         */
+        const val INIT_TIMEOUT_MS = 10_000L
+
+        /** init 失败 / 超时后的冷却：**30 分钟**（和壳的 crash 熔断同一量级）。 */
+        const val INIT_FAIL_COOLDOWN_MS = 30 * 60 * 1000L
+
+        /**
+         * init 专用线程池条数：**3**（INIT_TIMEOUT 2026-11-16）。
+         *
+         * 慢 init 的源（SaoHuo 33 秒、Gulu 174ms）不能占着 search 的 20 条
+         * worker —— 否则「搜得快」的源还是要排在慢 init 后面。init 单独 3 条：
+         * 116 个源里真正慢的只有个位数，3 条够用，也不会把 CPU 抢光。
+         */
+        const val INIT_THREADS = 3
     }
 
     /** 懒创建的 DexClassLoader：jar 不存在时永远不该建它。 */
@@ -122,10 +148,33 @@ class JarSpiderLoader(
     private var loader: DexClassLoader? = null
 
     /** api（类名）→ Spider 实例。 */
-    private val cache = HashMap<String, Any>()
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Any>()
 
     /** api → 上次 init 用的 ext（ext 变了要重新 init）。 */
-    private val initedWith = HashMap<String, String>()
+    private val initedWith = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * api → 这个源「init 还没完成」的 Future（INIT_TIMEOUT 2026-11-16）。
+     *
+     * 同一实例的 init 与 search 必须串行（jar 里的源大多是单例 + 可变字段），
+     * 所以：谁先来谁发起 init，后来的人等同一个 Future，不重复 init。
+     */
+    private val initTasks = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.Future<*>>()
+
+    /** api → init 失败后的冷却到期时间（毫秒）。 */
+    private val initCoolDown = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * init 专用线程池（不和 search 抢线程）。
+     *
+     * 守护线程：加载器被丢弃时不会阻止进程退出。
+     */
+    private val initPool: ExecutorService = Executors.newFixedThreadPool(INIT_THREADS) { runnable ->
+        Thread(runnable, "fx-jar-init").apply {
+            isDaemon = true
+            priority = Thread.NORM_PRIORITY - 1
+        }
+    }
 
     private val lock = Any()
 
@@ -375,34 +424,97 @@ class JarSpiderLoader(
      *
      * `ext` 变化时会重新 init —— 同一个 api 在不同配置里 ext 可能不同，
      * 不重 init 就会拿到上一个站点的数据（表现为「两个源内容一模一样」）。
+     *
+     * **INIT_TIMEOUT（2026-11-16）**：以前「bootstrap + 实例化 + init」整段都在
+     * 全局 `synchronized(lock)` 里，而 `csp_SaoHuo.init()` 实测要 33 秒 ——
+     * 一个慢 init 就把 116 个源全堵在锁外。现在锁只包「bootstrap + 实例化」
+     * （毫秒级），init 挪到锁外、走 [initPool]、限时 [INIT_TIMEOUT_MS]。
+     * 同一实例的 init / search 仍然串行：调用方 [call] 先拿 `lockOf(api)`，
+     * 所以这里是「按源串行、跨源并行」，和壳一致。
      */
     fun spider(api: String, ext: String): Any {
         val key = api.trim()
         if (key.isEmpty()) throw JarSpiderException("no_api", "没有配置 api（类名）")
+        // init 超时过的源：30 分钟内直接判失败，别再白等 10 秒。
+        val until = initCoolDown[key] ?: 0L
+        if (until > System.currentTimeMillis()) {
+            throw JarSpiderException(
+                "init_cooldown",
+                "这个源上次 init 超时，${(until - System.currentTimeMillis()) / 60_000} 分钟后重试",
+            )
+        }
         bootstrapJar()
-        synchronized(lock) {
-            cache[key]?.let { instance ->
-                if (initedWith[key] == ext) return instance
+        // 短锁：只做「查缓存 / 建实例」。resolveClass 内部还会进 classLoader()，
+        // 那是同一把可重入锁，同一个线程再进一次没问题。
+        val instance = synchronized(lock) {
+            cache[key] ?: run {
+                val clz = resolveClass(key)
+                val made = try {
+                    clz.getDeclaredConstructor().newInstance()
+                } catch (e: Throwable) {
+                    // 没有默认构造 / 构造里抛异常
+                    val inner = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+                    throw JarSpiderException(
+                        "new_instance_failed",
+                        "实例化 ${clz.name} 失败：${inner.javaClass.simpleName}: ${inner.message}",
+                    )
+                }
+                cache[key] = made
+                Log.i(TAG, "Spider 就绪：${clz.name} ext=${ext.take(40)}")
+                made
+            }
+        }
+        // 锁外：init（ext 变了 / 还没 init 过才走）
+        ensureInited(key, instance, ext)
+        return instance
+    }
+
+    /**
+     * 保证实例已经用 [ext] init 过；没 init 就发起一次，**限时** [INIT_TIMEOUT_MS]。
+     *
+     * 并发语义：同一个源同时只允许一次 init。先到的提交任务，后到的等同一个
+     * Future（不重复 init —— jar 里的源普遍是单例 + 可变字段，init 两遍会互相踩）。
+     */
+    private fun ensureInited(key: String, instance: Any, ext: String) {
+        if (initedWith[key] == ext) return
+        // 已经有别的线程在 init 这个源：等它，别再来一次。
+        initTasks[key]?.let { running ->
+            try {
+                running.get(INIT_TIMEOUT_MS + 2_000L, TimeUnit.MILLISECONDS)
+            } catch (ignored: Throwable) {
+                // 失败 / 超时由发起者记账，这里只是不再重复 init。
+            }
+            if (initedWith[key] == ext) return
+        }
+        val task = initPool.submit(
+            Callable {
                 initInstance(instance, ext)
-                initedWith[key] = ext
-                return instance
-            }
-            val clz = resolveClass(key)
-            val made = try {
-                clz.getDeclaredConstructor().newInstance()
-            } catch (e: Throwable) {
-                // 没有默认构造 / 构造里抛异常
-                val inner = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
-                throw JarSpiderException(
-                    "new_instance_failed",
-                    "实例化 ${clz.name} 失败：${inner.javaClass.simpleName}: ${inner.message}",
-                )
-            }
-            initInstance(made, ext)
-            cache[key] = made
+                ext
+            },
+        )
+        initTasks[key] = task
+        try {
+            task.get(INIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             initedWith[key] = ext
-            Log.i(TAG, "Spider 就绪：${clz.name} ext=${ext.take(40)}")
-            return made
+        } catch (e: TimeoutException) {
+            // 慢 init 的源（SaoHuo 33 秒）不能拖住整轮搜索：判失败 + 冷却 30 分钟。
+            task.cancel(true)
+            initCoolDown[key] = System.currentTimeMillis() + INIT_FAIL_COOLDOWN_MS
+            Log.w(TAG, "init 超时 ${INIT_TIMEOUT_MS / 1000}s：$key（${INIT_FAIL_COOLDOWN_MS / 60_000} 分钟内不再试）")
+            throw JarSpiderException(
+                "init_timeout",
+                "这个源初始化超过 ${INIT_TIMEOUT_MS / 1000} 秒（站点太慢），本轮跳过",
+            )
+        } catch (e: ExecutionException) {
+            val cause = e.cause ?: e
+            if (cause is JarSpiderException) throw cause
+            val message = cause.message ?: cause.javaClass.simpleName
+            throw JarSpiderException("init_failed", "init 失败：$message")
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw JarSpiderException("init_failed", "init 被中断")
+        } finally {
+            initTasks.remove(key)
         }
     }
 
@@ -876,8 +988,15 @@ class JarSpiderLoader(
             initedWith.clear()
             loader = null
         }
+        initTasks.clear()
+        initCoolDown.clear()
         try {
             worker.shutdownNow()
+        } catch (ignored: Throwable) {
+        }
+        // init 池也要停：不然 3 条线程会一直挂着等下一个任务。
+        try {
+            initPool.shutdownNow()
         } catch (ignored: Throwable) {
         }
         Log.i(TAG, "销毁加载器 ${jarPath.name}")
