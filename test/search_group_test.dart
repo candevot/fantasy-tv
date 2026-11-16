@@ -43,6 +43,18 @@ List<VideoCard> _reverse(List<VideoCard> cards) =>
 
 void main() {
   group('fxGroupBySource', () {
+    test('内部 key 显示成可读源名（u__咕噜_app → 咕噜 • APP）', () {
+      final groups = fxGroupBySource(<VideoCard>[
+        _pollutedCard('济公传', 'u__咕噜_app'),
+        _pollutedCard('济公新传', 'u__哔哩_app'),
+      ]);
+      final labels = groups.map((g) => g.label).toList();
+      expect(labels.any((l) => l.contains('u__')), isFalse,
+          reason: '左栏/组标题不能出现内部 key');
+      expect(labels.any((l) => l.contains('咕噜')), isTrue);
+    });
+
+
     test('分组键只认 id 里的 @src:<源key>，sourceLabel 是分类名也不影响', () {
       // 线上真实情况：jar 源返回的 source 字段是「小学」，但 id 里带源 key。
       final groups = fxGroupBySource(<VideoCard>[

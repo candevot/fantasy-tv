@@ -77,6 +77,36 @@ String fxSourceKeyOf(VideoCard card) {
   return kOwnSourceLabel;
 }
 
+/// 用户自加源内部 key → 可读名字（SEARCH_NAME 2026-11-17）。
+///
+/// `SourceHub._newUserKey` 会把「咕噜 • APP」这类名字清洗成 `u__咕噜_app`，
+/// 卡片 id 里存的是这个 key。直接当分组名/左栏名显示，用户看到的是
+/// 「u__咕噜_app」，完全认不出是哪个源。
+///
+/// 这里把它还原成可读名：去掉 `u_` / `u__` 前缀，去掉尾部 `_app` / `_4k`
+/// 这类后缀，下划线换回空格，再把 `• APP` 那种分隔符补回去。
+String fxFriendlySourceName(String key) {
+  var k = key.trim();
+  if (k.isEmpty) return k;
+  if (k == kOwnSourceLabel) return k;
+  // 只有用户自加源的 key 带 u_ 前缀；配置里的 key（咕噜/豆瓣/下饭）原样返回。
+  if (!k.startsWith('u_')) return k;
+  k = k.replaceFirst(RegExp(r'^u_+'), '');
+  // 尾部 _2 / _app / _4k 这类：`u_咕噜_app_2` → 咕噜 • APP
+  String? suffix;
+  final tail = RegExp(r'_([a-z0-9]{1,6})(?:_\d+)?$').firstMatch(k);
+  if (tail != null) {
+    final t = tail.group(1)!;
+    if (t == 'app' || t == '4k' || t == 'hd' || t == 'tv') {
+      suffix = t.toUpperCase();
+      k = k.substring(0, tail.start);
+    }
+  }
+  k = k.replaceAll('_', ' ').trim();
+  if (k.isEmpty) return key;
+  return suffix == null ? k : '$k • $suffix';
+}
+
 /// 这些是源站「分类」的名字，不是源名 —— jar 源常把分类塞进 `source`。
 /// 用它们做分组键会把左栏和组标题变成一堆「小学 / 初中 / 明星 / 高中」。
 const Set<String> _kCategoryLike = <String>{
@@ -114,7 +144,9 @@ List<FxSourceGroup> fxGroupBySource(
     // 变成一堆分类名，真正的源名（咕噜/下饭/韩圈…）反而没显示出来。
     // 卡片的 id 是 `SourceHub.relabel` 按 `@src:<源key>::<vodId>` 编的，
     // 源 key 就是配置里的 key（咕噜/下饭/韩圈…），不会串。
-    final key = fxSourceKeyOf(card);
+    // SEARCH_NAME：内部 key（`u__咕噜_app`）换成可读名（`咕噜 • APP`），
+    // 左栏和组标题都显示这个，用户才认得出是哪个源。
+    final key = fxFriendlySourceName(fxSourceKeyOf(card));
     if (wanted.isNotEmpty && key != wanted) continue;
     (buckets[key] ??= <VideoCard>[]).add(card);
   }

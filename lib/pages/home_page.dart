@@ -9,14 +9,11 @@ import '../services/cms_bridge.dart';
 import '../services/exo_player.dart';
 import '../theme.dart';
 import 'category_page.dart';
-import 'favorite_page.dart';
-import 'history_page.dart';
 import 'detail_page.dart';
 import 'search_page.dart';
 import 'together_page.dart';
 import '../utils/fx_route.dart';
 import '../services/source_hub.dart';
-import '../widgets/fx_source_sheet.dart';
 import '../widgets/player_theme.dart' show PGlassIcon, PGlassPill;
 import '../widgets/fx_resume_bar.dart' show FxResumeBarHost;
 
@@ -618,26 +615,60 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         children: [
           Row(
             children: [
-              _logo(),
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(11),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Fx.accent.withValues(alpha: .18),
+                      blurRadius: 14,
+                      offset: const Offset(0, 5),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(11),
+                  child: Image.asset(
+                    'assets/logo.png',
+                    fit: BoxFit.cover,
+                    cacheWidth: (36 * MediaQuery.devicePixelRatioOf(context))
+                        .round()
+                        .clamp(36, 216),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      '幻想影视',
+                      style: TextStyle(
+                        fontSize: 20,
+                        height: 1.2,
+                        fontWeight: FontWeight.w600,
+                        color: Fx.ink,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '高画 · 免费 · 无广',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w400,
+                        color: Fx.sub,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
               const SizedBox(width: 8),
-              // 源名（壳的写法「名字 · APP」）：点一下弹源选择面板。
-              Expanded(child: _sourceTitle()),
-              _iconButton(
-                icon: Icons.search_rounded,
-                label: '搜索',
-                onTap: _openSearch,
-              ),
-              _iconButton(
-                icon: Icons.star_rounded,
-                label: '收藏',
-                onTap: _openFavorites,
-              ),
-              _iconButton(
-                icon: Icons.history_rounded,
-                label: '历史',
-                onTap: _openHistory,
-              ),
-              const SizedBox(width: 4),
               _togetherChip(),
             ],
           ),
@@ -649,137 +680,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ],
       ),
     );
-  }
-
-  /// 圆形 logo（assets/logo.png 圆形裁切）。
-  Widget _logo() {
-    return Container(
-      width: 34,
-      height: 34,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        boxShadow: [
-          BoxShadow(
-            color: Fx.accent.withValues(alpha: .20),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: ClipOval(
-        child: Image.asset(
-          'assets/logo.png',
-          fit: BoxFit.cover,
-          cacheWidth: (34 * MediaQuery.devicePixelRatioOf(context))
-              .round()
-              .clamp(34, 204),
-        ),
-      ),
-    );
-  }
-
-  /// 「咕噜 · APP」/「幻想 · APP」：玻璃胶囊 + 弹面板的箭头。热区 44dp。
-  ///
-  /// 窄屏（< 380dp）只留源名：行里已经有 logo + 三枚 44dp 圆钮 + 一起看，
-  /// 再塞「· APP」会被截成省略号，不如直接省掉后缀。
-  Widget _sourceTitle() {
-    final narrow = MediaQuery.sizeOf(context).width < 380;
-    final text = narrow ? _hub.homeSourceName : _hub.homeSourceTitle;
-    return Semantics(
-      button: true,
-      label: '选择接口：${_hub.homeSourceName}',
-      child: SizedBox(
-        height: 44,
-        child: Center(
-          child: PGlassPill(
-            height: 34,
-            tint: .62,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            onTap: _pickSource,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: Text(
-                    text,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 14.5,
-                      height: 1.2,
-                      fontWeight: FontWeight.w600,
-                      color: Fx.ink,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 2),
-                const Icon(
-                  Icons.expand_more_rounded,
-                  size: 16,
-                  color: Fx.sub,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// 圆形玻璃按钮：走 PGlassIcon（玻璃底 + 白描边 + 44dp 热区）。
-  Widget _iconButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-  }) {
-    return PGlassIcon(
-      icon: icon,
-      onTap: onTap,
-      size: 34,
-      iconSize: 17,
-      tint: .62,
-      iconColor: Fx.ink,
-      hitSize: 44,
-      tooltip: label,
-    );
-  }
-
-  /// 源选择面板：选完就按那个源重拉首页（幻想是默认，永远第一项）。
-  Future<void> _pickSource() async {
-    final choice = await showFxSourceSheet(context);
-    if (!mounted || choice == null) return;
-    final hub = SourceHub.instance;
-    if (choice.key != hub.homeSourceKey) {
-      await hub.selectHomeSource(choice.key);
-      if (!mounted) return;
-      // 换源 = 换一整套数据：清缓存、回到「推荐」、重新拉。
-      setState(() {
-        _cache.clear();
-        _channel = 'recommend';
-        _bannerPage.value = 0;
-        _sourceRev++;
-      });
-      await _load(force: true);
-      if (!mounted) return;
-      _toast('已切换到「${hub.homeSourceName}」');
-      return;
-    }
-    // 点的是当前源那一行的刷新图标：只重拉首页。
-    await _load(force: true);
-    if (!mounted) return;
-    _toast('「${hub.homeSourceName}」已刷新');
-  }
-
-  void _openFavorites() {
-    Navigator.of(
-      context,
-    ).push(FxPageRoute(builder: (_) => const FavoritePage()));
-  }
-
-  void _openHistory() {
-    Navigator.of(
-      context,
-    ).push(FxPageRoute(builder: (_) => const HistoryPage()));
   }
 
   /// 一起看（用户明确要求保留，放在最右）。玻璃胶囊，和左边的圆钮同高。

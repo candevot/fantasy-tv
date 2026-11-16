@@ -147,16 +147,8 @@ class CmsBridge {
   static Future<HomeData> home(String channel) async {
     _boot();
     final ch = channelOf(channel);
-    // SOURCE_PICK（2026-11-17）：用户在首页标题栏选了别的源，首页就按那个
-    // 源出片（走它自己的 CMS 接口）；没选（`homeSource == null`）时仍然是
-    // 「幻想」——也就是原来 `src=hx` 这条默认路径，一行都没变。
-    final picked = SourceHub.instance.homeSource;
-    if (picked != null) {
-      final feed = await _pickedHome(picked, ch);
-      // 那个源整页都请求失败时退回幻想，别把首页弄成空白（选择器的错，
-      // 不该让用户看一屏「加载失败」）。
-      if (feed != null) return feed;
-    }
+    // HOME_OWN_ONLY（2026-11-17）：首页**永远只用我们自己的片源**。
+    // 用户口径：「主页和界面还是自己的片源线路，要看肥猫的人只有搜索」。
     final rows = (ch == null || ch.typeId <= 0) ? _homeRows : <CmsChannel>[ch];
     Object? failure;
     final lists = await Future.wait(<Future<List<VideoCard>?>>[
@@ -198,126 +190,6 @@ class CmsBridge {
         BannerItem(card.id, card.title, card.cover, card.desc, card.rating),
     ];
     return HomeData(banners, sections);
-  }
-
-  /// 按用户选中的源铺首页（推荐 = 六个分类行，单分类频道 = 这一行）。
-  ///
-  /// 返回 null 表示「这个源整页请求都失败」——调用方退回幻想那条默认路径，
-  /// 用户至少还能看到内容；返回空 sections 则是「这个源就是没有片」，
-  /// 页面照实显示空态（不是错误）。
-  static Future<HomeData?> _pickedHome(
-    KSource source,
-    CmsChannel? ch,
-  ) async {
-    // jar 源没装 jar 插件就**别逐行去敲**（每个源 12 秒，六行能把首屏拖到
-    // 一分钟以上）；直接判定「这个源出不了内容」，交给幻想兜底。
-    if (!await _sourceReady(source)) return null;
-    final rows = (ch == null || ch.typeId <= 0) ? _homeRows : <CmsChannel>[ch];
-    // 六行并行：壳的首页也是并发拉，串行只会让首屏越来越慢。
-    final lists = await Future.wait(<Future<List<VideoCard>?>>[
-      for (final row in rows) _pickedRowCards(source, row.key, page: 1),
-    ]);
-    final anyOk = lists.any((list) => list != null);
-    if (!anyOk) return null;
-    final sections = <HomeSection>[];
-    for (var i = 0; i < rows.length; i++) {
-      final items = lists[i];
-      if (items == null || items.isEmpty) continue;
-      sections.add(HomeSection(rows[i].label, items.take(_rowCount).toList()));
-    }
-    var bannerSource = const <VideoCard>[];
-    for (final list in lists) {
-      if (list != null && list.isNotEmpty) {
-        bannerSource = list;
-        break;
-      }
-    }
-    return HomeData(
-      <BannerItem>[
-        for (final card in bannerSource.take(_bannerCount))
-          BannerItem(card.id, card.title, card.cover, card.desc, card.rating),
-      ],
-      sections,
-    );
-  }
-
-  /// 这个源现在能不能出内容（jar 源要先装 jar 插件）。
-  ///
-  /// 顺手把 jar 状态查一次（内部 2 秒兜底），免得和首页首屏抢跑：
-  /// 状态未知时按「先查、查不到就当没装」处理，绝不乐观地逐行去敲 jar。
-  static Future<bool> _sourceReady(KSource source) async {
-    final hub = SourceHub.instance;
-    if (source.kind == KSourceKind.jar) {
-      await hub.ensureJarStatus();
-      return hub.jarReady;
-    }
-    return hub.canServeContent(source);
-  }
-
-  /// 取某个源的一个频道（首页 / 分类共用）。
-  ///
-  /// jar 源（TVBox type 3）没有 CMS 的 `class` 接口，走
-  /// `JarSpider.homeClasses → typeIdOfChannel → category` 这条链，和壳的
-  /// `homeContent / categoryContent` 一一对应；CMS 源就走它自己的
-  /// `class → list`。返回 null = 这个源没有这个频道（或请求失败）。
-  static Future<List<VideoCard>?> _pickedRowCards(
-    KSource source,
-    String channelKey, {
-    required int page,
-  }) async {
-    try {
-      if (source.kind == KSourceKind.jar) {
-        final tid = await JarSpider.typeIdOfChannel(
-          source.api,
-          source.ext,
-          channelKey,
-        );
-        if (tid.isEmpty) return null;
-        final cards = await JarSpider.category(
-          api: source.api,
-          ext: source.ext,
-          tid: tid,
-          page: page,
-        );
-        return _pickedCards(source, cards);
-      }
-      final client = CmsClient.of(source.api);
-      await client.classes();
-      final typeId = client.typeIdOfChannel(channelKey);
-      if (typeId <= 0) return null;
-      return _pickedCards(source, await client.list(type: typeId, page: page));
-    } catch (_) {
-      // 单行失败只当「这个频道没有」，整页还有其它行；全失败才回退幻想。
-      return null;
-    }
-  }
-
-  /// 某个源返回的卡片 → 能直接上首页的样子（来源标注 + id 路由 + 封面补全）。
-  static List<VideoCard> _pickedCards(
-    KSource source,
-    List<VideoCard> cards,
-  ) {
-    final out = <VideoCard>[];
-    final seen = <String>{};
-    for (final card in cards) {
-      if (SourceHub.isLiveCard(card)) continue;
-      final id = source.cardIdOf(card.id);
-      if (!seen.add(id)) continue;
-      // 我们自己的 hx 库用裸 vod_id（详情 / 播放仍走主站）；外部源编码成
-      // `@src:<key>::<id>`，详情按前缀路由回它的接口。
-      if (source.isOwnLibrary && !id.startsWith(SourceHub.idMark)) {
-        _mark(id, CmsOrigin.cms);
-      }
-      out.add(
-        SourceHub.relabel(
-          card,
-          label: source.resultLabel,
-          id: id,
-          cover: Api.coverOf(card.cover, root: source.api),
-        ),
-      );
-    }
-    return out;
   }
 
   /// 取一行；失败抛出去，由 [home] 决定是回落还是报错。
@@ -436,19 +308,7 @@ class CmsBridge {
     int page = 1,
   }) async {
     _boot();
-    // SOURCE_PICK（2026-11-17）：用户选了别的源，分类页也从那个源取 ——
-    // 首页和分类不能一半这个源一半那个源。
-    final picked = SourceHub.instance.homeSource;
-    if (picked != null) {
-      final pickedPage = await _pickedCategory(
-        picked,
-        type: type,
-        area: area,
-        year: year,
-        page: page,
-      );
-      if (pickedPage != null) return pickedPage;
-    }
+    // HOME_OWN_ONLY（2026-11-17）：分类页同样只用我们自己的片源。
     final typeId = CmsApi.typeIdOf(type);
     // RULE_SRC（2026-11-15）：分类页只用**我们自己的片源**。
     //
@@ -530,37 +390,6 @@ class CmsBridge {
       _filter(legacy, area: area, year: year),
       hasMore: legacy.length >= _pageSize,
     );
-  }
-
-  /// 按用户选中的源取一页分类（SOURCE_PICK）。null = 这个源给不出内容，
-  /// 调用方退回幻想那条默认路径。
-  static Future<CmsPage?> _pickedCategory(
-    KSource source, {
-    required String type,
-    required String area,
-    required String year,
-    required int page,
-  }) async {
-    if (!await _sourceReady(source)) return null;
-    final channel = channelOf(type);
-    final channelKey = channel?.key ?? type.trim();
-    final wanted = _filterWanted(area: area, year: year);
-    final scan = wanted ? _scanPages : 1;
-    final raw = <VideoCard>[];
-    var hasMore = false;
-    var anyOk = false;
-    for (var i = 0; i < scan; i++) {
-      final rawPage = (page - 1) * scan + i + 1;
-      final chunk = await _pickedRowCards(source, channelKey, page: rawPage);
-      if (chunk == null) break;
-      anyOk = true;
-      raw.addAll(chunk);
-      // 源没有 pagecount 可读：按「这一页给满了没有」判断有没有更多。
-      hasMore = chunk.length >= _pageSize;
-      if (!hasMore) break;
-    }
-    if (!anyOk) return null;
-    return CmsPage(_filter(raw, area: area, year: year), hasMore: hasMore);
   }
 
   /// 地区 / 年份的前端过滤。
