@@ -360,10 +360,25 @@ class FsTopBar extends StatelessWidget {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // 实时网速：能看出在动。网络卡住时掉到 0，一眼就知道。
-                  // 竖屏（narrow）先让它：360dp 宽装不下这么多胶囊。
-                  if (!narrow && speedText.isNotEmpty) ...[
-                    _TopChip(text: speedText, size: s),
+                  // 实时网速：**常驻槽位**（SPEED_ALWAYS 2026-11-16）。
+                  //
+                  // 以前是 `speedText.isNotEmpty` 才渲染 —— 网速掉到 0 或还没上报
+                  // 时这个胶囊整个消失，后面的分辨率/电量/时钟跟着整体左移，
+                  // 用户看到的就是「图标来回跳」。现在固定占 76dp 宽，
+                  // 值为空就显示「--」，位置永远不动。
+                  // 竖屏（narrow）仍然不显示（360dp 宽装不下），但分辨率/电量
+                  // 的位置也是固定的，不会互跳。
+                  if (!narrow) ...[
+                    SizedBox(
+                      width: 76 * s,
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: _TopChip(
+                          text: speedText.isEmpty ? '--' : speedText,
+                          size: s,
+                        ),
+                      ),
+                    ),
                     const SizedBox(width: 6),
                   ],
                   // 胶囊固定宽度、分辨率未就绪时只占位不画内容 —— 那样就没有可
