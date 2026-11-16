@@ -305,6 +305,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     _timer?.cancel();
     if (_isChannelFeed) return;
+    if (key == 'recommend') {
+      // 从分类 tab 回到推荐时，网格渲染的这一份要跟着换回来
+      // （`_sections` 上一步装的是别的频道的分区）。
+      final cached = _cache[key];
+      if (cached != null) {
+        final arranged = _arrangeSections(cached.sections);
+        setState(() {
+          _sections = arranged;
+          _feedPage = 1;
+          _feedMore = arranged.any((s) => s.items.length >= _feedPageSize);
+          _feedPaging = false;
+        });
+      }
+    }
     if (_cache.containsKey(key)) {
       _restartAuto();
       WidgetsBinding.instance.addPostFrameCallback((_) {
