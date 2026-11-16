@@ -437,6 +437,11 @@ class CmsBridge {
     final external = <VideoCard>[];
     await for (final batch in searchStream(keyword, page)) {
       (batch.external ? external : own).addAll(batch.items);
+      // SOFT_FINISH（2026-11-16）：`finished` 现在是「首屏这一轮结束」的信号
+      // （4 秒软收尾），流之后还会继续追加后台补全的结果。聚合调用方要的是
+      // 「尽快拿到一批能用的结果」（一起看选片、AI 推荐），不能等 60 秒硬收尾
+      // —— 收到第一条 finished 就收工，拿到的就是首屏那批。
+      if (batch.finished) break;
     }
     return <VideoCard>[...own, ...external];
   }
@@ -581,6 +586,9 @@ class CmsBridge {
     var total = 0;
     var emitted = 0;
     var closed = false;
+
+    /// 软收尾是否已经发过（SOFT_FINISH 2026-11-16）。
+    var softClosed = false;
     Object? primaryFailure;
 
     /// 外部源（肥猫 jar 源）一共命中多少条 —— 页面进度文案「命中 3」用它。
@@ -602,10 +610,12 @@ class CmsBridge {
     /// 缓存下来，之后每次搜索都在同一个地方炸），流既不 error 也不 close，
     /// 页面那边既收不到结果也收不到 done，`_loading` / `_skeleton` 永远是 true,
     /// 用户看到的就是「骨架屏一直转」。现在用 finally 兜住。
+    ///
+    /// SOFT_FINISH（2026-11-16）：拆成「软收尾」和「硬收尾」两档，见 [softFinish]。
     void finish() {
       if (closed) return;
       closed = true;
-      // 一轮的收尾日志：一行看到「41 个源里几个有货、几个空、几个挂」。
+      // 一轮的收尾日志：一行看到「86 个源里几个有货、几个空、几个挂」。
       if (externalStates.isNotEmpty || externalHits > 0) {
         final parts = externalStates.entries
             .map((e) => '${e.value} ${e.key.name}')
@@ -618,7 +628,8 @@ class CmsBridge {
       }
       if (emitted == 0 && primaryFailure != null) {
         ctrl.addError(primaryFailure!);
-      } else {
+      } else if (!softClosed) {
+        // 软收尾没发过（4 秒内就跑完了 / 一开始就空）：这里补一条 finished。
         ctrl.add(
           SearchBatch(
             items: const <VideoCard>[],
@@ -630,6 +641,38 @@ class CmsBridge {
         );
       }
       unawaited(ctrl.close());
+    }
+
+    /// 软收尾：告诉页面「首屏这一轮结束了」，**但不关流**（SOFT_FINISH 2026-11-16）。
+    ///
+    /// 为什么要有它：壳（FongMi）的多源搜索是「谁回来算谁、永远增量追加」，
+    /// 页面从来没有「整轮收尾」这个概念 —— 用户看到的是结果一直在长。
+    /// 我们之前只有一个「整体收尾」上限（40 秒），那 40 秒里页面只能一直转圈
+    /// 等最后一个慢源，用户感受就是「壳也没这么慢」。
+    ///
+    /// 现在分两档：
+    ///   · **4 秒软收尾**：发一条 `finished: true` 让页面停掉转圈 / 骨架 /
+    ///     进度条（用户这时已经能看到 14 个源的结果），流继续开着；
+    ///   · **后台继续追加**：还没回来的源照样 `emit`，页面照样往列表里长；
+    ///   · **硬收尾**：`run()` 自然结束（所有源都回来了）或 60 秒兜底，才真正 close。
+    ///
+    /// 幂等：重复调用只发一次。
+    void softFinish() {
+      if (closed || softClosed) return;
+      softClosed = true;
+      ctrl.add(
+        SearchBatch(
+          items: const <VideoCard>[],
+          external: false,
+          done: total == 0 ? done : total,
+          total: total == 0 ? done : total,
+          finished: true,
+        ),
+      );
+      fxJarLog(
+        'soft-finish key=$q 已回 $done/$total 源 · 命中 $externalHits 条 '
+        '· 后台继续补其余源',
+      );
     }
 
     void emit(
@@ -830,8 +873,7 @@ class CmsBridge {
         },
       ).whenComplete(finish),
     );
-    // 硬上限：单源 12 秒（[SourceHub.sourceTimeout]），这里再兜一层
-    // 「整体 20 秒」，页面最多等 20 秒就一定有结果或错误，绝不允许无限转圈。
+    // 硬上限：单源 12 秒（[SourceHub.sourceTimeout]），这里再兜一层整体上限。
     //
     // JAR_TIMEOUT（2026-11-15）：15 秒 → 20 秒。jar 源的 quick 回退
     // （quick=false 空 → quick=true）单个源最长能占满 12 秒，41 个源同时发
@@ -841,12 +883,19 @@ class CmsBridge {
     // 单源预算内能跑完 ≈ 3 轮，整体 20 秒仍然偏紧（最后一批刚好被砍）。
     // 放宽到 30 秒：用户早就在逐条看到结果了，这个上限只是兜「绝不允许无限转圈」。
     //
-    // JAR_PARALLEL（2026-11-16 · 116 源）：线上这份配置是 **116 个 type3 源**
-    // （不是 41 个）。实测 116 源 / 20 并发 / 12 秒单源预算，12 秒内只能跑完
-    // 82 个、约 20 秒跑完 111 个。30 秒对「最后十几个慢源」还是紧 —— 但用户
-    // 前 10 秒就能看到 20+ 个源的结果，所以这里只把收尾兜底放到 40 秒，
-    // 不让最后一批被整轮砍掉（用户口径：要影视壳那样「一下加载许多」）。
-    Timer(const Duration(seconds: 40), finish);
+    // SOFT_FINISH（2026-11-16 · 对齐壳）：壳（FongMi `App.searchExecutor` 20 条
+    // 线程 + 每个源一个 Future）根本没有「整体收尾」—— 谁回来算谁，页面一直
+    // 增量追加。我们原来只有一个 40 秒的整体上限，那 40 秒里页面一直转圈等
+    // 最后一个慢源，用户感受就是「壳也没这么慢」。
+    //
+    // 现在两档：
+    //   · **4 秒软收尾**（[softFinish]）：停掉页面转圈/骨架/进度条 —— 实测 86 个
+    //     可搜源 / 20 并发，3 秒就有 14 个源出结果、5 秒 20 个源，用户这时
+    //     已经有得看了；
+    //   · **60 秒硬收尾**（[finish]）：真正 close。慢源（金牌 9.1s init、
+    //     骚火 5.9s、听友 6.5s 才回）照样能在后台补进列表。
+    Timer(const Duration(seconds: 4), softFinish);
+    Timer(const Duration(seconds: 60), finish);
     return ctrl.stream;
   }
 
@@ -881,13 +930,30 @@ class CmsBridge {
     return <KSource>[for (final e in indexed) sources[e.key]];
   }
 
-  /// 反编译确认「真的按关键词搜」的类（`searchContent` 里把 key 编进了请求）。
+  /// 实测「真的按关键词搜」的类（`searchContent` 里把 key 编进了请求）。
   ///
   /// 名字是 `api` 去掉 `csp_` 再转小写（配置写 `csp_Gulu`，jar 里类叫 `Gulu`）。
+  ///
+  /// JAR_ORDER_MEASURED（2026-11-16）：这份名单原来是反编译「看代码猜」的，
+  /// 现在有 116 个源逐个实测的结果（`docs/JAR-SOURCE-PROBE-2026-11-16.md`），
+  /// 按**真的搜出「济公传」**的 24 个源重排。前一组是实测有结果的，
+  /// 后一组是「反编译看着像真搜、实测这部片没有」的（留着，换关键词会命中）。
+  ///
+  /// 为什么要按这个顺序发车：这些源一个批次一个批次地回来，先发的那批决定
+  /// 用户第一屏看到什么。实测 86 个可搜源 / 20 并发，3 秒内有 14 个源出结果 ——
+  /// 其中 12 个来自这份名单的前两行。
   static const Set<String> _jarSearchable = <String>{
-    'gulu', 'saohuo', 'jpys', 'gz360', 'appget', 'appqi', 'apprj', 'appyqk',
-    'hxq', 'push', 'czsapp', 'sp360', 'ygp', 'jike', 'kule', 'fengye', 'djuu',
-    'wogg', 'seedhub', 'xbpq', 'juxiafan', 'yunduo', 'new6v', 'renren',
+    // 实测命中（按条数）：下饭 40 / 韩圈 21 / 荐片 20 / 河马短剧 15 / 七猫短剧 10
+    // 听友听书 10 / 懂片 8 / 金牌 8 / 看剧 8 / 赏月 7 / 一起 4 / 星辰 4 / 蜻蜓FM 4
+    // 骚火 4 / 半日 3 / 咕噜 3 / 1905 2 / 剧圈 2 / 马猴 2 / 博看 1 / 布布 1 /
+    // 种子 1 / 飞娱 1
+    'juxiafan', 'hxq', 'jianpian', 'shorthema', 'shortqimao', 'tingtingyou',
+    'dongpian', 'jpys', 'kanjuai', 'animetsukimi', 'appyqk',
+    'xingchen', 'qingtingfm', 'saohuo', 'app99', 'gulu', 'web1905', 'app3q',
+    'tingbokan', 'yunduo', 'seedhub', 'feiyu',
+    // 实测这部片没有、但确认是按关键词搜的（换关键词会命中）
+    'gz360', 'appget', 'appqi', 'apprj', 'push', 'czsapp', 'sp360', 'ygp',
+    'jike', 'kule', 'fengye', 'djuu', 'wogg', 'xbpq', 'new6v', 'renren',
   };
 
   /// 反编译确认「无视关键词、只回分类/首页」的类（结果靠闸门丢）。

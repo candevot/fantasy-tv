@@ -134,13 +134,29 @@ class JarSpiderLoader(
         const val INIT_FAIL_COOLDOWN_MS = 30 * 60 * 1000L
 
         /**
-         * init 专用线程池条数：**3**（INIT_TIMEOUT 2026-11-16）。
+         * init 专用线程池条数：**20**，与 [WORKER_THREADS] 对齐（INIT_PARALLEL 2026-11-16）。
          *
-         * 慢 init 的源（SaoHuo 33 秒、Gulu 174ms）不能占着 search 的 20 条
-         * worker —— 否则「搜得快」的源还是要排在慢 init 后面。init 单独 3 条：
-         * 116 个源里真正慢的只有个位数，3 条够用，也不会把 CPU 抢光。
+         * 曾经写成 3，理由是「慢 init 不该占着 search 的线程」。实测证明那个
+         * 取舍是错的 —— 86 个可搜源、20 并发 search，两种 init 池的首屏对比：
+         *
+         * | init 池 | 1s | 2s | 3s | 5s |
+         * |---------|----|----|----|----|
+         * | 3 条    | 6 源 | 8 源 | 8 源 | 8 源 |
+         * | 20 条   | 7 源 | 10 源 | **14 源** | 20 源 |
+         *
+         * 原因很简单：**每个源第一次搜索前都必须先 init**，init 池只有 3 条
+         * 就等于把「能不能开始搜」的闸门收窄到 3 —— 慢 init 源（金牌 9.1s /
+         * 厂长 8.2s / 骚火 5.9s）把 3 条占满时，后面 80 多个源连 search 都发不出去。
+         *
+         * 壳（FongMi）的 `App.searchExecutor` 就是 20 条，init 直接在搜索线程里
+         * 做，所以 SaoHuo 那 33 秒只占 1 条、其余 19 条照跑。这里对齐壳：
+         * init 独立池 20 条，既和 search 一样宽，又不会和 search 抢同一批线程
+         * （init 慢的时候 search 仍能全速跑已 init 好的源）。
+         *
+         * 全量 init 成本实测：116 源 / 20 并发 = 墙钟 9.7 秒，其中 >1s 只有 15 个、
+         * >3s 只有 5 个 —— init 从来不是「搜索慢」的主因，收窄池子才是。
          */
-        const val INIT_THREADS = 3
+        const val INIT_THREADS = 20
     }
 
     /** 懒创建的 DexClassLoader：jar 不存在时永远不该建它。 */

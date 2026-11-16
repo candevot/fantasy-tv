@@ -8,6 +8,7 @@ import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../services/jar_plugin.dart';
 import '../services/jar_log.dart';
+import '../services/search_group.dart';
 import '../services/search_rank.dart';
 import '../services/source_hub.dart';
 import '../theme.dart';
@@ -69,33 +70,23 @@ class _SearchPageState extends State<SearchPage> {
   /// 空串 = 全部源。
   String _sourceFilter = '';
 
-  /// 每个来源各有多少条（按 label 聚合，用于筛选条）。
-  Map<String, int> get _sourceCounts {
-    final map = <String, int>{};
-    for (final card in _external) {
-      final label = card.fromSource.trim();
-      if (label.isEmpty) continue;
-      map[label] = (map[label] ?? 0) + 1;
-    }
-    return map;
-  }
-
-  /// 应用当前的按源筛选。
-  List<VideoCard> _filterBySource(List<VideoCard> list) {
-    final f = _sourceFilter;
-    if (f.isEmpty) return list;
-    return <VideoCard>[
-      for (final card in list)
-        if (card.fromSource.trim() == f) card,
-    ];
-  }
-
   final Map<SourceSearchStatus, int> _externalStates =
       <SourceSearchStatus, int>{};
 
+  /// 软收尾之后还有源在后台补（SOFT_FINISH 2026-11-16）。
+  ///
+  /// 影视壳的多源搜索没有「整轮结束」—— 谁回来算谁，页面一直增量长。
+  /// 我们把「停止转圈」提前到 4 秒（这时已有十几个源），剩下的源在后台继续
+  /// 追加；这个标记只影响文案（「后台还在补其余源」），不影响结果。
+  bool _backgroundFilling = false;
+
   /// 这一轮的 jar 源是不是有结果（决定「暂无相关结果」要不要出现）。
   bool get _jarEmpty =>
-      _external.isEmpty && _externalQueried > 0 && !_loading;
+      _external.isEmpty &&
+      _externalQueried > 0 &&
+      !_loading &&
+      // SOFT_FINISH：软收尾后源还在后台补，这时说「没有结果」是假的。
+      !_backgroundFilling;
 
   /// 外部源结局的一行小字：「命中 3 · 空 6 · 超时 2 · 出错 1」。
   String get _externalStateText {
@@ -118,16 +109,10 @@ class _SearchPageState extends State<SearchPage> {
   /// 我们自己的那批（主站采集库 + 幻想线路），段内按「实际分辨率 →
   /// 热度 → 更新时间」排序。
   ///
-  /// SEARCH_SEGMENT（2026-11-15）：产品规则是「我们的先出，肥猫的 jar 源
-  /// 陆续补」，所以结果是**两段**：前一段永远是我们自己的，后一段才是
-  /// 肥猫 / 自加的外部源；每段内部各自排序。
-  /// 之前这里是全局混排（`SearchRank.sort([..._results, ..._external])`），
-  /// 一条高分辨率的外部结果会挤到我们自己的结果上面，看列表第一屏分不出
-  /// 哪条是自己的、哪条是肥猫的，和规则相反。
-  List<VideoCard> get _ownRanked => SearchRank.sort(_results);
-
-  /// 外部源（肥猫的 jar 源 + 用户自加）那一批，段内同样排序。
-  List<VideoCard> get _externalRanked => SearchRank.sort(_external);
+  /// SEARCH_SEGMENT（2026-11-15）→ SHELL_GROUP（2026-11-16）：
+  /// 原来是「我们一段 + 外部一段」的两段长列表；现在按**源**分组
+  /// （见 [_sourceGroups]），组间「我们的源优先 → 条数多的在前」，
+  /// 组内仍走 [SearchRank.sort]（分辨率 → 冷却 → 热度 → 时间）。
 
   /// 一轮搜索的兜底看门狗：16 秒还没收到「查完了」，强制收尾。
   ///
@@ -370,6 +355,7 @@ class _SearchPageState extends State<SearchPage> {
       _externalHits = 0;
       _externalQueried = 0;
       _externalStates.clear();
+      _backgroundFilling = false;
     });
     _scrollTop();
     // 我们自己的源 300ms 还没回来：先铺骨架卡片，让用户知道在动；
@@ -424,10 +410,12 @@ class _SearchPageState extends State<SearchPage> {
         if (!mounted || req != _req) return;
         _skeletonTimer?.cancel();
         _watchdog?.cancel();
-        if (_skeleton || _loading) {
+        if (_skeleton || _loading || _backgroundFilling) {
           setState(() {
             _skeleton = false;
             _loading = false;
+            // 后台补全也结束了：进度文案不再显示「后台继续补」。
+            _backgroundFilling = false;
           });
         }
       },
@@ -468,14 +456,21 @@ class _SearchPageState extends State<SearchPage> {
       // 追加进来，页面还按 1 算的话，上拉会再取一次第 2 页。
       if (!batch.external && batch.page > _page) _page = batch.page;
       // 转圈 / 骨架只由「整轮查完」收：我们这批先回来（哪怕是个空批次）时，
-      // 肥猫那 41 个 jar 源还在跑，这时把 loading 关掉，页面会立刻显示
+      // 肥猫那 86 个 jar 源还在跑，这时把 loading 关掉，页面会立刻显示
       // 「没有找到相关影片」—— 用户看到的空态是假的。
+      //
+      // SOFT_FINISH（2026-11-16）：`finished` 现在有「软收尾」的含义 —— 4 秒时
+      // 先发一次让转圈停掉（用户这时已经能看到十几个源），流还开着，后面的源
+      // 继续追加。所以这里要记一个 `_backgroundFilling`，让进度文案说清楚
+      // 「后台还在补」，而不是让用户以为「就这么多了」。
       if (batch.finished) {
         _loading = false;
         _loadingMore = false;
         _skeleton = false;
         // 有没有下一页只看**我们自己**这一批：外部源不分页。
         _hasMore = _results.length >= 20;
+        // 还有源没回来（batch.done < batch.total）说明是软收尾，不是真结束。
+        _backgroundFilling = batch.done < batch.total;
       }
     });
     if (pinTop) _scrollTop();
@@ -1104,54 +1099,63 @@ class _SearchPageState extends State<SearchPage> {
   Widget _resultsView() {
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     final ai = _mode == 'ai';
-    final own = _ownRanked;
-    final external = _filterBySource(_externalRanked);
+    // SHELL_LAYOUT（2026-11-16）：影视壳搜索页是「左侧固定源栏 + 右侧网格」。
+    // 左栏不随结果滚动；右侧默认「全部」时按源分组（每组一个吸顶头 + 3 列网格）。
+    final groups = _sourceGroups();
+    final showRail = !ai && _railEntries(groups).length > 2;
+    final railWidth = showRail ? _railWidth(context) : 0.0;
     return Column(
       children: [
         _resultsHeader(),
         Expanded(
-          child: CustomScrollView(
-            controller: _scroll,
-            physics: const BouncingScrollPhysics(),
-            slivers: [
-              // 第一段：我们自己的片源（主站采集库 + 幻想线路）。
-              if (own.isNotEmpty) _resultSliver(own),
-              // 第二段：肥猫的 jar 源 + 自加的外部源，后补、单独一条分隔。
-              if (_external.isNotEmpty) ...<Widget>[
-                // SOURCE_FILTER：一列可点的来源（只列真的有结果的源），
-                // 点一下只看这个源 —— 和影视壳搜索页左侧那列源名一样。
-                SliverToBoxAdapter(child: _sourceFilterBar()),
-              ],
-              if (external.isNotEmpty) ...<Widget>[
-                SliverToBoxAdapter(child: _externalHeader(external.length)),
-                _resultSliver(external),
-              ],
-              // 肥猫的源查完了但一条相关结果都没有：**不要整段消失**
-              // （JAR_PROGRESS 2026-11-15）。用户至少要知道「查了、是空的」，
-              // 以及是「真没有」还是「全超时」。
-              if (!ai && external.isEmpty && _jarEmpty)
-                SliverToBoxAdapter(child: _externalEmptyNotice()),
-              // 还没查完：骨架补在下面，表示「还在查」。
-              if (_skeleton)
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-                  sliver: const SliverToBoxAdapter(
-                    child: FxSkeletonPulse(
-                      child: FxResultListSkeleton(count: 3),
-                    ),
-                  ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (showRail)
+                SizedBox(width: railWidth, child: _sourceRail(groups)),
+              Expanded(
+                child: CustomScrollView(
+                  controller: _scroll,
+                  physics: const BouncingScrollPhysics(),
+                  slivers: [
+                    // 骨架：还没查完时补在最上面（不是塞在结果中间）。
+                    if (_skeleton)
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                        sliver: const SliverToBoxAdapter(
+                          child: FxSkeletonPulse(
+                            child: FxResultListSkeleton(count: 3),
+                          ),
+                        ),
+                      ),
+                    // jar 插件没装 / 正在装：原因写在结果区上面，别让用户以为
+                    // 「外部源就是没有内容」。
+                    if (!ai && _sourceNoticeText.isNotEmpty)
+                      SliverToBoxAdapter(
+                        child: _sourceNotice(
+                          _sourceNoticeText,
+                          actionLabel:
+                              _sourceNoticeAction == null ? null : '重试',
+                          onAction: _sourceNoticeAction,
+                        ),
+                      ),
+                    // 每个源一组：吸顶头（源名 + 条数）+ 3 列海报网格。
+                    for (var i = 0; i < groups.length; i++)
+                      _sourceGroupSliver(
+                        groups[i],
+                        railWidth: railWidth,
+                        last: i == groups.length - 1,
+                      ),
+                    // 选中了一个 0 条的源（用户要求：点进去提示「该源没有这部片」）。
+                    if (!ai && groups.isEmpty && _sourceFilter.isNotEmpty)
+                      SliverToBoxAdapter(child: _sourceEmptyNotice()),
+                    // 一个源都没出结果：说明查了几个、各自什么结局。
+                    if (!ai && groups.isEmpty && _sourceFilter.isEmpty && _jarEmpty)
+                      SliverToBoxAdapter(child: _externalEmptyNotice()),
+                    SliverToBoxAdapter(child: _footer(bottom)),
+                  ],
                 ),
-              // jar 插件没装时，肥猫的源一个都出不来：把原因写在结果区上面，
-              // 不要让用户以为「外部源就是没有内容」。
-              if (!ai && _sourceNoticeText.isNotEmpty)
-                SliverToBoxAdapter(
-                  child: _sourceNotice(
-                    _sourceNoticeText,
-                    actionLabel: _sourceNoticeAction == null ? null : '重试',
-                    onAction: _sourceNoticeAction,
-                  ),
-                ),
-              SliverToBoxAdapter(child: _footer(bottom)),
+              ),
             ],
           ),
         ),
@@ -1159,125 +1163,317 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
-  /// 一段结果列表（行间 10dp；最后一行交给底部留白，不拖一条空缝）。
-  Widget _resultSliver(List<VideoCard> list) => SliverPadding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-        sliver: SliverList(
-          delegate: SliverChildBuilderDelegate(
-            (ctx, i) {
-              final item = list[i];
-              return Padding(
-                padding: EdgeInsets.only(bottom: i == list.length - 1 ? 0 : 10),
-                child: FxSearchResultTile(
-                  item: item,
-                  onTap: () => _openResult(item),
-                ),
-              );
-            },
-            childCount: list.length,
-          ),
-        ),
+  /* ------------------------------------------------------------ 按源分组 */
+
+  /// 搜索结果按「源」分组（SHELL_GROUP 2026-11-16）。
+  ///
+  /// 规则全部在 [fxGroupBySource]（`lib/services/search_group.dart`）里，
+  /// 由 `test/search_group_test.dart` 逐条钉住：
+  ///   · 分组键 = 卡片的 `sourceLabel`（源短名：咕噜 / 下饭 / 幻想…）；
+  ///   · 组间：我们自己的源优先 → 条数多的在前 → 名字；
+  ///   · 组内：`SearchRank.sort`（分辨率 → 线路冷却 → 热度 → 时间）。
+  ///
+  /// 空源（0 条 / 超时 / 出错）不进分组 —— 组是「有内容的分区」；
+  /// 它们只在左侧源栏出现（[fxRailEntries]），点进去给「该源没有这部片」。
+  List<FxSourceGroup> _sourceGroups() => fxGroupBySource(
+        <VideoCard>[..._results, ..._external],
+        filter: _sourceFilter,
+        sortCards: SearchRank.sort,
+        ownLabel: KSource.ownResultLabel,
       );
 
-  /// 按源筛选条（SOURCE_FILTER 2026-11-16）。
+  /// 左侧源栏的条目：「全部」+ 每个源（有结果的带条数，没结果的 0 条）。
   ///
-  /// 影视壳搜索页左边是一列源名，点哪个看哪个。这里做成横向可滚的一排胶囊：
-  ///   · 第一个是「全部 N」；
-  ///   · 之后每个「有结果的源」一个胶囊，带该源条数（`咕噜 8` / `苹果 3`）；
-  ///   · 一个源都没出结果时整条不显示（下面有专门的空态说明）。
+  /// 空源的名字从本轮检索计划里取（`SourceHub.searchPlan` 的 own + external
+  /// 就是这一轮真正发出去的源），用 `resultLabel` 得到和卡片 `sourceLabel`
+  /// 完全一致的短名，才能和分组对上。
+  List<FxRailEntry> _railEntries(List<FxSourceGroup> groups) {
+    final plan = SourceHub.instance.searchPlan;
+    return fxRailEntries(
+      <VideoCard>[..._results, ..._external],
+      emptyLabels: <String>[
+        for (final s in <KSource>[...plan.own, ...plan.external])
+          if (s.resultLabel.trim().isNotEmpty) s.resultLabel.trim(),
+      ],
+      sortCards: SearchRank.sort,
+      ownLabel: KSource.ownResultLabel,
+    );
+  }
+
+  /// 左侧源栏宽度（对齐壳 `CollectFragment.setWidth`）。
   ///
-  /// 只列「真的有结果」的源 —— 用户想知道的正是「哪些源出了、各出几条」，
-  /// 把 40 个空源也列出来只会更难找。
-  Widget _sourceFilterBar() {
-    final counts = _sourceCounts;
-    if (counts.isEmpty) return const SizedBox.shrink();
-    final entries = counts.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    final total = _external.length;
-    Widget chip(String label, int n, bool active, VoidCallback onTap) {
-      return Padding(
-        padding: const EdgeInsets.only(right: 8),
-        child: GestureDetector(
-          onTap: onTap,
-          behavior: HitTestBehavior.opaque,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-            decoration: BoxDecoration(
-              color: active ? Fx.accent : Fx.ink.withValues(alpha: .05),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Text(
-              '$label $n',
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-                color: active ? Colors.white : Fx.ink,
+  /// 壳的算法：`max(120dp, min(最长源名宽度 + 48dp, 屏宽/(列数+1) - 40dp))`。
+  /// 我们是 3 列网格，所以上限是 `屏宽/4 - 40dp`，并且再夹一个 96~132dp 的
+  /// 区间 —— 手机上 120dp 已经能放下「金牌影视 8」这种最长的了。
+  double _railWidth(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final maxWidth = width / 4 - 40;
+    return maxWidth.clamp(96.0, 132.0);
+  }
+
+  /// 左侧固定源栏：竖排、不随结果滚动（壳的 `collect` RecyclerView）。
+  Widget _sourceRail(List<FxSourceGroup> groups) {
+    final entries = _railEntries(groups);
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 4, 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: .55),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: .9)),
+      ),
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+        physics: const BouncingScrollPhysics(),
+        itemCount: entries.length,
+        itemBuilder: (ctx, i) {
+          final e = entries[i];
+          final active = e.label == _sourceFilter;
+          final label = e.label.isEmpty ? '全部' : e.label;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _selectSource(e.label),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+                decoration: BoxDecoration(
+                  color: active ? Fx.accent : Colors.transparent,
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        height: 1.2,
+                        fontWeight:
+                            active ? FontWeight.w600 : FontWeight.w500,
+                        // 我们自己的源用金色区分（和组标题的「优先」标记同一套
+                        // 视觉语言），一眼看出「这组是主站的」。
+                        color: active
+                            ? Colors.white
+                            : (e.own ? const Color(0xFFB47600) : Fx.ink),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${e.count}',
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        height: 1.2,
+                        color: active
+                            ? Colors.white.withValues(alpha: .85)
+                            : Fx.sub,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// 点左栏某个源：只显示它；点「全部」回到分组视图。
+  ///
+  /// 该源 0 条时不做空切换 —— 直接把结果区换成「该源没有这部片」的说明，
+  /// 但**不**改 `_sourceFilter`（用户点回「全部」还能看到其它源）。
+  void _selectSource(String label) {
+    if (label.isEmpty) {
+      if (_sourceFilter.isEmpty) return;
+      setState(() => _sourceFilter = '');
+      _scrollTop();
+      return;
+    }
+    setState(() => _sourceFilter = label);
+    _scrollTop();
+  }
+
+  /// 一组结果：吸顶头 + 3 列海报网格（SHELL_GROUP 2026-11-16）。
+  ///
+  /// 用 `SliverMainAxisGroup` 把「头」和「网格」绑在一起 —— 这样吸顶头只在
+  /// **本组**滚动期间钉在顶部，滚到下一组就自然被顶掉（壳的 RecyclerView 里
+  /// 每段标题的行为一样）。直接用 `PinnedHeaderSliver` 而不分组的话，所有头
+  /// 会一直互相顶替，滚到第 5 个源时第 1 个源的头还挂着。
+  Widget _sourceGroupSliver(
+    FxSourceGroup group, {
+    required double railWidth,
+    required bool last,
+  }) {
+    final columns = _gridColumns();
+    final width = MediaQuery.sizeOf(context).width;
+    // 网格可用宽度 = 屏宽 − 左栏 − 左右内边距(16×2) − 列间距（留 2px 余量防溢出）。
+    final usable = width - railWidth - 16 * 2 - 8 * (columns - 1) - 2;
+    final itemWidth = usable / columns;
+    return SliverMainAxisGroup(
+      slivers: [
+        PinnedHeaderSliver(child: _groupHeader(group)),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+          sliver: SliverGrid(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+              // FxPosterTile 会渲染「片名 + 来源小字 + 状态行」，
+              // 来源小字必须计入高度（withSource: true），否则每组最后一行
+              // 会被裁掉半个字。
+              mainAxisExtent: itemWidth * 1.5 +
+                  fxPosterMetaExtent(context, withSource: true),
+            ),
+            delegate: SliverChildBuilderDelegate(
+              (ctx, i) {
+                final item = group.cards[i];
+                return FxPosterTile(
+                  item: item,
+                  onTap: () => _openResult(item),
+                  showStatus: false,
+                );
+              },
+              childCount: group.cards.length,
+            ),
           ),
         ),
-      );
-    }
+        // 组尾留白：下一组的吸顶头不要贴死上一组最后一行海报。
+        SliverToBoxAdapter(child: SizedBox(height: last ? 0 : 12)),
+      ],
+    );
+  }
 
-    return SizedBox(
-      height: 42,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
-        children: <Widget>[
-          chip('全部', total, _sourceFilter.isEmpty, () {
-            if (_sourceFilter.isEmpty) return;
-            setState(() => _sourceFilter = '');
-          }),
-          for (final e in entries)
-            chip(e.key, e.value, _sourceFilter == e.key, () {
-              setState(() => _sourceFilter = _sourceFilter == e.key ? '' : e.key);
-            }),
+  /// 竖屏 3 列 / 横屏 5 列（对齐壳 `Product.getColumn`：竖屏基数 5、size 默认 2）。
+  int _gridColumns() {
+    final width = MediaQuery.sizeOf(context).width;
+    final land = width > MediaQuery.sizeOf(context).height;
+    return land ? 5 : 3;
+  }
+
+  /// 一个源的组标题（吸顶）：`源名 · N 部`，我们自己的源多一个「优先」标记。
+  Widget _groupHeader(FxSourceGroup group) {
+    return Container(
+      // 吸顶头必须不透明：下面滚过去的海报不能透出来。
+      color: const Color(0xFFF7FAFF),
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 12,
+            decoration: BoxDecoration(
+              color: group.own
+                  ? Fx.gold.withValues(alpha: .85)
+                  : Fx.accent.withValues(alpha: .55),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 7),
+          Text(
+            group.label,
+            style: const TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600, color: Fx.ink),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '${group.cards.length}',
+            style: const TextStyle(
+                fontSize: 11, fontWeight: FontWeight.w400, color: Fx.sub),
+          ),
+          if (group.own) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(
+                color: Fx.gold.withValues(alpha: .14),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text(
+                '优先',
+                style: TextStyle(
+                    fontSize: 9.5,
+                    height: 1.3,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFB47600)),
+              ),
+            ),
+          ],
+          const Spacer(),
+          if (_backgroundFilling)
+            const Text(
+              '后台补全中',
+              style: TextStyle(fontSize: 10.5, color: Color(0xFFA6B1C2)),
+            ),
         ],
       ),
     );
   }
 
-  /// 外部源分区的分隔标题：让用户一眼看出「下面这些来自肥猫的 jar 源」。
-  Widget _externalHeader(int count) => Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
-        child: Row(
-          children: [
-            Container(
-              width: 3,
-              height: 12,
-              decoration: BoxDecoration(
-                color: Fx.accent.withValues(alpha: .55),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(width: 7),
-            Text(
-              '肥猫的源',
-              style: const TextStyle(
-                  fontSize: 12, fontWeight: FontWeight.w600, color: Fx.ink),
-            ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                _externalStateText.isEmpty
-                    ? '外部源结果 · $count 部'
-                    : '外部源结果 · $count 部（$_externalStateText）',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11, color: Fx.sub),
-              ),
-            ),
-          ],
-        ),
-      );
-
-  /// 肥猫的源查完但一条相关结果都没有时的说明（JAR_PROGRESS 2026-11-15）。
+  /// 点了一个「0 条」的源：明确告诉用户「这个源没有这部片」，并给回全部的路。
   ///
-  /// 为什么不能「整段不显示」：用户搜「济公传」看到肥猫分区整个消失，会以为
-  /// 是插件坏了；而实际情况可能是「这些源确实没这部片」或「站点全超时」。
+  /// SHELL_GROUP（2026-11-16）：壳的左栏里空源也列着，点进去右边是空的 ——
+  /// 用户会以为是加载失败。这里把「确实查了、确实没有」说清楚，并且不把
+  /// `_sourceFilter` 清掉（用户可以自己点左栏「全部」回去）。
+  Widget _sourceEmptyNotice() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
+      decoration: BoxDecoration(
+        color: Fx.ink.withValues(alpha: .04),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Fx.ink.withValues(alpha: .08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.search_off_rounded, size: 16, color: Fx.sub),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '「$_sourceFilter」没有「${_lastQuery ?? ''}」',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w600, color: Fx.ink),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            _backgroundFilling ? '这个源还在后台查，稍等一下，或者先看别的源' : '这个源确实查过了，站点上没有这部片',
+            style: const TextStyle(fontSize: 11, height: 1.45, color: Fx.sub),
+          ),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: () => _selectSource(''),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(0, 32),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text('看全部源',
+                style: TextStyle(fontSize: 12, color: Fx.accent)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 所有源都查完、却一条相关结果都没有时的说明（JAR_PROGRESS 2026-11-15）。
+  ///
+  /// 为什么不能「整段不显示」：用户搜「济公传」看到整片空白，会以为是插件坏了；
+  /// 而实际情况可能是「这些源确实没这部片」或「站点全超时」。
   /// 这里把**查了几个源、各自什么结局**写清楚，并把「重试」直接给出来
   /// （不用用户再点一次搜索按钮）。
+  ///
+  /// SHELL_GROUP（2026-11-16）：分组视图下它的位置变成「一条结果都没有」时的
+  /// 兜底说明；有结果时各组自己带标题，不再需要「肥猫源」这个分区标题。
   Widget _externalEmptyNotice() {
     final detail = _externalStateText.isEmpty
         ? '已查 $_externalQueried 个源'
@@ -1298,7 +1494,7 @@ class _SearchPageState extends State<SearchPage> {
               const Icon(Icons.pets_outlined, size: 15, color: Fx.sub),
               const SizedBox(width: 8),
               Text(
-                '肥猫源暂无相关结果',
+                _results.isEmpty ? '外部源暂无相关结果' : '这个源没有这部片',
                 style: const TextStyle(
                     fontSize: 13, fontWeight: FontWeight.w600, color: Fx.ink),
               ),
@@ -1336,8 +1532,12 @@ class _SearchPageState extends State<SearchPage> {
   Widget _resultsHeader() {
     final ai = _mode == 'ai';
     final count = _results.length + _external.length;
+    // SOFT_FINISH（2026-11-16）：4 秒软收尾后页面不再转圈，但源还在后台补 ——
+    // 进度文案要一直显示「已查 X/Y」，让用户知道数字还在涨，而不是以为卡住了。
     final progress = !ai && _total > 0
-        ? '已查 $_done/$_total 个源${_externalQueried > 0 ? ' · 命中 $_externalHits' : ''}'
+        ? '已查 $_done/$_total 个源'
+            '${_externalQueried > 0 ? ' · 命中 $_externalHits' : ''}'
+            '${_backgroundFilling ? ' · 补全中' : ''}'
         : '';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
@@ -1489,11 +1689,13 @@ class _SearchPageState extends State<SearchPage> {
       padding: EdgeInsets.only(top: 24, bottom: 26 + keyboard),
       child: Center(
         child: Text(
-          _mode == 'search' && !_hasMore
-              ? '— 没有更多结果了 —'
-              : _mode == 'ai'
-                  ? '以上由 AI 根据片库匹配，仅供参考'
-                  : '',
+          _mode == 'search' && _backgroundFilling
+              ? '其余源还在后台补，稍等会继续出现'
+              : _mode == 'search' && !_hasMore
+                  ? '— 没有更多结果了 —'
+                  : _mode == 'ai'
+                      ? '以上由 AI 根据片库匹配，仅供参考'
+                      : '',
           style: const TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w400,
