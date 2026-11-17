@@ -501,12 +501,22 @@ class SourceHub extends ChangeNotifier {
   /// （HTML），只有播放器 UA 才回配置本身。肥猫回的配置还是加密的。
   static const String tvBoxUserAgent = 'okhttp/3.12.12';
 
-  /// 默认 TVBox 配置地址（肥猫）。设置页的「配置地址」预填它，
-  /// 首次启动也自动拉一次导入 —— 装完就有源，不用用户自己去别处找。
-  static const String defaultTvBoxUrl = 'http://肥猫.net/';
+  /// 默认 TVBox 配置地址（DEFAULT_CONFIG 2026-11-18）。
+  ///
+  /// 原来指向 `http://肥猫.net/` —— 这个地址已经不通了。首次启动的自动导入
+  /// 因此永远失败，App 里只剩用户手动加的那几个源：搜片时只有咕噜能出结果，
+  /// 其余源一个都没有（用户实测就是这个现象）。
+  ///
+  /// 现在指向我们自己的 `hx_all.json`：116 个肥猫 jar 源 + 我们的幻想，
+  /// 装完首次启动就能导入全量源。
+  static const String defaultTvBoxUrl = 'http://125.94.244.87/hx_all.json';
 
   /// 首次自动导入的超时：失败静默，绝不拦首屏。
-  static const Duration autoImportTimeout = Duration(seconds: 3);
+  /// 首次自动导入的超时（AUTO_IMPORT_V2）：3s → 8s。
+  ///
+  /// 现在导的是 `hx_all.json`（116 个源 + 协议面），3 秒经常只拿到半截就被
+  /// 判超时；导入在首帧之后异步跑，不挡首屏，给 8 秒能把全量源吃下来。
+  static const Duration autoImportTimeout = Duration(seconds: 8);
 
   /// 中文域名 → punycode。
   ///
@@ -532,7 +542,8 @@ class SourceHub extends ChangeNotifier {
   static const String _kRemoved = 'fx_sources_removed_v1';
   static const String _kUser = 'fx_sources_user_v1';
   static const String _kFetchedAt = 'fx_sources_fetched_at_v1';
-  static const String _kAutoImported = 'fx_sources_auto_tvbox_v1';
+  /// 自动导入标记（v2：换了默认配置地址，老装机也要重新导一次全量源）。
+  static const String _kAutoImported = 'fx_sources_auto_tvbox_v2';
 
   /// 协议面（`parses` / `flags` / `ads` / `hosts` / `rules` / `doh` / `spider`）
   /// 的落盘键 —— 配置拉不到时也要能按上一份继续解析。
@@ -1139,10 +1150,10 @@ class SourceHub extends ChangeNotifier {
     try {
       final sp = await SharedPreferences.getInstance();
       if (sp.getBool(_kAutoImported) == true) return;
-      if (_user.isNotEmpty) {
-        await sp.setBool(_kAutoImported, true);
-        return;
-      }
+      // AUTO_IMPORT_V2（2026-11-18）：**不再因为「已经有几个源」就跳过**。
+      // 旧逻辑是 `_user.isNotEmpty` 直接置标记返回 —— 用户手动加过一两个源
+      // 就永远拿不到全量配置，搜索只剩那一两个源能出结果。
+      // 现在按 v2 标记判断：老装机也会重新导一次 hx_all.json 的 116 个源。
       final result = await importTvBox(
         defaultTvBoxUrl,
         timeout: autoImportTimeout,

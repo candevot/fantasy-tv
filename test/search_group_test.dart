@@ -62,7 +62,7 @@ void main() {
     });
   });
 
-
+  group('fxGroupBySource', () {
     test('内部 key 显示成可读源名（u__咕噜_app → 咕噜 • APP）', () {
       final groups = fxGroupBySource(<VideoCard>[
         _pollutedCard('济公传', 'u__咕噜_app'),
