@@ -45,7 +45,13 @@ List<VideoCard> _reverse(List<VideoCard> cards) =>
 void main() {
   group('fxLooksLikeAudioContent', () {
     test('相声/评书/音乐这类非影视内容被识别出来', () {
-      VideoCard c(String t, {String cat = ''}) => VideoCard(
+      VideoCard c(String t) => VideoCard(
+            id: '@src:明星::$t',
+            title: t,
+            cover: '',
+            sourceLabel: '明星',
+          );
+      VideoCard cCat(String t, String cat) => VideoCard(
             id: '@src:明星::$t',
             title: t,
             cover: '',
@@ -55,7 +61,7 @@ void main() {
       expect(fxLooksLikeAudioContent(c('郭德纲｜长篇单口相声｜全本【济公传】')), isTrue);
       expect(fxLooksLikeAudioContent(c('《济公传》郭德纲评书全集')), isTrue);
       expect(fxLooksLikeAudioContent(c('某某歌曲合集')), isTrue);
-      expect(fxLooksLikeAudioContent(c('济公传'), cat: '相声'), isTrue);
+      expect(fxLooksLikeAudioContent(cCat('济公传', '相声')), isTrue);
       // 正常影视不能误杀
       expect(fxLooksLikeAudioContent(c('济公传')), isFalse);
       expect(fxLooksLikeAudioContent(c('梦幻西游之天命之战')), isFalse);
