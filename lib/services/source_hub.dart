@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -1147,7 +1148,15 @@ class SourceHub extends ChangeNotifier {
   /// 触发条件：没成功导过、且用户手上还没有自加源（老用户升级上来不该被
   /// 突然塞一堆源，删过源的也不重灌）。3 秒超时、失败静默并且**不写标记**，
   /// 下次启动再试 —— 首屏不等它，网络差也就是没有这些源而已。
+  /// 单元测试环境里不碰网络（TEST_GUARD 2026-11-18）。
+  ///
+  /// 自动导入会发真实 HTTP 请求、超时 8 秒；`flutter test` 里测试跑完时这些
+  /// 定时器还挂着，会报 "A Timer is still pending" 把门禁测试判红。
+  static bool get _underTest =>
+      Platform.environment['FLUTTER_TEST'] == 'true';
+
   Future<void> _importDefaultTvBoxOnce() async {
+    if (_underTest) return;
     try {
       final sp = await SharedPreferences.getInstance();
       if (sp.getBool(_kAutoImported) == true) return;
