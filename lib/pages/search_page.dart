@@ -447,6 +447,10 @@ class _SearchPageState extends State<SearchPage> {
       // 追加时按 id 去重：流里除了第 1 页还会补一波第 2 页，上拉再取同一页
       // 时不能把同一部片挂两遍。
       _appendUnique(batch.external ? _external : _results, batch.items);
+      // SKELETON_CLEAR（2026-11-18）：**一有结果就撤骨架**。
+      // 原来骨架只由「整轮查完」（4 秒软收尾）撤，结果已经上屏了骨架还挂在
+      // 列表最上面，用户看到的就是「搜索上面空出来一大块」。
+      if (batch.items.isNotEmpty) _skeleton = false;
       // 到达顺序：**谁先回来谁先上屏**（不受源在配置里的位置影响）。
       _noteArrival(batch.items);
       _done = batch.done;

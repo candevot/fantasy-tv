@@ -546,6 +546,9 @@ class SourceHub extends ChangeNotifier {
   /// 自动导入标记（v2：换了默认配置地址，老装机也要重新导一次全量源）。
   static const String _kAutoImported = 'fx_sources_auto_tvbox_v2';
 
+  /// 上次导入时服务端配置的 md5（用来判断「配置变了没有」）。
+  static const String _kConfigMd5 = 'fx_sources_config_md5_v1';
+
   /// 协议面（`parses` / `flags` / `ads` / `hosts` / `rules` / `doh` / `spider`）
   /// 的落盘键 —— 配置拉不到时也要能按上一份继续解析。
   static const String _kProtocol = 'fx_sources_protocol_v1';
@@ -1159,7 +1162,15 @@ class SourceHub extends ChangeNotifier {
     if (_underTest) return;
     try {
       final sp = await SharedPreferences.getInstance();
-      if (sp.getBool(_kAutoImported) == true) return;
+      // CONFIG_REFRESH（2026-11-18）：配置变了就重导一次。
+      // 原来导过一次就永不再看服务端 —— 服务端删掉的源（明星 mv / 哔哩合集）
+      // 手机上照旧显示、照旧去搜，用户看到「我说删了还在」。
+      final remoteMd5 = await _fetchConfigMd5();
+      final localMd5 = sp.getString(_kConfigMd5) ?? '';
+      if (sp.getBool(_kAutoImported) == true &&
+          (remoteMd5.isEmpty || remoteMd5 == localMd5)) {
+        return;
+      }
       // AUTO_IMPORT_V2（2026-11-18）：**不再因为「已经有几个源」就跳过**。
       // 旧逻辑是 `_user.isNotEmpty` 直接置标记返回 —— 用户手动加过一两个源
       // 就永远拿不到全量配置，搜索只剩那一两个源能出结果。
@@ -1171,9 +1182,24 @@ class SourceHub extends ChangeNotifier {
       );
       if (result.added > 0) {
         await sp.setBool(_kAutoImported, true);
+        if (remoteMd5.isNotEmpty) await sp.setString(_kConfigMd5, remoteMd5);
       }
     } catch (_) {
       // 静默：没网 / 超时 / 配置换了格式，都当没这回事。
+    }
+  }
+
+  /// 取服务端配置的 md5（`hx_all.json.md5`）；取不到返回空串（按不刷新处理）。
+  Future<String> _fetchConfigMd5() async {
+    try {
+      final res = await http
+          .get(Uri.parse('$defaultTvBoxUrl.md5'))
+          .timeout(const Duration(seconds: 5));
+      if (res.statusCode != 200) return '';
+      final m = RegExp(r'[0-9a-fA-F]{32}').firstMatch(res.body.trim());
+      return m?.group(0) ?? '';
+    } catch (_) {
+      return '';
     }
   }
 
