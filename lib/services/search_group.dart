@@ -121,6 +121,20 @@ const Set<String> _kCategoryLike = <String>{
 /// 这个名字像不像「分类名」而不是源名。
 bool fxLooksLikeCategory(String name) => _kCategoryLike.contains(name.trim());
 
+/// 左栏去重键（RAIL_DEDUPE 2026-11-17）：`咕噜 • APP` 与 `咕噜` 是同一个源。
+///
+/// 用户实测左栏「咕噜」出现两次：有结果的那组用的是 `咕噜 • APP`
+/// （从卡片 id 的 key 还原），没结果的那条用的是配置里的短名 `咕噜`
+/// （`KSource.resultLabel`）。两个字符串不等 → 同一个源占了两行。
+/// 这里把它归一成 `咕噜` 再比。
+String fxRailDedupeKey(String label) {
+  var l = label.trim();
+  if (l.isEmpty) return l;
+  final at = l.indexOf(' • ');
+  if (at > 0) l = l.substring(0, at).trim();
+  return l.toLowerCase();
+}
+
 /// [filter] 非空时只保留该源（左侧源栏点某个源）。
 /// [sortCards] 决定组内顺序；不传就保持原顺序（测试 / 不需要排序的调用方）。
 /// [ownLabel] 是「我们自己的源」的标签，默认 [kOwnSourceLabel]。
@@ -234,12 +248,13 @@ List<FxRailEntry> fxRailEntries(
   final out = <FxRailEntry>[
     FxRailEntry(label: '', count: total, own: false),
     for (final g in groups)
-      if (seen.add(g.label))
+      // RAIL_DEDUPE：按「短名」去重，`咕噜 • APP` 与 `咕噜` 只留一行。
+      if (seen.add(fxRailDedupeKey(g.label)))
         FxRailEntry(label: g.label, count: g.count, own: g.own),
   ];
   for (final raw in emptyLabels) {
     final label = raw.trim();
-    if (label.isEmpty || !seen.add(label)) continue;
+    if (label.isEmpty || !seen.add(fxRailDedupeKey(label))) continue;
     out.add(FxRailEntry(label: label, count: 0, own: false));
   }
   return out;

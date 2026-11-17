@@ -635,7 +635,13 @@ class SourceHub extends ChangeNotifier {
   /// 分不清是谁先放弃。现在源级 12 秒 > 通道 12 秒内的两次尝试预算
   /// （[JarSpider.searchBudget] = 11 秒），层次清楚：**先由 jar 报「这个源
   /// 超时/出错」，源级只兜底**。
-  static const Duration sourceTimeout = Duration(seconds: 12);
+  /// 单源超时（SEARCH_FAST 2026-11-17）：12s → 8s。
+  ///
+  /// 用户实测「搜索加载太慢」：36 个源、20 并发、单源 12 秒，最坏要等
+  /// 两轮 = 24 秒才出齐。实测 98% 的源在 3 秒内返回（首条 552ms），
+  /// 12 秒只是给极慢源留的余量；压到 8 秒，慢源该失败就失败，
+  /// 用户不用陪着等。
+  static const Duration sourceTimeout = Duration(seconds: 8);
 
   /* ------------------------------------------------------ jar 插件可用性 */
 
