@@ -1143,12 +1143,27 @@ class _SearchPageState extends State<SearchPage> {
     );
   }
 
+  /// 平铺结果（SHELL_FLAT 2026-11-18）：影视壳的搜索结果是**一整块网格**，
+  /// 每张海报自己带站源角标，不按源分区、没有分区标题、也不显示「已查 X/Y」。
+  List<VideoCard> get _flatRanked {
+    final all = <VideoCard>[..._results, ..._external];
+    if (_sourceFilter.isEmpty) return all;
+    final f = fxFriendlySourceName(_sourceFilter);
+    return <VideoCard>[
+      for (final c in all)
+        if (fxFriendlySourceName(fxSourceKeyOf(c)) == f ||
+            c.sourceLabel.trim() == f)
+          c,
+    ];
+  }
+
   Widget _resultsView() {
     final bottom = MediaQuery.of(context).viewInsets.bottom;
     final ai = _mode == 'ai';
     // SHELL_LAYOUT（2026-11-16）：影视壳搜索页是「左侧固定源栏 + 右侧网格」。
     // 左栏不随结果滚动；右侧默认「全部」时按源分组（每组一个吸顶头 + 3 列网格）。
     final groups = _sourceGroups();
+    final flat = _flatRanked;
     final showRail = !ai && _railEntries(groups).length > 2;
     final railWidth = showRail ? _railWidth(context) : 0.0;
     return Column(
@@ -1186,12 +1201,33 @@ class _SearchPageState extends State<SearchPage> {
                           onAction: _sourceNoticeAction,
                         ),
                       ),
-                    // 每个源一组：吸顶头（源名 + 条数）+ 3 列海报网格。
-                    for (var i = 0; i < groups.length; i++)
-                      _sourceGroupSliver(
-                        groups[i],
-                        railWidth: railWidth,
-                        last: i == groups.length - 1,
+                    // SHELL_FLAT：一整块两列海报网格（壳就是这样），不分区。
+                    if (flat.isNotEmpty)
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
+                        sliver: SliverGrid(
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            crossAxisSpacing: 10,
+                            mainAxisSpacing: 12,
+                            mainAxisExtent:
+                                (MediaQuery.sizeOf(context).width -
+                                            railWidth -
+                                            10 * 2 -
+                                            10) /
+                                        2 *
+                                        1.5 +
+                                    24,
+                          ),
+                          delegate: SliverChildBuilderDelegate(
+                            (ctx, i) => FxShellPosterTile(
+                              item: flat[i],
+                              onTap: () => _openResult(flat[i]),
+                            ),
+                            childCount: flat.length,
+                          ),
+                        ),
                       ),
                     // 选中了一个 0 条的源（用户要求：点进去提示「该源没有这部片」）。
                     if (!ai && groups.isEmpty && _sourceFilter.isNotEmpty)
@@ -1344,118 +1380,6 @@ class _SearchPageState extends State<SearchPage> {
     _scrollTop();
   }
 
-  /// 一组结果：吸顶头 + 3 列海报网格（SHELL_GROUP 2026-11-16）。
-  ///
-  /// 用 `SliverMainAxisGroup` 把「头」和「网格」绑在一起 —— 这样吸顶头只在
-  /// **本组**滚动期间钉在顶部，滚到下一组就自然被顶掉（壳的 RecyclerView 里
-  /// 每段标题的行为一样）。直接用 `PinnedHeaderSliver` 而不分组的话，所有头
-  /// 会一直互相顶替，滚到第 5 个源时第 1 个源的头还挂着。
-  Widget _sourceGroupSliver(
-    FxSourceGroup group, {
-    required double railWidth,
-    required bool last,
-  }) {
-    return SliverMainAxisGroup(
-      slivers: [
-        PinnedHeaderSliver(child: _groupHeader(group)),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-          // SHELL_POSTER（2026-11-18）：照影视壳——**两列海报网格**，
-          // 每张卡左上角红胶囊写站源、海报底部绿标签写集数、下面一行片名。
-          // 之前改过竖排列表，和壳的观感差很远；壳就是两列海报。
-          sliver: SliverPadding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
-            sliver: SliverGrid(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                crossAxisSpacing: 10,
-                mainAxisSpacing: 12,
-                // 海报 2:3 + 片名一行
-                mainAxisExtent: (MediaQuery.sizeOf(context).width -
-                            railWidth -
-                            10 * 2 -
-                            10) /
-                        2 *
-                        1.5 +
-                    24,
-              ),
-              delegate: SliverChildBuilderDelegate(
-                (ctx, i) => FxShellPosterTile(
-                  item: group.cards[i],
-                  onTap: () => _openResult(group.cards[i]),
-                ),
-                childCount: group.cards.length,
-              ),
-            ),
-          ),
-        ),
-        // 组尾留白：下一组的吸顶头不要贴死上一组最后一行海报。
-        SliverToBoxAdapter(child: SizedBox(height: last ? 0 : 12)),
-      ],
-    );
-  }
-
-
-
-  /// 一个源的组标题（吸顶）：`源名 · N 部`，我们自己的源多一个「优先」标记。
-  Widget _groupHeader(FxSourceGroup group) {
-    return Container(
-      // 吸顶头必须不透明：下面滚过去的海报不能透出来。
-      color: const Color(0xFFF7FAFF),
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-      child: Row(
-        children: [
-          Container(
-            width: 3,
-            height: 12,
-            decoration: BoxDecoration(
-              color: group.own
-                  ? Fx.gold.withValues(alpha: .85)
-                  : Fx.accent.withValues(alpha: .55),
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          const SizedBox(width: 7),
-          Text(
-            group.label,
-            style: const TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w600, color: Fx.ink),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            '${group.cards.length}',
-            style: const TextStyle(
-                fontSize: 11, fontWeight: FontWeight.w400, color: Fx.sub),
-          ),
-          if (group.own) ...[
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(
-                color: Fx.gold.withValues(alpha: .14),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: const Text(
-                '优先',
-                style: TextStyle(
-                    fontSize: 9.5,
-                    height: 1.3,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFFB47600)),
-              ),
-            ),
-          ],
-          const Spacer(),
-          if (_backgroundFilling)
-            const Text(
-              '后台补全中',
-              style: TextStyle(fontSize: 10.5, color: Color(0xFFA6B1C2)),
-            ),
-        ],
-      ),
-    );
-  }
-
   /// 点了一个「0 条」的源：明确告诉用户「这个源没有这部片」，并给回全部的路。
   ///
   /// SHELL_GROUP（2026-11-16）：壳的左栏里空源也列着，点进去右边是空的 ——
@@ -1576,13 +1500,9 @@ class _SearchPageState extends State<SearchPage> {
   Widget _resultsHeader() {
     final ai = _mode == 'ai';
     final count = _results.length + _external.length;
-    // SOFT_FINISH（2026-11-16）：4 秒软收尾后页面不再转圈，但源还在后台补 ——
-    // 进度文案要一直显示「已查 X/Y」，让用户知道数字还在涨，而不是以为卡住了。
-    final progress = !ai && _total > 0
-        ? '已查 $_done/$_total 个源'
-            '${_externalQueried > 0 ? ' · 命中 $_externalHits' : ''}'
-            '${_backgroundFilling ? ' · 补全中' : ''}'
-        : '';
+    // SHELL_FLAT：壳的搜索页不显示「已查 X/Y 个源」这种进度数字，
+    // 只有「结果 N 部」。进度留在日志里（fxJarLog），界面不占位。
+    const progress = '';
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
       child: Row(

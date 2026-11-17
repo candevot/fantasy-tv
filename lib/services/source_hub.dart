@@ -1011,9 +1011,11 @@ class SourceHub extends ChangeNotifier {
       // SOURCE_BLOCK：网盘 / 课堂 / 体育 / 音频 / 配置文件这类源
       // 不参与检索（面板里仍会列出来，只是点不动）。
       if (!usableForContent(s)) return;
-      // FAIL_LEDGER（第 8 条）：这个源正在冷却 —— 批量检索跳过它，
-      // 别让一轮搜索在死源上白等。用户主动点进详情 / 播放不受影响。
-      if (_failures.shouldSkip(s.key)) return;
+      // ALL_SOURCES（2026-11-18）：**用户主动搜索时不再按冷却跳源**。
+      //
+      // 原来失败两次就冷静 10 分钟（crash 30 分钟），期间这个源在搜索里
+      // 根本不发请求 —— 用户看到的就是「有几个源根本没搜」。
+      // 搜索是用户主动要结果，宁可多等几秒，也不能悄悄少搜。
       // jar 插件没装：这些源一次也查不出来（原生只会回 no_jar），
       // 跳过它们，别让每次搜索白等 8 秒（JAR_NOTICE）。
       if (s.kind == KSourceKind.jar && _jarReady == false) return;
@@ -1082,11 +1084,10 @@ class SourceHub extends ChangeNotifier {
     final external = <KSource>[];
     final ownSeen = <String>{};
     final extSeen = <String>{};
+    // ALL_SOURCES：冷却不再影响搜索（见上面同名字段的说明）。
     bool usable(KSource s) =>
         usableForContent(s) &&
-        !(s.kind == KSourceKind.jar && _jarReady == false) &&
-        // 冷却中的源不参与本轮（`SourceFailureLedger`）。
-        !_failures.shouldSkip(s.key);
+        !(s.kind == KSourceKind.jar && _jarReady == false);
     for (final s in visibleCloud) {
       if (!usable(s)) continue;
       if (!ownSeen.add(keyOf(s))) continue;
