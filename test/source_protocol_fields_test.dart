@@ -123,8 +123,9 @@ void main() {
         'origin': 'cloud',
       });
       expect(normal.ownTimeout, isNull);
-      // 全局兜底还是 12 秒（这次只让**配了的**源突破它）。
-      expect(SourceHub.sourceTimeout, const Duration(seconds: 12));
+      // 全局兜底（2026-11-18 从 12s 调到 8s：36 个源并发时 12 秒整体太慢，
+      // 实测 98% 的源 3 秒内返回）。这里锁住当前值，改动要同步改本断言。
+      expect(SourceHub.sourceTimeout, const Duration(seconds: 8));
     });
 
     test('timeout 传进 CmsClient 的站点画像', () {
