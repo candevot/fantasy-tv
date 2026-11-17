@@ -1360,25 +1360,32 @@ class _SearchPageState extends State<SearchPage> {
         PinnedHeaderSliver(child: _groupHeader(group)),
         SliverPadding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-          // VERTICAL_LIST（2026-11-16）：用户要「两侧竖排」——左边竖排源栏，
-          // 右边也是竖排列表（每部片一整行），不是海报网格。
-          // 网格里片名只放得下一行，2~3 列必然截断（「济公传[电影…」），
-          // 竖排行左侧有 84×112 海报 + 右侧两行片名 + 来源 + 状态，名字看得全。
-          sliver: SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (ctx, i) {
-                final item = group.cards[i];
-                return Padding(
-                  padding: EdgeInsets.only(
-                    bottom: i == group.cards.length - 1 ? 0 : 10,
-                  ),
-                  child: FxSearchResultTile(
-                    item: item,
-                    onTap: () => _openResult(item),
-                  ),
-                );
-              },
-              childCount: group.cards.length,
+          // SHELL_POSTER（2026-11-18）：照影视壳——**两列海报网格**，
+          // 每张卡左上角红胶囊写站源、海报底部绿标签写集数、下面一行片名。
+          // 之前改过竖排列表，和壳的观感差很远；壳就是两列海报。
+          sliver: SliverPadding(
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
+            sliver: SliverGrid(
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                crossAxisSpacing: 10,
+                mainAxisSpacing: 12,
+                // 海报 2:3 + 片名一行
+                mainAxisExtent: (MediaQuery.sizeOf(context).width -
+                            railWidth -
+                            10 * 2 -
+                            10) /
+                        2 *
+                        1.5 +
+                    24,
+              ),
+              delegate: SliverChildBuilderDelegate(
+                (ctx, i) => FxShellPosterTile(
+                  item: group.cards[i],
+                  onTap: () => _openResult(group.cards[i]),
+                ),
+                childCount: group.cards.length,
+              ),
             ),
           ),
         ),

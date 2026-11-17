@@ -1152,3 +1152,131 @@ class _FxCoverInitial extends StatelessWidget {
     );
   }
 }
+
+/// 搜索结果海报（SHELL_POSTER 2026-11-18）：照影视壳的搜索卡片做。
+///
+/// 壳的搜索结果是**两列海报**，每张卡：
+///   · 左上角红色胶囊 = 站源名（`咕噜 • APP`）
+///   · 海报底部左侧绿色标签 = 集数状态（`58集全` / `已完结` / `更新至N集`）
+///   · 海报下面一行片名
+///
+/// 我们原来是竖排列表（宽而高、一屏只能看三四条），和壳的观感差很远。
+class FxShellPosterTile extends StatelessWidget {
+  const FxShellPosterTile({
+    super.key,
+    required this.item,
+    this.onTap,
+    this.radius = 12,
+  });
+
+  final VideoCard item;
+  final VoidCallback? onTap;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final status = fxListBadge(item);
+    final source = item.sourceLabel.trim();
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(radius),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  FxCover(url: item.cover, title: item.title, radius: radius),
+                  // 站源胶囊（红）：壳把它贴在海报左上角
+                  if (source.isNotEmpty)
+                    Positioned(
+                      left: 6,
+                      top: 6,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE8443A),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          source,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 9.5,
+                            height: 1.2,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                  // 集数状态（绿）：壳贴在海报左下角
+                  if (status != null)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(6, 10, 6, 5),
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [Color(0x00000000), Color(0xCC000000)],
+                          ),
+                        ),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 5,
+                              vertical: 1.5,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF16A34A),
+                              borderRadius: BorderRadius.circular(3),
+                            ),
+                            child: Text(
+                              status,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 9.5,
+                                height: 1.2,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            item.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 12.5,
+              height: 1.2,
+              fontWeight: FontWeight.w500,
+              color: Fx.ink,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
