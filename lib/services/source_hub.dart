@@ -1130,8 +1130,17 @@ class SourceHub extends ChangeNotifier {
 
   Future<void> _boot() async {
     await _loadCache();
-    // 首次启动：后台把默认 TVBox 配置（肥猫）导一次，不挡首屏。
-    unawaited(_importDefaultTvBoxOnce());
+    // 首次启动：导入默认 TVBox 配置（我们自己的 hx_all.json）。
+    //
+    // BOOT_IMPORT（2026-11-18）：**手上一个 jar 源都没有时必须等它导完**。
+    // 原来是无条件 `unawaited(...)` 后台跑 —— 装完第一次搜索时源还没导进来，
+    // 结果只有咕噜能出东西（用户实测就是这个）。有源了才后台补。
+    final hasJarSource = _user.any((s) => s.kind == KSourceKind.jar);
+    if (hasJarSource) {
+      unawaited(_importDefaultTvBoxOnce());
+    } else {
+      await _importDefaultTvBoxOnce();
+    }
     // 缓存过期或从来没拉过：后台补一次，不挡首屏。
     final age = _fetchedAt <= 0
         ? null
