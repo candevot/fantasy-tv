@@ -92,7 +92,7 @@ class JarSpiderLoader(
          * 壳是多源并行，这里提到 20，和 Dart 侧
          * `JarSpider.maxConcurrentSearches` 保持一致。
          */
-        const val WORKER_THREADS = 20
+        const val WORKER_THREADS = 72
 
         /** 类名没有包名时补这个前缀（TVBox 的约定）。 */
         const val CLASS_PREFIX = "com.github.catvod.spider."
@@ -156,7 +156,7 @@ class JarSpiderLoader(
          * 全量 init 成本实测：116 源 / 20 并发 = 墙钟 9.7 秒，其中 >1s 只有 15 个、
          * >3s 只有 5 个 —— init 从来不是「搜索慢」的主因，收窄池子才是。
          */
-        const val INIT_THREADS = 20
+        const val INIT_THREADS = 72
     }
 
     /** 懒创建的 DexClassLoader：jar 不存在时永远不该建它。 */
