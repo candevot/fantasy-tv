@@ -740,7 +740,12 @@ class CmsBridge {
         // 索引坏了也要能搜：下面的 plan 为空表就只查主站。
       }
       if (closed) return;
-      // jar 插件状态：没装就**不**去敲那 41 个 jar 源（每个 8 秒），
+      // SEARCH_READY（2026-11-18）：**搜索前确认源表已经导进来了**。
+      // 以前默认配置是后台异步导入的，第一次搜索发车时源表还是空的，
+      // 结果只有咕噜能出东西。这里没有 jar 源就同步导一遍再发车。
+      await hub.ensureSourcesImported();
+      if (closed) return;
+      // jar 插件状态：没装就**不**去敲那些 jar 源（每个 8 秒），
       // 页面改为显示「需要先安装 jar 插件」的提示（SourceHub.jarNotice）。
       await hub.ensureJarStatus();
       if (closed) return;
