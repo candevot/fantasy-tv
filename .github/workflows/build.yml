@@ -297,8 +297,8 @@ jobs:
         run: |
           set -e
           # 结构性断言：详情超时必须是「外部源 12 秒 / 本站 12 秒」两个常量
-          # （外部源 2026-11-18 从 20s 收紧到 12s：等 20 秒用户只看到卡住）。
-          grep -q 'externalDetailTimeout = Duration(seconds: 12)' lib/services/cms_bridge.dart
+          # （2026-11-19：从 12s 又还原成 20s —— 12 秒会让咕噜 detail 直接超时放不了）。
+          grep -q 'externalDetailTimeout = Duration(seconds: 20)' lib/services/cms_bridge.dart
           grep -q 'ownDetailTimeout = Duration(seconds: 12)' lib/services/cms_bridge.dart
           grep -q 'CmsBridge.detailTimeout(widget.id)' lib/pages/detail_page.dart
           # 反面门禁：文案里不许再出现「N 秒无响应」这种把内部超时数字报给

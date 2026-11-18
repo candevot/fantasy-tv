@@ -80,10 +80,10 @@ void main() {
   });
 
   group('详情超时按来源区分（DETAIL_TIMEOUT）', () {
-    test('外部源 12 秒（2026-11-18 从 20s 收紧：等 20 秒用户只会看到卡住）', () {
+    test('外部源 20 秒（咕噜 detailContent 要握手，缩到 12s 会直接超时放不了）', () {
       expect(CmsBridge.detailTimeout('@src:gulu::418792'),
-          const Duration(seconds: 12));
-      expect(CmsBridge.externalDetailTimeout, const Duration(seconds: 12));
+          const Duration(seconds: 20));
+      expect(CmsBridge.externalDetailTimeout, const Duration(seconds: 20));
     });
 
     test('本站 CMS 保持 12 秒', () {
@@ -95,10 +95,9 @@ void main() {
 
     test('jar 单次调用默认 12 秒（搜索 / 播放），详情单独放宽', () {
       expect(CmsBridge.jarTimeout, const Duration(seconds: 12));
-      // 详情现在 10 秒：**必须小于源级 12 秒**，页面才能先收到
-      // 「这个源没响应」的具体原因，而不是笼统一句页面超时。
-      expect(CmsBridge.jarDetailTimeout < CmsBridge.jarTimeout, isTrue);
-      expect(CmsBridge.jarDetailTimeout, const Duration(seconds: 10));
+      // 详情 18 秒：咕噜要握手，比搜索的 12 秒长。
+      expect(CmsBridge.jarDetailTimeout >= const Duration(seconds: 15), isTrue);
+      expect(CmsBridge.jarDetailTimeout, const Duration(seconds: 18));
     });
 
     test('源级超时先于页面级：jar guard 比页面预算短', () {
@@ -108,9 +107,7 @@ void main() {
         CmsBridge.jarDetailTimeout < CmsBridge.externalDetailTimeout,
         isTrue,
       );
-      // 2026-11-18：jar 详情从 18s 收紧到 10s —— 等 18 秒用户只会看到卡住。
-      // 仍然必须比页面级短（上一行已断言）。
-      expect(CmsBridge.jarDetailTimeout, const Duration(seconds: 10));
+
     });
   });
 

@@ -1395,7 +1395,7 @@ class CmsBridge {
   /// 自身还带「3 次重试 + 500/1000/2000ms 退避」（光睡眠 3.5 秒），
   /// 一次成功的详情经常落在 9～15 秒。搜索那条已经从 8 秒提到 12 秒了，
   /// 详情没跟上。这里给到 20 秒。
-  static const Duration externalDetailTimeout = Duration(seconds: 12);
+  static const Duration externalDetailTimeout = Duration(seconds: 20);
 
   /// jar 通道调用本身的 guard：比页面级少 2 秒。
   ///
@@ -1403,7 +1403,7 @@ class CmsBridge {
   /// 必须比页面级先到期**，页面才会收到「咕噜暂时没响应」这种说得清原因的
   /// 错误，而不是一句笼统的页面超时；同时通道那侧也能先释放原生 worker
   /// 线程，自动重试不会被上一次的僵尸调用堵住。
-  static const Duration jarDetailTimeout = Duration(seconds: 10);
+  static const Duration jarDetailTimeout = Duration(seconds: 18);
 
   /// 本站 CMS 详情的上限：保持 12 秒（它快，慢了就是真有问题）。
   static const Duration ownDetailTimeout = Duration(seconds: 12);
