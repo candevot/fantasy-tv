@@ -108,7 +108,9 @@ void main() {
         CmsBridge.jarDetailTimeout < CmsBridge.externalDetailTimeout,
         isTrue,
       );
-      expect(CmsBridge.jarDetailTimeout >= const Duration(seconds: 15), isTrue);
+      // 2026-11-18：jar 详情从 18s 收紧到 10s —— 等 18 秒用户只会看到卡住。
+      // 仍然必须比页面级短（上一行已断言）。
+      expect(CmsBridge.jarDetailTimeout, const Duration(seconds: 10));
     });
   });
 
