@@ -1182,7 +1182,9 @@ class SourceHub extends ChangeNotifier {
       // 「合并」——服务端把某个源删了，手机上那条还在，永远删不掉。
       // 现在按 tag 精确清除：只删「标注为默认配置导入」的源，用户手动加的
       // 不动；清完再按服务端最新配置导一遍。
-      _user.removeWhere((s) => s.tag == fatCatTag);
+      // 注意：历史导入的 tag 可能是 `TVBox`（tvBoxTag）而不是 `肥猫`，
+      // 只按 fatCatTag 删会一个都删不掉 —— 这就是「明星 mv 删不掉」的根因。
+      _user.removeWhere(isBundledSource);
       await _saveUser();
 
       final result = await importTvBox(
