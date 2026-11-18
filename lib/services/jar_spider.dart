@@ -385,7 +385,9 @@ class JarSpider {
   /// 20 秒跑完 111 个 —— 所以 20 这个数够用，真正卡住并发的不是它，
   /// 而是原生侧「实例化 + init」曾整段在全局锁里（`csp_SaoHuo.init()` 33 秒，
   /// 一个慢源堵死全部）。那个问题在 JarSpiderLoader 里单独修了。
-  static const int maxConcurrentSearches = 72;
+  // PARALLEL（2026-11-19 还原 20）：72 线程并发把带宽和 CPU 抢满，
+  // 慢源反而更容易超时（实测剧圈/半日那批从「有 3 条」变成「0 条」）。
+  static const int maxConcurrentSearches = 20;
 
   /// 一轮搜索里单个源的**总**预算（quick=false + quick=true 两次尝试之和）。
   ///

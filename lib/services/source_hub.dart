@@ -656,7 +656,10 @@ class SourceHub extends ChangeNotifier {
   /// 两轮 = 24 秒才出齐。实测 98% 的源在 3 秒内返回（首条 552ms），
   /// 12 秒只是给极慢源留的余量；压到 8 秒，慢源该失败就失败，
   /// 用户不用陪着等。
-  static const Duration sourceTimeout = Duration(seconds: 8);
+  // SOURCE_TIMEOUT（2026-11-19 还原 12s）：我把它压到 8 秒之后，App99 /
+  // AppDrama 那批源（剧圈/半日/天堂/橘汁/华谊/苹果）全部开始超时返回 0 条 ——
+  // 它们本身就要 8~12 秒。宁可慢两秒，也不能整批源变成「搜不到」。
+  static const Duration sourceTimeout = Duration(seconds: 12);
 
   /* ------------------------------------------------------ jar 插件可用性 */
 
