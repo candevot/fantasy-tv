@@ -693,9 +693,12 @@ class CmsBridge {
       //
       // GATE_LOG（2026-11-15）：**每个源单独判、单独记**。整批判的话只知道
       // 「41 个源一共丢了 30 条」，不知道是哪个源在灌首页数据。
-      final gate = external
-          ? fxSearchGate(cards, q)
-          : FxSearchGate(kept: cards, dropped: 0, extraClips: 0);
+      // PASS_THROUGH（2026-11-19）：**外部源的结果原样上屏，客户端不再过滤**。
+      //
+      // 影视壳用同一份 jar、同一个源，一个源能出 20 条；我们只有几条 ——
+      // 差别就在这层闸门（相关性 + 音频过滤）把大部分吃掉了。
+      // 用户口径：大部分源都有这部片，只搜出几个就是不对。
+      final gate = FxSearchGate(kept: cards, dropped: 0, extraClips: 0);
       if (external && (gate.dropped > 0 || gate.kept.isNotEmpty)) {
         fxJarGateLog(source, gate);
       }
