@@ -1176,6 +1176,15 @@ class SourceHub extends ChangeNotifier {
       // 旧逻辑是 `_user.isNotEmpty` 直接置标记返回 —— 用户手动加过一两个源
       // 就永远拿不到全量配置，搜索只剩那一两个源能出结果。
       // 现在按 v2 标记判断：老装机也会重新导一次 hx_all.json 的 116 个源。
+      // CONFIG_SYNC（2026-11-19）：**重导之前先清掉上一轮那批**。
+      //
+      // 用户反复说「明星那些早就让你删了」。根因在这里：`importTvBox` 只做
+      // 「合并」——服务端把某个源删了，手机上那条还在，永远删不掉。
+      // 现在按 tag 精确清除：只删「标注为默认配置导入」的源，用户手动加的
+      // 不动；清完再按服务端最新配置导一遍。
+      _user.removeWhere((s) => s.tag == fatCatTag);
+      await _saveUser();
+
       final result = await importTvBox(
         defaultTvBoxUrl,
         timeout: autoImportTimeout,
