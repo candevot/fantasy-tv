@@ -9,18 +9,14 @@ import '../services/app_settings.dart';
 import '../services/app_update_service.dart';
 import '../services/download_service.dart';
 import '../services/exo_player.dart';
-import '../services/jar_plugin.dart';
 import '../services/playback_params.dart';
-import '../services/source_hub.dart';
 import '../theme.dart';
-import '../widgets/jar_plugin_card.dart';
 import 'about_page.dart';
 import 'category_page.dart';
 import 'change_password_page.dart';
 import 'download_settings_page.dart';
 import 'feedback_page.dart';
 import 'login_page.dart';
-import 'source_settings_page.dart';
 import '../utils/fx_route.dart';
 
 /// 设置页：账号安全 / 播放设置 / 下载与缓存 / 关于 / 退出登录。
@@ -47,10 +43,6 @@ class _SettingsPageState extends State<SettingsPage> {
     _settings.addListener(_onChanged);
     _downloads.addListener(_onChanged);
     Auth.instance.addListener(_onChanged);
-    SourceHub.instance.addListener(_onChanged);
-    JarPluginManager.instance.addListener(_onChanged);
-    // 片源配置在后台补一次（有缓存就直接用，不挡设置页渲染）。
-    unawaited(SourceHub.instance.ensureReady());
     _load();
   }
 
@@ -59,8 +51,6 @@ class _SettingsPageState extends State<SettingsPage> {
     _settings.removeListener(_onChanged);
     _downloads.removeListener(_onChanged);
     Auth.instance.removeListener(_onChanged);
-    SourceHub.instance.removeListener(_onChanged);
-    JarPluginManager.instance.removeListener(_onChanged);
     super.dispose();
   }
 
@@ -454,26 +444,6 @@ class _SettingsPageState extends State<SettingsPage> {
               showChevron: false,
             ),
           ),
-          const _SectionTitle('jar 插件'),
-          const JarPluginCard(),
-          const _SectionTitle('片源与直播'),
-          GlassCard(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-            radius: 20,
-            child: _row(
-              icon: Icons.cloud_queue_rounded,
-              color: const Color(0xFF5B8CFF),
-              title: '片源管理',
-              subtitle: _sourceHint(),
-              trailing: const Icon(
-                Icons.chevron_right_rounded,
-                size: 18,
-                color: Color(0xFFC3CDDA),
-              ),
-              onTap: _openSources,
-              showChevron: false,
-            ),
-          ),
           const _SectionTitle('播放'),
           GlassCard(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
@@ -625,23 +595,6 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
-  }
-
-  String _sourceHint() {
-    final hub = SourceHub.instance;
-    final parts = <String>[
-      // 统计拆成「幻想 7 + 肥猫 41」，和片源页那两条内置项对得上。
-      '${hub.retrievalLabel} 个源参与检索',
-      if (hub.liveUrl.isNotEmpty) '直播已配置',
-    ];
-    return parts.join(' · ');
-  }
-
-  Future<void> _openSources() async {
-    await Navigator.of(context).push(
-      FxPageRoute(builder: (_) => const SourceSettingsPage()),
-    );
-    if (mounted) setState(() {});
   }
 
   String _downloadHint() {

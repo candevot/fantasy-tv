@@ -10,7 +10,6 @@ import '../utils/fx_route.dart';
 import 'category_page.dart' show fxErrorText;
 import 'live_detail_page.dart';
 import 'live_groups_page.dart' show LiveChannelCard, LiveSection, buildLiveSections;
-import 'source_settings_page.dart';
 
 /// 直播专区（底部导航「直播」的独立入口）。
 ///
@@ -143,11 +142,6 @@ class _LiveAllPageState extends State<LiveAllPage> {
         title: const Text('直播'),
         actions: [
           IconButton(
-            tooltip: '片源设置',
-            onPressed: _openSettings,
-            icon: const Icon(Icons.tune_rounded),
-          ),
-          IconButton(
             tooltip: '刷新频道',
             onPressed: _refreshing ? null : () => _load(force: true),
             icon: _refreshing
@@ -226,8 +220,7 @@ class _LiveAllPageState extends State<LiveAllPage> {
             ),
             const SizedBox(height: 6),
             const Text(
-              '直播跟着接口走：导入的接口里带 lives（TVBox 配置的直播列表）时，'
-              '频道会自动出现在这里。',
+              '直播跟着接口走：接口里带直播列表时，频道会自动出现在这里。',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 11, height: 1.5, color: Fx.sub),
             ),
@@ -238,11 +231,6 @@ class _LiveAllPageState extends State<LiveAllPage> {
                 FilledButton(
                   onPressed: () => _load(force: true),
                   child: const Text('刷新'),
-                ),
-                const SizedBox(width: 10),
-                TextButton(
-                  onPressed: _openSettings,
-                  child: const Text('片源管理'),
                 ),
               ],
             ),
@@ -357,12 +345,5 @@ class _LiveAllPageState extends State<LiveAllPage> {
     );
   }
 
-  Future<void> _openSettings() async {
-    await Navigator.of(context).push(
-      FxPageRoute(builder: (_) => const SourceSettingsPage()),
-    );
-    if (!mounted) return;
-    // 从设置回来可能换过直播地址：强制重拉一次。
-    await _load(force: true);
-  }
+
 }
