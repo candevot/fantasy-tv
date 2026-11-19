@@ -3,7 +3,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:fantasy_tv/models.dart';
 import 'package:fantasy_tv/services/cms_api.dart';
 import 'package:fantasy_tv/services/cms_bridge.dart';
-import 'package:fantasy_tv/services/jar_spider.dart';
 import 'package:fantasy_tv/services/source_hub.dart';
 import 'package:fantasy_tv/widgets/player_more_panel.dart';
 import 'package:flutter/material.dart';
@@ -65,33 +64,6 @@ void main() {
       // 外部源搜索卡片本来就不带播放地址，不能因此被丢掉。
       expect(CmsApi.usableLineCount(vod), 0);
       expect(CmsApi.hasPlayUrl(vod), isFalse);
-    });
-  });
-
-  group('jar 源卡片过滤（JarSpider.cardsOf）', () {
-    test('搜索响应不带播放字段 → 保留（TVBox 常态）', () {
-      final cards = JarSpider.cardsOf(<String, dynamic>{
-        'list': <Object?>[
-          <String, dynamic>{'vod_id': '1', 'vod_name': '济公传'},
-        ],
-      });
-      expect(cards, hasLength(1));
-      expect(cards.first.title, '济公传');
-    });
-
-    test('带了播放字段但全是空段 → 丢掉（空壳）', () {
-      final cards = JarSpider.cardsOf(<String, dynamic>{
-        'list': <Object?>[
-          <String, dynamic>{
-            'vod_id': '1',
-            'vod_name': '空壳',
-            'vod_play_from': '量子',
-            'vod_play_url': '',
-          },
-          <String, dynamic>{'vod_id': '2', 'vod_name': '济公传'},
-        ],
-      });
-      expect(cards.map((c) => c.title).toList(), <String>['济公传']);
     });
   });
 

@@ -1,12 +1,10 @@
 import 'dart:async';
-import 'dart:collection';
 
 import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
-import 'jar_log.dart';
-import 'jar_spider.dart';
+import 'source_log.dart';
 import 'play_log.dart';
 import 'play_path.dart';
 import 'search_rank.dart';
@@ -594,13 +592,6 @@ class CmsBridge {
     var softClosed = false;
     Object? primaryFailure;
 
-    /// 外部源（肥猫 jar 源）一共命中多少条 —— 页面进度文案「命中 3」用它。
-    var externalHits = 0;
-
-    /// 外部源各结局的计数（空 / 超时 / 出错），页面左下角一行小字就能看出
-    /// 「不是没搜，是这些源本身没东西 / 挂了」（JAR_PROGRESS 2026-11-15）。
-    final externalStates = <SourceSearchStatus, int>{};
-    final searchStarted = DateTime.now();
 
     /// 主站第一页给了多少条（用来判断要不要补第二页那一波）。
     var firstPageCount = 0;
@@ -618,17 +609,6 @@ class CmsBridge {
     void finish() {
       if (closed) return;
       closed = true;
-      // 一轮的收尾日志：一行看到「86 个源里几个有货、几个空、几个挂」。
-      if (externalStates.isNotEmpty || externalHits > 0) {
-        final parts = externalStates.entries
-            .map((e) => '${e.value} ${e.key.name}')
-            .join(' / ');
-        fxJarLog(
-          'summary key=$q 源=${externalStates.values.fold<int>(0, (a, b) => a + b)} '
-          '命中=$externalHits [$parts] '
-          '耗时=${(DateTime.now().difference(searchStarted).inMilliseconds / 1000).toStringAsFixed(1)}s',
-        );
-      }
       if (emitted == 0 && primaryFailure != null) {
         ctrl.addError(primaryFailure!);
       } else if (!softClosed) {
@@ -672,9 +652,8 @@ class CmsBridge {
           finished: true,
         ),
       );
-      fxJarLog(
-        'soft-finish key=$q 已回 $done/$total 源 · 命中 $externalHits 条 '
-        '· 后台继续补其余源',
+      fxSourceLog(
+        'soft-finish key=$q 已回 $done/$total 源 · 后台继续补其余源',
       );
     }
 
@@ -697,7 +676,7 @@ class CmsBridge {
           ? fxSearchGate(cards, q)
           : FxSearchGate(kept: cards, dropped: 0, extraClips: 0);
       if (external && (gate.dropped > 0 || gate.kept.isNotEmpty)) {
-        fxJarGateLog(source, gate);
+        fxSourceGateLog(source, gate);
       }
       for (final card in gate.kept) {
         if (SourceHub.isLiveCard(card)) continue;
@@ -709,7 +688,6 @@ class CmsBridge {
         kept.add(card);
       }
       emitted += kept.length;
-      if (external) externalHits += kept.length;
       // SEARCH_RANK：每一批都按「分辨率优先」排好再交给页面 —— 先到的一批
       // 也已经是正确顺序，不会出现「低画质先占位、高画质后到被压在下面」。
       final ranked = SearchRank.sort(kept);
@@ -739,10 +717,6 @@ class CmsBridge {
       } catch (_) {
         // 索引坏了也要能搜：下面的 plan 为空表就只查主站。
       }
-      if (closed) return;
-      // jar 插件状态：没装就**不**去敲那 41 个 jar 源（每个 8 秒），
-      // 页面改为显示「需要先安装 jar 插件」的提示（SourceHub.jarNotice）。
-      await hub.ensureJarStatus();
       if (closed) return;
       final plan = hub.searchPlan;
       // 分母：主站 1 + 内置线路切片 + 云端源 + 外部源。
@@ -804,45 +778,6 @@ class CmsBridge {
           final cards = await hub.searchPrepared(source, q, page);
           done++;
           emit(cards, external: false);
-        }());
-      }
-
-      // 3. 外部源（肥猫 41 个 jar 源 + 自加）：**并行发、谁先回谁先上屏**。
-      //
-      // JAR_PROGRESS（2026-11-15）：这里原来是 `searchPrepared`，它把异常和
-      // 超时全吞成空列表，页面看不出「这个源超时了」还是「这个源真没这部片」。
-      // 现在每个源回一个 [SourceSearchResult]（条数 + 结局 + 耗时），
-      // 立刻单独 emit 一批 —— 用户是**一条一条看到结果冒出来**的，
-      // 不是等 15 秒后一次性出现（壳的体验就是这样）。
-      // 某个源超时 / 出错只影响它自己：已上屏的结果不动，进度继续往前走。
-      final jarGate = _ConcurrencyGate(JarSpider.maxConcurrentSearches);
-      // SHELL_ARRIVAL（2026-11-17）：搜索页**不对源做任何优先级排序** ——
-      // 不把幻想提前、也不把它垫底，就按配置里的源顺序原样并发发车，
-      // 谁先回来谁先上屏（页面按到达顺序分组渲染）。
-      for (final source in plan.external) {
-        tasks.add(() async {
-          // JAR_CONCURRENCY：原生侧只有 6 条 worker 线程，Dart 一次发 41 个
-          // 请求只会让后 35 个在队列里超时（排队时间也算在 guard 的超时里）。
-          final gated = source.kind == KSourceKind.jar;
-          if (gated) await jarGate.acquire();
-          SourceSearchResult result;
-          try {
-            result = await hub.searchSource(source, q, page);
-          } finally {
-            if (gated) jarGate.release();
-          }
-          done++;
-          externalStates.update(
-            result.status,
-            (v) => v + 1,
-            ifAbsent: () => 1,
-          );
-          emit(
-            result.cards,
-            external: true,
-            source: result.label,
-            status: result.status,
-          );
         }());
       }
 
@@ -1126,22 +1061,6 @@ class CmsBridge {
     _boot();
     final external = await _externalSource(id);
     if (external != null) {
-      // jar 源（TVBox type 3）：详情走 JarSpider，模型出口与 CMS 一致。
-      if (external.kind == KSourceKind.jar) {
-        final detail = await _jarGuard(
-          () => JarSpider.detail(
-            api: external.api,
-            ext: external.ext,
-            vodId: SourceHub.rawIdOf(id),
-          ),
-          // DETAIL_TIMEOUT：详情的手速比搜索慢得多（握手 + 3 次退避重试），
-          // 给 20 秒，别再让「刚好在最后一次重试前被杀掉」重现。
-          wait: jarDetailTimeout,
-          label: external.resultLabel,
-        );
-        _mark(id, CmsOrigin.cms);
-        return detail;
-      }
       final detail = await CmsClient.of(external.api).detail(
         SourceHub.rawIdOf(id),
       );
@@ -1245,21 +1164,6 @@ class CmsBridge {
     _boot();
     final external = await _externalSource(vodId);
     if (external != null) {
-      if (external.kind == KSourceKind.jar) {
-        // jar 源：拿详情里的集地址交给 playerContent（解析在 jar 内部完成）。
-        final info = await _jarGuard(
-          () => JarSpider.play(
-            api: external.api,
-            ext: external.ext,
-            vodId: SourceHub.rawIdOf(vodId),
-            lineName: line,
-            ep: ep,
-          ),
-          label: external.resultLabel,
-        );
-        _mark(vodId, CmsOrigin.cms);
-        return info;
-      }
       final info = await CmsClient.of(external.api).play(
         SourceHub.rawIdOf(vodId),
         line,
@@ -1303,19 +1207,6 @@ class CmsBridge {
   static Future<String> playUrl(String vodId, String line, int ep) async {
     final external = await _externalSource(vodId);
     if (external != null) {
-      if (external.kind == KSourceKind.jar) {
-        final info = await _jarGuard(
-          () => JarSpider.play(
-            api: external.api,
-            ext: external.ext,
-            vodId: SourceHub.rawIdOf(vodId),
-            lineName: line,
-            ep: ep,
-          ),
-          label: external.resultLabel,
-        );
-        return info.url;
-      }
       final info = await CmsClient.of(external.api).play(
         SourceHub.rawIdOf(vodId),
         line,
@@ -1342,12 +1233,6 @@ class CmsBridge {
     );
   }
 
-  /// 片源侧的可读提示（目前只有「jar 插件没装」这一条），没话可说返回空串。
-  ///
-  /// 搜索页 / 片源页都直接展示它：宁可讲清楚「肥猫的源要装 jar」，
-  /// 也不要让用户对着「查了 0 个源」的结果发呆。
-  static String get sourceNotice => SourceHub.instance.jarNotice;
-
   /// 把站内相对地址补成绝对地址（播放 / 投屏 / 下载共用）。
   ///
   /// DELEGACY（2026-11-15）：根必须跟着**记录来源**走。
@@ -1359,43 +1244,21 @@ class CmsBridge {
 
   /// 这个 id 是不是 CMS 的 `vod_id`（详情页据此跳过旧接口的平台线路逻辑）。
   ///
-  /// 外部源（云端 / 自加）的卡片 id 带 `@src:` 前缀，同样按 CMS 处理，
+  /// 老记录可能带 `@src:` 前缀，同样按 CMS 处理，
   /// 否则详情页会为它去查旧接口的平台线路。
   static bool isCms(String id) =>
       id.trim().startsWith(SourceHub.idMark) ||
       id.trim().startsWith(sliceMark) ||
       _originOf(id) == CmsOrigin.cms;
 
-  /* ------------------------------------------------------ jar 源兜底 */
-
-  /// jar 源的一次调用：**硬超时 + 可读文案**（JAR_TIMEOUT 2026-11-15）。
-  ///
-  /// 为什么必须有这一层：jar 是第三方 dex，原生那边虽然也有 guard，
-  /// 但通道本身不保证一定回话（jar 没装时早年版本、原生插件没注册、dex
-  /// 加载卡在类初始化上，都会让 `invokeMethod` 的 Future 永远挂着）。
-  /// 详情页原来就等着这一个 Future，表现是「点进详情 → 转圈 → 8 秒后
-  /// 加载失败，请求超时」。这里统一兜成 [ApiException]，文案说清是「源」
-  /// 不可用、而不是「网络」不好。
-  ///
-  /// 单次调用默认 12 秒（搜索 / 播放共用）。
-  static const Duration jarTimeout = Duration(seconds: 12);
+  /* ------------------------------------------------------ 详情超时预算 */
 
   /// **外部源详情**的单次上限：20 秒（DETAIL_TIMEOUT 2026-11-15）。
   ///
-  /// 现场：点进肥猫（咕噜）那条 → 整整 8 秒后直接报「该源暂不可用」。
-  /// 8 秒从来不够 —— 咕噜的 `detailContent` 和搜索一样要 `GuluCrypto` 握手，
-  /// 自身还带「3 次重试 + 500/1000/2000ms 退避」（光睡眠 3.5 秒），
-  /// 一次成功的详情经常落在 9～15 秒。搜索那条已经从 8 秒提到 12 秒了，
-  /// 详情没跟上。这里给到 20 秒。
+  /// 现场：点进外部源那条 → 整整 8 秒后直接报「该源暂不可用」。
+  /// 8 秒从来不够 —— 外部源的详情接口自身带「3 次重试 + 500/1000/2000ms
+  /// 退避」（光睡眠 3.5 秒），一次成功的详情经常落在 9～15 秒。这里给到 20 秒。
   static const Duration externalDetailTimeout = Duration(seconds: 20);
-
-  /// jar 通道调用本身的 guard：比页面级少 2 秒。
-  ///
-  /// 和 `JarSpider.searchBudget < JarSpider.timeout` 同一个口径：**源级超时
-  /// 必须比页面级先到期**，页面才会收到「咕噜暂时没响应」这种说得清原因的
-  /// 错误，而不是一句笼统的页面超时；同时通道那侧也能先释放原生 worker
-  /// 线程，自动重试不会被上一次的僵尸调用堵住。
-  static const Duration jarDetailTimeout = Duration(seconds: 18);
 
   /// 本站 CMS 详情的上限：保持 12 秒（它快，慢了就是真有问题）。
   static const Duration ownDetailTimeout = Duration(seconds: 12);
@@ -1407,59 +1270,7 @@ class CmsBridge {
   static Duration detailTimeout(String id) =>
       isExternalId(id) ? externalDetailTimeout : ownDetailTimeout;
 
-  static Future<T> _jarGuard<T>(
-    Future<T> Function() task, {
-    Duration? wait,
-    String label = '',
-  }) async {
-    final who = label.trim();
-    if (!JarSpider.supported) {
-      throw ApiException('jar 源只在 Android 客户端上可用，换条线路试试');
-    }
-    final hub = SourceHub.instance;
-    await hub.ensureJarStatus();
-    if (!hub.jarReady) {
-      // 装不装 jar 是**设置问题**，不是源超时：这条提示必须留着
-      // 「需要 spider.jar」，否则用户会一直以为是那个源挂了。
-      throw ApiException(
-        who.isEmpty
-            ? '这个源需要 jar 插件（spider.jar），当前还没安装，换条线路试试'
-            : '$who 需要先安装 jar 插件（spider.jar）',
-        code: 503,
-      );
-    }
-    final limit = wait ?? jarTimeout;
-    try {
-      return await task().timeout(
-        limit,
-        onTimeout: () => throw ApiException(
-          _jarUnavailable(who),
-          kind: ApiErrorKind.timeout,
-        ),
-      );
-    } on ApiException catch (e) {
-      // 裸通道超时（jar 内部先超时）也按「源没响应」的文案交给页面。
-      if (e.kind != ApiErrorKind.timeout) rethrow;
-      throw ApiException(_jarUnavailable(who), kind: ApiErrorKind.timeout);
-    } catch (e) {
-      // jar 内部抛出来的东西五花八门（NoClassDefFoundError / 反射异常…），
-      // 一律收敛成一句话，别把 Java 栈丢到用户脸上。
-      throw ApiException(_jarUnavailable(who));
-    }
-  }
-
-  /// jar / 外部源没响应时的一句话（SOURCE_TEXT 2026-11-15）。
-  ///
-  /// 「换本站线路试试」在**外部源**身上是错的：肥猫的片子没有「本站线路」，
-  /// 用户照着文案去找只会更迷惑。外部源一律说「<源名> 暂时没响应，
-  /// 换一个源试试」；只有站点内部源（没有源名）才留「换条线路试试」。
-  /// 内部超时秒数（8/20 秒）属于实现细节，不写进用户文案。
-  static String _jarUnavailable(String label) {
-    if (label.isEmpty) return '该源暂时取不到，换条线路试试';
-    return '$label 暂时没响应，换一个源试试';
-  }
-
-  /// 这个 id 是不是**外部源**（肥猫 jar / 自加源）的记录。
+  /// 这个 id 是不是**外部源**（历史遗留的 `@src:` 记录）的 id。
   ///
   /// 外部源没有「本站线路」这个退路，页面文案和超时预算都要跟本站区别开。
   static bool isExternalId(String id) =>
@@ -1705,38 +1516,5 @@ class _Dedupe {
       return true;
     }
     return false;
-  }
-}
-
-/// 简单的并发闸门（先进先出）。
-///
-/// JAR_CONCURRENCY（2026-11-15）：外部源是「41 个一起发」，但原生 jar 加载器
-/// 只有固定几条 worker 线程 —— 不在这里排队，就会在原生队列里超时，
-/// 用户看到的是「后面的源一个都没查到」。这里保证：
-/// 同时最多 [limit] 个源在跑，其余排队；谁跑完谁补位，页面继续逐源上屏。
-class _ConcurrencyGate {
-  _ConcurrencyGate(this.limit);
-
-  final int limit;
-  int _active = 0;
-  final Queue<Completer<void>> _waiting = Queue<Completer<void>>();
-
-  Future<void> acquire() {
-    if (_active < limit) {
-      _active++;
-      return Future<void>.value();
-    }
-    final completer = Completer<void>();
-    _waiting.add(completer);
-    return completer.future;
-  }
-
-  void release() {
-    if (_waiting.isNotEmpty) {
-      // 名额直接交给排在最前面的那个（_active 不变）。
-      _waiting.removeFirst().complete();
-      return;
-    }
-    if (_active > 0) _active--;
   }
 }

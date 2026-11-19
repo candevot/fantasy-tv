@@ -12,13 +12,11 @@ import 'cms_client.dart';
 import 'cms_request.dart';
 import 'dns_profile.dart';
 import 'fallback_match.dart' show fxNormTitle;
-import 'jar_log.dart';
-import 'jar_spider.dart';
+import 'source_log.dart';
 import 'parse_registry.dart';
 import 'sniff_rules.dart';
 import 'source_failure.dart';
 import 'tvbox_config.dart';
-import 'tvbox_crypto.dart';
 
 /// 片源的种类。
 enum KSourceKind {
@@ -31,11 +29,10 @@ enum KSourceKind {
   /// `type: "live"` —— 直播播放列表（M3U / TXT / JSON）。
   live,
 
-  /// `type: 3` —— TVBox 的 jar 解析插件（`api` 是 jar 里的类名，`ext` 是站点配置）。
+  /// `type: 3` —— TVBox 的 jar 解析插件（历史值，App 已不再接入）。
   ///
-  /// 走 `JAR_SPIDER` 通道：原生 DexClassLoader 加载 `spider.jar`，反射调
-  /// `com.github.catvod.crawler.Spider`，返回的 JSON 在 jar_spider.dart 里
-  /// 转成 [VideoCard] / [VideoDetail] / [PlayInfo]。
+  /// 只保留枚举位以兼容老配置 / 老缓存的反序列化；这种源在解析入口就被丢掉，
+  /// 不会进检索计划，也不会出现在任何界面上。
   jar,
 
   /// `type: 4`（python 解析脚本）—— 暂不支持。
@@ -47,7 +44,7 @@ enum KSourceOrigin {
   /// 云端配置下发（后台 `/api/config`）。
   cloud,
 
-  /// 用户在设置里自加（含 TVBox 导入）。
+  /// 用户自加（历史值，App 已没有添加片源的入口）。
   user,
 }
 
@@ -374,24 +371,6 @@ class KSource {
   }
 }
 
-/// TVBox 导入结果。
-class TvBoxImport {
-  const TvBoxImport({
-    required this.added,
-    required this.skipped,
-    this.notes = const <String>[],
-  });
-
-  /// 成功加入的源数量。
-  final int added;
-
-  /// 跳过（type 3/4、地址为空）的源数量。
-  final int skipped;
-
-  /// 逐条说明（给设置页展示，别让用户猜为什么少了几个源）。
-  final List<String> notes;
-}
-
 /// 一轮检索的源分组：自己的先查先渲染，外部的并行后台查、陆续追加。
 ///
 /// 两组的源数加起来就是进度文案里的分母（幻想 7 + 肥猫 41 = 48）。
@@ -497,42 +476,19 @@ class SourceHub extends ChangeNotifier {
     defaultValue: '',
   );
 
-  /// 播放器 UA：猫源那类站按 UA 分流 —— 浏览器 UA 拿到的是一张介绍页
-  /// （HTML），只有播放器 UA 才回配置本身。肥猫回的配置还是加密的。
-  static const String tvBoxUserAgent = 'okhttp/3.12.12';
-
-  /// 默认 TVBox 配置地址（肥猫）。设置页的「配置地址」预填它，
-  /// 首次启动也自动拉一次导入 —— 装完就有源，不用用户自己去别处找。
-  static const String defaultTvBoxUrl = 'http://肥猫.net/';
-
-  /// 首次自动导入的超时：失败静默，绝不拦首屏。
-  static const Duration autoImportTimeout = Duration(seconds: 3);
-
-  /// 中文域名 → punycode。
-  ///
-  /// Dart 的 `Uri` / `HttpClient` 不认非 ASCII 主机：`Uri.parse` 会把主机
-  /// 百分号编码（`%E8%82%A5%E7%8C%AB.net`），`HttpClient.getUrl` 随即抛
-  /// `FormatException`。所以展示可以用 `http://肥猫.net/`，发请求前换成
-  /// punycode。表里没有的域名就按原样试，报错照常抛给调用方。
-  static const Map<String, String> asciiHosts = <String, String>{
-    '肥猫.net': 'xn--z7x900a.net',
-  };
-
-  /// 配置缓存有效期：6 小时内不重复拉取（手动刷新不受限）。
-  static const Duration cacheTtl = Duration(hours: 6);
-
   /// 云端配置 `/api/config` 的超时：**3 秒**（TIMEOUT_UNIFY 2026-11-15）。
   ///
   /// 实测这份配置 0.14 秒就回来了，3 秒已经是很宽的余量；原来给 6 秒，
   /// 弱网下一次首屏要白等 6 秒才铺片源。列表 / 搜索 / 详情各自另有 8 秒。
   static const Duration timeout = Duration(seconds: 3);
 
+  /// 配置缓存有效期：6 小时内不重复拉取（手动刷新不受限）。
+  static const Duration cacheTtl = Duration(hours: 6);
+
   static const String _kCloud = 'fx_sources_cloud_v1';
   static const String _kLiveUrl = 'fx_sources_live_url_v1';
   static const String _kRemoved = 'fx_sources_removed_v1';
-  static const String _kUser = 'fx_sources_user_v1';
   static const String _kFetchedAt = 'fx_sources_fetched_at_v1';
-  static const String _kAutoImported = 'fx_sources_auto_tvbox_v1';
 
   /// 协议面（`parses` / `flags` / `ads` / `hosts` / `rules` / `doh` / `spider`）
   /// 的落盘键 —— 配置拉不到时也要能按上一份继续解析。
@@ -541,26 +497,8 @@ class SourceHub extends ChangeNotifier {
   /// 源级失败账本的落盘键（[SourceFailureLedger]）。
   static const String _kSourceFailure = 'fx_source_failure_v1';
 
-  /// 首页当前用哪个源（源选择面板的结果）；空串 = 幻想（默认）。
-  static const String _kHomeSource = 'fx_home_source_v1';
-
-  /// 「推荐 / 置顶」标记（片源管理里手动钉上去的源）。
-  static const String _kPinned = 'fx_sources_pinned_v1';
-
-  /// 肥猫那一批（TVBox 批量导入）是否被用户在片源管理里删掉。
-  static const String _kBundledHidden = 'fx_sources_bundled_hidden_v1';
-
-  /// 「幻想」这个默认源在界面上的名字（源选择面板固定第一项）。
-  ///
-  /// SOURCE_PICK_DEFAULT（2026-11-17）：壳（FongMi / OK影视）的源面板里
-  /// 默认选中它自己那份配置的源（咕噜）；我们是「幻想」，所以幻想必须
-  /// **永远排第一、永远是默认选中**，咕噜 / 豆瓣 / 配置中心这些肥猫源
-  /// 一律排在它后面。默认源的 key 用空串表示，这样它不依赖云端配置里
-  /// 某个具体 key（换 key / 重新下发也不会把默认项弄丢）。
+  /// 「幻想」这个默认源在界面上的名字。
   static const String ownSourceName = '幻想';
-
-  /// 源面板标题的后缀（壳的写法是「名字 · APP」）。
-  static const String sourceTitleSuffix = ' · APP';
 
   /* ------------------------------------------------------ 非影视源 */
 
@@ -600,114 +538,19 @@ class SourceHub extends ChangeNotifier {
   static bool usableForContent(KSource source) =>
       source.searchable && !isBlockedSource(source);
 
-  /// 配置地址 → 能真正发出去的 [Uri]（顺手把中文域名换成 punycode）。
-  static Uri requestUri(String raw) {
-    var url = raw.trim();
-    for (final entry in asciiHosts.entries) {
-      if (url.contains(entry.key)) {
-        url = url.replaceFirst(entry.key, entry.value);
-      }
-    }
-    try {
-      return Uri.parse(url);
-    } on FormatException {
-      throw ApiException('配置地址不合法：$raw');
-    }
-  }
 
-  /// 外部源 id 前缀。主站 id 不带这个前缀，两套编号互不干扰。
   static const String idMark = '@src:';
 
-  /// 「肥猫」那份 TVBox 配置自动导入时打的标记。
-  ///
-  /// 片源管理页只把这一批算成一条「肥猫」，不逐个列出来 —— 41 个 jar 源
-  /// 一个个铺在设置页里，用户既看不清也管不过来。
-  static const String fatCatTag = '肥猫';
 
-  /// 手动「导入 TVBox」时打的标记（老版本自动导入也用它，一并归到肥猫那条）。
-  static const String tvBoxTag = 'TVBox';
 
   /// 单源检索超时：超时按「这个源没结果」处理，不拖住其它源。
   ///
-  /// JAR_TIMEOUT（2026-11-15）：从 8 秒放宽到 **12 秒**。8 秒是「jar 通道
-  /// 自身超时」的值，套在源级上就变成了「源级和通道级同时到点」—— jar 那边
-  /// 刚要说「超时」我们已经先把它判死了，日志里全是一致的 8000ms，
-  /// 分不清是谁先放弃。现在源级 12 秒 > 通道 12 秒内的两次尝试预算
-  /// （[JarSpider.searchBudget] = 11 秒），层次清楚：**先由 jar 报「这个源
-  /// 超时/出错」，源级只兜底**。
+  /// 幻想那几条线路是同一个主站接口，正常 0.6~4 秒回来；12 秒是给弱网留的
+  /// 兜底，到点就把它判成「这个源没结果」，不影响其它源已经上屏的内容。
   static const Duration sourceTimeout = Duration(seconds: 12);
 
-  /* ------------------------------------------------------ jar 插件可用性 */
-
-  /// jar 插件（`spider.jar`）是否已安装；null = 还没查过。
-  bool? _jarReady;
-
-  Future<void>? _jarChecking;
-
-  /// jar 插件是否可用（没查过按「不可用」算，绝不乐观）。
-  bool get jarReady => _jarReady == true;
-
-  /// 这台设备的源列表里有没有 jar 源（决定要不要自动装 spider.jar）。
-  bool get hasJarSources => _user.any((s) => s.kind == KSourceKind.jar);
-
-  /// 有 jar 源、但插件没装 —— 这正是「肥猫的源完全不加载」的原因。
-  bool get jarMissing =>
-      _jarReady == false && _user.any((s) => s.kind == KSourceKind.jar);
-
-  /// 给页面用的可读提示（没什么可说的就空串）。
-  ///
-  /// JAR_NOTICE（2026-11-15）：`assets/spiders/spider.jar` 并没有打进 APK
-  /// （`android_src/libs/api.jar` 只是 Spider 基类，不是源本身的 jar），
-  /// 所以肥猫那 41 个 jar 源在「没手动装 jar」的机器上**一个都跑不起来**。
-  /// 以前这些源照样进检索队列，每个 8 秒超时后被静默当成「没结果」，
-  /// 用户看到的是「肥猫完全不加载」而且毫无解释。现在直接跳过并给出这句。
-  String get jarNotice => jarMissing
-      ? '肥猫的 ${bundledSources.length} 个 jar 源需要先装 jar 插件（spider.jar）才能出内容，'
-          '到「片源管理 → 安装 jar 插件」装好后重新搜索'
-      : '';
-
-  /// 查一次 jar 插件状态（结果缓存，失败按「没装」处理）。
-  Future<void> ensureJarStatus() {
-    final running = _jarChecking;
-    if (running != null) return running;
-    if (_jarReady != null) return Future<void>.value();
-    final task = () async {
-      try {
-        final status = await JarSpider.status().timeout(
-          const Duration(seconds: 2),
-          onTimeout: () => const JarStatus.missing(),
-        );
-        _jarReady = status.installed;
-      } catch (_) {
-        // 通道没起来 / 非 Android：按没装处理，jar 源跳过。
-        _jarReady = false;
-      }
-      // 状态出来之后标题可能要降级（默认源是 jar 源、但没装 jar），
-      // 通知一次让首页 / 片源页跟着变。
-      _notifySafely();
-    }();
-    _jarChecking = task;
-    return task.whenComplete(() {
-      _jarChecking = null;
-    });
-  }
-
-  /// jar 装好 / 卸载后强制重查（片源页装完 jar 调一次）。
-  void invalidateJarStatus() {
-    _jarReady = null;
-    _jarChecking = null;
-  }
-
-  /// 这个源是不是「肥猫」那批量导入的一批。
-  static bool isBundledSource(KSource source) =>
-      source.tag == fatCatTag || source.tag == tvBoxTag;
-
   List<KSource> _cloud = const <KSource>[];
-  List<KSource> _user = const <KSource>[];
   Set<String> _removed = <String>{};
-  String _homeKey = '';
-  Set<String> _pinned = <String>{};
-  bool _bundledHidden = false;
   String _liveUrl = '';
   int _fetchedAt = 0;
   String _error = '';
@@ -738,14 +581,8 @@ class SourceHub extends ChangeNotifier {
   /// 嗅探规则（「直链还是解析」的判定）。
   FxSniffer get sniffer => FxSniffer.fromConfig(_protocol.rules);
 
-  /// 全局线路名表（透传给 jar 源的 `playerContent`）。
-  List<String> get flags => List<String>.unmodifiable(_protocol.flags);
-
   /// 广告域名表。
   List<String> get ads => List<String>.unmodifiable(_protocol.ads);
-
-  /// 全局 jar（站点级 `jar` 为空时用它）。
-  String get spider => _protocol.spider;
 
   /// 配置里的 DNS 画像（hosts / doh）。
   DnsProfile get dnsProfile => DnsProfile.fromConfig(_protocol);
@@ -762,19 +599,17 @@ class SourceHub extends ChangeNotifier {
     _protocol = config;
     ParseRegistry.install(parsers);
     FxSniffer.install(sniffer);
-    // `flags` → jar 源的 `playerContent(flag, id, flags)`（壳同一语义）。
-    JarSpider.setVipFlags(config.flags);
     // `ads` → 解析结果的广告域过滤。
     FxAds.install(FxAds(config.ads));
     _installCmsProfiles();
     unawaited(DnsProfileInstaller.install(dnsProfile).then<void>((_) {}));
-    fxJarLog('配置协议面 ${config.summary()}');
+    fxSourceLog('配置协议面 ${config.summary()}');
   }
 
   /// 把所有源的站点画像交给 [CmsClient]（详情 / 播放那条链路也能拿到）。
   void _installCmsProfiles() {
     final profiles = <String, CmsSiteProfile>{};
-    for (final s in <KSource>[..._cloud, ..._user]) {
+    for (final s in _cloud) {
       if (s.api.trim().isEmpty) continue;
       profiles[s.api.trim()] = s.cmsProfile;
     }
@@ -801,39 +636,8 @@ class SourceHub extends ChangeNotifier {
 
   /* ------------------------------------------------------------ 读取 */
 
-  /// 云端下发的全部源（含已被用户删掉的，UI 用 [isRemoved] 标注）。
+  /// 云端下发的全部源（含已被删掉的，检索前按 [removed] 过滤）。
   List<KSource> get cloudSources => List<KSource>.unmodifiable(_cloud);
-
-  /// 用户自加的源（不含「肥猫」那批量导入的一批）。
-  ///
-  /// 「我的源」区只列这些：肥猫那 41 个 jar 源在界面上归成一条内置项，
-  /// 混在这里会让用户以为是自己加的。
-  List<KSource> get userSources => List<KSource>.unmodifiable(<KSource>[
-        for (final s in _user)
-          if (!isBundledSource(s)) s,
-      ]);
-
-  /// 「肥猫」带来的源（TVBox 配置批量导入），界面只算一条。
-  ///
-  /// 用户在片源管理里删掉这一条时只置 [bundledHidden]：导入结果原样留着，
-  /// 「恢复」不需要重新联网拉配置。
-  List<KSource> get bundledSources => List<KSource>.unmodifiable(
-        _bundledHidden
-            ? const <KSource>[]
-            : <KSource>[
-                for (final s in _user)
-                  if (isBundledSource(s)) s,
-              ],
-      );
-
-  /// 我们自己的一批源（云端下发的幻想线路）：检索时先查、先渲染。
-  List<KSource> get ownSources => List<KSource>.unmodifiable(<KSource>[
-        for (final s in visibleCloud)
-          if (s.searchable) s,
-      ]);
-
-  /// 是否已被用户删掉（只对云端内置源有意义）。
-  bool isRemoved(String key) => _removed.contains(key.trim());
 
   /// 云端源里当前生效的（没被删、enabled 不为 false）。
   List<KSource> get visibleCloud => <KSource>[
@@ -841,175 +645,26 @@ class SourceHub extends ChangeNotifier {
           if (!_removed.contains(s.key) && s.enabled) s,
       ];
 
-  /// 云端源里被用户删掉的（片源管理的「已移除」分组，可恢复）。
-  List<KSource> get removedCloudSources => <KSource>[
-        for (final s in _cloud)
-          if (_removed.contains(s.key)) s,
-      ];
-
   /* ------------------------------------------------------ 首页当前源 */
 
-  /// 首页 / 分类 / 排行榜当前用哪个源。
-  ///
-  /// 三种取值（SOURCE_PICK_ORDER，2026-11-17 定稿）：
-  ///   · 空串 = **自动**：配置里的第一个源（壳的默认项，肥猫配置里就是咕噜）；
-  ///   · [ownSourceKey]（`@own`）= 幻想（我们自己的 hx 库）；
-  ///   · 其它 = 某个具体源的 key。
-  String get homeSourceKey => _homeKey;
-
-  /// 「幻想」这个默认项在面板里的 key（它不是云端 key，用一个固定标记）。
+  /// 首页 / 分类 / 排行榜用的就是「幻想」这一套（`src=hx`），
+  /// 没有「换源」这回事：外部源接入层已经整层拆掉。
   static const String ownSourceKey = '@own';
 
-  /// 这个源现在**真能出内容**吗（jar 源要先装 jar 插件）。
+  /// 参与搜索 / 分类的源：只有我们自己的那批（云端下发的幻想线路）。
   ///
-  /// 用它做「标题降级」的判据：默认源是咕噜、但这台机器没装 jar 插件时，
-  /// 首页实际取到的是幻想的内容 —— 标题就必须显示「幻想 · APP」，
-  /// 绝不能出现「标题写咕噜、内容是幻想」的错位。
-  bool canServeContent(KSource source) {
-    if (!usableForContent(source)) return false;
-    if (source.kind == KSourceKind.jar) return _jarReady != false;
-    return true;
-  }
-
-  /// 配置里的第一个源：肥猫那批按导入顺序，其次自加源，最后云端幻想线路。
-  ///
-  /// 壳的默认源就是「配置 sites 的第一条」，这里按同一口径取，
-  /// **不做任何重排**（推荐 / 置顶只影响片源管理页里的排序）。
-  KSource? get firstConfigSource {
-    for (final s in bundledSources) {
-      if (canServeContent(s)) return s;
-    }
-    for (final s in userSources) {
-      if (canServeContent(s)) return s;
-    }
-    for (final s in visibleCloud) {
-      if (canServeContent(s)) return s;
-    }
-    return null;
-  }
-
-  /// 当前选中的源；null = 幻想（主站 hx 库那条默认路径）。
-  KSource? get homeSource {
-    final key = _homeKey.trim();
-    if (key == ownSourceKey) return null;
-    if (key.isEmpty) return firstConfigSource;
-    for (final s in _cloud) {
-      // 选中的源出不了内容（没装 jar / 非影视源 / 被删掉）→ 标题和内容都
-      // 降级到幻想，不留「标题写咕噜、内容是幻想」的错位。
-      if (s.key == key) return canServeContent(s) ? s : firstConfigSource;
-    }
-    for (final s in _user) {
-      if (s.key == key) return canServeContent(s) ? s : firstConfigSource;
-    }
-    // 源被删了 / 被禁用了：当作「自动」，回到配置第一个可用源
-    // （没有就是幻想）。
-    return firstConfigSource;
-  }
-
-  /// 当前是不是选中了「幻想」。
-  bool get isOwnSourceSelected => homeSource == null;
-
-  /// 首页标题栏上的源名（壳的写法「名字 · APP」里那个名字）。
-  String get homeSourceName {
-    final picked = homeSource;
-    if (picked == null) return ownSourceName;
-    final short = picked.shortName;
-    return short.isEmpty ? picked.name : short;
-  }
-
-  /// 首页标题栏那一行字：`咕噜 · APP` / `幻想 · APP`。
-  String get homeSourceTitle => '$homeSourceName$sourceTitleSuffix';
-
-  /// 选中一个源作为首页的数据源（[ownSourceKey] = 幻想）。
-  ///
-  /// 传进来一个不认识 / 已被删掉的 key 会被忽略，不会把首页弄成空白。
-  Future<void> selectHomeSource(String key) async {
-    final want = key.trim();
-    if (want.isNotEmpty && want != ownSourceKey) {
-      final known = <KSource>[..._cloud, ..._user]
-          .any((s) => s.key == want && usableForContent(s));
-      if (!known) return;
-    }
-    if (_homeKey == want) return;
-    _homeKey = want;
-    await _saveHomeSource();
-    notifyListeners();
-  }
-
-  /// 源面板里的条目：**就是配置里的原始顺序**，一项都不重排。
-  ///
-  /// 顺序（定稿口径）：肥猫那批（sites 原顺序：咕噜 / 豆瓣 / 配置中心 / …）
-  /// → 自加源 → 云端幻想线路。面板把「幻想」单列成最后一行（它不是一个
-  /// sites 条目，是我们自己的 hx 库）。
-  List<KSource> get pickerSources => <KSource>[
-        // 非影视源也照常列出（用户要求「能看到全部」），面板把它们画成
-        // ⊘ 不可选；这里只滤掉彻底不可搜 / 已删掉的条目。
-        for (final s in bundledSources)
-          if (s.searchable) s,
-        for (final s in userSources)
-          if (s.searchable) s,
-        // 云端那几条「幻想4K / 幻想蓝光 / 量子 / 红牛」是**幻想自己的线路
-        // 切片**，面板里由最后那一行「幻想」统一代表（壳的面板也是一条
-        // 幻想），不重复铺 7 条 —— 要单独增删它们去「片源管理」。
-      ];
-
-  /* ------------------------------------------------------ 推荐 / 置顶 */
-
-  /// 这个源被标成「推荐」了吗（片源管理里手动点的）。
-  bool isPinned(String key) => _pinned.contains(key.trim());
-
-  /// 推荐 / 取消推荐。标记会持久化，并影响源面板与片源管理的排序。
-  Future<void> togglePinned(String key) async {
-    final k = key.trim();
-    if (k.isEmpty) return;
-    if (!_pinned.remove(k)) _pinned.add(k);
-    await _savePinned();
-    notifyListeners();
-  }
-
-  /* ------------------------------------------------------ 肥猫那一批 */
-
-  /// 肥猫（TVBox 批量导入）那一批是否被删掉了。
-  bool get bundledHidden => _bundledHidden;
-
-  /// 删掉 / 恢复肥猫那一批（只隐藏，不销毁导入结果 —— 恢复不需要联网）。
-  Future<void> setBundledHidden(bool hidden) async {
-    if (_bundledHidden == hidden) return;
-    _bundledHidden = hidden;
-    await _saveBundledHidden();
-    notifyListeners();
-  }
-
-  /// 参与搜索 / 分类的源：云端生效的 + 用户自加的全部。
-  ///
-  /// 同一个地址只留一份（云端和用户各加一遍很常见），直播源不在此列。
+  /// 同一个地址只留一份，直播源 / 非影视源不在此列。
   List<KSource> get querySources {
     final out = <KSource>[];
     final seen = <String>{};
-    void take(KSource s) {
-      // SOURCE_BLOCK：网盘 / 课堂 / 体育 / 音频 / 配置文件这类源
-      // 不参与检索（面板里仍会列出来，只是点不动）。
-      if (!usableForContent(s)) return;
+    for (final s in visibleCloud) {
+      // SOURCE_BLOCK：网盘 / 课堂 / 体育 / 音频 / 配置文件这类源不参与检索。
+      if (!usableForContent(s)) continue;
       // FAIL_LEDGER（第 8 条）：这个源正在冷却 —— 批量检索跳过它，
       // 别让一轮搜索在死源上白等。用户主动点进详情 / 播放不受影响。
-      if (_failures.shouldSkip(s.key)) return;
-      // jar 插件没装：这些源一次也查不出来（原生只会回 no_jar），
-      // 跳过它们，别让每次搜索白等 8 秒（JAR_NOTICE）。
-      if (s.kind == KSourceKind.jar && _jarReady == false) return;
-      // jar 源的 api 是类名，同一个类靠 ext 区分不同站点（肥猫 / 饭太硬 / 二小
-      // 常常共用一个 csp_Xxx），只按 api 去重会把它们合并成一个源。
-      final key = s.kind == KSourceKind.jar
-          ? '${s.api.trim()}|${s.ext}'
-          : s.api.trim();
-      if (!seen.add(key)) return;
+      if (_failures.shouldSkip(s.key)) continue;
+      if (!seen.add(s.api.trim())) continue;
       out.add(s);
-    }
-
-    for (final s in visibleCloud) {
-      take(s);
-    }
-    for (final s in _user) {
-      take(s);
     }
     return out;
   }
@@ -1023,64 +678,18 @@ class SourceHub extends ChangeNotifier {
         return s.api.trim();
       }
     }
-    for (final s in _user) {
-      if (s.isLive && s.api.trim().isNotEmpty) return s.api.trim();
-    }
     return '';
   }
 
   /// 云端配置里是不是显式配了直播地址（设置页用它提示）。
   bool get hasCloudLiveUrl => liveUrl.isNotEmpty;
 
-  /// 检索源统计文案：「幻想 7 + 肥猫 41」。
+  /// 一轮检索要查的源。
   ///
-  /// 片源页原来写「48 个源参与检索」，用户看不出这 48 个是怎么来的 ——
-  /// 拆成我们自己那 7 条 + 肥猫那一条（内部 41 个 jar 源）才对得上界面。
-  String get retrievalLabel {
-    final parts = <String>[
-      '幻想 ${ownSources.length}',
-      '肥猫 ${bundledSources.length}',
-    ];
-    final mine = <KSource>[
-      for (final s in userSources)
-        if (s.searchable) s,
-    ];
-    if (mine.isNotEmpty) parts.add('自加 ${mine.length}');
-    return parts.join(' + ');
-  }
-
-  /// 一轮检索要查的源，按「自己的」/「外部的」分组。
-  ///
-  /// 自己的那批（云端下发的幻想线路）先查先渲染；外部那批（肥猫的 jar 源 +
-  /// 用户自加）并行在后台查，谁先回来谁先追加到列表下面。
-  SourceSearchPlan get searchPlan {
-    String keyOf(KSource s) => s.kind == KSourceKind.jar
-        ? '${s.api.trim()}|${s.ext}'
-        : s.api.trim();
-    final own = <KSource>[];
-    final external = <KSource>[];
-    final ownSeen = <String>{};
-    final extSeen = <String>{};
-    bool usable(KSource s) =>
-        usableForContent(s) &&
-        !(s.kind == KSourceKind.jar && _jarReady == false) &&
-        // 冷却中的源不参与本轮（`SourceFailureLedger`）。
-        !_failures.shouldSkip(s.key);
-    for (final s in visibleCloud) {
-      if (!usable(s)) continue;
-      if (!ownSeen.add(keyOf(s))) continue;
-      own.add(s);
-    }
-    for (final s in _user) {
-      if (!usable(s)) continue;
-      final key = keyOf(s);
-      // 已经在我们自己的那批里出现过的地址，不再查第二遍。
-      if (ownSeen.contains(key)) continue;
-      if (!extSeen.add(key)) continue;
-      external.add(s);
-    }
-    return SourceSearchPlan(own: own, external: external);
-  }
+  /// 只有我们自己的那批（云端下发的幻想线路）—— 外部源接入层已经拆掉，
+  /// 所以「自己的 / 外部的」这个分组也不存在了。
+  SourceSearchPlan get searchPlan =>
+      SourceSearchPlan(own: querySources, external: const <KSource>[]);
 
   DateTime? get fetchedAt =>
       _fetchedAt <= 0 ? null : DateTime.fromMillisecondsSinceEpoch(_fetchedAt);
@@ -1113,8 +722,6 @@ class SourceHub extends ChangeNotifier {
 
   Future<void> _boot() async {
     await _loadCache();
-    // 首次启动：后台把默认 TVBox 配置（肥猫）导一次，不挡首屏。
-    unawaited(_importDefaultTvBoxOnce());
     // 缓存过期或从来没拉过：后台补一次，不挡首屏。
     final age = _fetchedAt <= 0
         ? null
@@ -1122,32 +729,6 @@ class SourceHub extends ChangeNotifier {
             DateTime.fromMillisecondsSinceEpoch(_fetchedAt),
           );
     if (age == null || age > cacheTtl) unawaited(refresh());
-  }
-
-  /// 首次启动自动导入默认配置（[defaultTvBoxUrl]）。
-  ///
-  /// 触发条件：没成功导过、且用户手上还没有自加源（老用户升级上来不该被
-  /// 突然塞一堆源，删过源的也不重灌）。3 秒超时、失败静默并且**不写标记**，
-  /// 下次启动再试 —— 首屏不等它，网络差也就是没有这些源而已。
-  Future<void> _importDefaultTvBoxOnce() async {
-    try {
-      final sp = await SharedPreferences.getInstance();
-      if (sp.getBool(_kAutoImported) == true) return;
-      if (_user.isNotEmpty) {
-        await sp.setBool(_kAutoImported, true);
-        return;
-      }
-      final result = await importTvBox(
-        defaultTvBoxUrl,
-        timeout: autoImportTimeout,
-        tag: fatCatTag,
-      );
-      if (result.added > 0) {
-        await sp.setBool(_kAutoImported, true);
-      }
-    } catch (_) {
-      // 静默：没网 / 超时 / 配置换了格式，都当没这回事。
-    }
   }
 
   /* ------------------------------------------------------------ 云端配置 */
@@ -1277,6 +858,9 @@ class SourceHub extends ChangeNotifier {
     final site = FxSite.from(m);
     if (site == null) return null;
     final kind = kindOf(m['type']);
+    // type 3（jar 插件）/ type 4（python 脚本）不再接入：解析阶段就丢掉，
+    // 免得它们混进检索计划或界面。
+    if (kind == KSourceKind.unsupported || kind == KSourceKind.jar) return null;
     return KSource(
       key: site.key,
       name: site.name,
@@ -1286,40 +870,6 @@ class SourceHub extends ChangeNotifier {
       builtin: m['builtin'] != false,
       enabled: m['enabled'] != false,
       reason: _reasonOf(m['type'], kind),
-      ext: site.ext,
-      timeout: site.timeout,
-      header: site.header,
-      playUrl: site.playUrl,
-      click: site.click,
-      categories: site.categories,
-      jar: site.jar,
-      searchableFlag: site.searchable,
-      changeable: site.changeable,
-      quickSearch: site.quickSearch,
-      style: site.style,
-      playerType: site.playerType,
-    );
-  }
-
-  /// 一份 [FxSite] → 我们自己的源（导入 TVBox 时用）。
-  KSource _sourceOf(
-    FxSite site, {
-    required String key,
-    required String tag,
-    required KSourceOrigin origin,
-    required bool builtin,
-  }) {
-    final kind = kindOf(site.type);
-    return KSource(
-      key: key,
-      name: site.name,
-      api: site.api,
-      kind: kind,
-      origin: origin,
-      builtin: builtin,
-      enabled: true,
-      tag: tag,
-      reason: _reasonOf(site.type, kind),
       ext: site.ext,
       timeout: site.timeout,
       header: site.header,
@@ -1353,7 +903,8 @@ class SourceHub extends ChangeNotifier {
       case 1:
         return KSourceKind.cms;
       case 3:
-        return KSourceKind.jar;
+        // type 3 是 TVBox 的 jar 插件源：接入层已整层拆掉，按「不支持」处理。
+        return KSourceKind.unsupported;
       case 4:
         return KSourceKind.unsupported;
       default:
@@ -1365,382 +916,40 @@ class SourceHub extends ChangeNotifier {
     if (kind != KSourceKind.unsupported) return '';
     final text = _text(raw);
     final n = int.tryParse(text);
+    if (n == 3) return 'type 3（jar 插件源）已不再支持';
     if (n == 4) return 'type 4（python 解析脚本）暂不支持';
     return 'type $text 暂不支持';
   }
 
-  /* ------------------------------------------------------------ 增删改 */
-
-  /// 删掉一个云端内置源（只记黑名单，云端原始配置不动）。
-  Future<void> removeCloud(String key) async {
-    final k = key.trim();
-    if (k.isEmpty) return;
-    _removed = <String>{..._removed, k};
-    await _saveRemoved();
-    notifyListeners();
-  }
-
-  /// 恢复默认：被删掉的内置源全部回来。
-  Future<void> restoreDefaults() async {
-    if (_removed.isEmpty) return;
+  /// 调试用：清掉本地片源缓存（下次启动重新拉云端配置）。
+  Future<void> resetLocal() async {
+    _cloud = const <KSource>[];
     _removed = <String>{};
-    await _saveRemoved();
-    notifyListeners();
-  }
-
-  /// 恢复**单个**被删掉的云端源（片源管理「已移除」分组里的「恢复」）。
-  ///
-  /// RESTORE_ONE（2026-11-17）：用户要的是「删错了能挑一条恢复」，
-  /// 不想为了一条源把其它删掉的全放回来 —— 那等于把「删」白做一遍。
-  Future<void> restoreCloud(String key) async {
-    final k = key.trim();
-    if (k.isEmpty || !_removed.contains(k)) return;
-    _removed = <String>{..._removed}..remove(k);
-    await _saveRemoved();
-    notifyListeners();
-  }
-
-  /// 这个源的「恢复」是否可用（被删掉、且云端配置里还有它）。
-  bool canRestoreCloud(String key) => isRemoved(key);
-
-  /// 用户自加一个源。地址为空抛 [ApiException]，由 UI 直接 toast。
-  Future<KSource> addUser({
-    required String name,
-    required String api,
-    Object? type = 1,
-    String tag = '',
-    String ext = '',
-  }) async {
-    final address = api.trim();
-    if (address.isEmpty) throw ApiException('填一下片源地址');
-    final kind = kindOf(type);
-    // JAR_CLASS（2026-11-15）：jar 插件源的 `api` 是**类名**（`csp_Xxx`），
-    // 不是网址。这里原来一律要求 http(s)://，于是「添加片源 → jar 插件」
-    // 永远保存失败（弹窗却特意提示「填 jar 里的类名」）。updateUser 早就按
-    // kind 分别校验，这里对齐。
-    if (kind != KSourceKind.jar &&
-        !address.startsWith('http://') &&
-        !address.startsWith('https://')) {
-      throw ApiException('片源地址要以 http(s):// 开头');
-    }
-    var label = name.trim();
-    if (label.isEmpty) {
-      final host = Uri.tryParse(address)?.host ?? '';
-      label = host.isEmpty ? '我的片源' : host;
-    }
-    final source = KSource(
-      key: _newUserKey(label),
-      name: label,
-      api: address,
-      kind: kind,
-      origin: KSourceOrigin.user,
-      enabled: true,
-      tag: tag,
-      reason: _reasonOf(type, kind),
-      ext: ext.trim(),
-    );
-    _user = <KSource>[..._user, source];
-    await _saveUser();
-    _installCmsProfiles();
-    notifyListeners();
-    return source;
-  }
-
-  /// 修改一个用户自加源（云端源不允许改，只能删了再恢复）。
-  Future<void> updateUser(
-    String key, {
-    String? name,
-    String? api,
-    Object? type,
-    String? ext,
-  }) async {
-    final k = key.trim();
-    if (k.isEmpty) return;
-    final next = <KSource>[];
-    for (final s in _user) {
-      if (s.key != k) {
-        next.add(s);
-        continue;
-      }
-      final address = (api ?? s.api).trim();
-      if (address.isEmpty) throw ApiException('填一下片源地址');
-      final kind = type == null ? s.kind : kindOf(type);
-      final label = (name ?? s.name).trim();
-      next.add(KSource(
-        key: s.key,
-        name: label.isEmpty ? s.name : label,
-        api: address,
-        kind: kind,
-        origin: s.origin,
-        builtin: false,
-        enabled: true,
-        tag: s.tag,
-        reason: _reasonOf(type, kind),
-        ext: (ext ?? s.ext).trim(),
-      ));
-    }
-    _user = next;
-    await _saveUser();
-    _installCmsProfiles();
-    notifyListeners();
-  }
-
-  Future<void> removeUser(String key) async {
-    final k = key.trim();
-    final next = <KSource>[
-      for (final s in _user)
-        if (s.key != k) s,
-    ];
-    if (next.length == _user.length) return;
-    _user = next;
-    await _saveUser();
-    _installCmsProfiles();
-    notifyListeners();
-  }
-
-  /// TVBox / 猫源导入：粘贴 JSON 或填一个配置地址，解析 `sites` 数组。
-  ///
-  /// 收 `type: 1`（CMS 接口）、`type: 0`（直接地址）、`type: 3`（jar 插件，
-  /// `api` 是类名、`ext` 是站点配置，需要先装好 `spider.jar`）；
-  /// `type: 4`（python 脚本）标记「暂不支持」后跳过。
-  /// 是否指向本站苹果CMS 接口（App 内置源，导入时应跳过）。
-  static bool _isOurOwnApi(String api) {
-    final u = api.trim().toLowerCase();
-    if (u.isEmpty) return false;
-    final root = CmsApi.root.toLowerCase();
-    if (root.isNotEmpty && u.startsWith(root)) return true;
-    return u.contains('125.94.244.87/api.php') ||
-        u.contains('api.php/provide/vod');
-  }
-
-  Future<TvBoxImport> importTvBox(
-    String input, {
-    Duration? timeout,
-    String tag = tvBoxTag,
-  }) async {
-    final text = input.trim();
-    if (text.isEmpty) throw ApiException('先粘贴 TVBox 配置或填一个地址');
-    final config = await _loadTvBoxConfig(
-      text,
-      timeout: timeout ?? const Duration(seconds: 12),
-      depth: 0,
-    );
-    if (config.sites.isEmpty) {
-      throw ApiException(
-        _lastConfigHint.isEmpty ? '没解析到 sites 数组，检查一下配置内容' : _lastConfigHint,
-      );
-    }
-    // 协议面先装上：parses / rules / hosts / doh 与导入是同一份配置里的东西，
-    // 少装一步就是「源导进来了，但解析器一个都没注册」（第 1 条）。
-    _applyProtocolSections(config);
-    _lastConfigHint = '';
-
-    final notes = <String>[];
-    final added = <KSource>[];
-    // 去重键：普通源看地址；jar 源看「类名 + ext」（同类不同 ext 是不同的站点）。
-    final taken = <String>{
-      for (final s in _user)
-        s.kind == KSourceKind.jar ? '${s.api.trim()}|${s.ext}' : s.api.trim(),
-    };
-    var skipped = 0;
-    var selfSkipped = 0;
-    var jarNotice = false;
-    // 接口里 `type: live` 的站点地址（没有顶层 lives / live_url 时用它）。
-    var liveFromSites = '';
-    for (final site in config.sites) {
-      final name = site.name;
-      final api = site.api;
-      final kind = kindOf(site.type);
-      // 排除指向本站接口的源：那是 App 内置的七个源（幻想腾讯/全部线路/4K/
-      // 1080P/爱奇艺/量子/红牛），导入云端配置时再进来一份只会让源列表重复。
-      if (_isOurOwnApi(api)) {
-        selfSkipped++;
-        continue;
-      }
-      if (kind == KSourceKind.unsupported) {
-        skipped++;
-        notes.add('「$name」${_reasonOf(site.type, kind)}，已跳过');
-        continue;
-      }
-      // LIVE_FOLLOW_INTERFACE（2026-11-17）：直播**跟着接口走**。
-      // 用户口径：片源管理里不出现任何「添加直播源」的入口，直播页的数据
-      // 来自已导入接口的 lives 字段。所以这里不再把直播列表当成「跳过并
-      // 提示去直播页添加」，而是把它的地址记成当前直播源（后面 `lives`
-      // 顶层字段 / `live_url` 优先级更高）。
-      if (kind == KSourceKind.live) {
-        if (liveFromSites.isEmpty && api.isNotEmpty) liveFromSites = api;
-        skipped++;
-        notes.add('「$name」是直播列表，已接到「直播」页');
-        continue;
-      }
-      final dedupeKey = kind == KSourceKind.jar ? '$api|${site.ext}' : api;
-      if (!taken.add(dedupeKey)) {
-        skipped++;
-        continue;
-      }
-      if (kind == KSourceKind.jar) jarNotice = true;
-      added.add(_sourceOf(
-        site,
-        key: _newUserKey(name.isEmpty ? 'tvbox' : name),
-        tag: tag,
-        origin: KSourceOrigin.user,
-        builtin: false,
-      ));
-    }
-    if (selfSkipped > 0 && added.isEmpty) {
-      throw ApiException('这份配置里的源都是本站内置的，没有需要导入的');
-    }
-    // 直播跟着接口走：顶层 `lives` / `live_url` 优先，其次 type=live 的站点。
-    final liveUrl = config.liveUrl.trim().isNotEmpty
-        ? config.liveUrl.trim()
-        : liveFromSites.trim();
-    if (liveUrl.isNotEmpty && liveUrl != _liveUrl) {
-      _liveUrl = liveUrl;
-      await _saveLiveUrl();
-      notes.add('直播源已跟着接口更新');
-    }
-    final withTimeout = added.where((s) => s.timeout > 0).length;
-    final withHeader = added.where((s) => s.header.isNotEmpty).length;
-    if (withTimeout > 0 || withHeader > 0) {
-      notes.add('识别到 $withTimeout 个带 timeout、$withHeader 个带 header 的站点');
-    }
-    if (config.parses.isNotEmpty) {
-      notes.add('导入 ${config.parses.length} 个解析器'
-          '${config.flags.isEmpty ? '' : '、${config.flags.length} 条线路名'}');
-    }
-    if (jarNotice) {
-      final jar = JarSpider.cachedStatus ?? await JarSpider.status();
-      notes.add(jar.installed
-          ? 'jar 源已导入，解析交给本地的 spider.jar'
-          : '导入了 jar 源，但还没装 spider.jar：到片源页点「安装 jar 插件」，这些源才能出内容');
-    }
-    if (added.isNotEmpty) {
-      _user = <KSource>[..._user, ...added];
-      await _saveUser();
-      _installCmsProfiles();
-      notifyListeners();
-    }
-    return TvBoxImport(
-      added: added.length,
-      skipped: skipped,
-      notes: notes,
-    );
-  }
-
-  /// 最近一次配置加载给不出的原因（导入报错要用它说人话）。
-  String _lastConfigHint = '';
-
-  /// 读一份配置（地址 / 文本都行），**递归展开 depot**，返回合并后的结果。
-  ///
-  /// DEPOT（第 1 条 · 壳 `VodConfig.parseDepot()`）：TVBox 生态里很常见一种
-  /// 「订阅合集」配置 —— 顶层只有 `{urls: ["a.json", "b.json"]}`，
-  /// 真正的站点在子配置里。我们原来只认 `sites`，这种配置一条都导不进来。
-  ///
-  /// 合并口径见 [TvBoxConfig.merge]；子配置的相对地址按父配置地址补全。
-  Future<TvBoxConfig> _loadTvBoxConfig(
-    String input, {
-    required Duration timeout,
-    required int depth,
-    String baseUrl = '',
-  }) async {
-    if (depth > 3) {
-      // 递归上限：配置互相引用（A→B→A）时不能无限拉。
-      return const TvBoxConfig();
-    }
-    var body = input;
-    var sourceUrl = baseUrl;
-    if (input.startsWith('http://') || input.startsWith('https://')) {
-      sourceUrl = input;
-      try {
-        final r = await http
-            .get(requestUri(input), headers: const <String, String>{
-              'accept': '*/*',
-              // 猫源那类站按 UA 分流：浏览器 UA 给的是介绍页（HTML），
-              // 播放器 UA 才给配置（肥猫给的就是加密配置）。
-              'user-agent': tvBoxUserAgent,
-            })
-            .timeout(timeout);
-        if (r.statusCode >= 400) throw ApiException.server(r.statusCode);
-        // 加密配置是纯 ASCII 的 hex，用 bodyBytes 兜住乱码更稳。
-        body = utf8.decode(r.bodyBytes, allowMalformed: true);
-      } on TimeoutException {
-        _lastConfigHint = '配置请求超时';
-        throw ApiException.timeout();
-      } on http.ClientException {
-        _lastConfigHint = '配置地址连不上';
-        throw ApiException.network();
-      }
-    }
-    // 加密配置（`$#key#$` + AES-CBC）：先解出明文 JSON，再走下面同一套解析。
-    final plain = decodeTvBoxConfig(body);
-    final text = plain ?? body;
-    Object? parsed;
+    _liveUrl = '';
+    _fetchedAt = 0;
     try {
-      parsed = jsonDecode(text);
-    } catch (_) {
-      _lastConfigHint = '配置不是合法 JSON';
-      return const TvBoxConfig();
-    }
-    // depot：`{urls:[…]}` → 逐个拉下来合并（第一个是主配置）。
-    final depot = TvBoxConfig.depotUrlsOf(parsed);
-    if (depot.isNotEmpty) {
-      var merged = const TvBoxConfig();
-      for (final url in depot) {
-        final absolute = _resolveConfigUrl(url, sourceUrl);
-        if (absolute.isEmpty) continue;
-        try {
-          final child = await _loadTvBoxConfig(
-            absolute,
-            timeout: timeout,
-            depth: depth + 1,
-            baseUrl: absolute,
-          );
-          merged = merged.merge(child);
-        } catch (_) {
-          // 子配置挂了不影响其它几份（合集里常年有一两条是死的）。
-        }
-      }
-      return merged;
-    }
-    final config = TvBoxConfig.parse(parsed, baseUrl: sourceUrl);
-    if (config.sites.isEmpty && plain == null && isTvBoxEncrypted(body)) {
-      _lastConfigHint = '这份配置是加密的，但解不开（密文被截断或换了加密方式），换个地址试试';
-    }
-    return config;
+      final sp = await SharedPreferences.getInstance();
+      await sp.remove(_kCloud);
+      await sp.remove(_kRemoved);
+      await sp.remove(_kLiveUrl);
+      await sp.remove(_kFetchedAt);
+      await sp.remove(_kProtocol);
+      await sp.remove(_kSourceFailure);
+      // 老版本留下的片源管理键：一并清掉，避免升级后还挂着旧数据。
+      await sp.remove('fx_sources_user_v1');
+      await sp.remove('fx_sources_auto_tvbox_v1');
+      await sp.remove('fx_home_source_v1');
+      await sp.remove('fx_sources_pinned_v1');
+      await sp.remove('fx_sources_bundled_hidden_v1');
+    } catch (_) {}
+    _protocol = const TvBoxConfig();
+    ParseRegistry.install(ParseRegistry.empty);
+    FxSniffer.install(FxSniffer.none);
+    FxAds.install(FxAds.none);
+    CmsClient.installProfiles(const <String, CmsSiteProfile>{});
+    await _failures.clear();
+    notifyListeners();
   }
-
-  /// depot 里的相对地址（`./a.json` / `../b.json` / `a.json`）按父配置补全。
-  static String _resolveConfigUrl(String url, String baseUrl) {
-    final text = url.trim();
-    if (text.isEmpty) return '';
-    if (text.startsWith('http://') || text.startsWith('https://')) return text;
-    final base = Uri.tryParse(baseUrl.trim());
-    if (base == null || !base.hasScheme) return '';
-    final parsed = Uri.tryParse(text);
-    if (parsed == null) return '';
-    return base.resolveUri(parsed).toString();
-  }
-
-  String _newUserKey(String name) {
-    final base = name
-        .trim()
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^a-z0-9\u4e00-\u9fa5]+'), '_');
-    final head = base.isEmpty ? 'src' : base;
-    var key = 'u_$head';
-    var i = 1;
-    final used = <String>{
-      for (final s in _cloud) s.key,
-      for (final s in _user) s.key,
-    };
-    while (used.contains(key)) {
-      i++;
-      key = 'u_${head}_$i';
-    }
-    return key;
-  }
-
-  /* ------------------------------------------------------------ 多源检索 */
 
   /// 并行查所有启用源，合并去重。
   ///
@@ -1862,71 +1071,6 @@ class SourceHub extends ChangeNotifier {
               ),
         ];
 
-    if (source.kind == KSourceKind.jar) {
-      try {
-        // 两种 quick 都在 [JarSpider.searchWithFallback] 里试过了，
-        // 这里只给它一层「源级」兜底超时，别让某个源把整轮拖死。
-        final report = await JarSpider.searchWithFallback(
-          api: source.api,
-          ext: source.ext,
-          key: q,
-          page: page,
-          label: label,
-        ).timeout(limit);
-        final cards = prepared(report.cards);
-        final status = cards.isNotEmpty
-            ? SourceSearchStatus.ok
-            : report.allTimedOut
-                ? SourceSearchStatus.timeout
-                : report.allFailed
-                    ? SourceSearchStatus.error
-                    : SourceSearchStatus.empty;
-        if (cards.isEmpty) {
-          fxJarLog(
-            'source=$label key=$q 结局=${status.name}'
-            '${report.note.isEmpty ? '' : ' err=${fxJarClip(report.note, max: 120)}'}'
-            ' 耗时=${spent().inMilliseconds}ms',
-          );
-        }
-        record(status, report.note);
-        return SourceSearchResult(
-          source: source,
-          cards: cards,
-          status: status,
-          elapsed: spent(),
-          rawCount: report.cards.length,
-          note: report.note,
-          quickFallback: report.usedFallback,
-        );
-      } on TimeoutException {
-        fxJarLog(
-          'source=$label key=$q 结局=timeout（源级 ${limit.inSeconds}s 兜底）'
-          ' 耗时=${spent().inMilliseconds}ms',
-        );
-        record(SourceSearchStatus.timeout, '源级超时');
-        return SourceSearchResult(
-          source: source,
-          cards: const <VideoCard>[],
-          status: SourceSearchStatus.timeout,
-          elapsed: spent(),
-          note: '源级超时',
-        );
-      } catch (e) {
-        fxJarLog(
-          'source=$label key=$q 结局=error err=${fxJarClip('$e', max: 120)}'
-          ' 耗时=${spent().inMilliseconds}ms',
-        );
-        record(SourceSearchStatus.error, '$e');
-        return SourceSearchResult(
-          source: source,
-          cards: const <VideoCard>[],
-          status: SourceSearchStatus.error,
-          elapsed: spent(),
-          note: '$e',
-        );
-      }
-    }
-
     try {
       final cards = await CmsClient.of(source.api)
           .search(q, page)
@@ -1943,7 +1087,7 @@ class SourceHub extends ChangeNotifier {
         rawCount: cards.length,
       );
     } on TimeoutException {
-      fxJarLog(
+      fxSourceLog(
         'source=$label key=$q 结局=timeout（站点级 ${limit.inSeconds}s）'
         ' 耗时=${spent().inMilliseconds}ms',
       );
@@ -1983,7 +1127,7 @@ class SourceHub extends ChangeNotifier {
 
   /// 当前所有源的画像快照（安装单个源的画像时用，别把别人的冲掉）。
   Map<String, CmsSiteProfile> _cmsProfilesSnapshot() => <String, CmsSiteProfile>{
-        for (final s in <KSource>[..._cloud, ..._user])
+        for (final s in _cloud)
           if (s.api.trim().isNotEmpty) s.api.trim(): s.cmsProfile,
       };
 
@@ -2008,22 +1152,6 @@ class SourceHub extends ChangeNotifier {
     int page,
   ) async {
     try {
-      if (source.kind == KSourceKind.jar) {
-        // jar 源的分类 id 来自它自己的 homeContent（class 列表），
-        // 先按名字映射到我们的频道键，再拿它真实的 type_id 去取列表。
-        final typeId = await JarSpider.typeIdOfChannel(
-          source.api,
-          source.ext,
-          channelKey,
-        );
-        if (typeId.isEmpty) return const <VideoCard>[];
-        return await JarSpider.category(
-          api: source.api,
-          ext: source.ext,
-          tid: typeId,
-          page: page,
-        );
-      }
       final client = CmsClient.of(source.api);
       await client.classes();
       final typeId = client.typeIdOfChannel(channelKey);
@@ -2071,9 +1199,6 @@ class SourceHub extends ChangeNotifier {
     if (at <= 0) return null;
     final key = rest.substring(0, at);
     for (final s in _cloud) {
-      if (s.key == key) return s;
-    }
-    for (final s in _user) {
       if (s.key == key) return s;
     }
     return null;
@@ -2187,16 +1312,8 @@ class SourceHub extends ChangeNotifier {
       if (cloudRaw != null && cloudRaw.trim().isNotEmpty) {
         _cloud = _decodeList(cloudRaw);
       }
-      final userRaw = sp.getString(_kUser);
-      if (userRaw != null && userRaw.trim().isNotEmpty) {
-        _user = _decodeList(userRaw);
-      }
       final removedRaw = sp.getStringList(_kRemoved);
       if (removedRaw != null) _removed = removedRaw.toSet();
-      _homeKey = (sp.getString(_kHomeSource) ?? '').trim();
-      final pinnedRaw = sp.getStringList(_kPinned);
-      if (pinnedRaw != null) _pinned = pinnedRaw.toSet();
-      _bundledHidden = sp.getBool(_kBundledHidden) ?? false;
       _liveUrl = sp.getString(_kLiveUrl) ?? '';
       _fetchedAt = sp.getInt(_kFetchedAt) ?? 0;
       final protocolRaw = sp.getString(_kProtocol);
@@ -2247,61 +1364,9 @@ class SourceHub extends ChangeNotifier {
         _kCloud,
         jsonEncode(<Map<String, dynamic>>[for (final s in _cloud) s.toMap()]),
       );
-      await sp.setString(
-        _kUser,
-        jsonEncode(<Map<String, dynamic>>[for (final s in _user) s.toMap()]),
-      );
       await sp.setString(_kLiveUrl, _liveUrl);
       await sp.setStringList(_kRemoved, _removed.toList());
-      await sp.setString(_kHomeSource, _homeKey);
-      await sp.setStringList(_kPinned, _pinned.toList());
-      await sp.setBool(_kBundledHidden, _bundledHidden);
       await sp.setString(_kProtocol, jsonEncode(_protocol.protocolToMap()));
-    } catch (_) {}
-  }
-
-  Future<void> _saveLiveUrl() async {
-    try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.setString(_kLiveUrl, _liveUrl);
-    } catch (_) {}
-  }
-
-  Future<void> _saveHomeSource() async {
-    try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.setString(_kHomeSource, _homeKey);
-    } catch (_) {}
-  }
-
-  Future<void> _savePinned() async {
-    try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.setStringList(_kPinned, _pinned.toList());
-    } catch (_) {}
-  }
-
-  Future<void> _saveBundledHidden() async {
-    try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.setBool(_kBundledHidden, _bundledHidden);
-    } catch (_) {}
-  }
-
-  Future<void> _saveUser() async {
-    try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.setString(
-        _kUser,
-        jsonEncode(<Map<String, dynamic>>[for (final s in _user) s.toMap()]),
-      );
-    } catch (_) {}
-  }
-
-  Future<void> _saveRemoved() async {
-    try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.setStringList(_kRemoved, _removed.toList());
     } catch (_) {}
   }
 
@@ -2312,41 +1377,7 @@ class SourceHub extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// 调试用：清掉本地片源缓存（不动云端配置）。
-  ///
-  /// 顺带清掉「默认配置已自动导入」的标记：恢复默认就该把肥猫那份重新导回来
-  /// （下次启动时生效）。
-  Future<void> resetLocal() async {
-    _removed = <String>{};
-    _user = const <KSource>[];
-    _liveUrl = '';
-    _fetchedAt = 0;
-    _homeKey = '';
-    _pinned = <String>{};
-    _bundledHidden = false;
-    try {
-      final sp = await SharedPreferences.getInstance();
-      await sp.remove(_kCloud);
-      await sp.remove(_kUser);
-      await sp.remove(_kRemoved);
-      await sp.remove(_kLiveUrl);
-      await sp.remove(_kFetchedAt);
-      await sp.remove(_kAutoImported);
-      await sp.remove(_kProtocol);
-      await sp.remove(_kSourceFailure);
-      await sp.remove(_kHomeSource);
-      await sp.remove(_kPinned);
-      await sp.remove(_kBundledHidden);
-    } catch (_) {}
-    _protocol = const TvBoxConfig();
-    ParseRegistry.install(ParseRegistry.empty);
-    FxSniffer.install(FxSniffer.none);
-    FxAds.install(FxAds.none);
-    JarSpider.setVipFlags(const <String>[]);
-    CmsClient.installProfiles(const <String, CmsSiteProfile>{});
-    await _failures.clear();
-    notifyListeners();
-  }
+
 }
 
 /// 任意值 → 去空白的文本（配置字段可能是 null / 数字 / 字符串）。

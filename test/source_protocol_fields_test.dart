@@ -9,7 +9,6 @@
 //   · `type: 0` → `directKind`（决定 `ac=videolist` 还是 `detail`）。
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:fantasy_tv/services/jar_spider.dart';
 import 'package:fantasy_tv/services/source_hub.dart';
 
 KSource _source(Map<String, dynamic> map) {
@@ -213,22 +212,6 @@ void main() {
         'changeable': 0,
       });
       expect(s.changeableEnabled, isFalse);
-    });
-  });
-
-  group('flags → jar 的 playerContent', () {
-    tearDown(() => JarSpider.setVipFlags(const <String>[]));
-
-    test('没配 flags 时保持写死的默认名单（行为与改造前一致）', () {
-      JarSpider.setVipFlags(const <String>[]);
-      expect(JarSpider.vipFlags, JarSpider.defaultVipFlags);
-      expect(JarSpider.vipFlags, contains('iqiyi'));
-    });
-
-    test('配了 flags 就用配置的（壳的 VodConfig.get().getFlags() 语义）', () {
-      JarSpider.setVipFlags(<String>['youku', ' 优酷 ', '爱奇艺', '']);
-      expect(JarSpider.vipFlags, <String>['youku', '优酷', '爱奇艺']);
-      expect(JarSpider.vipFlags, isNot(contains('qq')));
     });
   });
 

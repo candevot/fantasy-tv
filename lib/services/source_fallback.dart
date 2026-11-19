@@ -76,8 +76,7 @@ class FxFallbackOutcome {
     String reason = '',
   }) : this(
           note: note,
-          jarSkipped: jarSkipped,
-          reason: reason,
+              reason: reason,
         );
 
   final FxFallbackCandidate? candidate;
@@ -343,11 +342,9 @@ class FxSourceFallback {
     for (final key in found.triedKeys) {
       triedSources.add(key);
     }
-    final jarSkipped = found.jarSkipped;
     if (found.hits.isEmpty) {
       return FxFallbackOutcome.miss(
-        jarSkipped: jarSkipped,
-        reason: found.reason.isEmpty ? 'external_empty' : found.reason,
+          reason: found.reason.isEmpty ? 'external_empty' : found.reason,
       );
     }
 
@@ -364,8 +361,7 @@ class FxSourceFallback {
     }
     if (picks.isEmpty) {
       return FxFallbackOutcome.miss(
-        jarSkipped: jarSkipped,
-        reason: 'external_empty',
+          reason: 'external_empty',
       );
     }
     // 源优先级先于年份差：咕噜（priority 0）有同名就先用咕噜的。
@@ -406,7 +402,6 @@ class FxSourceFallback {
     }
     return FxFallbackOutcome.miss(
       note: note,
-      jarSkipped: jarSkipped,
       reason: 'external_no_playable_line',
     );
   }
@@ -424,28 +419,17 @@ class FxSourceFallback {
     } catch (_) {
       // 索引坏了也照样能查外部源；只是可能少几个。
     }
-    await hub.ensureJarStatus();
     final plan = hub.searchPlan;
-    // jarMissing：源列表里有 jar 源、但插件没装。这种源会被 searchPlan 提前
-    // 过滤掉（连队列都进不来），所以要先记下「第 3 段是被跳过」，
-    // 否则页面会当成「外部源里没有这部片」，用户不知道该装插件。
-    var jarSkipped = hub.jarMissing;
+    // 外部源接入层已经整层拆掉：第 3 段没有可查的源，如实上报「没有外部源」，
+    // 页面据此给「所有线路都试过了」的最终提示。
     final usable = <KSource>[];
     for (final source in plan.external) {
       // 这个源上一轮已经查过了：不再查第二遍（「不要在源之间来回跳」）。
       if (tried.contains(sourceKeyOf(source))) continue;
-      // jar 源要 jar 插件；没装就跳过第 3 段（不假装查过）。
-      if (source.kind == KSourceKind.jar && !hub.jarReady) {
-        jarSkipped = true;
-        continue;
-      }
       usable.add(source);
     }
     if (usable.isEmpty) {
-      return FxExternalHits(
-        jarSkipped: jarSkipped,
-        reason: jarSkipped ? 'jar_missing' : 'no_external_source',
-      );
+      return const FxExternalHits(reason: 'no_external_source');
     }
 
     // 顺序：**先查「咕噜」**（内容最全、速度也快），咕噜没有 / 失败再按配置
@@ -493,7 +477,6 @@ class FxSourceFallback {
     }
     return FxExternalHits(
       hits: hits,
-      jarSkipped: jarSkipped,
       triedKeys: <String>[for (final source in queue) sourceKeyOf(source)],
     );
   }
@@ -577,9 +560,7 @@ class FxSourceFallback {
       CmsBridge.detail(id);
 
   /// 源的身份 key（与 [SourceHub.searchPlan] 的去重口径一致）。
-  static String sourceKeyOf(KSource source) => source.kind == KSourceKind.jar
-      ? '${source.api.trim()}|${source.ext.trim()}'
-      : source.api.trim();
+  static String sourceKeyOf(KSource source) => source.api.trim();
 
   /// 卡片上要显示的源名：优先用卡片自己的来源标注，其次源对象的名字。
   static String sourceLabelOf(VideoCard card, KSource source) {

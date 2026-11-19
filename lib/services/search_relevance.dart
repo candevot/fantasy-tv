@@ -33,7 +33,7 @@ library;
 
 import '../models.dart';
 import 'fallback_match.dart' show fxIsExtraClip, fxNormTitle;
-import 'jar_log.dart';
+import 'source_log.dart';
 
 /// 判定为「相关」的最低分（保留给需要打分排序的调用方，闸门本身不用它
 /// 做硬阈值 —— 见 [fxSearchRelevant]）。
@@ -168,12 +168,12 @@ FxSearchGate fxSearchGate(List<VideoCard> cards, String query) {
 ///
 /// 格式固定，真机 `grep 'gate source='` 就能看出**哪个源**在灌无关数据：
 /// `[JarSearch] gate source=哔哩合集 dropped=2 kept=3 clips=0 reason=unrelated`
-void fxJarGateLog(String source, FxSearchGate gate) {
+void fxSourceGateLog(String source, FxSearchGate gate) {
   final who = source.trim().isEmpty ? '?' : source.trim();
   final reason = gate.dropped > 0
       ? 'unrelated'
       : (gate.kept.isEmpty ? 'empty' : 'ok');
-  fxJarLog(
+  fxSourceLog(
     'gate source=$who dropped=${gate.dropped} kept=${gate.kept.length} '
     'clips=${gate.extraClips} reason=$reason',
   );

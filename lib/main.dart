@@ -14,7 +14,6 @@ import 'services/app_settings.dart';
 import 'services/app_update_service.dart';
 import 'services/playback_params.dart';
 import 'services/download_service.dart';
-import 'services/jar_plugin.dart';
 import 'services/cms_bridge.dart';
 import 'services/line_health.dart';
 import 'services/source_hub.dart';
@@ -142,28 +141,6 @@ class Boot {
         await PlaybackParamsInstaller.sync(AppSettings.instance);
       } catch (e, st) {
         AppLog.write('boot.playbackParams', e, st);
-      }
-    }());
-
-    // jar 插件（肥猫那 41 个 csp_ 源的运行期依赖）：
-    // 只在这一台设备上真的导入了 jar 源时才自动装，避免给纯 CMS 用户白下 1.5MB。
-    // 装的过程全在后台：内置 jar 优先，没有就从设置里的地址下载，
-    // 失败重试一次并写进 JarPluginManager.error（设置页 / 搜索页可见）。
-    unawaited(() async {
-      try {
-        await SourceHub.instance
-            .ensureJarStatus()
-            .timeout(const Duration(seconds: 3));
-        // 不再等「源列表里先出现 jar 源」：首启用云端配置还没拉回来时
-        // _user 是空的，等它等于永远不装。jar 只有 1.9MB，直接后台装。
-        if (SourceHub.instance.jarReady) {
-          // 已经装好：只补一次自检，确认 jar 真的能跑。
-          unawaited(JarPluginManager.instance.ensureReady(auto: false));
-          return;
-        }
-        await JarPluginManager.instance.ensureReady();
-      } catch (e, st) {
-        AppLog.write('boot.jar', e, st);
       }
     }());
 

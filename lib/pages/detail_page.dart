@@ -62,7 +62,7 @@ class DetailPage extends StatefulWidget {
 
   /// 搜索阶段已经知道的封面（DETAIL_SKELETON 2026-11-15）。
   ///
-  /// 外部源（肥猫的 jar 源）详情要握手 + 重试，第一次成功经常在 9～15 秒。
+  /// 外部源的详情接口要握手 + 重试，第一次成功经常在 9～15 秒。
   /// 这段时间里页面原来是一整块转圈的白/黑屏；把搜索结果里的封面带进来，
   /// 首帧就能画出「海报 + 片名 + 骨架」，用户不会以为页面死了。
   final String cover;
@@ -302,10 +302,9 @@ class _DetailPageState extends State<DetailPage>
     // 页面不能一直转圈。
     //
     // 上限**按来源区分**：
-    //   · 外部源（肥猫 jar）：20 秒。8 秒 / 12 秒都不够 —— 咕噜的
-    //     `detailContent` 要先 `GuluCrypto` 握手，本身还带「3 次重试 +
-    //     500/1000/2000ms 退避」（光睡眠 3.5 秒），一次成功的详情经常落在
-    //     9～15 秒。用户看到的「8 秒无响应」就是被这个上限杀掉的。
+    //   · 外部源（历史 `@src:` 记录）：20 秒。8 秒 / 12 秒都不够 ——
+    //     它自身带「3 次重试 + 500/1000/2000ms 退避」（光睡眠 3.5 秒），
+    //     一次成功的详情经常落在 9～15 秒。
     //   · 本站 CMS：保持 12 秒（它快，慢了说明真有问题，不该让用户干等）。
     final budget = CmsBridge.detailTimeout(widget.id);
     try {
@@ -1271,7 +1270,7 @@ class _DetailPageState extends State<DetailPage>
   /// ```
   /// 第 1 段  本片其他线路     _switchNextLine（已有）
   /// 第 2 段  同源其他版本     FxSourceFallback.find 内部先查我们自己的库
-  /// 第 3 段  跨源找同名       再去外部源（肥猫的 jar 源）搜
+  /// 第 3 段  跨源找同名       再去外部源搜（接入层已拆，现恒为未命中）
   /// 全失败   「所有线路都尝试过了，暂时无法播放」
   /// ```
   void _showPlaybackError({SourceIssue? issue}) {
@@ -1338,7 +1337,6 @@ class _DetailPageState extends State<DetailPage>
       _showFinalPlaybackError(
         issue: issue,
         note: outcome.note,
-        jarSkipped: outcome.jarSkipped,
       );
       return;
     }
@@ -1383,7 +1381,6 @@ class _DetailPageState extends State<DetailPage>
   void _showFinalPlaybackError({
     SourceIssue? issue,
     String note = '',
-    bool jarSkipped = false,
   }) {
     final lines = _detail?.lines ?? const <LineInfo>[];
     String message;
@@ -1393,8 +1390,6 @@ class _DetailPageState extends State<DetailPage>
       message = fxFallbackAllFailedText;
       final tail = note.trim();
       if (tail.isNotEmpty) message = '$message（$tail）';
-      // 第 3 段因为 jar 没装被跳过：说清是「没装插件」，不是「没有这部片」。
-      if (jarSkipped) message = '$message · 装好 jar 插件（spider.jar）后可跨源再找一次';
       if (issue == SourceIssue.parse) message = '$message · 这些线路都需要现场解析';
     }
     final player = _playerKey.currentState;

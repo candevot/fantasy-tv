@@ -82,9 +82,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _hub.addListener(_onHubChanged);
-    // 源面板标题要按「这个源现在能不能出内容」降级（jar 源没装 jar 插件时
-    // 标题显示幻想），所以启动就查一次 jar 状态。
-    unawaited(_hub.ensureJarStatus());
     _feedScroll.addListener(_onFeedScroll);
     _load();
     // BG_SERVICE（2026-11-15）：上次后台播放被系统压过内存 → 启动后提示一次。

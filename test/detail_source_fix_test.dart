@@ -6,21 +6,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:fantasy_tv/api.dart';
 import 'package:fantasy_tv/models.dart';
 import 'package:fantasy_tv/services/cms_bridge.dart';
-import 'package:fantasy_tv/services/jar_spider.dart';
 import 'package:fantasy_tv/widgets/fx_cards.dart';
 
 /// DETAIL_FIX（2026-11-15）：详情页「加载失败（该源暂不可用，8 秒无响应）」
 /// 与「肥猫结果封面空白」两件事的回归。
 ///
 /// 钉死的四组规则：
-///   1. 详情超时**按来源区分**：外部源（肥猫 jar）20 秒，本站 CMS 保持 12 秒。
-///      8 秒必挂 —— 咕噜的 `detailContent` 要先握手，自身还有
-///      3 次重试 + 500/1000/2000ms 退避（光睡眠 3.5 秒），一次成功的详情
-///      经常落在 9～15 秒。
+///   1. 详情超时**按来源区分**：外部源 20 秒，本站 CMS 保持 12 秒。
+///      8 秒必挂 —— 外部源详情自身带 3 次重试 + 500/1000/2000ms 退避
+///      （光睡眠 3.5 秒），一次成功的详情经常落在 9～15 秒。
 ///   2. 错误文案按来源区分：本站 →「该线路暂时取不到，换条线路试试」；
 ///      外部源 →「<源名> 暂时没响应，换一个源试试」。外部源没有「本站线路」。
-///   3. jar 的 `vod_pic` 归一化：空串 / 源站相对地址 / 协议相对地址三种都
-///      不许再补成我们已下线的旧后端地址（那会变成一块空白封面）。
+///   3. `vod_pic` 归一化：空串 / 源站相对地址 / 协议相对地址三种都不许再补成
+///      我们已下线的旧后端地址（那会变成一块空白封面）。
 ///   4. 封面加载中 / 加载失败 / 地址为空都显示「片名首字 + 渐变底」，
 ///      不再是灰白空白块。
 void main() {
@@ -92,21 +90,6 @@ void main() {
           const Duration(seconds: 12));
       expect(CmsBridge.ownDetailTimeout, const Duration(seconds: 12));
     });
-
-    test('jar 单次调用默认 12 秒（搜索 / 播放），详情单独放宽', () {
-      expect(CmsBridge.jarTimeout, const Duration(seconds: 12));
-      expect(CmsBridge.jarDetailTimeout > CmsBridge.jarTimeout, isTrue);
-    });
-
-    test('源级超时先于页面级：jar guard 比页面预算短', () {
-      // 和 searchBudget < timeout 同一个口径：页面要拿到「咕噜暂时没响应」，
-      // 而不是一句笼统的页面超时。
-      expect(
-        CmsBridge.jarDetailTimeout < CmsBridge.externalDetailTimeout,
-        isTrue,
-      );
-      expect(CmsBridge.jarDetailTimeout >= const Duration(seconds: 15), isTrue);
-    });
   });
 
   group('错误文案按来源区分（SOURCE_TEXT）', () {
@@ -135,43 +118,6 @@ void main() {
       expect(CmsBridge.isExternalId('@src:gulu::1'), isTrue);
       expect(CmsBridge.isExternalId('  418792'), isFalse);
       expect(CmsBridge.isExternalId('@line:幻想::1'), isFalse);
-    });
-  });
-
-  group('jar 详情的封面归一化（COVER_FIX）', () {
-    test('相对 vod_pic 按源站根补全；空 vod_pic 保持空串', () {
-      Map<String, Object?> body(String pic) => <String, Object?>{
-            'list': <Map<String, Object?>>[
-              <String, Object?>{
-                'vod_id': '9001',
-                'vod_name': '济公传',
-                'vod_pic': pic,
-                'vod_year': '2016',
-                'vod_play_from': '咕噜',
-                'vod_play_url':
-                    '第01集\$https://cdn/1.m3u8#第02集\$https://cdn/2.m3u8',
-              },
-            ],
-          };
-
-      final relative = JarSpider.detailOf(body('upload/vod/9.jpg'),
-          fallbackId: '9001', root: 'https://gulu.example/api.php');
-      expect(relative.cover, 'https://gulu.example/upload/vod/9.jpg');
-
-      final empty = JarSpider.detailOf(body(''), fallbackId: '9001');
-      expect(empty.cover, '');
-
-      final absolute = JarSpider.detailOf(body('https://img/9.jpg'),
-          fallbackId: '9001', root: 'https://gulu.example/api.php');
-      expect(absolute.cover, 'https://img/9.jpg');
-    });
-
-    test('jar 卡片（搜索）经片源中心归一化后不再是「我们旧后端的相对地址」', () {
-      // 直接验证转换规则本身：csp_Gulu 没有站点根 → 空串（走首字占位），
-      // 而不是补成 http://<我们后端>/upload/1.jpg 这种必然 404 的地址。
-      expect(Api.coverOf('upload/vod/9.jpg', root: 'csp_Gulu'), '');
-      expect(Api.coverOf('https://img/9.jpg', root: 'csp_Gulu'),
-          'https://img/9.jpg');
     });
   });
 
@@ -217,7 +163,7 @@ void main() {
     });
     expect(card.cover, 'https://img/1.jpg');
     expect(card.title, '济公传');
-    // 只是确认 JSON 形状没变；封面归一化发生在 source_hub / jar_spider 一层。
+    // 只是确认 JSON 形状没变；封面归一化发生在片源中心那一层。
     expect(jsonEncode(<String, Object?>{'cover': card.cover}),
         '{"cover":"https://img/1.jpg"}');
   });

@@ -288,9 +288,9 @@ jobs:
       #     咕噜的 detailContent 要先握手、自身还有 3 次重试 + 500/1000/2000ms
       #     退避（光睡眠 3.5 秒），详情经常落在 9～15 秒。现在「详情超时按来源
       #     区分」：外部源 20 秒、本站 CMS 12 秒；失败还会自动重试一次。
-      #   · 肥猫结果的第 2、3 条封面空白：jar 的 vod_pic 是空串 / 源站相对
-      #     地址，老逻辑把它补成我们已下线的旧后端 → 图永远回不来。现在按源站
-      #     根补全，补不出来就显示「片名首字 + 渐变底」，加载中也是首字。
+      #   · 外部源结果的第 2、3 条封面空白：vod_pic 是空串 / 源站相对地址，
+      #     老逻辑把它补成我们已下线的旧后端 → 图永远回不来。现在按源站根补全，
+      #     补不出来就显示「片名首字 + 渐变底」，加载中也是首字。
       # 文案也按来源分开：本站「换条线路试试」，外部源「<源名> 暂时没响应，
       # 换一个源试试」——外部源没有「本站线路」这回事。
       - name: Detail timeout / source text / cover regressions
@@ -374,8 +374,8 @@ jobs:
         run: flutter test test/search_rank_test.dart
       # SEARCH_RELEVANCE / DEDUPE_LINES / PANEL_CAP / FS_ICON_SPEC（2026-11-15）：
       # 这一轮现场问题的回归，四件事各自钉死：
-      #   · 搜「济公传」时肥猫那一段不能再出现「背着善宰跑」这类无关片
-      #     （jar 侧的 searchContent 不保证按关键词搜，客户端必须有相关性闸门）；
+      #   · 搜「济公传」时不能出现「背着善宰跑」这类无关片
+      #     （外部接口不保证按关键词搜，客户端必须有相关性闸门）；
       #   · 没有任何可用线路的空壳记录在搜索/列表阶段就丢掉；同名记录去重保留
       #     线路多的那条（搜索里那条点进去必失败的重复记录就是这样没的）；
       #   · 播放设置面板横屏 ≤55% 屏高且 ≤360dp、竖屏 ≤40% 且 ≤480dp，内部可滚；
@@ -403,7 +403,7 @@ jobs:
           #   · fallback_match：片名归一化 / 年份上限 / 解说预告排除 /
           #     集号对齐 / 进度接续 / 日志格式；
           #   · source_fallback：走哪一段、排除自己、集数不够不换、
-          #     只切一次、triedSources 生效、jar 没装如实上报。
+          #     只切一次、triedSources 生效、没有外部源时如实上报。
           flutter test test/fallback_match_test.dart
           flutter test test/source_fallback_test.dart
           # LINE_COOLDOWN：失败线路 10 分钟不再试、本次播放内沉底、
@@ -414,15 +414,6 @@ jobs:
           # 蓝光 → 直接闪退」就是这条规则没生效。
           flutter test test/line_rank_test.dart
           dart run tools/test_fallback_match.dart
-      # JAR_PLUGIN（2026-11-15）：肥猫那 41 个 csp_ 源的 jar 插件链路。
-      # 原生侧进度 / 自检回传的结构 -> Dart 模型；失败原因必须能翻译成
-      # 「类找不到 / 方法签名不匹配 / 缺依赖 / 源站异常」四类人话。
-      - name: jar plugin regressions
-        run: |
-          flutter test test/jar_plugin_test.dart
-          # 服务器上的 spider.jar 必须还在、md5 必须和默认值一致。
-          # 非阻塞：服务器偶发抖动不该让整个构建红掉，但日志里要能看见。
-          python3 tools/check_spider_url.py || true
       # TOGETHER_WS（2026-11-15）：一起看的 ws 地址推导回归
       # （旧机 47.96.0.112 已下线、尾斜杠 / https 不能拼错）。
       - name: together endpoint regressions
