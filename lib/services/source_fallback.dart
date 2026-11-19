@@ -76,7 +76,8 @@ class FxFallbackOutcome {
     String reason = '',
   }) : this(
           note: note,
-              reason: reason,
+          jarSkipped: jarSkipped,
+          reason: reason,
         );
 
   final FxFallbackCandidate? candidate;
