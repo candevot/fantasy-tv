@@ -432,7 +432,7 @@ class CmsBridge {
 
   /// 一次性拿到全部结果（老的调用方：一起看选片、外挂取片等）。
   ///
-  /// 内部就是收 [searchStream] 的流：我们自己的结果在前，外部源的结果在后。
+  /// 内部就是收 [searchStream] 的流，收到首屏那一轮收尾就返回。
   static Future<List<VideoCard>> search(String keyword, int page) async {
     final own = <VideoCard>[];
     final external = <VideoCard>[];
@@ -449,9 +449,8 @@ class CmsBridge {
 
   /// 只查我们自己那一批（主站采集库 + 幻想线路），一次拿全。
   ///
-  /// 上拉「加载更多」用它：同一个词的第 2 页把 41 个 jar 源再全跑一遍没有意义
-  /// （外部源的分页质量参差，翻页常常把第 1 页原样再返回一遍），分页只续我们
-  /// 自己那批。
+  /// 上拉「加载更多」用它：第 2 页只续我们自己那批（主站采集库 + 幻想线路
+  /// 切片），不必把同一轮的全部源重跑一遍。
   static Future<List<VideoCard>> searchOwn(String keyword, int page) async {
     _boot();
     final q = keyword.trim();
@@ -546,25 +545,25 @@ class CmsBridge {
     return out;
   }
 
-  /// 渐进检索：谁先回来谁先渲染，不再等 48 个源全部返回。
+  /// 渐进检索：谁先回来谁先渲染，不等所有源都回来。
   ///
   /// 发车顺序（全部同时开跑，互不等待）：
   ///   1. 主站采集库（本地 CMS）—— 通常几十毫秒，第一批就它；
-  ///   2. 我们自己的幻想线路（云端下发的 7 条）—— 同一个接口，也很快；
-  ///   3. 外部源（肥猫的 41 个 jar 源 + 用户自加）—— 慢，回来一批追加一批。
+  ///   2. 我们自己的幻想线路切片 —— 同一个接口，0.6~4 秒陆续回来；
+  ///   3. 云端下发的幻想源 —— 同上。
   ///
-  /// 每个源单独 8 秒超时（[SourceHub.sourceTimeout]），超时按「没结果」算，
-  /// 不会阻塞别的源。每批都带 `done / total`，页面据此显示「已查 12/48 个源」。
+  /// 每个源单独 12 秒超时（[SourceHub.sourceTimeout]），超时按「没结果」算，
+  /// 不会阻塞别的源。每批都带 `done / total`，页面据此显示「已查 3/6 个源」。
   ///
   /// 所有源都空、而主站采集库是**报错**（不是空结果）时，最后补一个错误：
   /// 页面就能给出「重新搜索」，而不是含糊的「没有找到」。
   static Stream<SearchBatch> searchStream(
     String keyword,
     int page, {
-    /// 同一部片在不同源的版本**不合并**（一起看建房要按源分别列出）。
+    /// 同一部片的不同版本**不合并**（一起看建房要按版本分别列出）。
     ///
     /// 默认 false 保持原来的去重口径（片名+片源）；置 true 时只按卡片 id
-    /// 去重，咕噜一条、剧圈一条都留在结果里。
+    /// 去重。
     bool keepDuplicates = false,
   }) {
     _boot();
@@ -666,9 +665,9 @@ class CmsBridge {
     }) {
       if (closed) return;
       final kept = <VideoCard>[];
-      // SEARCH_RELEVANCE（2026-11-15）：外部源（肥猫的 jar 源）不保证按关键词
-      // 搜 —— 有的 jar 直接把关键词当分类 id（见 search_relevance.dart 头注释），
-      // 返回的是源站首页那批片。片名和关键词无关的一律丢掉。
+      // SEARCH_RELEVANCE（2026-11-15）：外部接口不保证按关键词搜 —— 有的直接
+      // 把关键词当分类 id（见 search_relevance.dart 头注释），返回的是源站首页
+      // 那批片。片名和关键词无关的一律丢掉（自家源也走同一道闸门，行为一致）。
       //
       // GATE_LOG（2026-11-15）：**每个源单独判、单独记**。整批判的话只知道
       // 「41 个源一共丢了 30 条」，不知道是哪个源在灌首页数据。
@@ -680,10 +679,8 @@ class CmsBridge {
       }
       for (final card in gate.kept) {
         if (SourceHub.isLiveCard(card)) continue;
-        // JAR_PROGRESS：外部源**按 id 去重**（id 里带 `@src:<源>`）。
-        // 以前外部卡片也走「片名+年份」跨源合并 —— 咕噜和剧圈都搜到
-        // 「济公传」时后到的会被当成重复丢掉，用户只看到一条，
-        // 和「肥猫乐园每个源各自出结果」的体验相反。
+        // 按 id 去重：线条切片 / 主库各自出的卡片 id 不同，不能被「片名+年份」
+        // 合并丢掉（那会只剩一条，用户以为别的线路没结果）。
         if (!dedupe.fresh(card, perSource: external)) continue;
         kept.add(card);
       }
@@ -816,13 +813,8 @@ class CmsBridge {
     );
     // 硬上限：单源 12 秒（[SourceHub.sourceTimeout]），这里再兜一层整体上限。
     //
-    // JAR_TIMEOUT（2026-11-15）：15 秒 → 20 秒。jar 源的 quick 回退
-    // （quick=false 空 → quick=true）单个源最长能占满 12 秒，41 个源同时发
-    // 在 15 秒时被整轮截断，日志里会出现「源还没跑完就被收尾」，
-    // 用户看到的是「进度停在 12/41」。
-    // SEARCH_BUDGET（2026-11-16）：并发从 6 提到 20 之后，41 个源在 12 秒
-    // 单源预算内能跑完 ≈ 3 轮，整体 20 秒仍然偏紧（最后一批刚好被砍）。
-    // 放宽到 30 秒：用户早就在逐条看到结果了，这个上限只是兜「绝不允许无限转圈」。
+    // 单源 12 秒预算 + 整轮 30 秒兜底：用户早就在逐条看到结果了，
+    // 这个上限只是兜「绝不允许无限转圈」。
     //
     // SOFT_FINISH（2026-11-16 · 对齐壳）：壳（FongMi `App.searchExecutor` 20 条
     // 线程 + 每个源一个 Future）根本没有「整体收尾」—— 谁回来算谁，页面一直
@@ -842,11 +834,8 @@ class CmsBridge {
 
   /// SEARCH_ORDER（2026-11-17）：搜索**不对源做任何优先级 / 排序干预**。
   ///
-  /// 原先这里有一套 `_prioritizeExternal` + `_jarSearchable` 名单，按
-  /// 「实测能真搜影视的类优先」重排外部源的发车顺序。用户口径改成
-  /// 「搜索不管顺序、不把幻想提前也不垫底、谁先返回谁先上屏」，所以那套
-  /// 排序整块删掉了：现在发车顺序就是配置里的原始顺序，页面按**到达顺序**
-  /// 分组渲染（见 `SearchPage._arrived`）。
+  /// 用户口径：「搜索不管顺序、谁先返回谁先上屏」，所以这里不对源做任何
+  /// 优先级排序。页面按**到达顺序**渲染（见 `SearchPage._arrived`）。
 
   /// 单条记录转卡片；坏数据返回 null，**不能**让一条脏记录炸掉整页。
   ///
@@ -1464,12 +1453,7 @@ class _Dedupe {
   /// 按卡片 id 去重（跨源不合并）：一起看建房要列出「同一部片在各个源」。
   final bool byId;
 
-  /// [perSource] = 外部源（jar）单独一批：**按 id 去重**。
-  ///
-  /// JAR_PROGRESS（2026-11-15）：外部卡片的 id 已经带 `@src:<源key>`，
-  /// 按 id 去重等于「同一个源里的同一部片只留一条、不同源的同名片都留」——
-  /// 这正是「肥猫乐园里每个源各自出结果」的样子。按片名跨源合并的话，
-  /// 咕噜和剧圈都搜到「济公传」时只会剩一条，用户以为肥猫只有 1 条结果。
+  /// [perSource] = 这一批单独按 id 去重（不参与跨源片名合并）。
   bool fresh(VideoCard card, {bool perSource = false}) {
     if (byId || perSource) {
       final hit = _seen.putIfAbsent('id:${card.id}', () => <VideoCard>[]);

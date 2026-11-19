@@ -449,22 +449,21 @@ class SourceSearchResult {
   bool get hasCards => cards.isNotEmpty;
 }
 
-/// 片源中心：云端配置 + 本地增删 + 多源检索。
+/// 片源中心：云端配置 + 多源检索（只有我们自己的源）。
 ///
-/// 三件事：
-///   1. **配置下发**：拉 `GET /api/config`，解析 `cloud_sources`（片源）
+/// 两件事：
+///   1. **配置下发**：拉 `GET /api/config`，解析 `cloud_sources`（幻想线路）
 ///      与 `live_url`（直播接口地址）；拉不到就用本地缓存，缓存也没有就用
 ///      内置空表 —— 任何一步失败都不能让 App 起不来。
-///   2. **可删可恢复**：删掉的内置源只记一个 key 黑名单，云端的原始列表
-///      一直留着，「恢复默认」= 清空黑名单，不需要重新拉配置。
-///   3. **多源合并**：搜索 / 分类并行查所有启用的源，按「片名 + 年份」
-///      去重，结果带上来源标记（幻想 / 肥猫 / 自加，见
-///      [KSource.resultLabel]）；搜索分成「自己的」和「外部的」两组渐进
-///      返回，见 [searchPlan]。
+///   2. **多源检索**：搜索 / 分类并行查云端下发的幻想线路，按「片名 + 年份」
+///      去重，结果统一标「幻想」（见 [KSource.resultLabel]）。
 ///
-/// id 约定：外部源的影片 id 会编码成 `@src:<源key>::<vod_id>`，
-/// 详情 / 播放据此路由回原来的源；我们自己的 hx 库和主站采集库是同一套
-/// 编号，id 保持原样不动（见 [KSource.cardIdOf]）。
+/// 影视壳（TVBox / jar 插件）接入层已经整层拆掉：这里不再有导入、自加源、
+/// 换源面板，也不再有 jar 插件状态。
+///
+/// id 约定：老记录里可能还带 `@src:<源key>::<vod_id>` 前缀（详情 / 播放
+/// 据此路由回它自己的源）；主站 hx 库与主站采集库是同一套编号，id 保持
+/// 原样不动（见 [KSource.cardIdOf]）。
 class SourceHub extends ChangeNotifier {
   SourceHub._();
 
@@ -504,10 +503,8 @@ class SourceHub extends ChangeNotifier {
 
   /// 源名里出现这些词 = 非影视源（网盘 / 课堂 / 体育 / 音频 / 配置中心）。
   ///
-  /// SOURCE_BLOCK（2026-11-17）：壳的源面板里这些源也是 ⊘ 状态。用户口径：
-  /// 「照常列出（能看到全部）但点不动，不参与首页/分类/排行榜的默认源，
-  /// 也不参与搜索」。判定写死成关键词，不靠人工维护名单 —— 肥猫配置里这类
-  /// 源有几十个，名字还会变（「夸克·网盘」「123·云盘」「小学·课堂」…）。
+  /// SOURCE_BLOCK（2026-11-17）：云端配置里偶尔混进这类源，它们不参与
+  /// 搜索 / 分类，也不参与首页取数。判定写死成关键词，不靠人工维护名单。
   static const List<String> blockedNameWords = <String>[
     '网盘', '云盘', '课堂', '教育', '儿童', '少儿', '体育', '看球',
     'FM', 'DJ', '听书', '音乐', '相声', '小品', '戏曲', '教学',
@@ -519,7 +516,7 @@ class SourceHub extends ChangeNotifier {
   static bool isBlockedSource(KSource source) =>
       blockedReasonOf(source).isNotEmpty;
 
-  /// 不可用的原因（空串 = 可用）。源面板拿它显示一行小字。
+  /// 不可用的原因（空串 = 可用）。
   static String blockedReasonOf(KSource source) {
     final api = source.api.trim().toLowerCase();
     if (api.isEmpty) return '没有地址';
@@ -540,8 +537,6 @@ class SourceHub extends ChangeNotifier {
 
 
   static const String idMark = '@src:';
-
-
 
   /// 单源检索超时：超时按「这个源没结果」处理，不拖住其它源。
   ///
