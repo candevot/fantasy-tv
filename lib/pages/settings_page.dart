@@ -489,39 +489,6 @@ class _SettingsPageState extends State<SettingsPage> {
                   onTap: _openBufferLevel,
                 ),
                 _divider(),
-                // 首选 AAC 音轨（壳 `prefer_aac`，默认关）。
-                _row(
-                  icon: Icons.audiotrack_rounded,
-                  color: const Color(0xFF8B6FE8),
-                  title: '优先 AAC 音轨',
-                  subtitle: _settings.preferAac
-                      ? '多音轨时优先选 AAC（兼容性最好，但可能不是最高码率那轨）'
-                      : '跟随片源默认音轨（推荐）',
-                  trailing: Switch(
-                    value: _settings.preferAac,
-                    activeThumbColor: Fx.accent,
-                    onChanged: (v) => _settings.setPreferAac(v),
-                  ),
-                  onTap: () => _settings.setPreferAac(!_settings.preferAac),
-                  showChevron: false,
-                ),
-                _divider(),
-                // 隧道播放（壳 `tunnel`，默认关）。
-                _row(
-                  icon: Icons.swap_horiz_rounded,
-                  color: const Color(0xFF2FA985),
-                  title: '隧道播放（实验）',
-                  subtitle: _settings.tunneling
-                      ? '音视频走同一条解码通路，音画同步更准；不支持时自动跳过'
-                      : '关闭：走普通解码通路（兼容性最好）',
-                  trailing: Switch(
-                    value: _settings.tunneling,
-                    activeThumbColor: Fx.accent,
-                    onChanged: (v) => _settings.setTunneling(v),
-                  ),
-                  onTap: () => _settings.setTunneling(!_settings.tunneling),
-                  showChevron: false,
-                ),
               ],
             ),
           ),
