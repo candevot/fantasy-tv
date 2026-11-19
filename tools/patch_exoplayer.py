@@ -18,8 +18,39 @@ SRC_DIR = 'android_src/kotlin'
 PKG_PATH = 'com/huanxiang/fantasy_tv'
 DEST_DIR = 'android/app/src/main/kotlin/' + PKG_PATH
 
-# Media3 版本：和 compileSdk 36 兼容的稳定版
-MEDIA3_VERSION = '1.4.1'
+# Media3 版本：和 compileSdk 36 兼容的稳定版。
+#
+# FFMPEG_AUDIO（2026-11-19）：从 1.4.1 升到 **1.7.1**。
+#
+# 为什么必须升：我们要挂的 FFmpeg 音轨解码器来自
+# `io.github.anilbeesetti:nextlib-media3ext`（预编译的 media3 扩展，不用
+# NDK 现场编 FFmpeg）。它按 media3 版本一一发版，最早的构建是
+# `1.7.1-0.9.0` —— **没有 1.4.1 对应的版本**。硬把 1.7.1 编的 AAR 塞进
+# 1.4.1 的运行时是二进制不兼容的（FfmpegAudioRenderer 继承
+# DecoderAudioRenderer，父类签名在这两个版本之间变过），会以
+# NoSuchMethodError 在起播那一刻炸掉，所以只能升 media3。
+#
+# 1.7.1 是「带 nextlib 的最低版本」，同时也是改动最小的一档：它和 1.4.1
+# 之间我们用到的 API（DefaultRenderersFactory / DefaultTrackSelector /
+# DefaultHlsExtractorFactory(int,boolean) / TsExtractor常量 / MediaSession
+# 全家桶）逐个 javap 核对过，签名没变。
+MEDIA3_VERSION = '1.7.1'
+
+# FFmpeg 音频解码扩展（FFMPEG_AUDIO，2026-11-19）。
+#
+# 坐标：io.github.anilbeesetti:nextlib-media3ext（GitHub anilbeesetti/nextlib）
+# 版本号格式 `<media3版本>-<nextlib版本>`，**第一个字段必须等于 MEDIA3_VERSION**，
+# 下面的断言会挡住版本漂移。
+#
+# 它带进 APK 的原生库：libavcodec / libavutil / libswresample（+ libswscale），
+# 解码器含 ac3 / eac3 / dca(DTS) / truehd / mlp —— 正是我们要补的四类。
+# arm64-v8a + armeabi-v7a 两个 ABI，都是 16KB 页对齐（0x4000，用 readelf 验过）。
+NEXT_LIB_VERSION = '1.7.1-0.9.0'
+NEXT_LIB_COORD = 'io.github.anilbeesetti:nextlib-media3ext'
+
+assert NEXT_LIB_VERSION.startswith(MEDIA3_VERSION + '-'), (
+    'nextlib 版本必须以 media3 版本开头：%s vs %s'
+    % (NEXT_LIB_VERSION, MEDIA3_VERSION))
 
 # OkHttp 版本（TRANSPORT_OKHTTP，2026-11-15）。
 #
@@ -58,6 +89,8 @@ def dep_lines(is_kts):
         lines.append((coord, text))
     okhttp = [
         ('com.squareup.okhttp3:okhttp', OKHTTP_VERSION),
+        # FFmpeg 音轨解码扩展（自带 .so，不用 NDK 编译）。
+        (NEXT_LIB_COORD, NEXT_LIB_VERSION),
     ]
     for coord, version in okhttp:
         if is_kts:

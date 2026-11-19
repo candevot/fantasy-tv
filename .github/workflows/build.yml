@@ -235,6 +235,53 @@ jobs:
           # 上一集 / 下一集按钮的边界口径（第一集 / 最后一集 / 集号不连续 / 单片）。
           flutter test test/episode_step_test.dart
 
+      # FFMPEG_AUDIO / AUDIO_BITRATE（2026-11-19）：这一轮两件事的**结构**门禁。
+      #
+      # 为什么必须有：代码全在 android_src/ 里，`flutter analyze` 看不见；
+      # 而「选轨规则错了」连 Gradle 都不会报 —— 它只是静默选错音轨，
+      # 用户听到的是「怎么是英语 / 怎么没声音」。所以两件事都钉死：
+      #   ① FFmpeg 音轨兜底：依赖坐标、media3 版本配对（nextlib 的版本号
+      #      第一段就是 media3 版本）、渲染器工厂、以及**每一条降级路径**
+      #      （构造失败 / 播放期解码失败都要能退回系统解码，不许把起播带走）；
+      #   ② 音轨按码率选：实现存在 + 纯逻辑单测（tools/check_fx_audio_track.sh），
+      #      外加反面断言 —— 不许再把「按编码类型优先 AAC」写回来。
+      - name: FFmpeg audio extension & bitrate track selection regressions
+        run: |
+          set -e
+          K=android_src/kotlin/com/huanxiang/fantasy_tv
+          # ① 依赖与版本配对（导入即执行 assert：nextlib 版本必须以 media3 版本开头）。
+          grep -q "MEDIA3_VERSION = '1.7.1'" tools/patch_exoplayer.py
+          grep -q "NEXT_LIB_VERSION = '1.7.1-0.9.0'" tools/patch_exoplayer.py
+          grep -q "nextlib-media3ext" tools/patch_exoplayer.py
+          python3 -c "import sys; sys.path.insert(0,'tools'); import patch_exoplayer as p; \
+            assert p.MEDIA3_VERSION in p.NEXT_LIB_VERSION, 'nextlib 与 media3 版本不配对'; \
+            print('version pair ok:', p.MEDIA3_VERSION, '<->', p.NEXT_LIB_VERSION)"
+          # ② 渲染器：FFmpeg 音轨渲染器挂在系统渲染器**之后**（兜底），
+          #    并且构造/播放期两处失败都有降级。
+          grep -q 'FxRenderersFactory(context)' $K/ExoPlayerPlugin.kt
+          grep -q 'super.buildAudioRenderers' $K/FxRenderersFactory.kt
+          grep -q 'FfmpegAudioRenderer' $K/FxRenderersFactory.kt
+          grep -q 'FxAudioExt.disable' $K/FxRenderersFactory.kt
+          grep -q 'FxAudioExt.disable' $K/ExoPlayerPlugin.kt
+          grep -q 'fun shouldAttach' $K/FxRenderersFactory.kt
+          # ③ 选轨：全部音频轨按码率排序 → 用 override 钉死。
+          grep -q 'FxAudioTrack.pick' $K/ExoPlayerPlugin.kt
+          grep -q 'TrackSelectionOverride' $K/ExoPlayerPlugin.kt
+          grep -q 'override fun onTracksChanged' $K/ExoPlayerPlugin.kt
+          grep -q 'fun pick(' $K/FxAudioTrack.kt
+          grep -q 'audio/eac3' $K/FxAudioTrack.kt
+          grep -q 'audio/vnd.dts' $K/FxAudioTrack.kt
+          # ④ 反面门禁：不许把「按编码类型优先 AAC」写回来（AAC 一般码率最低）。
+          #    只匹配**代码行**（缩进 + builder.setPreferredAudioMimeType），
+          #    注释里解释「为什么去掉」的那些文字不算。
+          if grep -nE '^[[:space:]]+(builder\.)?setPreferredAudioMimeType' \
+               $K/ExoPlayerPlugin.kt; then
+            echo '音轨不许再按编码类型优先（AAC 一般码率最低）：改成按码率选' >&2
+            exit 1
+          fi
+          # ⑤ 选轨规则的纯逻辑单测（没有 kotlinc 的 runner 自动 SKIP）。
+          bash tools/check_fx_audio_track.sh
+
       # BG_GATE（2026-11-15）：后台播放「点任意剧就闪退」的**结构性**门禁。
       #
       # 那次闪退不是某句代码写错，而是异常从 media3 库内部（它自己调

@@ -251,6 +251,43 @@ def verify_media_session(gate, apk):
                      '' if found[w] else 'descriptor not found in any dex')
 
 
+def verify_ffmpeg_audio(gate, apk):
+    """APK 里必须真的有 FFmpeg 音轨解码器（FFMPEG_AUDIO，2026-11-19）。
+
+    为什么要在 APK 层面查：`nextlib-media3ext` 带的是**预编译 .so**，
+    Gradle 依赖被摘掉、或者 ABI 过滤把它整个裁掉时，代码照常编译、APK 照常
+    装、AC3/EAC3 的源只会「没声音」—— 这类退化在日志里只表现为
+    `AUDIO_EXT ffmpeg=off`，用户看到的是「这集没声音」。所以这里直接查：
+
+      · lib/<abi>/libmedia3ext.so —— nextlib 的 JNI 层（FFmpeg 解码器的壳）
+      · lib/<abi>/libavcodec.so   —— FFmpeg 本体（ac3/eac3/dca/truehd 在里面）
+      · dex 里有 FfmpegAudioRenderer —— 说明渲染器真的被引用了（没被裁）
+
+    ABI 只强求 arm64-v8a（主运行时）；armeabi-v7a 存在就顺带报一行。
+    """
+    try:
+        zf = zipfile.ZipFile(apk)
+    except zipfile.BadZipFile as exc:
+        gate.fail('APK openable for ffmpeg scan', str(exc))
+        return
+    names = zf.namelist()
+    libs = set(n for n in names if n.startswith('lib/') and n.endswith('.so'))
+    for abi in ('arm64-v8a', 'armeabi-v7a'):
+        for so in ('libmedia3ext.so', 'libavcodec.so', 'libavutil.so', 'libswresample.so'):
+            entry = 'lib/%s/%s' % (abi, so)
+            if abi == 'arm64-v8a':
+                gate.require('APK contains %s' % entry, entry in libs,
+                             '' if entry in libs else 'missing (FFmpeg 音轨会静默降级)')
+            elif entry in libs:
+                print('  note: 也带了 %s（32 位 ABI，可选）' % entry)
+    wanted = b'Lio/github/anilbeesetti/nextlib/media3ext/ffdecoder/FfmpegAudioRenderer;'
+    dek = [n for n in names if n.endswith('.dex')]
+    found = any(wanted in zf.read(n) for n in dek)
+    gate.require('dex contains FfmpegAudioRenderer', found,
+                 '' if found else 'descriptor not found in any dex')
+    zf.close()
+
+
 def verify_zip(gate, apk):
     try:
         zf = zipfile.ZipFile(apk)
@@ -424,6 +461,7 @@ def main():
         zf.close()
     verify_manifest(gate, apk)
     verify_media_session(gate, apk)
+    verify_ffmpeg_audio(gate, apk)
     verify_signature(gate, apk)
     verify_zipalign(gate, apk)
 

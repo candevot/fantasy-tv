@@ -21,6 +21,9 @@ import androidx.media3.common.C
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackGroup
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ExtractorsFactory
@@ -504,6 +507,38 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
      */
     @Volatile
     private var textLanguagePreferred = ""
+
+    /**
+     * 首选**音轨**语言（AUDIO_BITRATE，2026-11-19）。
+     *
+     * 优先级：Dart 通过 `setTrackPrefs` 的**新增可选键** `audioLanguage` 推上来
+     * （Dart 现在不推，键也不动已有语义）→ 否则用系统语言
+     * （`Locale.getDefault().getISO3Language()`，与字幕那条同源）。
+     *
+     * 语义很窄：只在「源里真的有这个语言的轨」时收窄候选集，然后在收窄后的
+     * 轨里仍然按码率选最高。一条都没有 = 不限制语言，避免「选了英语所以
+     * 把唯一的中文 E-AC3 丢掉」这种静默降级。
+     */
+    @Volatile
+    private var audioLanguagePreferred = ""
+
+    /**
+     * 建播放器时拿到的 [DefaultTrackSelector]（AUDIO_BITRATE 的落点）。
+     *
+     * 选音轨不再靠 `TrackSelectionParameters` 猜，而是在 `onTracksChanged`
+     * 里用 [FxAudioTrack] 算完写成 `TrackSelectionOverride` 钉死 ——
+     * 那需要能拿到 selector 本身。播放器重建（解码失败重试）时这个引用
+     * 跟着换新。
+     */
+    private var trackSelector: DefaultTrackSelector? = null
+
+    /**
+     * 当前钉住的音轨 override 的指纹（`组id|轨index`），空 = 没钉过。
+     *
+     * 用来避免「`onTracksChanged` → setParameters → 又触发 `onTracksChanged`」
+     * 的死循环：只有候选里的赢家变了才重新写一次参数。
+     */
+    private var audioOverrideKey: String? = null
 
     /**
      * 「播放器正在缓冲」的**主线程快照**（CRASH_FIX 2026-11-15）。
@@ -1245,6 +1280,14 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             //   textLanguage  String   首选字幕语言 ISO3（壳 `Locale.getDefault().getISO3Language()`）
             "setTrackPrefs" -> {
                 call.argument<Boolean>("preferAac")?.let { preferAacTrack = it }
+                // AUDIO_BITRATE（2026-11-19）：**新增**可选键 `audioLanguage`。
+                //
+                // 只新增、不改任何已有键：Dart 现在不推这个键，行为等价于
+                // 「用系统语言当首选音轨语言」。以后设置页要「原声/国语」这类
+                // 选项时，直接传 ISO 语言码即可，通道契约不用再动。
+                call.argument<String>("audioLanguage")?.let { raw ->
+                    audioLanguagePreferred = raw.trim().lowercase()
+                }
                 call.argument<Boolean>("tunneling")?.let {
                     // 用户重新打开隧道 = 重新给这台设备一次机会（换机 / 升级 ROM 后
                     // 可能就好了）；原来那条「一炸永久关」只在同一次进程内有效。
@@ -1257,8 +1300,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 }
                 Log.i(
                     LOG_TAG,
-                    "TRACK 偏好 aac=$preferAacTrack tunnel=$tunnelingPreferred" +
+                    "TRACK 偏好 aac=$preferAacTrack（已废：音轨按码率选）" +
+                        " tunnel=$tunnelingPreferred" +
                         " text=${textLanguagePreferred.ifEmpty { "系统" }}" +
+                        " audio=${resolvedAudioLanguage().ifEmpty { "any" }}" +
                         (if (tunnelingUnsupported) "（本机隧道已判不可用）" else ""),
                 )
                 result.success(true)
@@ -1315,6 +1360,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // 改动 ⑦：渲染器改由 [buildRenderers] 建 —— 解码失败重试时要把
         // 「优先软解」的 MediaCodecSelector 换进去，所以必须能重建。
         val renderers = buildRenderers()
+        // FFMPEG_AUDIO（2026-11-19）：把 FFmpeg 音频扩展的可用性写进起播日志 ——
+        // 用户反馈「没声音」时，这一行直接区分「FFmpeg 没挂上」和「挂上了但源里
+        // 没这条轨」。`status()` 内部只在第一次真的去 loadLibrary。
+        Log.i(LOG_TAG, "AUDIO_EXT 状态 ${FxAudioExt.status()}")
         // PARAMS_ALIGN（2026-11-15 · 阶段 2 第 1 条）：TrackSelector 全套。
         //
         // 壳 `ExoUtil.buildTrackSelector()`（`:46-55`）四行：
@@ -1423,15 +1472,29 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         // ③ 首选字幕语言：Dart 覆盖优先，否则系统语言（壳的取值）。
         val textLang = resolvedTextLanguage()
         if (textLang.isNotEmpty()) builder.setPreferredTextLanguage(textLang)
-        // ④ 可选 AAC 偏好（默认关，与壳一致）。
-        if (preferAacTrack) {
-            builder.setPreferredAudioMimeType(MimeTypes.AUDIO_AAC)
-        }
+        // ④ **不再**按编码类型给音轨排优先级（AUDIO_BITRATE，2026-11-19）。
+        //
+        // 原来这里是 `if (preferAacTrack) builder.setPreferredAudioMimeType(AUDIO_AAC)`，
+        // 照抄壳的 `isPreferAAC` 开关。问题在于这条偏好的方向和用户的需求
+        // **正好相反**：AAC 在同一条片子里通常就是码率最低的那条（128~192k），
+        // 而 E-AC3 / AC3 / DTS 动辄 384~1536k。打开它等于在有多音轨的源上
+        // 主动降级；关着也没解决「多组音轨之间不按码率比」的问题。
+        //
+        // 现在改由 [applyBestAudioTrack] 在 `onTracksChanged` 里**显式**选：
+        // 所有音频轨按 bitrate 降序取最高，同码率 EAC3 > AC3 > DTS > AAC，
+        // 并且尊重首选音轨语言。`setTrackPrefs` 的 `preferAac` 键仍然接收
+        // （通道契约一个字都没动），但只用于日志 —— 语义已在内部增强。
         selector.setParameters(builder.build())
+        trackSelector = selector
+        // 新 selector 身上没有任何 override：指纹一起清掉，下一次
+        // onTracksChanged 会按新候选重新钉一条。
+        audioOverrideKey = null
         Log.i(
             LOG_TAG,
             "TRACK 建 selector forceHighest=true tunnel=$wantTunnel " +
-                "text=${textLang.ifEmpty { "-" }} aac=$preferAacTrack",
+                "text=${textLang.ifEmpty { "-" }} " +
+                "audioLang=${resolvedAudioLanguage().ifEmpty { "any" }} " +
+                "（preferAac=$preferAacTrack 已废：音轨按码率选）",
         )
         return selector
     }
@@ -1460,6 +1523,134 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         } catch (_: Throwable) {
             // MissingResourceException / 任何 ISO3 取不到的机型。
             ""
+        }
+    }
+
+    // ------------------------------------------- 音轨按码率选（AUDIO_BITRATE）
+
+    /**
+     * 解析「首选音轨语言」，返回 ISO 三字母小写；空串 = 不限制语言。
+     *
+     * 和 [resolvedTextLanguage] 同一条链（Dart 覆盖 → 系统语言 → `und` 视作
+     * 不指定），但**不复用同一个字段**：字幕语言和音轨语言可以不一样
+     * （用户可能系统是英文、想看中文字幕但听原声）。
+     */
+    private fun resolvedAudioLanguage(): String {
+        val fromDart = audioLanguagePreferred.trim().lowercase()
+        if (fromDart.isNotEmpty() && fromDart != "und") return fromDart
+        return try {
+            val sys = java.util.Locale.getDefault().getISO3Language().trim().lowercase()
+            if (sys.isEmpty() || sys == "und") "" else sys
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    /**
+     * 在全部音频轨里按**码率**选一条并钉住（AUDIO_BITRATE，2026-11-19）。
+     *
+     * 为什么不在 `DefaultTrackSelector` 的参数里做：media3 的选轨是「组内比较」，
+     * HLS 的多音轨经常是多个独立组（每条 `EXT-X-MEDIA` 一组），跨组之间
+     * **不比较码率** —— 于是结果取决于谁先被抽出来。要「全局最高码率」就只能
+     * 自己算，再用 [TrackSelectionOverride] 把结果钉死。
+     *
+     * 调用时机：[Player.Listener.onTracksChanged]（走 `mainHandler.post`，
+     * 不在回调里同步改参数，避免 media3 内部重入）。
+     *
+     * 失败一律吞掉：选轨失败退化成 media3 默认行为（还是能播，只是音轨可能
+     * 不是最高的），绝不能因为这个让播放挂掉。
+     */
+    private fun applyBestAudioTrack(p: ExoPlayer) {
+        try {
+            val selector = trackSelector ?: return
+            val cands = ArrayList<FxAudioTrack.Cand>()
+            // index → (TrackGroup, 组内轨下标)，选完回来查表。
+            val refs = ArrayList<Pair<TrackGroup, Int>>()
+            for (group in p.currentTracks.groups) {
+                if (group.type != C.TRACK_TYPE_AUDIO) continue
+                for (i in 0 until group.length) {
+                    val format = group.getTrackFormat(i) ?: continue
+                    cands.add(
+                        FxAudioTrack.Cand(
+                            index = refs.size,
+                            mimeType = format.sampleMimeType,
+                            bitrate = format.bitrate,
+                            language = format.language,
+                            supported = group.isTrackSupported(i),
+                            selected = group.isTrackSelected(i),
+                        ),
+                    )
+                    refs.add(group.mediaTrackGroup to i)
+                }
+            }
+            if (cands.isEmpty()) return
+            val wantLang = resolvedAudioLanguage()
+            val best = FxAudioTrack.pick(cands, wantLang) ?: return
+            // 候选日志：用户截图就能核对「最高码率那条是不是被选中了」。
+            for (cand in cands) {
+                Log.i(
+                    LOG_TAG,
+                    "TRACK 音频候选 mime=${cand.mimeType ?: "-"} " +
+                        "bitrate=${FxAudioTrack.bitrateLabel(cand.bitrate)} " +
+                        "lang=${cand.language ?: "-"} " +
+                        "sup=${if (cand.supported) 1 else 0} " +
+                        "sel=${if (cand.selected) 1 else 0}",
+                )
+            }
+            val ref = refs[best.index]
+            val key = "${ref.first.id}|${ref.second}"
+            if (key == audioOverrideKey) {
+                Log.i(
+                    LOG_TAG,
+                    "TRACK 选中音轨未变 mime=${best.mimeType ?: "-"} " +
+                        "bitrate=${FxAudioTrack.bitrateLabel(best.bitrate)} " +
+                        "lang=${best.language ?: "-"}（候选 ${cands.size} 条）",
+                )
+                return
+            }
+            selector.setParameters(
+                selector.buildUponParameters()
+                    .setOverrideForType(TrackSelectionOverride(ref.first, ref.second))
+                    .build(),
+            )
+            audioOverrideKey = key
+            Log.i(
+                LOG_TAG,
+                "TRACK 选中音轨 mime=${best.mimeType ?: "-"} " +
+                    "bitrate=${FxAudioTrack.bitrateLabel(best.bitrate)} " +
+                    "lang=${best.language ?: "-"} " +
+                    "supported=${if (best.supported) 1 else 0} " +
+                    "（候选 ${cands.size} 条，按码率取最高；语言偏好=" +
+                    "${wantLang.ifEmpty { "any" }}）",
+            )
+        } catch (error: Throwable) {
+            Log.w(
+                LOG_TAG,
+                "TRACK 选轨失败（${error.javaClass.simpleName}: ${error.message}），" +
+                    "退回 media3 默认选轨",
+            )
+        }
+    }
+
+    /**
+     * 清掉上一次钉住的音轨 override（换集 / 换线路 / 重建播放器时）。
+     *
+     * 不清理的话，`TrackSelectionOverride` 里的 `TrackGroup` 属于上一个
+     * 媒体项，media3 会拿着一个「找不到对应组」的 override 去选轨，
+     * 结果要么退化、要么和新的 override 打架。清完之后下一次
+     * `onTracksChanged` 会重新算、重新钉。
+     */
+    private fun resetAudioOverride() {
+        audioOverrideKey = null
+        val selector = trackSelector ?: return
+        try {
+            selector.setParameters(
+                selector.buildUponParameters()
+                    .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                    .build(),
+            )
+        } catch (error: Throwable) {
+            Log.w(LOG_TAG, "TRACK 清音轨 override 失败（${error.javaClass.simpleName}）")
         }
     }
 
@@ -1551,8 +1742,23 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
      * 这是解码失败重试时唯一能真正改变解码路径的开关。
      */
     private fun buildRenderers(): androidx.media3.exoplayer.DefaultRenderersFactory {
-        val factory = androidx.media3.exoplayer.DefaultRenderersFactory(context)
-            .setEnableDecoderFallback(true)
+        // FFMPEG_AUDIO（2026-11-19）：渲染器工厂换成 [FxRenderersFactory] ——
+        // 它在系统/硬件音频渲染器之后追加一个 FFmpeg 音轨渲染器（AC3 / EAC3 /
+        // DTS / TrueHD 的兜底），视频链路一点没动。
+        //
+        // 这里仍然**兜一层** try/catch：工厂构造本身理论上不会失败（它的
+        // 原生库是懒加载的），但真失败也绝不能把起播带走 —— 退回官方
+        // DefaultRenderersFactory，等于这次改动之前的行为。
+        val factory: androidx.media3.exoplayer.DefaultRenderersFactory = try {
+            FxRenderersFactory(context)
+        } catch (error: Throwable) {
+            Log.w(
+                LOG_TAG,
+                "AUDIO_EXT 工厂构造失败（${error.javaClass.simpleName}），退回系统渲染器",
+            )
+            androidx.media3.exoplayer.DefaultRenderersFactory(context)
+        }
+        factory.setEnableDecoderFallback(true)
         if (softDecoderPreferred) {
             factory.setMediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
                 val infos = androidx.media3.exoplayer.mediacodec.MediaCodecUtil.getDecoderInfos(
@@ -1778,12 +1984,25 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
         if (positionMs > 0) lastKnownPositionMs = positionMs
 
         if (isDecodeError(error)) {
-            // 第 2 档：解码错误 → 切解码模式（硬解 ↔ 软解）再 prepare。
+            // 第 2 档：解码错误 → 换一条解码路径再 prepare。
+            //
+            // FFMPEG_AUDIO（2026-11-19）：**先摘 FFmpeg 这一档**，再谈软硬切换。
+            // 理由：FFmpeg 音轨渲染器是这次新加的变量，解不出声时第一件事
+            // 应该是「退回这次改动之前的行为」（纯系统/硬解），而不是在同一台
+            // 机器上继续叠加改动 —— 否则用户会遇到「以前能播的片子现在报错」，
+            // 而报错原因在新变量上。摘掉之后仍然失败，才走原来那套软硬切换。
             retryReason = "decode"
-            softDecoderPreferred = !softDecoderPreferred
+            val droppingExt = FxAudioExt.shouldAttach()
+            if (droppingExt) {
+                FxAudioExt.disable("播放期解码失败 code=${error.errorCodeName}")
+            } else {
+                softDecoderPreferred = !softDecoderPreferred
+            }
             Log.i(
                 LOG_TAG,
-                "retry=$retryCount reason=decode softFirst=$softDecoderPreferred " +
+                "retry=$retryCount reason=decode " +
+                    "audioExt=${if (droppingExt) "off" else "on"} " +
+                    "softFirst=$softDecoderPreferred " +
                     "code=${error.errorCodeName} pos=${positionMs}ms",
             )
             // 重开放到回调外执行：在 onPlayerError 里同步 release / prepare
@@ -2002,6 +2221,24 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
                     emit()
                 } catch (error: Throwable) {
                     Log.e(LOG_TAG, "listener playing 异常 ${error.javaClass.simpleName}", error)
+                }
+            }
+            override fun onTracksChanged(tracks: Tracks) {
+                // AUDIO_BITRATE（2026-11-19）：音轨**元信息**一到就按码率选一次。
+                //
+                // 为什么必须 post 到下一轮：`onTracksChanged` 是 media3 选轨
+                // 之后回调的，在这里同步 `setParameters` 会在 media3 内部
+                // 再触发一次选轨（重入 → 死循环）。post 之后这一轮选轨已经
+                // 收尾，改参数只是「下一次选轨用新参数」。
+                //
+                // 抛异常一律吞掉：音轨没选到最好的 = 声音还是有的，
+                // 而主线程抛异常 = 闪退。两者不是一个量级。
+                try {
+                    val snapshot = tracks
+                    if (snapshot.groups.none { it.type == C.TRACK_TYPE_AUDIO }) return
+                    mainHandler.post { player?.let { applyBestAudioTrack(it) } }
+                } catch (error: Throwable) {
+                    Log.e(LOG_TAG, "listener tracks 异常 ${error.javaClass.simpleName}", error)
                 }
             }
             override fun onRenderedFirstFrame() {
@@ -2502,6 +2739,10 @@ class ExoPlayerPlugin(private val context: Context) : MethodChannel.MethodCallHa
             // 不清的话，「A 集兜过 mime、换到 B 集」就永远兜不了了。
             mimeFallbackUsed = false
             forcedMimeType = null
+            // AUDIO_BITRATE：换了媒体项，上一条钉住的 TrackGroup 已经无效，
+            // 先清掉再等新的 onTracksChanged 重新算（不清会让 media3 拿着
+            // 一个不存在的组去选轨）。
+            resetAudioOverride()
             // 换集 / 换线路：上一轮「下一集预载」整轮作废（改动 ⑥）。
             if (!fromRetry) {
                 nextPreloader?.cancel()
