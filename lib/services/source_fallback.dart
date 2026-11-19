@@ -327,7 +327,7 @@ class FxSourceFallback {
 
   /* -------------------------------------------------------- 第 3 段：跨源 */
 
-  /// 第 3 段：外部源（肥猫的 jar 源 + 用户自加）里找同名。
+  /// 第 3 段：外部源里找同名（接入层已拆，正常恒为「没有外部源」）。
   Future<FxFallbackOutcome> _findExternal({required int ep}) async {
     FxExternalHits found;
     try {
@@ -344,7 +344,9 @@ class FxSourceFallback {
     }
     if (found.hits.isEmpty) {
       return FxFallbackOutcome.miss(
-          reason: found.reason.isEmpty ? 'external_empty' : found.reason,
+        // jarSkipped 由检索层上报（老记录可能带 jar 源、但这些源已不再接入）。
+        jarSkipped: found.jarSkipped,
+        reason: found.reason.isEmpty ? 'external_empty' : found.reason,
       );
     }
 
