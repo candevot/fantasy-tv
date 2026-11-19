@@ -32,7 +32,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final PageController _bannerCtrl = PageController(viewportFraction: .88);
   final Map<String, HomeData> _cache = {};
 
-  /// 源选择面板 / 片源管理改了东西时，标题栏要立刻跟着变。
+  /// 云端片源配置刷新 / 直播地址变化时，首页跟着重算一次。
   final SourceHub _hub = SourceHub.instance;
 
   /// 换源次数：分类 tab 的 key 带上它，换源时旧列表整体重建，

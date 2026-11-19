@@ -178,7 +178,7 @@ class _LiveAllPageState extends State<LiveAllPage> {
             ),
             const SizedBox(height: 6),
             const Text(
-              '直播跟着接口走：导入的接口里带 lives 才有频道',
+              '直播跟着接口走：接口里带直播列表时才有频道',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 11, color: Color(0xFFA6B1C2)),
             ),
