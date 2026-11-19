@@ -2275,10 +2275,30 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     );
   }
 
-  /// 实时网速（字节/秒）：优先原生按块统计的真实速率，0 就是 0。
+  /// 最近几秒的速度采样（SPEED_AVG 2026-11-19）。
+  ///
+  /// HLS 是「抓一段播一段」，瞬时速率在几 MB 和 0 之间跳 —— 用户看到顶栏
+  /// 在「--」「1.1 KB/s」「3 MB/s」之间闪，以为网络出问题。
+  /// 这里改成**最近 3 秒的滑动平均**：缓冲足够时显示 0（就是不拉了），
+  /// 真在拉流时显示稳定值，不再乱跳。
+  final List<double> _speedWindow = <double>[];
+  int _speedSampleAt = 0;
+
+  /// 实时网速（字节/秒）= 最近约 3 秒的采样平均。
   double _liveSpeed(FxPlayerValue v) {
-    if (v.bytesLoadedPerSec > 0) return v.bytesLoadedPerSec.toDouble();
-    return v.bytesPerSecond;
+    final raw = v.bytesLoadedPerSec > 0
+        ? v.bytesLoadedPerSec.toDouble()
+        : v.bytesPerSecond;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // 每 300ms 采一次样，窗口内最多 10 个样本（≈3 秒）
+    if (now - _speedSampleAt >= 300) {
+      _speedSampleAt = now;
+      _speedWindow.add(raw.isFinite && raw > 0 ? raw : 0);
+      if (_speedWindow.length > 10) _speedWindow.removeAt(0);
+    }
+    if (_speedWindow.isEmpty) return raw;
+    final sum = _speedWindow.fold<double>(0, (a, b) => a + b);
+    return sum / _speedWindow.length;
   }
 
   /// 首帧 / 加载 / 缓冲统一浮层。
@@ -2427,9 +2447,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               narrow: narrow,
               rotatedToPortrait: _isPortraitLayout,
               qualityLabel: _qualityText,
-              speedText: _isLive
+              // SPEED_AVG：和其它全屏入口走同一份「3 秒滑动平均」，
+              // 不再直接用内核瞬时值（那个会在 0 和几 MB 之间跳）。
+              speedText: _isLive || _controller == null
                   ? ''
-                  : (_controller?.value.speedText ?? ''),
+                  : fxSpeedLabel(_liveSpeed(_controller!.value)),
               onBack: () => unawaited(_exit()),
               onCast: () => unawaited(_openCastSheet()),
               onMore: () => unawaited(_openMorePanel()),
