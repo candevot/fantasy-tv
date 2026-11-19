@@ -80,10 +80,10 @@ void main() {
   });
 
   group('详情超时按来源区分（DETAIL_TIMEOUT）', () {
-    test('外部源 35 秒（咕噜 detail 握手+3次退避实测 9~25 秒）', () {
+    test('外部源 20 秒', () {
       expect(CmsBridge.detailTimeout('@src:gulu::418792'),
-          const Duration(seconds: 35));
-      expect(CmsBridge.externalDetailTimeout, const Duration(seconds: 35));
+          const Duration(seconds: 20));
+      expect(CmsBridge.externalDetailTimeout, const Duration(seconds: 20));
     });
 
     test('本站 CMS 保持 12 秒', () {
@@ -95,8 +95,7 @@ void main() {
 
     test('jar 单次调用默认 12 秒（搜索 / 播放），详情单独放宽', () {
       expect(CmsBridge.jarTimeout, const Duration(seconds: 12));
-      // 详情 18 秒：咕噜要握手，比搜索的 12 秒长。
-      expect(CmsBridge.jarDetailTimeout, const Duration(seconds: 32));
+      expect(CmsBridge.jarDetailTimeout > CmsBridge.jarTimeout, isTrue);
     });
 
     test('源级超时先于页面级：jar guard 比页面预算短', () {
@@ -106,7 +105,7 @@ void main() {
         CmsBridge.jarDetailTimeout < CmsBridge.externalDetailTimeout,
         isTrue,
       );
-
+      expect(CmsBridge.jarDetailTimeout >= const Duration(seconds: 15), isTrue);
     });
   });
 

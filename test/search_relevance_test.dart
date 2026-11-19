@@ -69,11 +69,10 @@ void main() {
         card('釜山行前传：首尔站'),
       ];
       final kept = fxRelevantCards(raw, '济公传');
-      // NOT_FILM（2026-11-18）：「郭德纲济公传书场」是评书/曲艺音频，
-      // 片名虽含关键词也不该进影视结果，现在已经拦掉。
       expect(kept.map((c) => c.title).toList(), <String>[
         '济公传',
         '新编济公传奇国语',
+        '郭德纲济公传书场',
       ]);
       // 结果里的片名必须都和关键词相关（用户要的那条验收标准）。
       for (final c in kept) {

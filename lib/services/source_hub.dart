@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -502,22 +501,12 @@ class SourceHub extends ChangeNotifier {
   /// （HTML），只有播放器 UA 才回配置本身。肥猫回的配置还是加密的。
   static const String tvBoxUserAgent = 'okhttp/3.12.12';
 
-  /// 默认 TVBox 配置地址（DEFAULT_CONFIG 2026-11-18）。
-  ///
-  /// 原来指向 `http://肥猫.net/` —— 这个地址已经不通了。首次启动的自动导入
-  /// 因此永远失败，App 里只剩用户手动加的那几个源：搜片时只有咕噜能出结果，
-  /// 其余源一个都没有（用户实测就是这个现象）。
-  ///
-  /// 现在指向我们自己的 `hx_all.json`：116 个肥猫 jar 源 + 我们的幻想，
-  /// 装完首次启动就能导入全量源。
-  static const String defaultTvBoxUrl = 'http://125.94.244.87/hx_all.json';
+  /// 默认 TVBox 配置地址（肥猫）。设置页的「配置地址」预填它，
+  /// 首次启动也自动拉一次导入 —— 装完就有源，不用用户自己去别处找。
+  static const String defaultTvBoxUrl = 'http://肥猫.net/';
 
   /// 首次自动导入的超时：失败静默，绝不拦首屏。
-  /// 首次自动导入的超时（AUTO_IMPORT_V2）：3s → 8s。
-  ///
-  /// 现在导的是 `hx_all.json`（116 个源 + 协议面），3 秒经常只拿到半截就被
-  /// 判超时；导入在首帧之后异步跑，不挡首屏，给 8 秒能把全量源吃下来。
-  static const Duration autoImportTimeout = Duration(seconds: 8);
+  static const Duration autoImportTimeout = Duration(seconds: 3);
 
   /// 中文域名 → punycode。
   ///
@@ -543,11 +532,7 @@ class SourceHub extends ChangeNotifier {
   static const String _kRemoved = 'fx_sources_removed_v1';
   static const String _kUser = 'fx_sources_user_v1';
   static const String _kFetchedAt = 'fx_sources_fetched_at_v1';
-  /// 自动导入标记（v2：换了默认配置地址，老装机也要重新导一次全量源）。
-  static const String _kAutoImported = 'fx_sources_auto_tvbox_v2';
-
-  /// 上次导入时服务端配置的 md5（用来判断「配置变了没有」）。
-  static const String _kConfigMd5 = 'fx_sources_config_md5_v1';
+  static const String _kAutoImported = 'fx_sources_auto_tvbox_v1';
 
   /// 协议面（`parses` / `flags` / `ads` / `hosts` / `rules` / `doh` / `spider`）
   /// 的落盘键 —— 配置拉不到时也要能按上一份继续解析。
@@ -650,15 +635,6 @@ class SourceHub extends ChangeNotifier {
   /// 分不清是谁先放弃。现在源级 12 秒 > 通道 12 秒内的两次尝试预算
   /// （[JarSpider.searchBudget] = 11 秒），层次清楚：**先由 jar 报「这个源
   /// 超时/出错」，源级只兜底**。
-  /// 单源超时（SEARCH_FAST 2026-11-17）：12s → 8s。
-  ///
-  /// 用户实测「搜索加载太慢」：36 个源、20 并发、单源 12 秒，最坏要等
-  /// 两轮 = 24 秒才出齐。实测 98% 的源在 3 秒内返回（首条 552ms），
-  /// 12 秒只是给极慢源留的余量；压到 8 秒，慢源该失败就失败，
-  /// 用户不用陪着等。
-  // SOURCE_TIMEOUT（2026-11-19 还原 12s）：我把它压到 8 秒之后，App99 /
-  // AppDrama 那批源（剧圈/半日/天堂/橘汁/华谊/苹果）全部开始超时返回 0 条 ——
-  // 它们本身就要 8~12 秒。宁可慢两秒，也不能整批源变成「搜不到」。
   static const Duration sourceTimeout = Duration(seconds: 12);
 
   /* ------------------------------------------------------ jar 插件可用性 */
@@ -1014,11 +990,9 @@ class SourceHub extends ChangeNotifier {
       // SOURCE_BLOCK：网盘 / 课堂 / 体育 / 音频 / 配置文件这类源
       // 不参与检索（面板里仍会列出来，只是点不动）。
       if (!usableForContent(s)) return;
-      // ALL_SOURCES（2026-11-18）：**用户主动搜索时不再按冷却跳源**。
-      //
-      // 原来失败两次就冷静 10 分钟（crash 30 分钟），期间这个源在搜索里
-      // 根本不发请求 —— 用户看到的就是「有几个源根本没搜」。
-      // 搜索是用户主动要结果，宁可多等几秒，也不能悄悄少搜。
+      // FAIL_LEDGER（第 8 条）：这个源正在冷却 —— 批量检索跳过它，
+      // 别让一轮搜索在死源上白等。用户主动点进详情 / 播放不受影响。
+      if (_failures.shouldSkip(s.key)) return;
       // jar 插件没装：这些源一次也查不出来（原生只会回 no_jar），
       // 跳过它们，别让每次搜索白等 8 秒（JAR_NOTICE）。
       if (s.kind == KSourceKind.jar && _jarReady == false) return;
@@ -1087,10 +1061,11 @@ class SourceHub extends ChangeNotifier {
     final external = <KSource>[];
     final ownSeen = <String>{};
     final extSeen = <String>{};
-    // ALL_SOURCES：冷却不再影响搜索（见上面同名字段的说明）。
     bool usable(KSource s) =>
         usableForContent(s) &&
-        !(s.kind == KSourceKind.jar && _jarReady == false);
+        !(s.kind == KSourceKind.jar && _jarReady == false) &&
+        // 冷却中的源不参与本轮（`SourceFailureLedger`）。
+        !_failures.shouldSkip(s.key);
     for (final s in visibleCloud) {
       if (!usable(s)) continue;
       if (!ownSeen.add(keyOf(s))) continue;
@@ -1138,8 +1113,7 @@ class SourceHub extends ChangeNotifier {
 
   Future<void> _boot() async {
     await _loadCache();
-    // 首次启动：后台把默认 TVBox 配置（我们自己的 hx_all.json）导一次。
-    // 搜索前还有一道 `ensureSourcesImported()` 兜底（那里会等它导完）。
+    // 首次启动：后台把默认 TVBox 配置（肥猫）导一次，不挡首屏。
     unawaited(_importDefaultTvBoxOnce());
     // 缓存过期或从来没拉过：后台补一次，不挡首屏。
     final age = _fetchedAt <= 0
@@ -1155,41 +1129,14 @@ class SourceHub extends ChangeNotifier {
   /// 触发条件：没成功导过、且用户手上还没有自加源（老用户升级上来不该被
   /// 突然塞一堆源，删过源的也不重灌）。3 秒超时、失败静默并且**不写标记**，
   /// 下次启动再试 —— 首屏不等它，网络差也就是没有这些源而已。
-  /// 单元测试环境里不碰网络（TEST_GUARD 2026-11-18）。
-  ///
-  /// 自动导入会发真实 HTTP 请求、超时 8 秒；`flutter test` 里测试跑完时这些
-  /// 定时器还挂着，会报 "A Timer is still pending" 把门禁测试判红。
-  static bool get _underTest =>
-      Platform.environment['FLUTTER_TEST'] == 'true';
-
   Future<void> _importDefaultTvBoxOnce() async {
-    if (_underTest) return;
     try {
       final sp = await SharedPreferences.getInstance();
-      // CONFIG_REFRESH（2026-11-18）：配置变了就重导一次。
-      // 原来导过一次就永不再看服务端 —— 服务端删掉的源（明星 mv / 哔哩合集）
-      // 手机上照旧显示、照旧去搜，用户看到「我说删了还在」。
-      final remoteMd5 = await _fetchConfigMd5();
-      final localMd5 = sp.getString(_kConfigMd5) ?? '';
-      if (sp.getBool(_kAutoImported) == true &&
-          (remoteMd5.isEmpty || remoteMd5 == localMd5)) {
+      if (sp.getBool(_kAutoImported) == true) return;
+      if (_user.isNotEmpty) {
+        await sp.setBool(_kAutoImported, true);
         return;
       }
-      // AUTO_IMPORT_V2（2026-11-18）：**不再因为「已经有几个源」就跳过**。
-      // 旧逻辑是 `_user.isNotEmpty` 直接置标记返回 —— 用户手动加过一两个源
-      // 就永远拿不到全量配置，搜索只剩那一两个源能出结果。
-      // 现在按 v2 标记判断：老装机也会重新导一次 hx_all.json 的 116 个源。
-      // CONFIG_SYNC（2026-11-19）：**重导之前先清掉上一轮那批**。
-      //
-      // 用户反复说「明星那些早就让你删了」。根因在这里：`importTvBox` 只做
-      // 「合并」——服务端把某个源删了，手机上那条还在，永远删不掉。
-      // 现在按 tag 精确清除：只删「标注为默认配置导入」的源，用户手动加的
-      // 不动；清完再按服务端最新配置导一遍。
-      // 注意：历史导入的 tag 可能是 `TVBox`（tvBoxTag）而不是 `肥猫`，
-      // 只按 fatCatTag 删会一个都删不掉 —— 这就是「明星 mv 删不掉」的根因。
-      _user.removeWhere(isBundledSource);
-      await _saveUser();
-
       final result = await importTvBox(
         defaultTvBoxUrl,
         timeout: autoImportTimeout,
@@ -1197,38 +1144,10 @@ class SourceHub extends ChangeNotifier {
       );
       if (result.added > 0) {
         await sp.setBool(_kAutoImported, true);
-        if (remoteMd5.isNotEmpty) await sp.setString(_kConfigMd5, remoteMd5);
       }
     } catch (_) {
       // 静默：没网 / 超时 / 配置换了格式，都当没这回事。
     }
-  }
-
-  /// 取服务端配置的 md5（`hx_all.json.md5`）；取不到返回空串（按不刷新处理）。
-  Future<String> _fetchConfigMd5() async {
-    try {
-      final res = await http
-          .get(Uri.parse('$defaultTvBoxUrl.md5'))
-          .timeout(const Duration(seconds: 5));
-      if (res.statusCode != 200) return '';
-      final m = RegExp(r'[0-9a-fA-F]{32}').firstMatch(res.body.trim());
-      return m?.group(0) ?? '';
-    } catch (_) {
-      return '';
-    }
-  }
-
-  /// 搜索前的兜底（SEARCH_READY 2026-11-18）：**一个 jar 源都没有就等导入**。
-  ///
-  /// 用户实测：装完第一次搜索只有咕噜能出结果 —— 因为默认配置是后台异步导入的，
-  /// 搜索发车时源表还是空的。这里在搜索前检查一次，没有源就同步导一遍
-  /// （最多等 [autoImportTimeout]），导完再发车。
-  Future<void> ensureSourcesImported() async {
-    if (_user.any((s) => s.kind == KSourceKind.jar)) return;
-    await _importDefaultTvBoxOnce().timeout(
-      autoImportTimeout + const Duration(seconds: 2),
-      onTimeout: () {},
-    );
   }
 
   /* ------------------------------------------------------------ 云端配置 */

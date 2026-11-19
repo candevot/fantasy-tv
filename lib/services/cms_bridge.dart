@@ -693,12 +693,9 @@ class CmsBridge {
       //
       // GATE_LOG（2026-11-15）：**每个源单独判、单独记**。整批判的话只知道
       // 「41 个源一共丢了 30 条」，不知道是哪个源在灌首页数据。
-      // PASS_THROUGH（2026-11-19）：**外部源的结果原样上屏，客户端不再过滤**。
-      //
-      // 影视壳用同一份 jar、同一个源，一个源能出 20 条；我们只有几条 ——
-      // 差别就在这层闸门（相关性 + 音频过滤）把大部分吃掉了。
-      // 用户口径：大部分源都有这部片，只搜出几个就是不对。
-      final gate = FxSearchGate(kept: cards, dropped: 0, extraClips: 0);
+      final gate = external
+          ? fxSearchGate(cards, q)
+          : FxSearchGate(kept: cards, dropped: 0, extraClips: 0);
       if (external && (gate.dropped > 0 || gate.kept.isNotEmpty)) {
         fxJarGateLog(source, gate);
       }
@@ -743,12 +740,7 @@ class CmsBridge {
         // 索引坏了也要能搜：下面的 plan 为空表就只查主站。
       }
       if (closed) return;
-      // SEARCH_READY（2026-11-18）：**搜索前确认源表已经导进来了**。
-      // 以前默认配置是后台异步导入的，第一次搜索发车时源表还是空的，
-      // 结果只有咕噜能出东西。这里没有 jar 源就同步导一遍再发车。
-      await hub.ensureSourcesImported();
-      if (closed) return;
-      // jar 插件状态：没装就**不**去敲那些 jar 源（每个 8 秒），
+      // jar 插件状态：没装就**不**去敲那 41 个 jar 源（每个 8 秒），
       // 页面改为显示「需要先安装 jar 插件」的提示（SourceHub.jarNotice）。
       await hub.ensureJarStatus();
       if (closed) return;
@@ -1395,10 +1387,7 @@ class CmsBridge {
   /// 自身还带「3 次重试 + 500/1000/2000ms 退避」（光睡眠 3.5 秒），
   /// 一次成功的详情经常落在 9～15 秒。搜索那条已经从 8 秒提到 12 秒了，
   /// 详情没跟上。这里给到 20 秒。
-  // DETAIL_BUDGET（2026-11-19）：咕噜的 detailContent = 加密握手 + 3 次重试 +
-  // 500/1000/2000ms 退避，实测一次成功要 9~25 秒。20 秒经常刚好卡在最后
-  // 一次重试上被砍掉，用户看到的就是「一直取线路和选集」。
-  static const Duration externalDetailTimeout = Duration(seconds: 35);
+  static const Duration externalDetailTimeout = Duration(seconds: 20);
 
   /// jar 通道调用本身的 guard：比页面级少 2 秒。
   ///
@@ -1406,7 +1395,7 @@ class CmsBridge {
   /// 必须比页面级先到期**，页面才会收到「咕噜暂时没响应」这种说得清原因的
   /// 错误，而不是一句笼统的页面超时；同时通道那侧也能先释放原生 worker
   /// 线程，自动重试不会被上一次的僵尸调用堵住。
-  static const Duration jarDetailTimeout = Duration(seconds: 32);
+  static const Duration jarDetailTimeout = Duration(seconds: 18);
 
   /// 本站 CMS 详情的上限：保持 12 秒（它快，慢了就是真有问题）。
   static const Duration ownDetailTimeout = Duration(seconds: 12);

@@ -777,29 +777,12 @@ class JarSpiderLoader(
     fun search(api: String, ext: String, key: String, quick: Boolean, page: Int = 1): String {
         val started = System.currentTimeMillis()
         val out = guard("searchContent") {
-            // SHELL_PARITY（2026-11-19）：**第一页走两参版本**，和壳一致。
-            //
-            // 壳 SearchTask.java:51：
-            //   page=1  → searchContent(keyword, quick)
-            //   page>1  → searchContent(keyword, quick, page)
-            // 我们原来无条件先调三参 —— 只实现两参的源，三参反射能命中但内部
-            // 把 "1" 当页码拼 URL，第一页地址是错的，返回条数很少甚至为空。
-            // 这就是「同一个源壳能出 20 条、我们只出几条」的直接原因。
             val pageText = page.coerceAtLeast(1).toString()
-            if (page <= 1) {
-                try {
-                    call(api, ext, "searchContent", arrayOf<Any?>(key, quick))
-                } catch (e: JarSpiderException) {
-                    if (e.code != "no_method") throw e
-                    call(api, ext, "searchContent", arrayOf<Any?>(key, quick, pageText))
-                }
-            } else {
-                try {
-                    call(api, ext, "searchContent", arrayOf<Any?>(key, quick, pageText))
-                } catch (e: JarSpiderException) {
-                    if (e.code != "no_method") throw e
-                    call(api, ext, "searchContent", arrayOf<Any?>(key, quick))
-                }
+            try {
+                call(api, ext, "searchContent", arrayOf<Any?>(key, quick, pageText))
+            } catch (e: JarSpiderException) {
+                if (e.code != "no_method") throw e
+                call(api, ext, "searchContent", arrayOf<Any?>(key, quick))
             }
         }
         val elapsed = System.currentTimeMillis() - started

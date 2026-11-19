@@ -137,34 +137,6 @@ class FxSearchGate {
 /// 过一遍闸门：[cards] 里留下和 [query] 相关的，解说 / 预告排到后面。
 ///
 /// [cards] 为空或 [query] 为空时整批放行（空关键词不做判断）。
-/// 这些词出现在片名/分类里，就说明是音频、曲艺、有声内容 —— 不是影视。
-///
-/// 搜「济公传」时 `明星 mv` 源灌进来的「长篇单口相声」「评书全集」
-/// 「太平歌词」全属于这一类；不拦掉，用户看到的就是一屏无关结果。
-const List<String> _kAudioWords = <String>[
-  '相声', '评书', '单口', '对口', '群口', '太平歌词', '快板', '鼓书',
-  '有声书', '有声小说', '听书', '音频', '电台', '广播剧',
-  '戏曲', '京剧', '越剧', '黄梅', '豫剧', '梆子', '昆曲',
-  '小品', '二人转', '脱口秀', '播客',
-  // 曲艺现场 / 广播剧（三六零源常把德云社专场归成「综艺」灌进搜索结果）
-  '书场', '钢丝节', '德云社', '广播剧', '大鼓', '琴书', '数来宝',
-  'DJ', 'FM', '音乐', '歌曲', '演唱会', '伴奏', '纯音乐',
-];
-
-/// 这条卡片是不是「音频 / 曲艺 / 电台」这类非影视内容。
-bool fxLooksLikeAudioContent(VideoCard card) {
-  final hay = <String>[
-    card.title,
-    card.category,
-    card.type,
-    ...card.tags,
-  ].join(' ').toLowerCase();
-  for (final w in _kAudioWords) {
-    if (hay.contains(w.toLowerCase())) return true;
-  }
-  return false;
-}
-
 FxSearchGate fxSearchGate(List<VideoCard> cards, String query) {
   final q = query.trim();
   if (cards.isEmpty || q.isEmpty) {
@@ -174,16 +146,6 @@ FxSearchGate fxSearchGate(List<VideoCard> cards, String query) {
   final clips = <VideoCard>[];
   var dropped = 0;
   for (final card in cards) {
-    // NOT_FILM（2026-11-17）：**音频 / 曲艺内容一律丢掉**。
-    //
-    // 用户实测搜「济公传」，`明星 mv` 那个源回来 20 条全是「郭德纲｜长篇
-    // 单口相声｜全本【济公传】」「郭德纲评书全集」——片名里确实有关键词，
-    // 相关性闸门全放行，但那些不是影视，用户看到的就是「一堆无关的东西」。
-    // 带这些词的一律当非影视处理。
-    if (fxLooksLikeAudioContent(card)) {
-      dropped++;
-      continue;
-    }
     if (!fxSearchRelevant(card.title, q)) {
       dropped++;
       continue;

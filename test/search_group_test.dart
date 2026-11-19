@@ -12,7 +12,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:fantasy_tv/models.dart';
 import 'package:fantasy_tv/services/search_group.dart';
-import 'package:fantasy_tv/services/search_relevance.dart';
 
 /// 造一张外部源的卡片：id 按 `@src:<源key>::<vodId>` 编（和线上一致），
 /// `sourceLabel` 故意塞**分类名**，用来证明分组键不看它。
@@ -43,31 +42,6 @@ List<VideoCard> _reverse(List<VideoCard> cards) =>
     cards.reversed.toList(growable: false);
 
 void main() {
-  group('fxLooksLikeAudioContent', () {
-    test('相声/评书/音乐这类非影视内容被识别出来', () {
-      VideoCard c(String t) => VideoCard(
-            id: '@src:明星::$t',
-            title: t,
-            cover: '',
-            sourceLabel: '明星',
-          );
-      VideoCard cCat(String t, String cat) => VideoCard(
-            id: '@src:明星::$t',
-            title: t,
-            cover: '',
-            category: cat,
-            sourceLabel: '明星',
-          );
-      expect(fxLooksLikeAudioContent(c('郭德纲｜长篇单口相声｜全本【济公传】')), isTrue);
-      expect(fxLooksLikeAudioContent(c('《济公传》郭德纲评书全集')), isTrue);
-      expect(fxLooksLikeAudioContent(c('某某歌曲合集')), isTrue);
-      expect(fxLooksLikeAudioContent(cCat('济公传', '相声')), isTrue);
-      // 正常影视不能误杀
-      expect(fxLooksLikeAudioContent(c('济公传')), isFalse);
-      expect(fxLooksLikeAudioContent(c('梦幻西游之天命之战')), isFalse);
-    });
-  });
-
   group('fxGroupBySource', () {
     test('内部 key 显示成可读源名（u__咕噜_app → 咕噜 • APP）', () {
       final groups = fxGroupBySource(<VideoCard>[

@@ -123,8 +123,7 @@ void main() {
         'origin': 'cloud',
       });
       expect(normal.ownTimeout, isNull);
-      // 12 秒（2026-11-19 从 8s 还原：App99/AppDrama 那批源要 8~12 秒，
-      // 压到 8 秒直接整批变 0 条）。
+      // 全局兜底还是 12 秒（这次只让**配了的**源突破它）。
       expect(SourceHub.sourceTimeout, const Duration(seconds: 12));
     });
 
