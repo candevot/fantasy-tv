@@ -73,7 +73,6 @@ class CmsBridge {
     CmsChannel('tv', '电视剧', 2, 'juji'),
     CmsChannel('anime', '动漫', 3, 'manhua'),
     CmsChannel('zongyi', '综艺', 4, 'zongyi'),
-    CmsChannel('duanju', '短剧', 5, 'juji'),
     CmsChannel('kids', '少儿', 6, 'manhua'),
   ];
 
@@ -83,7 +82,6 @@ class CmsBridge {
     CmsChannel('tv', '电视剧', 2, 'juji'),
     CmsChannel('anime', '动漫', 3, 'manhua'),
     CmsChannel('zongyi', '综艺', 4, 'zongyi'),
-    CmsChannel('duanju', '短剧', 5, 'juji'),
     CmsChannel('kids', '少儿', 6, 'manhua'),
   ];
 
@@ -104,7 +102,6 @@ class CmsBridge {
     '动画': 'anime',
     '番剧': 'anime',
     '综艺': 'zongyi',
-    '短剧': 'duanju',
     '少儿': 'kids',
     '儿童': 'kids',
   };

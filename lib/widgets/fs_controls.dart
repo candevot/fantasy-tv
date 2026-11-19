@@ -401,18 +401,9 @@ class FsTopBar extends StatelessWidget {
                     // 当前时间：全屏时看不到系统状态栏，这里补一个
                     _ClockChip(size: s),
                   ],
-                  if (onRotate != null) ...[
-                    const SizedBox(width: 6),
-                    // 手动转屏：竖着看短剧想横过来、或反过来时用。点过一次之后
-                    // 本次播放内不再自动跟着分辨率切（页面记 user override）。
-                    PGlassIcon.fs(
-                      icon: rotatedToPortrait
-                          ? Icons.crop_landscape_rounded
-                          : Icons.crop_portrait_rounded,
-                      tooltip: rotatedToPortrait ? '转成横屏' : '转成竖屏',
-                      onTap: onRotate,
-                    ),
-                  ],
+                  // ROTATE_OFF（2026-11-19）：全屏顶栏**不要横屏/竖屏控件**。
+                  // 用户口径：全屏只留基本播放控制，转屏靠系统旋转。
+                  // onRotate 参数保留（页面还在传），但这里不再渲染按钮。
                   if (showCast && onCast != null) ...[
                     const SizedBox(width: 6),
                     PGlassIcon.fs(
