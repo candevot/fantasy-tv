@@ -280,10 +280,16 @@ def verify_ffmpeg_audio(gate, apk):
                              '' if entry in libs else 'missing (FFmpeg 音轨会静默降级)')
             elif entry in libs:
                 print('  note: 也带了 %s（32 位 ABI，可选）' % entry)
-    wanted = b'Lio/github/anilbeesetti/nextlib/media3ext/ffdecoder/FfmpegAudioRenderer;'
+    # dex 侧查的是 **FfmpegLibrary**，不是 FfmpegAudioRenderer：release 开了
+    # R8，普通类会被改名（实测这一版里 `ffdecoder.FfmpegAudioRenderer` 变成
+    # `ffdecoder.b`，用 descriptor 查会假红）。而 FfmpegLibrary 声明了 native
+    # 方法，靠 AAR 自带的 `-keepclasseswithmembernames class * { native <methods>; }`
+    # 保住类名 —— JNI 就是按类名找符号的，所以「类名还在」正好等价于
+    # 「FFmpeg 原生绑定没被 R8 破坏」，这条断言比查渲染器更贴近真正的失败模式。
+    wanted = b'Lio/github/anilbeesetti/nextlib/media3ext/ffdecoder/FfmpegLibrary;'
     dek = [n for n in names if n.endswith('.dex')]
     found = any(wanted in zf.read(n) for n in dek)
-    gate.require('dex contains FfmpegAudioRenderer', found,
+    gate.require('dex contains FfmpegLibrary (JNI 绑定类名未被 R8 改名)', found,
                  '' if found else 'descriptor not found in any dex')
     zf.close()
 
