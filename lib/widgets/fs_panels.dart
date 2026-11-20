@@ -121,8 +121,8 @@ class FsBottomBar extends StatelessWidget {
   /// 蚂蚁字，选集 / 齿轮 / 退出保持原尺寸好点。
   final bool narrow;
 
-  /// 直播：隐藏进度条 / 下一集 / 倍速 / 选集，显示 LIVE，只保留
-  /// 播放暂停、清晰度（线路切换）和退出全屏。
+  /// 直播：隐藏进度条 / 下一集 / 倍速 / 选集 / **播放暂停**，显示 LIVE，
+  /// 只保留清晰度（线路切换）和退出全屏。
   final bool live;
 
   @override
@@ -180,20 +180,24 @@ class FsBottomBar extends StatelessWidget {
               // ── 左组：播放 / 下一集（不压缩）──
               // FS_ICON_SPEC：底栏所有圆钮与顶栏 / 侧栏同一规格（30dp 底、
               // 19.5 图标、tint .13、44dp 热区），间距交给热区自带的留白。
-              PGlassIcon.fs(
-                icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                tooltip: playing ? '暂停' : '播放',
-                onTap: onTogglePlay,
-              ),
-              const SizedBox(width: 2),
-              if (live) ...[
-                const _FsLiveBadge(),
-              ] else ...[
+              //
+              // LIVE_EDGE（2026-11-20）：直播**没有**播放 / 暂停按钮。
+              // 用户口径：「直播要什么暂停按钮」。直播只有 LIVE 小红标，
+              // 点播（live == false）完全不变：暂停 + 下一集照旧。
+              if (!live) ...[
+                PGlassIcon.fs(
+                  icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  tooltip: playing ? '暂停' : '播放',
+                  onTap: onTogglePlay,
+                ),
+                const SizedBox(width: 2),
                 PGlassIcon.fs(
                   icon: Icons.skip_next_rounded,
                   tooltip: '下一集',
                   onTap: onNext,
                 ),
+              ] else ...[
+                const _FsLiveBadge(),
               ],
               // ── 中间：吃掉剩余空间，把右组顶到最右 ──
               const Spacer(),

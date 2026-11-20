@@ -206,6 +206,47 @@ jobs:
           grep -q 'fxTransientCooldownWindow = Duration(minutes: 2)' \
             lib/services/auto_resume.dart
           flutter test test/auto_resume_test.dart
+      # LIVE_EDGE（2026-11-20）：直播页现场问题 —— 用户实测播 CCTV-4K，
+      # 顶栏有刷新按钮、左下角有暂停按钮、画面明显落后，原话：
+      # 「直播要什么暂停按钮，还有刷新按钮，根本就不对，刷新之后还是当前的，
+      #  根本不是跟上跟不上进度，直播不同步」。
+      #
+      # 口径（用户中途把「落后 8 秒自动追平」否掉了，这里是**改后**的）：
+      #   ① 直播没有暂停 / 播放按钮，也没有可拖动的进度条；
+      #   ② 刷新 = 重新 prepare + seek 到直播窗口末端前 3 秒（验收：末端 3 秒内），
+      #      这是唯一一条追边路径；
+      #   ③ 不许任何自动追平、定时位置检查（落后就让它落后）；
+      #   ④ 点播（live == false）一个像素都不变：暂停 + 进度条照旧。
+      - name: Live mode (no pause, refresh to live edge) regressions
+        run: |
+          set -e
+          # ① 直播页（竖屏）不许有播放 / 暂停按钮。
+          if grep -nE 'Icons\.(pause|play_arrow)_rounded' lib/pages/live_detail_page.dart; then
+            echo '直播页不许有播放/暂停按钮（用户口径：直播要什么暂停按钮）' >&2
+            exit 1
+          fi
+          # ② 刷新 = 重开 + 落地到直播边缘，回退写死 3 秒 / 下限 2 秒。
+          grep -q '_refreshLive' lib/pages/live_detail_page.dart
+          grep -q '_openAndLand' lib/pages/live_detail_page.dart
+          grep -q '_landOnLiveEdge' lib/pages/live_detail_page.dart
+          grep -q 'seekToLiveEdge' lib/pages/live_detail_page.dart
+          grep -q 'fxLiveRefreshRewind = Duration(seconds: 3)' lib/services/live_edge.dart
+          grep -q 'fxLiveEdgeMinRewind = Duration(seconds: 2)' lib/services/live_edge.dart
+          grep -q 'Future<bool> seekToLiveEdge(' lib/services/fx_player.dart
+          # ③ 反面门禁：不许把「自动追平 / 定时位置检查」加回来。
+          if grep -nE 'fxLiveLagThreshold|fxLiveWatchInterval|Timer\.periodic' \
+               lib/services/live_edge.dart lib/pages/live_detail_page.dart; then
+            echo '直播不许自动追平 / 定时检查位置：只有刷新才追到边缘' >&2
+            exit 1
+          fi
+          # ④ 全屏直播：暂停入口先短路（点播那段 playOrPause 不许被削掉），
+          #    定时关闭到点也不许把直播按停。
+          grep -A14 'void _togglePlay() {' lib/pages/fullscreen_page.dart | grep -q 'if (_isLive)'
+          grep -q 'playOrPause' lib/pages/fullscreen_page.dart
+          grep -A8 'void _fireSleep() {' lib/pages/fullscreen_page.dart | grep -q 'if (!_isLive)'
+          # ⑤ 底栏：直播不渲染暂停钮（live == false 时暂停 / 下一集照旧）。
+          grep -qF 'if (!live) ...[' lib/widgets/fs_panels.dart
+          flutter test test/live_edge_test.dart test/live_mode_test.dart
       # NET_SPEED（2026-11-15）：实时网速。
       #
       # 用户实测「缓冲时转圈下面一直 0 KB/s，从来没变过」：计数器的字节数

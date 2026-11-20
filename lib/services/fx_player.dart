@@ -12,6 +12,7 @@ import 'hls_segment_index.dart';
 import 'iqiyi_codec.dart';
 import 'line_enrich.dart';
 import 'line_probe.dart';
+import 'live_edge.dart';
 import 'local_hls_proxy.dart';
 import 'playback_progress.dart';
 import 'playback_recovery.dart';
@@ -1468,6 +1469,44 @@ class FxPlayer implements Listenable {
 
   /// 兼容 video_player 命名。
   Future<void> seekTo(Duration position) => seek(position);
+
+  /// 直播追边（LIVE_EDGE 2026-11-20）：把播放位置挪到直播窗口末端前 [rewind]。
+  ///
+  /// 只给**用户主动重开**用（直播页的刷新 / 换线路 / 换台）。直播页不会定时
+  /// 调用它：播着播着落后了就让它落后，软件不自动跳。
+  ///
+  /// 窗口时长就是内核报的 `duration`（HLS live 的窗口末端）；窗口未知
+  /// （duration == 0，很多直播清单就是这样）时退回 [fxLiveSeekToEnd] ——
+  /// ExoPlayer 的 `seekTo` 会把目标钳进可播放窗口，等于落到末端。
+  Future<bool> seekToLiveEdge({
+    Duration rewind = fxLiveRefreshRewind,
+    String reason = 'manual',
+  }) async {
+    if (_disposed) return false;
+    final v = _value;
+    if (!v.isInitialized || v.hasError) return false;
+    final target = fxLiveEdgeTarget(v.duration, rewind: rewind);
+    final seekTo =
+        target ?? (v.duration <= Duration.zero ? fxLiveSeekToEnd : null);
+    // 窗口比回退还短：没有「末端前 N 秒」这回事，宁可不 seek。
+    if (seekTo == null) return false;
+    _logFx(
+      fxLiveProbeLog(
+        event: 'refresh',
+        position: v.position,
+        duration: v.duration,
+        target: seekTo,
+        reason: reason,
+      ),
+    );
+    try {
+      await seek(seekTo);
+      return true;
+    } catch (error) {
+      _logFx('[FxLive] 追边失败 reason=$reason error=$error');
+      return false;
+    }
+  }
 
   /// 切后台回来后的自愈：确认还在出画、进度没被系统重置。
   Future<bool> recoverAfterBackground(

@@ -9,6 +9,8 @@ import '../api.dart';
 import '../models.dart';
 import '../services/cast_service.dart';
 import '../services/fx_player.dart';
+import '../services/live_edge.dart';
+import '../services/play_log.dart';
 import '../services/screen_orientation.dart';
 import '../theme.dart';
 import '../widgets/cast_sheet.dart';
@@ -70,6 +72,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
 
   int _openSeq = 0;
   String _lastPlayerKey = '';
+
+  /// 刷新进行中：连点刷新只认第一次（第二次会再 open 一路流，双声）。
+  bool _refreshingLive = false;
   Timer? _hideTimer;
 
   /// 救援链（open 的 rescueLines）已静默试过的线路 id：同一次播放里每条
@@ -119,6 +124,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // 直播回前台：画面可能已断流，重建一次拉流回到直播最新位置；
     // 切后台不主动 pause，方便用户边听边做别的事。
+    //
+    // LIVE_EDGE（2026-11-20）：只处理「流真的断了」这一种情况。回前台不比较
+    // 位置、不自动 seek —— 播着落后就让它落后，追进度只由刷新按钮触发。
     if (state == AppLifecycleState.resumed && mounted && _error == null) {
       final player = _player;
       if (player != null && player.value.hasError) {
@@ -153,7 +161,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         _lineId = usable.isNotEmpty ? usable.first.id : _lines.first.id;
       }
     });
-    await _open(_lineId);
+    await _openAndLand(_lineId, reason: 'open');
   }
 
   Future<void> _loadFav() async {
@@ -310,11 +318,22 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     return _lines.isEmpty ? null : _lines.first;
   }
 
-  Future<void> _reopenCurrent() async {
+  /// 重开当前线路：`open` 成功后统一落地到直播边缘（LIVE_EDGE 2026-11-20）。
+  ///
+  /// 所有「用户主动重开」的入口都走这里（刷新 / 出错重试 / 一起看回来），
+  /// 保证重开之后看到的一定是当前实时画面。
+  Future<void> _reopenCurrent({String reason = 'refresh'}) async {
     if (_releasedForTogether) return;
     final line = _line;
     if (line == null) return;
-    await _open(line.id);
+    await _openAndLand(line.id, reason: reason);
+  }
+
+  /// 打开一条线路并落到直播边缘（换线路 / 换台 / 首次进页面共用）。
+  Future<void> _openAndLand(String lineId, {String reason = 'open'}) async {
+    final player = await _open(lineId);
+    if (player == null || !mounted) return;
+    await _landOnLiveEdge(player, reason: reason);
   }
 
   void _onPlayer() {
@@ -355,21 +374,70 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     if (_controls) _startHideTimer();
   }
 
-  Future<void> _togglePlay() async {
-    final player = _player;
-    if (player == null || _loading || _error != null) return;
+  /// 直播没有暂停（LIVE_EDGE 2026-11-20）。
+  ///
+  /// 用户口径：「直播要什么暂停按钮」。所以本页**不存在**任何暂停路径 ——
+  /// 暂停按钮已删、双击画面也不再暂停（见 [_buildPlayer]），
+  /// 只保留「刷新 = 追到直播边缘」这一个主动动作。
+  void _noopDoubleTap() {}
+
+  /// 刷新 = 重新 prepare，就绪后落到直播窗口末端前 3 秒（LIVE_EDGE 2026-11-20）。
+  ///
+  /// 旧实现的「刷新」只是 `_open` 同一个地址：内核从缓冲头 / 窗口头重新起播，
+  /// 追不回来的那一截还是追不回来，用户看到的就是「刷新之后还是当前的」。
+  /// 现在刷新分两步：重开一路流 → 就绪后 seek 到 `duration - 3s`，
+  /// 画面 = 当前直播实时画面。
+  Future<void> _refreshLive() async {
+    if (_refreshingLive || _releasedForTogether) return;
+    _refreshingLive = true;
+    _hideTimer?.cancel();
+    if (mounted) {
+      setState(() => _controls = true);
+    }
     try {
-      if (player.value.isPlaying) {
-        await player.pause();
-      } else {
-        // 投屏中用户点手机播放：先结束投屏，避免电视 / 手机双声。
-        if (CastService.instance.isCasting) {
-          unawaited(CastService.instance.stop());
-        }
-        await player.play();
-      }
-    } catch (_) {}
-    _touch();
+      await _reopenCurrent();
+      if (!mounted) return;
+      fxToast(context, '已回到直播');
+    } finally {
+      _refreshingLive = false;
+      if (mounted) _touch();
+    }
+  }
+
+  /// 重开之后落地到直播边缘：等内核把窗口时长报出来，再 seek 到末端前 3 秒。
+  ///
+  /// 只在**用户主动重开**时调用（进页面 / 刷新 / 换线路 / 换台 / 出错重试）。
+  /// 播放过程中**不做**定时位置检查、不自动 seek：落后就让它落后。
+  Future<void> _landOnLiveEdge(
+    FxPlayer player, {
+    required String reason,
+    Duration rewind = fxLiveRefreshRewind,
+  }) async {
+    // open 刚返回时 duration 可能还是 0（内核还没解析完清单）：等它出现。
+    // 直播清单解析一般 1~3 秒，8 秒还拿不到就说明窗口本来就未知，
+    // 此时 [FxPlayer.seekToLiveEdge] 自己会走 seekToEnd 兜底。
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (mounted &&
+        identical(_player, player) &&
+        player.value.isInitialized &&
+        !player.value.hasError &&
+        player.value.duration <= Duration.zero &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    if (!mounted || !identical(_player, player)) return;
+    final landed = await player.seekToLiveEdge(rewind: rewind, reason: reason);
+    if (!mounted || !identical(_player, player)) return;
+    // 探针：刷新后这一行就是验收证据（pos 与 end 的差应 ≤ 3 秒）。
+    fxPlayLog(
+      fxLiveProbeLog(
+        event: 'land',
+        position: player.value.position,
+        duration: player.value.duration,
+        target: fxLiveEdgeTarget(player.value.duration, rewind: rewind),
+        reason: landed ? reason : '$reason-skip',
+      ),
+    );
   }
 
   Future<void> _switchLine(String lineId) async {
@@ -383,7 +451,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     _switchingLine = true;
     if (mounted) setState(() {});
     try {
-      await _open(lineId);
+      await _openAndLand(lineId, reason: 'switch');
     } finally {
       _switchingLine = false;
       if (mounted) {
@@ -441,7 +509,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         }
         return;
       }
-      await _open(_lineId);
+      await _openAndLand(_lineId, reason: 'switch');
     } finally {
       _switchingChannel = false;
       if (mounted) {
@@ -715,9 +783,11 @@ class _LiveDetailPageState extends State<LiveDetailPage>
             ),
           ),
           const SizedBox(width: 8),
+          // 刷新 = 重新 prepare 再落到直播边缘（LIVE_EDGE 2026-11-20）：
+          // 不是把当前缓冲重播一遍，而是真的把画面追到「现在」。
           _circle(
             Icons.refresh_rounded,
-            onTap: () => unawaited(_reopenCurrent()),
+            onTap: () => unawaited(_refreshLive()),
             size: 36,
             iconSize: 18,
           ),
@@ -754,7 +824,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
                         enableVertical: false,
                         enableSeek: false,
                         onTap: _toggleControls,
-                        onDoubleTap: () => unawaited(_togglePlay()),
+                        // 直播没有暂停：双击画面什么都不做（不暂停、不跳转）。
+                        // 追边只由用户点刷新触发，播放中落后就让它落后。
+                        onDoubleTap: _noopDoubleTap,
                         onSeek: (_) {},
                         onGestureStart: () => _hideTimer?.cancel(),
                       ),
@@ -789,7 +861,6 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   }
 
   Widget _buildPlayerControls() {
-    final playing = _player?.value.isPlaying ?? false;
     final line = _line;
     return Stack(
       fit: StackFit.expand,
@@ -848,17 +919,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
             ),
             child: Row(
               children: [
-                PGlassIcon(
-                  icon: playing
-                      ? Icons.pause_rounded
-                      : Icons.play_arrow_rounded,
-                  size: 30,
-                  iconSize: 19,
-                  tint: .13,
-                  tooltip: playing ? '暂停' : '播放',
-                  onTap: () => unawaited(_togglePlay()),
-                ),
-                const SizedBox(width: 8),
+                // LIVE_EDGE（2026-11-20）：直播**没有**播放 / 暂停按钮。
+                // 用户口径：「直播要什么暂停按钮」。这一排只留 LIVE 小红标 +
+                // 当前分辨率 + 全屏；音量 / 投屏 / 返回在其它位置。
                 const _LiveBadge(),
                 if (line != null) ...[
                   const SizedBox(width: 7),

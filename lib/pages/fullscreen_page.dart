@@ -590,6 +590,18 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   Future<void> _recoverAfterBackground() async {
     final c = _controller;
     if (c == null || _loading || _error) return;
+    if (_isLive) {
+      // LIVE_EDGE（2026-11-20）：直播没有「回到切后台前的位置」这回事 ——
+      // 那只会把画面拉得更靠后。回前台只保证「在播」，不做任何 seek；
+      // 落后多少由用户点刷新决定要不要追。
+      if (!c.value.isPlaying) {
+        try {
+          await c.play();
+        } catch (_) {}
+      }
+      if (mounted) setState(() {});
+      return;
+    }
     final anchor = _backgroundAnchor;
     if (anchor <= Duration.zero) return;
     final healed = await c.recoverAfterBackground(
@@ -1767,6 +1779,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         !c.value.isInitialized) {
       return;
     }
+    if (_isLive) {
+      // LIVE_EDGE（2026-11-20）：直播没有暂停，也不做「自动跳回直播」。
+      // 这个入口在直播下是空操作：点一下 / 双击都只当「显隐控件」，
+      // 绝不 seek、绝不 pause（坑就在这里 —— 旧实现双击直接 pause 了直播）。
+      _wake();
+      return;
+    }
     // 投屏中用户点手机播放：先结束投屏，避免电视 / 手机双声。
     if (!c.value.isPlaying && CastService.instance.isCasting) {
       unawaited(CastService.instance.stop());
@@ -2072,9 +2091,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   void _fireSleep() {
     _sleepTimer = null;
     if (!mounted) return;
-    try {
-      unawaited(_controller?.pause());
-    } catch (_) {}
+    // LIVE_EDGE（2026-11-20）：直播不许被任何路径按停 —— 停了就是一顿冻帧，
+    // 比继续播更糟。到点只把模式回落「不开启」，不 pause 直播流。
+    if (!_isLive) {
+      try {
+        unawaited(_controller?.pause());
+      } catch (_) {}
+    }
     unawaited(AppSettings.instance.setSleepTimer(FxSleepMode.off));
     setState(() {});
   }
