@@ -180,7 +180,9 @@ class _SearchPageState extends State<SearchPage> {
         _hotError = false;
       });
     }
-    // 热搜词也走 CMS（按点击量排的片名），拿不到再回落旧接口榜单。
+    // 热搜词跟热播榜走（HOTWORDS 2026-11-20）：`GET /api/hotwords` 读
+    // mac_hot_rank（爱奇艺 + 腾讯热播榜，每 3 小时刷新），两平台都在榜的优先，
+    // 其次按名次加权取前 12 个。桥接层拿不到时回退本地默认词，不会空着。
     List<String> words = const <String>[];
     try {
       words = await CmsBridge.hotWords();

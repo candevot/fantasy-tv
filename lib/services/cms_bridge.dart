@@ -871,32 +871,41 @@ class CmsBridge {
     ];
   }
 
-  /// 热搜词：CMS 按点击量排的片名；拿不到再用旧接口的日榜。
+  /// 本地兜底热搜词（HOTWORDS 2026-11-20）。
+  ///
+  /// 只在 `/api/hotwords` 拉不到时用：宁可少、也要是「人人都在看」的片子。
+  /// 这份表跟热播榜同一口径抄下来（爱奇艺 + 腾讯两边都在榜的），
+  /// 所以不会再出现旧表里「已经是冷门片」的词。要改随版本发。
+  static const List<String> defaultHotWords = <String>[
+    '八仙',
+    '空枪',
+    '四渡',
+    '哪吒之魔童闹海',
+    '罗小黑战记',
+    '蜘蛛侠：崭新之日',
+    '伟大的长征',
+    '功夫女足',
+    '蒸蒸日上',
+    '给阿嬷的情书',
+    '捕风追影',
+    '飞驰人生3',
+  ];
+
+  /// 热搜词：**跟着热播榜走**（HOTWORDS 2026-11-20）。
+  ///
+  /// 以前这里是「CMS 按点击量排的片名」，实测下发的是一张早就不会变的词表
+  /// （八仙 / 繁华落尽第二季 / 空枪 / 大主宰年番 / 小城良方 / 穿普拉达的女王2 …），
+  /// 里面混着已经下榜的冷门片。现在改成直接问服务端：
+  ///   `GET /api/hotwords` → mac_hot_rank（爱奇艺 + 腾讯热播榜，每 3 小时刷新）
+  ///   → 两平台都在榜的优先，其次按名次加权 → 前 12 个（服务端缓存 60 秒）。
+  /// 拿不到（离线 / 5xx / 空列表）就回退 [defaultHotWords]，搜索页永远有词可点。
   static Future<List<String>> hotWords({int limit = 12}) async {
     _boot();
-    final out = <String>[];
-    void take(List<VideoCard> list) {
-      for (final card in list) {
-        final title = card.title.trim();
-        if (title.isEmpty || out.contains(title)) continue;
-        out.add(title);
-        if (out.length >= limit) return;
-      }
+    final words = await Api.hotWords(limit: limit);
+    if (words.isNotEmpty) {
+      return words.take(limit).toList(growable: false);
     }
-
-    try {
-      final list = await CmsApi.list(sort: 'hot', src: CmsApi.ownSrc);
-      _markAll(list, CmsOrigin.cms);
-      take(list);
-    } catch (_) {
-      // 下面回落旧接口。
-    }
-    if (out.isNotEmpty) return out;
-    if (!legacyEnabled) return out;
-    final legacy = await Api.rank('hot');
-    _markAll(legacy, CmsOrigin.legacy);
-    take(legacy);
-    return out;
+    return defaultHotWords.take(limit).toList(growable: false);
   }
 
   /* ------------------------------------------------------------ 排行榜 */

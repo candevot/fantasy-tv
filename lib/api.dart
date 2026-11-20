@@ -461,6 +461,30 @@ class Api {
         .toList();
   }
 
+  /// 搜索页热搜词：`GET /api/hotwords`（HOTWORDS 2026-11-20）。
+  ///
+  /// 服务端读 `mac_hot_rank`（爱奇艺 + 腾讯热播榜，每 3 小时刷新）：
+  /// 两个平台都在榜的片名优先，其次按 Σ(1/rank) 名次加权，返回前 12 个，
+  /// 进程内缓存 60 秒。拿不到（超时 / 5xx / 空列表）返回空列表，
+  /// 由调用方回退本地默认词 —— 这里不抛异常，搜索页不该因为热搜词而报错。
+  static Future<List<String>> hotWords({int limit = 12}) async {
+    try {
+      final d = await _get('/hotwords');
+      final raw = d['words'] ?? d['items'];
+      if (raw is! List) return const <String>[];
+      final out = <String>[];
+      for (final e in raw) {
+        final w = e is String ? e.trim() : '';
+        if (w.isEmpty || out.contains(w)) continue;
+        out.add(w);
+        if (out.length >= limit) break;
+      }
+      return out;
+    } catch (_) {
+      return const <String>[];
+    }
+  }
+
   static Future<VideoDetail> detail(String id) async {
     final d = await _get('/detail', {'id': id});
     return VideoDetail.fromJson(d);
