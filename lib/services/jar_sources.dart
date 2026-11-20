@@ -263,6 +263,26 @@ List<LineInfo> fxOwnLinesFirst(List<LineInfo> lines) {
   return <LineInfo>[...own, ...jar];
 }
 
+/// 搜索期一条 jar 结果的归宿。
+enum FxJarHitAction {
+  /// 我们库里已经有这部片（片名 + 年份对得上）：只合并线路，不新增卡片。
+  merge,
+
+  /// 我们库里没有：作为新条目上屏（详情 / 播放都走 jar 通道）。
+  add,
+}
+
+/// 判定一条 jar 搜索结果的归宿（纯函数，`test/jar_fusion_test.dart` 逐条钉住）。
+FxJarHitAction fxJarAction({
+  required String title,
+  required int year,
+  required Set<String> ownKeys,
+}) {
+  final key = JarMergeIndex.keyOf(title, year);
+  if (key.isNotEmpty && ownKeys.contains(key)) return FxJarHitAction.merge;
+  return FxJarHitAction.add;
+}
+
 /* ------------------------------------------------------------ 融合索引 */
 
 /// 一部片在某个 jar 源里的位置。
@@ -335,24 +355,21 @@ class JarMergeIndex {
   }
 
   /// 这部片在 jar 源里的全部命中（按源名顺序，稳定）。
-  List<FxJarHit> hitsFor({required String title, int year}) {
+  List<FxJarHit> hitsFor({required String title, required int year}) {
     final exact = _byTitle[keyOf(title, year)];
     if (exact != null && exact.isNotEmpty) return List<FxJarHit>.of(exact);
-    if (year > 0) {
-      // 年份对不上时退一步按片名找（jar 常把年份写成 0 / 空）。
-      final norm = fxNormTitle(title);
-      if (norm.isEmpty) return const <FxJarHit>[];
-      for (final entry in _byTitle.entries) {
-        if (entry.key.startsWith('$norm|')) {
-          return List<FxJarHit>.of(entry.value);
-        }
-      }
+    // 年份对不上时退一步按片名找：jar 常把年份写成 0 / 空，
+    // 我们库里是 2016，硬比年份会把能合的片漏掉。
+    final norm = fxNormTitle(title);
+    if (norm.isEmpty) return const <FxJarHit>[];
+    for (final entry in _byTitle.entries) {
+      if (entry.key.startsWith('$norm|')) return List<FxJarHit>.of(entry.value);
     }
     return const <FxJarHit>[];
   }
 
   /// 这部片是不是已经在某个 jar 源里出现过（搜索期「合并 vs 新增」判定）。
-  bool hasAny({required String title, int year}) =>
+  bool hasAny({required String title, required int year}) =>
       hitsFor(title: title, year: year).isNotEmpty;
 
   /// 调试 / 测试：当前记了多少条记录。

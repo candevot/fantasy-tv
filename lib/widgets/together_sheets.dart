@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../models.dart';
 import '../theme.dart';
+import 'fx_line_group_selector.dart';
 import 'together_client.dart';
 import 'together_ui.dart';
 
@@ -563,25 +564,21 @@ Future<String?> showTogetherLineSheet(
             ),
             const SizedBox(height: 4),
             const Text(
-              '换线路后所有人一起切换；仅房主可选择',
+              '先选片源，再选子线路；换线路后所有人一起切换',
               style: TextStyle(fontSize: 10.5, color: Fx.sub),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 4),
+            // LINE_GROUPS（2026-11-21）：和详情页同一个两行组件 ——
+            // 第一行大类（幻想 / 咕噜 / 剧圈 / 橘汁 / 下饭），第二行子线路。
             Flexible(
               child: SingleChildScrollView(
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final line in lines)
-                      _ChoiceChip(
-                        label: line.displayName.trim().isEmpty
-                            ? line.id
-                            : line.displayName,
-                        active: current == line.id,
-                        onTap: () => Navigator.of(ctx).pop(line.id),
-                      ),
-                  ],
+                child: FxLineGroupSelector(
+                  lines: lines,
+                  currentLineId: current,
+                  padding: EdgeInsets.zero,
+                  showHint: false,
+                  selectFirstOnGroupChange: false,
+                  onSelected: (line) => Navigator.of(ctx).pop(line.id),
                 ),
               ),
             ),
@@ -826,6 +823,18 @@ class _ChoiceChip extends StatelessWidget {
   }
 }
 
+/// 房间线路的「当前」到底是名字还是 id（老报文两种都有）。
+String _currentIdOf(List<TogetherLine> lines, String current) {
+  final want = current.trim();
+  for (final line in lines) {
+    if (line.id == want) return line.id;
+  }
+  for (final line in lines) {
+    if (line.name == want) return line.id;
+  }
+  return '';
+}
+
 /// 房间线路列表（建房时那个源的线路）：任何人点一条都能换，全员同步。
 ///
 /// 返回选中的线路名；null 表示取消。[locals] 是本地已有的线路名 / id：
@@ -874,88 +883,22 @@ Future<String?> showTogetherRoomLineSheet(
               ),
             ),
             const SizedBox(height: 10),
+            // LINE_GROUPS（2026-11-21）：这里也是同一套两行结构。
+            // 房间线路只有名字 + id，转成 LineInfo 交给组件分组；
+            // 大类 key 仍从 `咕噜·4K` 这种名字前缀里认，成员看到的分组一致。
             Flexible(
-              child: ListView.separated(
-                shrinkWrap: true,
-                itemCount: lines.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 7),
-                itemBuilder: (ctx, i) {
-                  final line = lines[i];
-                  final active = line.name == current || line.id == current;
-                  final local =
-                      locals.contains(line.name) || locals.contains(line.id);
-                  return InkWell(
-                    onTap: () => Navigator.of(ctx).pop(line.name),
-                    borderRadius: BorderRadius.circular(14),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 11,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(
-                          color: active
-                              ? Fx.accent.withValues(alpha: .45)
-                              : const Color(0xFFEDF1F8),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              line.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 12.5,
-                                fontWeight: active
-                                    ? FontWeight.w800
-                                    : FontWeight.w600,
-                                color: Fx.ink,
-                              ),
-                            ),
-                          ),
-                          if (line.qualityLabel.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 6),
-                              child: Text(
-                                line.qualityLabel,
-                                style: TextStyle(
-                                  fontSize: 9.5,
-                                  fontWeight: FontWeight.w600,
-                                  color: Fx.accent,
-                                ),
-                              ),
-                            ),
-                          if (line.episodes > 0)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 6),
-                              child: Text(
-                                '${line.episodes} 集',
-                                style: TextStyle(fontSize: 9.5, color: Fx.sub),
-                              ),
-                            ),
-                          if (!local)
-                            Text(
-                              '本机没有',
-                              style: TextStyle(
-                                fontSize: 9.5,
-                                color: Fx.sub.withValues(alpha: .8),
-                              ),
-                            ),
-                          if (active)
-                            const Icon(
-                              Icons.check_circle_rounded,
-                              size: 15,
-                              color: Fx.accent,
-                            ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
+              child: SingleChildScrollView(
+                child: FxLineGroupSelector(
+                  lines: <LineInfo>[
+                    for (final line in lines)
+                      LineInfo(line.id, line.name, 'hls', 0),
+                  ],
+                  currentLineId: _currentIdOf(lines, current),
+                  padding: EdgeInsets.zero,
+                  showHint: false,
+                  selectFirstOnGroupChange: false,
+                  onSelected: (line) => Navigator.of(ctx).pop(line.name),
+                ),
               ),
             ),
           ],

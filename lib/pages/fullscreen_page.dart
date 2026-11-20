@@ -14,6 +14,7 @@ import '../services/device_status.dart';
 import '../services/fx_player.dart';
 import '../services/iq_codec_gate.dart';
 import '../services/iqiyi_codec.dart';
+import '../services/live_edge.dart';
 import '../services/play_log.dart';
 import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
@@ -516,6 +517,60 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     // 诊断浮层开关：上次开着就继续开着，用户不用每次重进再长按。
     unawaited(_restoreDiagnostics());
     _startHideTimer();
+    // 直播：竖屏把画面层摘掉、这里新挂一块，原生要等新 SurfaceTexture
+    // 可用才出画。做一次自检，接不上就落回直播边缘（点播不走这条路）。
+    if (_isLive) unawaited(_checkLiveSurfaceAfterEnter(c));
+  }
+
+  /// 进全屏后的一次画面自检（仅直播）。
+  ///
+  /// FULLSCREEN_SWITCH（2026-11-21）：不是定时追平 —— 位置在走就直接返回，
+  /// 一次都不 seek。只有位置完全不动（输出面没交接过来）才补一次 `play()`
+  /// 并落回直播边缘，用户不会停在黑屏 / 转圈上。
+  Future<void> _checkLiveSurfaceAfterEnter(FxPlayer player) async {
+    final before = player.value.position;
+    await Future<void>.delayed(fxLiveSurfaceCheckDelay);
+    if (!mounted || _exiting || !identical(_controller, player)) return;
+    final v = player.value;
+    if (v.hasError || !v.isInitialized) return;
+    if (!fxLivePictureDead(
+      before: before,
+      after: v.position,
+      isBuffering: v.isBuffering,
+    )) {
+      return;
+    }
+    fxPlayLog(
+      fxLiveSwitchLog(
+        phase: 'recover',
+        fullscreen: true,
+        surfaceMounted: true,
+        playing: v.isPlaying,
+        position: v.position,
+        duration: v.duration,
+        reason: 'enter',
+      ),
+    );
+    try {
+      await player.play();
+    } catch (_) {}
+    if (!mounted || _exiting) return;
+    final landed =
+        await player.seekToLiveEdge(rewind: fxLiveRefreshRewind, reason: 'enter');
+    if (!mounted || _exiting) return;
+    fxPlayLog(
+      fxLiveProbeLog(
+        event: 'land',
+        position: player.value.position,
+        duration: player.value.duration,
+        target: fxLiveEdgeTarget(
+          player.value.duration,
+          rewind: fxLiveRefreshRewind,
+        ),
+        reason: landed ? 'enter' : 'enter-skip',
+      ),
+    );
+    setState(() {});
   }
 
   @override

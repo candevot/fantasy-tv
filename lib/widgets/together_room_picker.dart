@@ -8,6 +8,7 @@ import '../services/cms_bridge.dart';
 import '../services/fallback_match.dart';
 import '../services/source_hub.dart';
 import '../theme.dart';
+import 'fx_line_group_selector.dart';
 import 'together_client.dart';
 import 'together_ui.dart';
 
@@ -354,8 +355,25 @@ class _TogetherRoomPickerState extends State<_TogetherRoomPicker> {
       final episodes = detail.allEpisodes.isNotEmpty
           ? detail.allEpisodes.length
           : (detail.episodes > 0 ? detail.episodes : version.card.episodes);
+      // FUSION（2026-11-21）：建房也要能看到 jar 源的同名子线路（`咕噜·4K`），
+      // 否则「创建时选咕噜大类」这一步根本不存在。只在搜索时命中过才有，
+      // 而且拿不到就当没有，不影响建房。
+      var lines = detail.lines;
+      try {
+        final extra = await CmsBridge.jarLinesFor(detail);
+        if (extra.isNotEmpty) {
+          final have = <String>{for (final l in lines) l.name};
+          lines = <LineInfo>[
+            ...lines,
+            for (final l in extra)
+              if (!have.contains(l.name)) l,
+          ];
+        }
+      } catch (_) {
+        // jar 源失败不影响建房。
+      }
       version.lines = <TogetherLine>[
-        for (final line in detail.lines) togetherLineOfInfo(line, episodes: episodes),
+        for (final line in lines) togetherLineOfInfo(line, episodes: episodes),
       ];
       version.episodes = episodes;
       version.loaded = true;
@@ -685,18 +703,33 @@ class _TogetherRoomPickerState extends State<_TogetherRoomPicker> {
           style: TextStyle(fontSize: 10.5, color: Fx.sub.withValues(alpha: .92)),
         ),
         const SizedBox(height: 8),
+        // LINE_GROUPS（2026-11-21）：建房「选线路」一步和详情页 / 房间面板
+        // 用同一个两行组件：第一行大类（幻想 / 咕噜 / 剧圈 / 橘汁 / 下饭），
+        // 第二行该大类的子线路。选定后房间以「大类 + 子线路」作为初始线路。
         Flexible(
-          child: ListView.separated(
-            shrinkWrap: true,
-            itemCount: version.lines.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
-            itemBuilder: (ctx, i) {
-              final line = version.lines[i];
-              return _LineTile(
-                line: line,
-                onTap: () => _finish(version, line),
-              );
-            },
+          child: SingleChildScrollView(
+            child: FxLineGroupSelector(
+              lines: <LineInfo>[
+                for (final line in version.lines)
+                  LineInfo(line.id, line.name, 'hls', 0),
+              ],
+              currentLineId: '',
+              padding: EdgeInsets.zero,
+              showHint: false,
+              selectFirstOnGroupChange: false,
+              onSelected: (picked) {
+                // 组件给的是 LineInfo，这里换回建房用的 TogetherLine
+                // （房间线路按名字广播，名字里带了大类前缀）。
+                final line = version.lines.firstWhere(
+                  (l) => l.id == picked.id,
+                  orElse: () => version.lines.firstWhere(
+                    (l) => l.name == picked.name,
+                    orElse: () => version.lines.first,
+                  ),
+                );
+                _finish(version, line);
+              },
+            ),
           ),
         ),
       ],
@@ -917,53 +950,6 @@ class _VersionTile extends StatelessWidget {
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right_rounded, size: 18, color: Fx.sub),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _LineTile extends StatelessWidget {
-  const _LineTile({required this.line, required this.onTap});
-
-  final TogetherLine line;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: const Color(0xFFEDF1F8)),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                line.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                  color: Fx.ink,
-                ),
-              ),
-            ),
-            if (line.qualityLabel.isNotEmpty) _tag(line.qualityLabel, accent: true),
-            const SizedBox(width: 6),
-            Text(
-              line.episodes > 0 ? '${line.episodes} 集' : '',
-              style: TextStyle(fontSize: 10.5, color: Fx.sub.withValues(alpha: .9)),
-            ),
-            const SizedBox(width: 4),
             const Icon(Icons.chevron_right_rounded, size: 18, color: Fx.sub),
           ],
         ),

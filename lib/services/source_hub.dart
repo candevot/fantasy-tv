@@ -1115,6 +1115,8 @@ class SourceHub extends ChangeNotifier {
       await sp.remove('fx_sources_pinned_v1');
       await sp.remove('fx_sources_bundled_hidden_v1');
     } catch (_) {}
+    // 内置 jar 目录不跟着清：它不是「用户配置」，是白名单里那几个源的定义。
+    _injectJarCatalog();
     _protocol = const TvBoxConfig();
     ParseRegistry.install(ParseRegistry.empty);
     FxSniffer.install(FxSniffer.none);

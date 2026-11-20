@@ -247,6 +247,44 @@ jobs:
           # ⑤ 底栏：直播不渲染暂停钮（live == false 时暂停 / 下一集照旧）。
           grep -qF 'if (!live) ...[' lib/widgets/fs_panels.dart
           flutter test test/live_edge_test.dart test/live_mode_test.dart
+      # FULLSCREEN_SWITCH（2026-11-21）：直播竖屏 ↔ 全屏来回切卡死。
+      #
+      # 用户实测：「点全屏 → 卡住；从全屏退回竖屏 → 卡住；黑屏 / 转圈 /
+      # 画面不动，要退出重进才恢复」。
+      # 根因：原生 ExoPlayerPlugin 只维护一块 videoView，竖屏和全屏各挂一块
+      # ExoView 时，输出面被抢走 → 退全屏时全屏那块 dispose 又把输出清掉，
+      # 竖屏那块不重建就永远没有输出面。
+      # 口径：
+      #   ① 全屏期间竖屏必须摘掉自己的画面层（和点播 player_page 同一做法）；
+      #   ② 切全屏不许新建播放器 / 不重新 prepare（复用同一个实例，不重缓冲）；
+      #   ③ 万一新宿主没接上画面，4 秒自检一次 → 补 play + 落回直播边缘，
+      #      不许停在黑屏 / 转圈（只此一条，不是定时追平）；
+      #   ④ 点播全屏路径不动。
+      - name: Live fullscreen switch regressions
+        run: |
+          set -e
+          # ① 竖屏页用共享口径决定挂不挂画面层。
+          grep -q 'fxLiveSurfaceVisible(' lib/pages/live_detail_page.dart
+          grep -q 'fullscreenActive: _fullscreenActive' lib/pages/live_detail_page.dart
+          grep -q 'bool _fullscreenActive = false;' lib/pages/live_detail_page.dart
+          # ② 切全屏路径不许重建播放器 / 重新拉流。
+          if sed -n '/Future<void> _openFullscreen() async {/,/^  }$/p' \
+               lib/pages/live_detail_page.dart \
+               | grep -nE 'FxPlayer\.create|_openAndLand\(|[^_]prepare\('; then
+            echo '直播切全屏不许重建播放器 / 重新 prepare（会重新缓冲 = 黑屏）' >&2
+            exit 1
+          fi
+          # ③ 接不上自检 + 落回直播边缘 + 播放，且只允许一次。
+          grep -q 'fxLivePictureDead(' lib/pages/live_detail_page.dart
+          grep -q 'fxLivePictureDead(' lib/pages/fullscreen_page.dart
+          grep -q "_checkSurfaceAfterSwitch(player, phase: 'exit')" lib/pages/live_detail_page.dart
+          grep -q 'if (_isLive) unawaited(_checkLiveSurfaceAfterEnter(c));' \
+            lib/pages/fullscreen_page.dart
+          grep -q 'fxLiveSurfaceCheckDelay = Duration(seconds: 4)' lib/services/live_edge.dart
+          # ④ 点播全屏口径原样保留。
+          grep -q '!_fullscreenActive' lib/pages/player_page.dart
+          flutter test test/live_edge_test.dart test/live_mode_test.dart \
+            test/live_fullscreen_switch_test.dart
       # NET_SPEED（2026-11-15）：实时网速。
       #
       # 用户实测「缓冲时转圈下面一直 0 KB/s，从来没变过」：计数器的字节数
@@ -456,6 +494,43 @@ jobs:
             exit 1
           fi
           flutter test test/detail_source_fix_test.dart
+      # JAR_RESTORE（2026-11-21）：jar 源接入层恢复后的回归。
+      #
+      # 这一层只管**搜索 + 播放解析**：首页 / 分类 / 排行榜仍然只用自有片源。
+      #   · 白名单（kEnabledJarSources）里的四个源必须还在、类名必须对得上；
+      #   · 融合口径：我们有的片合并线路（`咕噜·4K`），没有的片新增卡片；
+      #   · 两行线路：大类固定五个（幻想 + 四个 jar 源），子线路不带前缀，
+      #     自有线路恒排 jar 线路前面；
+      #   · 播放实时解析：走 playerContent，不读库里存的地址；
+      #   · 反面门禁：不许恢复 TVBox 配置导入 / 启动自动安装。
+      - name: jar 源（融合 / 两行线路）regressions
+        run: |
+          set -e
+          grep -q "const List<String> kEnabledJarSources" lib/services/jar_sources.dart
+          grep -q "'咕噜', '橘汁', '剧圈', '下饭'" lib/services/jar_sources.dart
+          grep -q 'csp_Gulu' lib/services/jar_sources.dart
+          grep -q 'csp_AppDrama' lib/services/jar_sources.dart
+          grep -q 'csp_App99' lib/services/jar_sources.dart
+          grep -q 'csp_JuXiaFan' lib/services/jar_sources.dart
+          # 通道契约不许改（方法名 / 参数名保持原样）
+          grep -q "MethodChannel('fantasy_tv/spider')" lib/services/jar_spider.dart
+          # 反面门禁：TVBox 配置导入 / 自动安装不回来
+          if grep -q 'importTvBox' lib/ -r; then
+            echo '不许恢复 TVBox 配置导入' >&2
+            exit 1
+          fi
+          if grep -q 'jarAutoInstall = true' lib/services/app_settings.dart; then
+            echo '不许恢复「启动自动安装 spider.jar」' >&2
+            exit 1
+          fi
+          flutter test test/jar_fusion_test.dart
+          flutter test test/jar_source_toggle_test.dart
+          flutter test test/jar_plugin_test.dart
+          flutter test test/tvbox_crypto_test.dart
+          flutter test test/search_group_test.dart test/search_group_pinned_test.dart
+          # 服务器上的 spider.jar 必须还在、md5 必须和默认值一致。
+          # 非阻塞：服务器偶发抖动不该让整个构建红掉，但日志里要能看见。
+          python3 tools/check_spider_url.py || true
       # PROTOCOL_FACE（2026-11-15 · 移植阶段 1）：TVBox 配置协议面。
       #
       # 这一段钉住「壳的配置字段被丢弃」导致的整类问题 —— 它们不会报错，
@@ -692,6 +767,25 @@ jobs:
           # 主播放不能被牵连。
           grep -q 'onCast: () => unawaited(_openCastSheet())' lib/pages/fullscreen_page.dart
           flutter test test/together_fullscreen_topbar_test.dart
+      # TOGETHER_VOD_REGRESSION（2026-11-21）：修「直播竖屏 ↔ 全屏卡死」时
+      # 顺带把**点播一起看**的页面接线整条过一遍 —— 生产改动只在直播切换
+      # 路径上，这一组门禁负责证明点播那半边没被碰坏：
+      #   ① 建房 / 加入：createRoom / joinRoom 之后必须 connect；
+      #   ② 暂停 / 继续 / 拖动 / 切集：上报 op=pause|play|seek|episode，
+      #      成员按 mediaChanged 重载 + _followPlayIntent / _staggerHardSeek；
+      #   ③ 切线路：按线路名广播（sendSwitchLine），成员映射本地同名线路；
+      #   ④ 退出：leave + 释放播放器 + 清房号（迟到的重连不会把人塞回房间）；
+      #   ⑤ 全屏：主画面 + 人数 + 可发言聊天三件都在，且只有一块画面层；
+      #   ⑥ 直播房：只同频道 / 刷新，不同步播放态。
+      - name: together vod regression (create / sync / line / exit / fullscreen)
+        run: |
+          set -e
+          grep -q 'mediaChanged: changedVideo || changedEp || changedLine' lib/pages/together_page.dart
+          grep -q "_client.sendSwitchLine(name, position: position, playing: playing, ep: _ep);" \
+            lib/pages/together_page.dart
+          grep -q 'if (!fromPeer) _client.sendLiveRefresh();' lib/pages/together_page.dart
+          grep -q "code = '';" lib/widgets/together_client.dart
+          flutter test test/together_vod_regression_test.dart
       - name: Build release APKs (split per ABI)
         run: |
           echo "versionName=1.0.${{ github.run_number }} versionCode=${{ github.run_number }}"

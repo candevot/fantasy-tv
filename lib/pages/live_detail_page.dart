@@ -75,6 +75,16 @@ class _LiveDetailPageState extends State<LiveDetailPage>
 
   /// 刷新进行中：连点刷新只认第一次（第二次会再 open 一路流，双声）。
   bool _refreshingLive = false;
+
+  /// 全屏路由是否在顶层（FULLSCREEN_SWITCH 2026-11-21）。
+  ///
+  /// 直播竖屏和全屏共用**同一个** FxPlayer，而原生只维护一块 videoView
+  /// （`ExoPlayerPlugin.createView()`）。两块画面层同时挂在树上时，进全屏
+  /// 输出被抢走、退全屏全屏那块 dispose 又把整条视频输出清掉 —— 用户看到
+  /// 的就是「切一次黑一次，要退出重进」。所以全屏期间本页必须摘掉自己的
+  /// 画面层，和点播页（player_page.dart 的 `_fullscreenActive`）同一口径。
+  bool _fullscreenActive = false;
+
   Timer? _hideTimer;
 
   /// 救援链（open 的 rescueLines）已静默试过的线路 id：同一次播放里每条
@@ -521,27 +531,124 @@ class _LiveDetailPageState extends State<LiveDetailPage>
 
   Future<void> _openFullscreen() async {
     final player = _player;
-    if (player == null || _loading || _error != null) return;
+    if (player == null || _loading || _error != null || _fullscreenActive) return;
     _hideTimer?.cancel();
     final line = _line;
     // 先转横屏再推页面，淡入时方向已经就位。
     unawaited(ScreenOrientation.landscape());
-    await Navigator.of(context).push<FullPlayerResult>(
-      // 直播进全屏与点播一致：200ms 淡入。
-      FxFullscreenRoute<FullPlayerResult>(
-        builder: (_) => FullPlayerPage(
-          player: player,
-          title: _channel.title,
-          line: _lineId,
-          lineName: line?.qualityLabel ?? '',
-          isLive: true,
-          castSource: _castSourceForCurrentLine(),
-          castOwner: this,
+    // 交接画面层：全屏页接管期间本页不再挂 ExoView（原生只有一块 videoView，
+    // 两块同时在树上 = 进/退全屏必黑屏，见 live_edge.dart 的 FULLSCREEN_SWITCH）。
+    setState(() => _fullscreenActive = true);
+    _logLiveSwitch(
+      phase: 'enter',
+      player: player,
+      surfaceMounted: false,
+      reason: 'fullscreen',
+    );
+    try {
+      await Navigator.of(context).push<FullPlayerResult>(
+        // 直播进全屏与点播一致：200ms 淡入。
+        FxFullscreenRoute<FullPlayerResult>(
+          builder: (_) => FullPlayerPage(
+            player: player,
+            title: _channel.title,
+            line: _lineId,
+            lineName: line?.qualityLabel ?? '',
+            isLive: true,
+            castSource: _castSourceForCurrentLine(),
+            castOwner: this,
+          ),
         ),
+      );
+    } finally {
+      // 全屏页已经 pop：把画面层交回本页。播放器实例从头到尾是同一个，
+      // 不重新 open、不重新 prepare，直播流不中断。
+      if (mounted) {
+        setState(() => _fullscreenActive = false);
+      }
+    }
+    if (!mounted) return;
+    _logLiveSwitch(
+      phase: 'exit',
+      player: player,
+      surfaceMounted: true,
+      reason: 'fullscreen',
+    );
+    // 全屏期间播放器仍归本页所有：错误态在这里补上错误层（全屏块已经走掉，
+    // 没人再画它）；没出错就把 loading 清干净，避免回来还压着转圈。
+    final value = player.value;
+    if (value.hasError) {
+      if (_error == null) {
+        setState(() {
+          _loading = false;
+          _error = '播放中断，请重试';
+        });
+      }
+    } else if (_loading) {
+      setState(() => _loading = !value.isInitialized);
+    }
+    _touch();
+    // 画面层刚换了宿主：原生要等新 TextureView 的 SurfaceTexture 可用才出画。
+    // 只做一次自检，接不上才落回直播边缘（播放中落后就让它落后）。
+    unawaited(_checkSurfaceAfterSwitch(player, phase: 'exit'));
+  }
+
+  /// 切页后在 [fxLiveSurfaceCheckDelay] 处检查一次「画面接上了没有」。
+  ///
+  /// 这不是定时追平：位置在走就直接返回，一次都不 seek。只有位置完全不动
+  /// （原生输出面没交接回来）才补一次 `play()` 并落回直播边缘，避免用户
+  /// 停在黑屏 / 转圈上等。
+  Future<void> _checkSurfaceAfterSwitch(
+    FxPlayer player, {
+    required String phase,
+  }) async {
+    final before = player.value.position;
+    await Future<void>.delayed(fxLiveSurfaceCheckDelay);
+    if (!mounted || !identical(_player, player) || _releasedForTogether) return;
+    // 这 4 秒里又进全屏了：画面层已经交给全屏页，它有自己的同款自检，
+    // 这里再 seek 一次等于在别人的画面上重新缓冲。
+    if (_fullscreenActive) return;
+    final value = player.value;
+    if (value.hasError || !value.isInitialized) return;
+    if (!fxLivePictureDead(
+      before: before,
+      after: value.position,
+      isBuffering: value.isBuffering,
+    )) {
+      return;
+    }
+    _logLiveSwitch(
+      phase: 'recover',
+      player: player,
+      surfaceMounted: true,
+      reason: phase,
+    );
+    try {
+      await player.play();
+    } catch (_) {}
+    if (!mounted || !identical(_player, player)) return;
+    await _landOnLiveEdge(player, reason: 'recover-$phase');
+  }
+
+  /// 交接探针（`[FxLive] switch ...`）：谁挂着画面层 / 在不在播 / 离末端多远。
+  void _logLiveSwitch({
+    required String phase,
+    required FxPlayer player,
+    required bool surfaceMounted,
+    required String reason,
+  }) {
+    final v = player.value;
+    fxPlayLog(
+      fxLiveSwitchLog(
+        phase: phase,
+        fullscreen: _fullscreenActive,
+        surfaceMounted: surfaceMounted,
+        playing: v.isPlaying,
+        position: v.position,
+        duration: v.duration,
+        reason: reason,
       ),
     );
-    if (!mounted) return;
-    _touch();
   }
 
   Future<void> _toggleFav() async {
@@ -799,6 +906,13 @@ class _LiveDetailPageState extends State<LiveDetailPage>
   Widget _buildPlayer() {
     final player = _player;
     final ready = player != null && player.value.isInitialized;
+    // 全屏期间不挂自己的画面层：原生只有一块 videoView，两块同时在树上时
+    // 进/退全屏都会把视频输出弄丢（FULLSCREEN_SWITCH，见 live_edge.dart）。
+    final showSurface = fxLiveSurfaceVisible(
+      hasPlayer: player != null,
+      ready: ready,
+      fullscreenActive: _fullscreenActive,
+    );
     return Column(
       children: [
         AspectRatio(
@@ -810,7 +924,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (player != null && ready)
+                  if (showSurface && player != null)
                     FxPlayerSurface(
                       key: ObjectKey(player),
                       player: player,

@@ -82,3 +82,80 @@ String fxLiveProbeLog({
   if (reason.isNotEmpty) buffer.write(' reason=$reason');
   return buffer.toString();
 }
+
+// ---------------------------------------------------------------------------
+// FULLSCREEN_SWITCH（2026-11-21）：竖屏 ↔ 全屏的画面层交接
+// ---------------------------------------------------------------------------
+//
+// 现场：直播页点全屏 → 黑屏 / 转圈；全屏退回竖屏 → 画面不动，必须退出重进
+// 才恢复。根因不在「重新 prepare」，而在**画面层被挂了两块**：
+//
+//   · 原生 `ExoPlayerPlugin.createView()` 只维护一块 `videoView`，每建一块
+//     ExoView 就 `player.setVideoTextureView(新的那块)`；
+//   · `ExoView.dispose()` → `detachView(tv)`，只有 `videoView === tv` 时才
+//     `clearVideoSurface()`，并把 `videoView` 置空。
+//
+// 所以竖屏页把自己的画面层留在树上、全屏页又挂一块时：进全屏 = 输出被抢到
+// 新的一块；退全屏 = 全屏那块 dispose 时把整条视频输出清掉，而竖屏那块
+// 从头到尾没重建过，不会再去 `setVideoTextureView` —— 播放器从此没有输出面，
+// 声音还在走、位置还在动，画面就是黑的。
+//
+// 规则只有一条，和点播页（player_page.dart 的 `_fullscreenActive`）完全一致：
+// **任何时刻只允许一块画面层在树上**。点播全屏行为不动，这里只管直播。
+
+/// 直播页要不要挂自己的画面层。
+///
+/// [fullscreenActive] 为 true（全屏路由在顶层）时必须返回 false：
+/// 画面交给全屏页那一块，竖屏这块先摘掉，原生才会把输出面干净地交接过去。
+bool fxLiveSurfaceVisible({
+  required bool hasPlayer,
+  required bool ready,
+  required bool fullscreenActive,
+}) =>
+    hasPlayer && ready && !fullscreenActive;
+
+/// 切页后多久做一次画面健康检查。
+///
+/// 只查**一次**：这是「交接有没有接上」的自检，不是定时追平。位置在走就
+/// 什么都不做 —— 直播播着落后就让它落后（用户口径，见文件头）。
+const Duration fxLiveSurfaceCheckDelay = Duration(seconds: 4);
+
+/// 画面是否已经断了：位置在 [tolerance] 内没有推进，且内核没在缓冲。
+///
+/// 缓冲中不判死：HLS live 换分片时位置本来就会停一下，这时候 seek 反而
+/// 把用户从「马上就要出画」打到「重新缓冲」。
+bool fxLivePictureDead({
+  required Duration before,
+  required Duration after,
+  required bool isBuffering,
+  Duration tolerance = const Duration(milliseconds: 400),
+}) {
+  if (isBuffering) return false;
+  return after - before <= tolerance;
+}
+
+/// 交接探针：`[FxLive] switch phase=enter fs=on surface=off playing=true ...`
+///
+/// phase：enter（进全屏）/ exit（退全屏）/ recover（接不上，落回直播边缘）。
+/// 真机上 `adb logcat | grep FxLive` 一行就能看清「谁挂着画面层、在不在播、
+/// 离直播末端多远」，作为「切换后仍在直播边缘并播放」的验收证据。
+String fxLiveSwitchLog({
+  required String phase,
+  required bool fullscreen,
+  required bool surfaceMounted,
+  required bool playing,
+  required Duration position,
+  required Duration duration,
+  String reason = '',
+}) {
+  String s(Duration d) => '${(d.inMilliseconds / 1000).toStringAsFixed(1)}s';
+  final buffer = StringBuffer('[FxLive] switch phase=$phase')
+    ..write(' fs=${fullscreen ? 'on' : 'off'}')
+    ..write(' surface=${surfaceMounted ? 'on' : 'off'}')
+    ..write(' playing=${playing ? 'yes' : 'no'}')
+    ..write(' pos=${s(position)}')
+    ..write(' end=${s(duration)}')
+    ..write(' lag=${s(fxLiveLag(position: position, duration: duration))}');
+  if (reason.isNotEmpty) buffer.write(' reason=$reason');
+  return buffer.toString();
+}

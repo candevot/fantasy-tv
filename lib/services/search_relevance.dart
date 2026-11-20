@@ -33,7 +33,7 @@ library;
 
 import '../models.dart';
 import 'fallback_match.dart' show fxIsExtraClip, fxNormTitle;
-import 'source_log.dart';
+import 'jar_log.dart';
 
 /// 判定为「相关」的最低分（保留给需要打分排序的调用方，闸门本身不用它
 /// 做硬阈值 —— 见 [fxSearchRelevant]）。
@@ -168,16 +168,22 @@ FxSearchGate fxSearchGate(List<VideoCard> cards, String query) {
 ///
 /// 格式固定，真机 `grep 'gate source='` 就能看出**哪个源**在灌无关数据：
 /// `[JarSearch] gate source=哔哩合集 dropped=2 kept=3 clips=0 reason=unrelated`
-void fxSourceGateLog(String source, FxSearchGate gate) {
+void fxJarGateLog(String source, FxSearchGate gate) {
   final who = source.trim().isEmpty ? '?' : source.trim();
   final reason = gate.dropped > 0
       ? 'unrelated'
       : (gate.kept.isEmpty ? 'empty' : 'ok');
-  fxSourceLog(
+  fxJarLog(
     'gate source=$who dropped=${gate.dropped} kept=${gate.kept.length} '
     'clips=${gate.extraClips} reason=$reason',
   );
 }
+
+/// 旧名字（SOURCE_GATE_LOG）：外部源接入层拆掉那阵子改名成 `fxSourceGateLog`，
+/// JAR_RESTORE 之后外部源 = jar 源，日志又回到 `[JarSearch]` 前缀，
+/// 这里保留别名，老调用方 / 老测试不用改。
+void fxSourceGateLog(String source, FxSearchGate gate) =>
+    fxJarGateLog(source, gate);
 
 /// 过滤一批卡片：只留和 [query] 相关的（保留给老调用方）。
 ///

@@ -181,6 +181,27 @@ class AppSettings extends ChangeNotifier {
   /// 是否允许纯后台自动安装（默认关，见 [_kJarAutoInstall]）。
   bool get jarAutoInstall => _jarAutoInstall;
 
+  /// 改 jar 下载地址（空串 = 不下载，只用内置 / 手动安装的 jar）。
+  Future<void> setJarUrl(String value) async {
+    final next = value.trim();
+    if (_jarUrl == next) return;
+    _jarUrl = next;
+    notifyListeners();
+    await _saveString(_kJarUrl, next);
+  }
+
+  /// 改 jar 期望 md5（空串 = 不校验）。
+  Future<void> setJarMd5(String value) async {
+    final next = value.trim().toLowerCase();
+    if (_jarMd5 == next) return;
+    _jarMd5 = next;
+    notifyListeners();
+    await _saveString(_kJarMd5, next);
+  }
+
+  /// 恢复默认 jar 地址（设置页的「恢复默认」用）。
+  Future<void> resetJarUrl() => setJarUrl(defaultJarUrl);
+
   DownloadLocation get downloadLocation => _downloadLocation;
   int get downloadConcurrency => _downloadConcurrency;
 

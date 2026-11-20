@@ -600,6 +600,8 @@ class CmsBridge {
       );
     }
     final hub = SourceHub.instance;
+    // 新的一轮搜索：上一轮的融合索引作废（它只描述「刚才这一轮命中了什么」）。
+    JarMergeIndex.instance.clear();
     final dedupe = _Dedupe(byId: keepDuplicates);
     final ctrl = StreamController<SearchBatch>();
     var done = 0;
@@ -676,6 +678,9 @@ class CmsBridge {
       );
     }
 
+    /// 自有结果里已经出现的「片名 + 年份」：jar 波次据此判断是「合并」还是「新增」。
+    final ownKeys = <String>{};
+
     void emit(
       List<VideoCard> cards, {
       required bool external,
@@ -705,6 +710,14 @@ class CmsBridge {
         kept.add(card);
       }
       emitted += kept.length;
+      if (!external) {
+        // FUSION（2026-11-21）：自有结果按「片名 + 年份」建档，
+        // jar 波次回来时先在这里对齐 —— 命中的合并线路，不新增卡片。
+        for (final card in kept) {
+          final key = JarMergeIndex.keyOf(card.title, card.year);
+          if (key.isNotEmpty) ownKeys.add(key);
+        }
+      }
       // SEARCH_RANK：每一批都按「分辨率优先」排好再交给页面 —— 先到的一批
       // 也已经是正确顺序，不会出现「低画质先占位、高画质后到被压在下面」。
       final ranked = SearchRank.sort(kept);
@@ -722,6 +735,71 @@ class CmsBridge {
         ),
       );
     }
+
+    /// jar 源的一批结果：**命中的合并线路，没命中的新增卡片**
+    /// （FUSION 2026-11-21）。
+    ///
+    /// 两条口径：
+    ///   · 我们库里已经有这部片（片名 + 年份对得上）→ 不新增卡片，
+    ///     只把「这个源也有这部片」记进 [JarMergeIndex]，详情页据此把它的
+    ///     子线路并进我们那条记录（一条片子、底下多几条线路）；
+    ///   · 我们库里没有 → 作为新条目上屏（id 编成 `@src:<源key>::<vod>`，
+    ///     详情 / 播放都走 jar 通道）。
+    void emitJar(_JarWave wave) {
+      if (closed) return;
+      final label = SourceHub.jarLabelOf(wave.source);
+      if (label.isEmpty || wave.cards.isEmpty) return;
+      final gate = fxSearchGate(wave.cards, q);
+      if (gate.dropped > 0 || gate.kept.isNotEmpty) {
+        fxSourceGateLog(label, gate);
+      }
+      final fresh = <VideoCard>[];
+      var merged = 0;
+      for (final card in gate.kept) {
+        if (SourceHub.isLiveCard(card)) continue;
+        final action = fxJarAction(
+          title: card.title,
+          year: card.year,
+          ownKeys: ownKeys,
+        );
+        if (action == FxJarHitAction.merge) {
+          JarMergeIndex.instance.attach(
+            title: card.title,
+            year: card.year,
+            label: label,
+            vodId: card.id,
+          );
+          merged++;
+          continue;
+        }
+        // 新条目：同一轮里同名的只留一条（jar 源自己会重复返回）。
+        if (!dedupe.fresh(card, perSource: true)) continue;
+        fresh.add(
+          SourceHub.relabel(
+            card,
+            label: label,
+            id: wave.source.cardIdOf(card.id),
+            cover: Api.coverOf(card.cover, root: wave.source.api),
+          ),
+        );
+        // 记进索引：同一部片后面再搜到别的源时还能合并。
+        JarMergeIndex.instance.attach(
+          title: card.title,
+          year: card.year,
+          label: label,
+          vodId: card.id,
+        );
+      }
+      fxJarLog(
+        'key=$q source=$label 合并线路=$merged 新增卡片=${fresh.length}',
+      );
+      if (fresh.isEmpty) return;
+      emit(fresh, external: true, source: label);
+    }
+
+    /// jar 源的并发闸门：jar 是第三方 dex，20 路一起敲会互相拖慢
+    /// （原生侧 init 有池上限）。闸门只限制同时在跑的源数，不改变顺序。
+    final jarGate = _JarConcurrencyGate(JarSpider.maxConcurrentSearches);
 
     Future<void> run() async {
       // 索引准备（读本地缓存 + 片源表）单独兜超时：这一步不该把整轮搜索
@@ -744,8 +822,14 @@ class CmsBridge {
         for (final preset in _linePresets)
           if (!ownApis.contains(_lineApi(preset.$2))) preset,
       ];
+      // jar 源：只有装好插件、又真的启用了才发车（没装就白等十几秒）。
+      await hub.ensureJarStatus().timeout(
+        const Duration(seconds: 2),
+        onTimeout: () {},
+      );
+      final jarSources = hub.jarReady ? plan.external : const <KSource>[];
       // +1：第一页满页时还会追加「第二页」那一波。
-      total = 2 + lineQueries.length + plan.total;
+      total = 2 + lineQueries.length + plan.own.length + jarSources.length;
       final tasks = <Future<void>>[];
 
       // 1. 本地 CMS：第一批发车，回来就渲染。
@@ -798,7 +882,55 @@ class CmsBridge {
         }());
       }
 
+      // 3. jar 源（白名单里用户开着的那几个）：**并发发车、结果押后**。
+      //
+      // 发车要早（jar 的 searchContent 是现下载页面，0.5～6 秒），
+      // 但结果必须等自有那批全部到齐再合并 —— 只有拿全了「我们有什么」，
+      // 才知道一部片是该合并线路还是新增卡片（FUSION 2026-11-21）。
+      final jarFutures = <Future<_JarWave>>[
+        for (final source in jarSources)
+          () async {
+            await jarGate.acquire();
+            try {
+              final label = SourceHub.jarLabelOf(source);
+              final report = await JarSpider.searchWithFallback(
+                api: source.api,
+                ext: source.ext,
+                key: q,
+                page: page,
+                label: label,
+              ).timeout(SourceHub.sourceTimeout);
+              done++;
+              fxJarLog(
+                'source=$label key=$q 通道回 ${report.cards.length} 条'
+                ' quick=${report.usedFallback ? 'fallback' : 'first'}',
+              );
+              return _JarWave(source: source, cards: report.cards);
+            } catch (e) {
+              done++;
+              fxJarLog(
+                'source=${SourceHub.jarLabelOf(source)} key=$q 失败：'
+                '${fxJarClip('$e', max: 120)}',
+              );
+              return _JarWave(
+                source: source,
+                cards: const <VideoCard>[],
+              );
+            } finally {
+              jarGate.release();
+            }
+          }(),
+      ];
+
       await Future.wait(tasks);
+      if (closed) return;
+      if (jarFutures.isNotEmpty) {
+        final waves = await Future.wait(jarFutures);
+        if (closed) return;
+        for (final wave in waves) {
+          emitJar(wave);
+        }
+      }
       if (closed) return;
       // SEARCH_WAVES（2026-11-15）：最后再加一波「第二页」。
       //
@@ -1202,7 +1334,7 @@ class CmsBridge {
       if (source == null) {
         throw ApiException('${jarRef.label} 源已停用，换条线路试试');
       }
-      return _jarGuard(
+      final info = await _jarGuard(
         jarLabelOf: jarRef.label,
         run: () => JarSpider.play(
           api: source.api,
@@ -1211,6 +1343,21 @@ class CmsBridge {
           lineName: jarRef.from,
           ep: ep,
         ),
+      );
+      // 线路名统一成详情页上看到的那个（`咕噜·4K`）：播放页 / 投屏 / 日志
+      // 都按同一个名字显示，不会一处「4K」一处「咕噜·4K」。
+      final full = jarRef.label.isEmpty || info.lineName.startsWith('${jarRef.label}·')
+          ? info.lineName
+          : '${jarRef.label}·${info.lineName}';
+      return PlayInfo(
+        url: info.url,
+        type: info.type,
+        quality: info.quality,
+        backup: info.backup,
+        headers: info.headers,
+        parsePage: info.parsePage,
+        lineName: full,
+        direct: info.direct,
       );
     }
     final external = await _externalSource(vodId);
@@ -1306,6 +1453,183 @@ class CmsBridge {
       id.trim().startsWith(SourceHub.idMark) ||
       id.trim().startsWith(sliceMark) ||
       _originOf(id) == CmsOrigin.cms;
+
+  /* ------------------------------------------------------------ jar 源 */
+
+  /// jar 通道调用的兜底超时：比页面级少 2 秒（源级先超时，页面才不至于干等）。
+  static const Duration jarTimeout = Duration(seconds: 12);
+
+  /// jar 详情的上限：18 秒 —— 咕噜的 `detailContent` 要先握手、自身还有
+  /// 3 次重试 + 500/1000/2000ms 退避（光睡眠 3.5 秒），9～15 秒是常态。
+  static const Duration jarDetailTimeout = Duration(seconds: 18);
+
+  /// 这个 id 是不是 jar 源的卡片（`@src:<jar源key>::<vodId>`）。
+  static Future<KSource?> _jarSourceOf(String id) async {
+    if (!id.trim().startsWith(SourceHub.idMark)) return null;
+    final source = await _externalSource(id);
+    if (source == null || source.kind != KSourceKind.jar) return null;
+    return source;
+  }
+
+  /// 白名单源名（`咕噜`）→ 当前启用的 jar 源。
+  static Future<KSource?> _jarSourceByLabel(String label) async {
+    final want = fxJarLabelOf(label).isEmpty ? label.trim() : fxJarLabelOf(label);
+    if (want.isEmpty) return null;
+    await SourceHub.instance.ensureReady();
+    for (final source in SourceHub.instance.jarSources) {
+      if (SourceHub.jarLabelOf(source) == want) return source;
+    }
+    return null;
+  }
+
+  /// 是不是一条 jar 源线路（播放时现场解析那类）。
+  static bool isJarLine(String lineId) => fxParseJarLineId(lineId) != null;
+
+  /// jar 通道调用的统一护栏：插件没装 / 超时 / jar 内部异常都变成可读文案。
+  static Future<T> _jarGuard<T>({
+    required String jarLabelOf,
+    required Future<T> Function() run,
+    Duration? wait,
+  }) async {
+    if (!JarSpider.supported) {
+      throw ApiException('jar 源只在 Android 客户端上可用，换条线路试试');
+    }
+    final hub = SourceHub.instance;
+    await hub.ensureJarStatus();
+    if (!hub.jarReady) {
+      throw ApiException(
+        jarLabelOf.isEmpty
+            ? '这个源需要 jar 插件（spider.jar），当前还没安装，换条线路试试'
+            : '$jarLabelOf 需要先安装 jar 插件（spider.jar）',
+      );
+    }
+    final limit = wait ?? jarTimeout;
+    try {
+      return await run().timeout(limit);
+    } on TimeoutException {
+      throw ApiException(_jarUnavailable(jarLabelOf), kind: ApiErrorKind.timeout);
+    } catch (e) {
+      if (e is ApiException) rethrow;
+      throw ApiException(_jarUnavailable(jarLabelOf));
+    }
+  }
+
+  /// jar 源没响应时的一句话（和外部源同一套文案口径）。
+  static String _jarUnavailable(String label) => label.trim().isEmpty
+      ? '这个源暂时没响应，换一条线路试试'
+      : '$label 暂时没响应，换一条线路试试';
+
+  /// 把一个 jar 源的详情改写成「合并得进我们记录」的线路表：
+  ///
+  ///   · 线路名 = `<源名>·<它自己的线路名>`（`咕噜·4K`），避免和自有线路重名；
+  ///   · 线路 id 编成 `jar::<源名>::<vod_id>::<flag>`，播放时据此现场解析；
+  ///   · 同源同名的子线路只留一条（源站常把同一条线路给两遍）。
+  static List<LineInfo> _jarLinesOf(
+    VideoDetail detail,
+    String label,
+    String vodId,
+  ) {
+    final out = <LineInfo>[];
+    final seen = <String>{};
+    for (final line in detail.lines) {
+      final sub = line.displayName.trim().isEmpty ? line.id : line.displayName;
+      final fullName = '$label·$sub';
+      if (!seen.add(fullName)) continue;
+      final from = (line.from ?? '').trim().isNotEmpty
+          ? line.from!.trim()
+          : sub;
+      out.add(
+        LineInfo(
+          fxJarLineId(label, vodId, from),
+          fullName,
+          line.needsParse ? 'hls' : line.type,
+          line.priority,
+          source: label,
+          from: from,
+          epNames: line.epNames,
+          status: line.status,
+        ),
+      );
+    }
+    return out;
+  }
+
+  /// jar 卡片自己的详情：线路全部换成本层编码后的形态。
+  static VideoDetail _withJarLines(
+    VideoDetail detail,
+    KSource source,
+    String vodId,
+  ) {
+    final label = SourceHub.jarLabelOf(source);
+    return detail.copyWith(lines: _jarLinesOf(detail, label, vodId));
+  }
+
+  /// **融合**：我们这条记录在 jar 源里也有时，把它们的子线路并进来。
+  ///
+  /// 搜索期 `JarMergeIndex` 记下了「这部片在哪个 jar 源、哪个 vod_id」，
+  /// 详情页拿到自有线路后调这里，返回需要追加的 jar 线路（自有线路在前、
+  /// jar 在后由调用方分区，见 `fxOwnLinesFirst`）。
+  ///
+  /// 一个源失败不影响别的源，也不影响自有线路：只记日志、跳过。
+  static Future<List<LineInfo>> jarLinesFor(VideoDetail detail) async {
+    final hits = JarMergeIndex.instance.hitsFor(
+      title: detail.title,
+      year: detail.year,
+    );
+    if (hits.isEmpty) return const <LineInfo>[];
+    final hub = SourceHub.instance;
+    await hub.ensureReady();
+    if (!hub.hasJarSources) return const <LineInfo>[];
+    await hub.ensureJarStatus();
+    if (!hub.jarReady) return const <LineInfo>[];
+    final enabled = <String>{
+      for (final s in hub.jarSources) SourceHub.jarLabelOf(s),
+    };
+    final futures = <Future<List<LineInfo>>>[];
+    for (final hit in hits) {
+      if (!enabled.contains(hit.label)) continue;
+      futures.add(() async {
+        final source = await _jarSourceByLabel(hit.label);
+        if (source == null) return const <LineInfo>[];
+        try {
+          final d = await _jarGuard(
+            jarLabelOf: hit.label,
+            run: () => JarSpider.detail(
+              api: source.api,
+              ext: source.ext,
+              vodId: hit.vodId,
+            ),
+            wait: jarDetailTimeout,
+          );
+          final lines = _jarLinesOf(d, hit.label, hit.vodId);
+          fxJarLog(
+            'merge title=${detail.title} source=${hit.label} '
+            'vodId=${hit.vodId} lines=${lines.length}',
+            tag: fxJarDetailTag,
+          );
+          return lines;
+        } catch (e) {
+          fxJarLog(
+            'merge title=${detail.title} source=${hit.label} 失败：'
+            '${fxJarClip('$e', max: 120)}',
+            tag: fxJarDetailTag,
+          );
+          return const <LineInfo>[];
+        }
+      }());
+    }
+    if (futures.isEmpty) return const <LineInfo>[];
+    final lists = await Future.wait(futures);
+    final out = <LineInfo>[];
+    final seen = <String>{};
+    for (final list in lists) {
+      for (final line in list) {
+        if (!seen.add(line.name)) continue;
+        out.add(line);
+      }
+    }
+    return out;
+  }
 
   /* ------------------------------------------------------ 详情超时预算 */
 
@@ -1567,5 +1891,41 @@ class _Dedupe {
       return true;
     }
     return false;
+  }
+}
+
+/// 一轮 jar 源搜索的结果（源 + 原始卡片）。
+class _JarWave {
+  const _JarWave({required this.source, required this.cards});
+
+  final KSource source;
+  final List<VideoCard> cards;
+}
+
+/// 简单的并发闸门（jar 源专用）。
+class _JarConcurrencyGate {
+  _JarConcurrencyGate(int limit) : max = limit < 1 ? 1 : limit;
+
+  final int max;
+  int _active = 0;
+  final List<Completer<void>> _waiters = <Completer<void>>[];
+
+  Future<void> acquire() {
+    if (_active < max) {
+      _active++;
+      return Future<void>.value();
+    }
+    final waiter = Completer<void>();
+    _waiters.add(waiter);
+    return waiter.future;
+  }
+
+  void release() {
+    if (_waiters.isNotEmpty) {
+      final next = _waiters.removeAt(0);
+      if (!next.isCompleted) next.complete();
+      return;
+    }
+    if (_active > 0) _active--;
   }
 }

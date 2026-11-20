@@ -8,6 +8,7 @@ import '../main.dart' show Nav;
 import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../services/download_service.dart';
+import '../services/jar_sources.dart';
 import '../services/fallback_match.dart';
 import '../services/fx_player.dart';
 import '../services/line_enrich.dart';
@@ -19,6 +20,7 @@ import '../services/source_hub.dart';
 import '../services/fx_video_geometry.dart';
 import '../widgets/detail_widgets.dart';
 import '../widgets/fx_cards.dart' show FxCover, FxSkeletonPulse;
+import '../widgets/fx_line_group_selector.dart';
 import '../widgets/download_sheet.dart';
 import '../widgets/player_theme.dart';
 import 'category_page.dart'
@@ -178,6 +180,9 @@ class _DetailPageState extends State<DetailPage>
   /// 不重建播放器。补线期间线路区一直占着固定高度，布局不跳动。
   Timer? _lineRefreshTimer;
   int _lineRefreshTries = 0;
+
+  /// jar 源子线路合并是否正在进行（防重入）。
+  bool _jarMerging = false;
 
   /// PLATFORM_PENDING：平台线路永远显示，解析在后台进行。
   /// 正在现场解析的线路 id（同一条只发一次请求）。
@@ -381,7 +386,9 @@ class _DetailPageState extends State<DetailPage>
         // （播放页里它会被自动跳过）。这里和服务端的 degraded 排序叠加，
         // 服务端标记 degraded 的仍然在最后。
         _detail = d.copyWith(
-          lines: LineHealth.instance.rankLines(widget.id, d.lines),
+          lines: fxOwnLinesFirst(
+            LineHealth.instance.rankLines(widget.id, d.lines),
+          ),
         );
         _lineId = lineId;
         _ep = ep;
@@ -394,6 +401,9 @@ class _DetailPageState extends State<DetailPage>
       // 后台跑，不阻塞详情页；命中就追加到线路列表，并参与现有排序
       // （付费线在前、按实测分辨率）与自动切线。
       unawaited(_enrichLines(d));
+      // FUSION（2026-11-21）：这部片在启用的 jar 源里也有时，把它们的子线路
+      // 并进来（`咕噜·4K` 这种），不新增记录、也不阻塞首屏。
+      unawaited(_mergeJarLines(d));
       _scheduleLineRefresh();
       // PLATFORM_PENDING：平台线路进页面就先在后台解析一次（fire-and-forget），
       // 用户点之前大概率已经 ready，点下去不用等。
@@ -1772,6 +1782,45 @@ class _DetailPageState extends State<DetailPage>
   /// 死线路，明确不补）。集数按对方实际集数，探不到就不补；命中缓存 24 小时。
   /// 补进来的线路 id 带 `enrich:` 前缀，播放地址由 `LineEnrich.resolvePlay`
   /// 现算 —— 服务端库一行都不改。
+  /// 把 jar 源的同名子线路合并进当前记录（FUSION 2026-11-21）。
+  ///
+  /// 触发条件只有一个：搜索时 jar 波次命中了这部片（`JarMergeIndex` 里有
+  /// 记录）。没搜过就直接从首页点进来的，这里一条都不加 —— 用户没要
+  /// 「进详情就全源再搜一遍」那种行为。
+  Future<void> _mergeJarLines(VideoDetail d) async {
+    if (_jarMerging || CmsBridge.isJarLine(_lineId)) return;
+    _jarMerging = true;
+    try {
+      final extra = await CmsBridge.jarLinesFor(d);
+      if (!mounted || extra.isEmpty) return;
+      final current = _detail;
+      if (current == null) return;
+      // 同一个 id / 同名子线路只留一条（用户口径：「咕噜·4K」只出现一次）。
+      final haveId = <String>{for (final line in current.lines) line.id};
+      final haveName = <String>{for (final line in current.lines) line.name};
+      final add = <LineInfo>[
+        for (final line in extra)
+          if (!haveId.contains(line.id) && !haveName.contains(line.name)) line,
+      ];
+      if (add.isEmpty) return;
+      setState(() {
+        _detail = current.copyWith(
+          // 先排序（自有线路按健康度），再把 jar 线路整体压到后面。
+          lines: fxOwnLinesFirst(
+            LineHealth.instance.rankLines(widget.id, <LineInfo>[
+              ...current.lines,
+              ...add,
+            ]),
+          ),
+        );
+      });
+    } catch (e) {
+      debugPrint('jar merge failed: $e');
+    } finally {
+      _jarMerging = false;
+    }
+  }
+
   Future<void> _enrichLines(VideoDetail d) async {
     final EnrichEntry? entry;
     try {
@@ -1797,10 +1846,12 @@ class _DetailPageState extends State<DetailPage>
     if (add.isEmpty) return;
     setState(() {
       _detail = current.copyWith(
-        lines: LineHealth.instance.rankLines(widget.id, <LineInfo>[
-          ...current.lines,
-          ...add,
-        ]),
+        lines: fxOwnLinesFirst(
+          LineHealth.instance.rankLines(widget.id, <LineInfo>[
+            ...current.lines,
+            ...add,
+          ]),
+        ),
       );
     });
   }
@@ -2219,8 +2270,6 @@ class _DetailPageState extends State<DetailPage>
         : (d.episodes > 0
             ? d.episodes
             : (episodes.isNotEmpty ? fxMainEpisodeCount(episodes) : 0));
-    final total =
-        episodes.isNotEmpty ? fxMainEpisodeCount(episodes) : d.episodes;
     final related = _relatedList;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2230,79 +2279,20 @@ class _DetailPageState extends State<DetailPage>
         _titleBlock(d),
         _actionRow(),
         const SizedBox(height: 16),
-        // 线路区固定 60px：平台线后到时原地填充，标题 / 选集不整体下移。
-        SizedBox(
-          height: 60,
-          child: d.lines.isNotEmpty
-              ? ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  itemCount: d.lines.length,
-                  separatorBuilder: (context, i) => const SizedBox(width: 8),
-                  itemBuilder: (context, i) {
-                    final line = d.lines[i];
-                    // 所有线路统一展示，不显示额外角标。
-                    return SizedBox(
-                      key: ValueKey<String>(line.id),
-                      width: 102,
-                      height: 60,
-                      child: DetailLineCard(
-                        name: line.displayName.isEmpty
-                            ? '线路${i + 1}'
-                            : line.displayName,
-                        // 集数用这条线路自己的：合并后的总集数套给所有线路，
-                        // 会出现「显示 5 集、点第 4 集播不出来」。
-                        count: line.epNames.isNotEmpty
-                            ? line.epNames.length
-                            : total,
-                        // LINE_SUBTITLE_DYNAMIC（2026-11-14）：副标题按**这条线路
-                        // 自己**的集数决定，不再用全局 _isMovie 写死。
-                        //
-                        // 之前 41 集的剧，每条线路卡片都挂「正片」，明明是多集。
-                        // 现在：
-                        //   · 该线路 ≤ 3 集 → 显示它自己的版本名（正片/粤语/国语）
-                        //   · 该线路 > 3 集 → 显示「共 N 集」
-                        // 电影显示它自己的版本名（正片/粤语/国语），
-                        // 其它分类一律显示「共 N 集」。
-                        subtitle: (() {
-                          // PLATFORM_PENDING：平台线永远占位。
-                          // 还没解析完显示「解析中」，上游不可用显示「暂时不可用」；
-                          // 绝不因为没解析完就藏掉这条线。
-                          if (line.linePending) return '解析中';
-                          if (line.lineUnavailable) return '暂时不可用';
-                          final names = line.epNames;
-                          final n = names.isNotEmpty ? names.length : total;
-                          if (_isMovie) {
-                            final first = names.isNotEmpty
-                                ? names.first.trim()
-                                : '';
-                            // 平台线解析回来的集名是「第N集」，电影不能这么显示
-                            final shown = first.isEmpty || _epNumOnly.hasMatch(first)
-                                ? '正片'
-                                : first;
-                            return shown;
-                          }
-                          return n > 0 ? '共 $n 集' : null;
-                        })(),
-                        active: line.id == _lineId,
-                        // degraded 线路照常展示并可点，只在卡片名后补灰色小字。
-                        unstable: line.degraded,
-                        // 量子 / 红牛是免费站，播放前有广告，名字上标出来。
-                        ads: fxLineHasAds(line.displayName),
-                        // 切换/重试期间不禁用点击：播放器内部有 _pendingSwitch
-                        // 排队机制（记住最后一次选择，当前切换一结束就执行）。
-                        // 这里把 onTap 置 null 的话，用户点线路完全没反应，
-                        // 就是「重试线路时没法手动切换」的根因。
-                        onTap: () => _selectLine(line),
-                      ),
-                    );
-                  },
-                )
-              : (_lineRefreshTimer != null
-                  // 补线进行中：同尺寸骨架占位，线路到了直接替换，不跳版。
-                  ? _linePlaceholder()
-                  : Center(child: _noLinesHint())),
-        ),
+        // LINE_GROUPS（2026-11-21）：线路区改成**两行** ——
+        // 第一行大类（幻想 / 咕噜 / 剧圈 / 橘汁 / 下饭），第二行该大类的子线路。
+        // 组件在 `widgets/fx_line_group_selector.dart`，一起看三处入口共用同一份。
+        if (d.lines.isNotEmpty)
+          FxLineGroupSelector(
+            lines: d.lines,
+            currentLineId: _lineId,
+            onSelected: _selectLine,
+          )
+        else if (_lineRefreshTimer != null)
+          // 补线进行中：同尺寸骨架占位，线路到了直接替换，不跳版。
+          SizedBox(height: 76, child: _linePlaceholder())
+        else
+          _noLinesHint(),
         if (visibleEpisodes.isNotEmpty) ...[
           const SizedBox(height: 22),
           _episodeHeader(totalAll, available: visibleEpisodes.length),
