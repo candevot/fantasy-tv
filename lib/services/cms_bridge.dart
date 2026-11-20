@@ -204,10 +204,18 @@ class CmsBridge {
     // 出现「八仙（幻想）」和「八仙（官采切片）」并排。
     // HOME_MORE（2026-11-20）：用户要求推荐多给几条。一页只有 20 条，
     // 这里拉两页合并成 40 条（同一部片按 id 去重）。
-    final pages = await Future.wait(<Future<List<dynamic>>>[
-      CmsApi.listVod(type: typeId, page: 1, sort: 'hot', src: CmsApi.ownSrc),
-      CmsApi.listVod(type: typeId, page: 2, sort: 'hot', src: CmsApi.ownSrc),
-    ]);
+    // HOME_MORE_SAFE：第 1 页必须有，第 2 页只是「多给点」——
+    // 第 2 页失败（越界 / 接口偶发 500）不能把整行、进而整页首页拖垮。
+    final first = await CmsApi.listVod(
+        type: typeId, page: 1, sort: 'hot', src: CmsApi.ownSrc);
+    List<dynamic> second = const <dynamic>[];
+    try {
+      second = await CmsApi.listVod(
+          type: typeId, page: 2, sort: 'hot', src: CmsApi.ownSrc);
+    } catch (_) {
+      second = const <dynamic>[];
+    }
+    final pages = <List<dynamic>>[first, second];
     final seen = <String>{};
     final vods = <dynamic>[];
     for (final pg in pages) {
