@@ -4,7 +4,7 @@ import 'package:fantasy_tv/models.dart';
 import 'package:fantasy_tv/services/cms_api.dart';
 import 'package:fantasy_tv/services/cms_bridge.dart';
 import 'package:fantasy_tv/services/source_hub.dart';
-import 'package:fantasy_tv/widgets/player_more_panel.dart';
+import 'package:fantasy_tv/widgets/fs_side_panel.dart';
 import 'package:flutter/material.dart';
 
 /// UNUSABLE_RECORD / DEDUPE_LINES（2026-11-15）回归。
@@ -158,46 +158,66 @@ void main() {
     });
   });
 
-  group('播放设置面板高度上限（PANEL_CAP）', () {
-    Future<double> capFor(WidgetTester tester, Size size) async {
-      late double value;
+  // SIDE_PANEL（2026-11-20）：面板从「底部弹层 + 高度上限（PANEL_CAP）」
+  // 改成「右侧竖排面板」。旧断言（横屏 ≤55% 屏高、竖屏 ≤40%）随实现一起
+  // 作废，改钉右侧面板的几何：宽度 = 屏宽 × 42%、不超过半屏、放得下时
+  // 最少 300dp；高度 = 屏高 − 上下各 12dp。面板自身的交互（4 列图标、
+  // 开关行、× 关闭、外点关闭）在 player_more_panel_test.dart 里。
+  group('右侧面板宽度 / 高度（SIDE_PANEL）', () {
+    Future<(double, double)> panelFor(WidgetTester tester, Size size) async {
+      late double width;
+      late double height;
       await tester.pumpWidget(
         MediaQuery(
           data: MediaQueryData(size: size),
           child: Builder(
             builder: (context) {
-              value = fxMorePanelMaxHeight(context);
+              width = fxSidePanelWidth(context);
+              height = fxSidePanelHeight(context);
               return const SizedBox.shrink();
             },
           ),
         ),
       );
-      return value;
+      return (width, height);
     }
 
-    testWidgets('横屏：屏高 55%，且不超过 360', (tester) async {
-      // 常见横屏手机 800×360 → 55% = 198。
-      expect(await capFor(tester, const Size(800, 360)), closeTo(198, .01));
-      // 平板横屏 1280×800 → 55% = 440，但封顶 360。
-      expect(await capFor(tester, const Size(1280, 800)), 360);
+    testWidgets('横屏 800×360：宽 336（42%）、高 336（上下各留 12）', (tester) async {
+      final (w, h) = await panelFor(tester, const Size(800, 360));
+      expect(w, closeTo(336, .01));
+      expect(h, closeTo(336, .01));
     });
 
-    testWidgets('竖屏：屏高 40%，且不超过 480', (tester) async {
-      // 360×800 → 40% = 320。
-      expect(await capFor(tester, const Size(360, 800)), closeTo(320, .01));
-      // 平板竖屏 800×1280 → 40% = 512，但封顶 480。
-      expect(await capFor(tester, const Size(800, 1280)), 480);
+    testWidgets('屏宽够大时下限 300：700×400 → 300', (tester) async {
+      final (w, _) = await panelFor(tester, const Size(700, 400));
+      // 700 × 42% = 294 < 300，按下限取 300。
+      expect(w, closeTo(300, .01));
     });
 
-    testWidgets('任何尺寸都不会盖满屏（上限 < 屏高的 60%）', (tester) async {
+    testWidgets('绝不超半屏：1080×600 → 453.6（半屏 540）', (tester) async {
+      final (w, _) = await panelFor(tester, const Size(1080, 600));
+      expect(w, closeTo(453.6, .01));
+      expect(w, lessThanOrEqualTo(540));
+    });
+
+    testWidgets('窄屏 360×800：半屏是硬上限（180），高 776', (tester) async {
+      final (w, h) = await panelFor(tester, const Size(360, 800));
+      expect(w, closeTo(180, .01));
+      expect(h, closeTo(776, .01));
+    });
+
+    testWidgets('任何尺寸都贴右侧、不到屏宽', (tester) async {
       for (final size in <Size>[
         const Size(360, 640),
         const Size(640, 360),
         const Size(400, 800),
         const Size(900, 400),
+        const Size(1280, 800),
       ]) {
-        final cap = await capFor(tester, size);
-        expect(cap, lessThan(size.height * .6), reason: '$size');
+        final (w, h) = await panelFor(tester, size);
+        expect(w, greaterThan(0));
+        expect(w, lessThanOrEqualTo(size.width * .5 + .01), reason: '$size');
+        expect(h, closeTo(size.height - 24, .01), reason: '$size');
       }
     });
   });

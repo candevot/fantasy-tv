@@ -1,32 +1,10 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
 import '../services/fx_display_settings.dart';
 import '../theme.dart';
-
-/// 播放设置面板的高度上限（PANEL_CAP 2026-11-15）。
-///
-/// 面板是底部弹层，内容固定 8 行左右；不给上限时 `mainAxisSize.min`
-/// 会把它撑到整屏高（横屏屏高只有 300–400dp，一开面板整屏就被盖住）。
-///
-/// 规则：
-///   · 横屏（宽 > 高）：上限 = 屏高 × 55%，且**绝对不超过 360dp**；
-///   · 竖屏：上限 = 屏高 × 40%，且不超过 480dp。
-///
-/// 面板内部的列表在超过这个高度时自己滚（见 [showFxMorePanel] 的
-/// `Flexible + SingleChildScrollView`），所以「永远不盖满屏」是硬的，
-/// 不是靠内容多少碰巧成立。
-double fxMorePanelMaxHeight(BuildContext context) {
-  final size = MediaQuery.sizeOf(context);
-  final landscape = size.width > size.height;
-  final ratio = landscape ? .55 : .40;
-  final cap = landscape ? 360.0 : 480.0;
-  final limit = math.min(size.height * ratio, cap);
-  // 极端矮屏（投屏到电视 / 分屏）兜一个最小可用高度：至少能看到标题 + 一行。
-  return math.max(limit, 180.0);
-}
+import 'fs_side_panel.dart';
 
 /// 循环播放模式：单集循环 / 关闭（对应 mpv setLooping）。
 /// 「列表循环」已移除：连播交给设置页的「自动下一集」开关。
@@ -42,18 +20,21 @@ enum FxLoopMode {
       this == FxLoopMode.single ? FxLoopMode.off : FxLoopMode.single;
 }
 
-/// 腾讯播放设置样式的「更多」面板（竖屏与全屏共用）：
-/// 图标行（定时关闭 / 下载本集 / 倍速 / 后台播放）
-/// + 列表行（循环播放 / 跳过片头片尾 / 画面比例 / 镜像模式 / 问题反馈）。
-/// 旧「清晰度 · 线路」入口已删除：码率档切换面板随入口一起移除，
-/// 线路切换仍由错误页「换线路」与详情页线路卡片负责。
-/// [onLoopChanged] / [onJumpPanel] / [onDownload] /
-/// [onSpeed] 传 null 时对应入口整块不显示（直播全屏没有下一集 /
-/// 片头尾 / 下载 / 倍速）；其余行为所有播放场景共用。
-/// 画中画已移除：当前版本不支持，列表只保留可用项。
-/// 旧「撑满全屏」开关已删除：由「画面比例 · 填充」替代。
-/// 旧的跳过秒数下拉已删除：片头 / 片尾改为按本剧标记，
-/// [markLabel] 显示「本剧：片头 01:20 · 片尾 43:10」，点行打开标记面板。
+/// 腾讯视频样式的「更多」播放设置面板（竖屏与全屏共用）。
+///
+/// SIDE_PANEL（2026-11-20）：从**底部通栏弹层**改成**右侧竖排面板**。
+///   · 壳：`FxSidePanel`（右侧、贯穿屏高、黑 72% + blur 18、只左两角圆角、
+///     右上角 ×、点外部关闭），几何常量见 `fs_side_panel.dart`；
+///   · 顶：定时关闭 / 下载本集 / 倍速 / 后台播放，4 列等宽「圆底图标 + 文字」；
+///   · 下：循环播放 / 跳过片头片尾 / 画面比例 / 镜像模式 / 播放诊断 /
+///     问题反馈，每行右侧是开关或箭头（档位行是选中片）；
+///   · 整体在 `ListView` 里，内容多了自己滚。
+///
+/// 功能一个不少：定时关闭、下载本集、倍速、后台播放、循环、跳过片头尾、
+/// 画面比例、镜像、播放诊断、问题反馈全部保留（旧入口仍由调用方传 null
+/// 控制显隐，语义没变）。
+/// [onLoopChanged] / [onJumpPanel] / [onDownload] / [onSpeed] 传 null 时对应
+/// 入口整块不显示（直播全屏没有下一集 / 片头尾 / 下载 / 倍速）。
 Future<void> showFxMorePanel(
   BuildContext context, {
   required FxLoopMode loopMode,
@@ -74,208 +55,209 @@ Future<void> showFxMorePanel(
 }) {
   // 兜底：面板比播放画面先开时也把已保存档位读出来（幂等）。
   unawaited(FxDisplaySettings.instance.ensureLoaded());
-  return showModalBottomSheet<void>(
-    context: context,
-    backgroundColor: Colors.transparent,
-    isScrollControlled: true,
-    builder: (sheetContext) {
-      var loop = loopMode;
-      // 画面比例 / 镜像模式是全局设置：这里只负责高亮，真正生效靠
-      // FxDisplaySettings 通知所有播放画面重建（立即生效，不重载视频）。
-      var aspect = FxDisplaySettings.instance.aspect;
-      var mirror = FxDisplaySettings.instance.mirror;
-      // 诊断开关在面板里就地翻转，用户点一下马上看到「开 / 关」的变化。
-      var diagnostics = diagnosticsOn;
-      final diagnosticsChanged = onDiagnosticsChanged;
-      // 直播等场景缺省的行为：局部变量判空后可安全地在闭包里使用。
-      final loopChanged = onLoopChanged;
-      final jumpPanel = onJumpPanel;
-      final download = onDownload;
-      final speed = onSpeed;
-      return StatefulBuilder(
-        builder: (context, setSheetState) {
-          void closeThen(VoidCallback action) {
-            Navigator.of(sheetContext).maybePop();
-            action();
-          }
-
-          return Container(
-            // PANEL_CAP（2026-11-15）：面板**永远不盖满屏**。
-            //
-            // 旧实现只有 `mainAxisSize.min`：内容一多（竖屏 8 行 + 图标行）
-            // 面板就顶到整屏高；横屏更糟 —— 屏高本来就小（≈360dp），
-            // 面板直接把画面全遮住，用户点「播放设置」等于切走一屏。
-            // 现在按屏幕方向给高度上限，超过就**面板内部滚动**：
-            //   · 横屏（宽 > 高）：55% 屏高，且绝对不超过 360dp；
-            //   · 竖屏：40% 屏高，且不超过 480dp。
-            constraints: BoxConstraints(maxHeight: fxMorePanelMaxHeight(context)),
-            padding: EdgeInsets.fromLTRB(
-              20,
-              12,
-              20,
-              18 + MediaQuery.of(context).padding.bottom,
-            ),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 38,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFE3E9F3),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    const Text(
-                      '播放设置',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
-                        color: Fx.ink,
-                      ),
-                    ),
-                    const Spacer(),
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => Navigator.of(sheetContext).maybePop(),
-                      child: Container(
-                        width: 30,
-                        height: 30,
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFF3F6FC),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white),
-                        ),
-                        child: const Icon(Icons.close_rounded,
-                            size: 18, color: Fx.sub),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                // 标题行下面的一切都可以滚：横屏 55% 放不下 8 行时，
-                // 用户往下滑就能看到「播放诊断 / 问题反馈」，不会卡在屏外。
-                Flexible(
-                  child: SingleChildScrollView(
-                    physics: const ClampingScrollPhysics(),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                Row(
-                  children: [
-                    _MoreAction(
-                      icon: Icons.timer_outlined,
-                      label: '定时关闭',
-                      onTap: () => closeThen(onSleepTimer),
-                    ),
-                    if (download != null)
-                      _MoreAction(
-                        icon: Icons.download_rounded,
-                        label: '下载本集',
-                        onTap: () => closeThen(download),
-                      ),
-                    if (speed != null)
-                      _MoreAction(
-                        icon: Icons.speed_rounded,
-                        label: '倍速',
-                        onTap: () => closeThen(speed),
-                      ),
-                    _MoreAction(
-                      icon: Icons.headphones_rounded,
-                      label: '后台播放',
-                      onTap: () => closeThen(onBackground),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                const Divider(height: 1, color: Color(0xFFEFF3FA)),
-                if (loopChanged != null)
-                  _MoreRow(
-                    icon: Icons.repeat_rounded,
-                    title: '循环播放',
-                    value: loop.label,
-                    onTap: () {
-                      loop = loop.next;
-                      setSheetState(() {});
-                      loopChanged(loop);
-                    },
-                  ),
-                if (jumpPanel != null)
-                  _MoreRow(
-                    icon: Icons.bookmark_border_rounded,
-                    title: '跳过片头片尾',
-                    value: markLabel,
-                    onTap: () => closeThen(jumpPanel),
-                  ),
-                _MoreChoiceRow(
-                  icon: Icons.aspect_ratio_rounded,
-                  title: '画面比例',
-                  options: [
-                    for (final mode in FxAspectMode.values) (mode.key, mode.label),
-                  ],
-                  selected: aspect.key,
-                  onSelect: (key) {
-                    final mode = FxAspectMode.fromKey(key) ?? FxAspectMode.contain;
-                    aspect = mode;
-                    setSheetState(() {});
-                    unawaited(FxDisplaySettings.instance.setAspect(mode));
-                  },
-                ),
-                _MoreChoiceRow(
-                  icon: Icons.flip_rounded,
-                  title: '镜像模式',
-                  options: [
-                    for (final mode in FxMirrorMode.values) (mode.key, mode.label),
-                  ],
-                  selected: mirror.key,
-                  onSelect: (key) {
-                    final mode = FxMirrorMode.fromKey(key) ?? FxMirrorMode.none;
-                    mirror = mode;
-                    setSheetState(() {});
-                    unawaited(FxDisplaySettings.instance.setMirror(mode));
-                  },
-                ),
-                if (diagnosticsChanged != null)
-                  _MoreRow(
-                    icon: Icons.monitor_heart_outlined,
-                    title: '播放诊断',
-                    // 值右对齐显示「开 / 关」，点一下翻转（面板不关，
-                    // 用户可以马上看到浮层在画面上出现 / 消失）。
-                    value: diagnostics ? '开' : '关',
-                    onTap: () {
-                      diagnostics = !diagnostics;
-                      setSheetState(() {});
-                      diagnosticsChanged(diagnostics);
-                    },
-                  ),
-                        _MoreRow(
-                          icon: Icons.feedback_outlined,
-                          title: '问题反馈',
-                          onTap: () => closeThen(onFeedback),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      );
-    },
+  return showFxSidePanel<void>(
+    context,
+    builder: (_) => FxSidePanel(
+      header: const Text(
+        '播放设置',
+        style: TextStyle(
+          fontSize: 16,
+          fontWeight: FontWeight.w800,
+          color: kFxSidePanelInk,
+        ),
+      ),
+      child: _FxMoreBody(
+        loopMode: loopMode,
+        markLabel: markLabel,
+        onLoopChanged: onLoopChanged,
+        onJumpPanel: onJumpPanel,
+        onSleepTimer: onSleepTimer,
+        onDownload: onDownload,
+        onSpeed: onSpeed,
+        onBackground: onBackground,
+        onFeedback: onFeedback,
+        diagnosticsOn: diagnosticsOn,
+        onDiagnosticsChanged: onDiagnosticsChanged,
+      ),
+    ),
   );
 }
 
-class _MoreAction extends StatelessWidget {
-  const _MoreAction({
+/// 播放设置面板主体：图标行 + 列表行，整块可滚。
+class _FxMoreBody extends StatefulWidget {
+  const _FxMoreBody({
+    required this.loopMode,
+    required this.markLabel,
+    required this.onLoopChanged,
+    required this.onJumpPanel,
+    required this.onSleepTimer,
+    required this.onDownload,
+    required this.onSpeed,
+    required this.onBackground,
+    required this.onFeedback,
+    required this.diagnosticsOn,
+    required this.onDiagnosticsChanged,
+  });
+
+  final FxLoopMode loopMode;
+  final String markLabel;
+  final ValueChanged<FxLoopMode>? onLoopChanged;
+  final VoidCallback? onJumpPanel;
+  final VoidCallback onSleepTimer;
+  final VoidCallback? onDownload;
+  final VoidCallback? onSpeed;
+  final VoidCallback onBackground;
+  final VoidCallback onFeedback;
+  final bool diagnosticsOn;
+  final ValueChanged<bool>? onDiagnosticsChanged;
+
+  @override
+  State<_FxMoreBody> createState() => _FxMoreBodyState();
+}
+
+class _FxMoreBodyState extends State<_FxMoreBody> {
+  late FxLoopMode _loop = widget.loopMode;
+  late bool _diagnostics = widget.diagnosticsOn;
+  // 画面比例 / 镜像模式是全局设置：这里只负责高亮，真正生效靠
+  // FxDisplaySettings 通知所有播放画面重建（立即生效，不重载视频）。
+  late FxAspectMode _aspect = FxDisplaySettings.instance.aspect;
+  late FxMirrorMode _mirror = FxDisplaySettings.instance.mirror;
+
+  /// 图标行是「打开另一个面板」的动作：先关掉本面板，再执行动作 ——
+  /// 顺序反过来会让新面板被这个模态路由盖住。
+  void _closeThen(VoidCallback action) {
+    Navigator.of(context).maybePop();
+    action();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final loopChanged = widget.onLoopChanged;
+    final jumpPanel = widget.onJumpPanel;
+    final download = widget.onDownload;
+    final speed = widget.onSpeed;
+    final diagnosticsChanged = widget.onDiagnosticsChanged;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 22),
+      physics: const ClampingScrollPhysics(),
+      children: [
+        // ── 图标行：4 列等宽（缺项时按剩余个数等分）──
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _SideAction(
+              icon: Icons.timer_outlined,
+              label: '定时关闭',
+              onTap: () => _closeThen(widget.onSleepTimer),
+            ),
+            if (download != null)
+              _SideAction(
+                icon: Icons.download_rounded,
+                label: '下载本集',
+                onTap: () => _closeThen(download),
+              ),
+            if (speed != null)
+              _SideAction(
+                icon: Icons.speed_rounded,
+                label: '倍速',
+                onTap: () => _closeThen(speed),
+              ),
+            _SideAction(
+              icon: Icons.headphones_rounded,
+              label: '后台播放',
+              onTap: () => _closeThen(widget.onBackground),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        const Divider(height: 1, color: kFxSidePanelLine),
+        if (loopChanged != null)
+          _SideRow(
+            icon: Icons.repeat_rounded,
+            title: '循环播放',
+            subtitle: _loop.label,
+            trailing: Switch(
+              value: _loop == FxLoopMode.single,
+              activeThumbColor: Colors.white,
+              activeTrackColor: kFxSidePanelAccent,
+              inactiveThumbColor: const Color(0xFFB7BECA),
+              inactiveTrackColor: const Color(0x26FFFFFF),
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              onChanged: (on) {
+                final mode = on ? FxLoopMode.single : FxLoopMode.off;
+                setState(() => _loop = mode);
+                loopChanged(mode);
+              },
+            ),
+          ),
+        if (jumpPanel != null)
+          _SideRow(
+            icon: Icons.bookmark_border_rounded,
+            title: '跳过片头片尾',
+            subtitle: widget.markLabel,
+            trailing: const _SideChevron(),
+            onTap: () => _closeThen(jumpPanel),
+          ),
+        _SideChoiceRow(
+          icon: Icons.aspect_ratio_rounded,
+          title: '画面比例',
+          options: [
+            for (final mode in FxAspectMode.values) (mode.key, mode.label),
+          ],
+          selected: _aspect.key,
+          onSelect: (key) {
+            final mode = FxAspectMode.fromKey(key) ?? FxAspectMode.contain;
+            setState(() => _aspect = mode);
+            unawaited(FxDisplaySettings.instance.setAspect(mode));
+          },
+        ),
+        _SideChoiceRow(
+          icon: Icons.flip_rounded,
+          title: '镜像模式',
+          options: [
+            for (final mode in FxMirrorMode.values) (mode.key, mode.label),
+          ],
+          selected: _mirror.key,
+          onSelect: (key) {
+            final mode = FxMirrorMode.fromKey(key) ?? FxMirrorMode.none;
+            setState(() => _mirror = mode);
+            unawaited(FxDisplaySettings.instance.setMirror(mode));
+          },
+        ),
+        if (diagnosticsChanged != null)
+          _SideRow(
+            icon: Icons.monitor_heart_outlined,
+            title: '播放诊断',
+            // 开关就地翻转（面板不关）：用户可以马上看到浮层在画面上
+            // 出现 / 消失。
+            subtitle: _diagnostics ? '开' : '关',
+            trailing: Switch(
+              value: _diagnostics,
+              activeThumbColor: Colors.white,
+              activeTrackColor: kFxSidePanelAccent,
+              inactiveThumbColor: const Color(0xFFB7BECA),
+              inactiveTrackColor: const Color(0x26FFFFFF),
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              onChanged: (on) {
+                setState(() => _diagnostics = on);
+                diagnosticsChanged(on);
+              },
+            ),
+          ),
+        _SideRow(
+          icon: Icons.feedback_outlined,
+          title: '问题反馈',
+          trailing: const _SideChevron(),
+          onTap: () => _closeThen(widget.onFeedback),
+        ),
+      ],
+    );
+  }
+}
+
+/// 图标行的一格：圆底图标 + 一行文字，宽度由 Row 等分给出。
+class _SideAction extends StatelessWidget {
+  const _SideAction({
     required this.icon,
     required this.label,
     required this.onTap,
@@ -295,25 +277,26 @@ class _MoreAction extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 44,
-              height: 44,
+              width: 46,
+              height: 46,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: const Color(0xFFF3F6FC),
+                color: const Color(0x1AFFFFFF),
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.white),
+                border: Border.all(color: const Color(0x24FFFFFF)),
               ),
-              child: Icon(icon, size: 21, color: Fx.ink),
+              child: Icon(icon, size: 22, color: kFxSidePanelInk),
             ),
             const SizedBox(height: 7),
             Text(
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
               style: const TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.w600,
-                color: Fx.ink,
+                color: kFxSidePanelInk,
               ),
             ),
           ],
@@ -323,17 +306,33 @@ class _MoreAction extends StatelessWidget {
   }
 }
 
-class _MoreRow extends StatelessWidget {
-  const _MoreRow({
+class _SideChevron extends StatelessWidget {
+  const _SideChevron();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Icon(
+      Icons.chevron_right_rounded,
+      size: 18,
+      color: kFxSidePanelSub,
+    );
+  }
+}
+
+/// 列表一行：左图标 + 标题（+ 副标题），右侧开关或箭头。
+class _SideRow extends StatelessWidget {
+  const _SideRow({
     required this.icon,
     required this.title,
-    this.value,
+    this.subtitle,
+    this.trailing,
     this.onTap,
   });
 
   final IconData icon;
   final String title;
-  final String? value;
+  final String? subtitle;
+  final Widget? trailing;
   final VoidCallback? onTap;
 
   @override
@@ -341,29 +340,45 @@ class _MoreRow extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: SizedBox(
-        height: 52,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
         child: Row(
           children: [
-            Icon(icon, size: 19, color: Fx.sub),
+            Icon(icon, size: 19, color: kFxSidePanelSub),
             const SizedBox(width: 10),
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 13.5,
-                fontWeight: FontWeight.w600,
-                color: Fx.ink,
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                      color: kFxSidePanelInk,
+                    ),
+                  ),
+                  if (subtitle != null && subtitle!.isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle!,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: kFxSidePanelSub,
+                        height: 1.25,
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
-            const Spacer(),
-            if (value != null) ...[
-              Text(
-                value!,
-                style: const TextStyle(fontSize: 12, color: Fx.sub),
-              ),
-              const SizedBox(width: 2),
-            ],
-            const Icon(Icons.chevron_right_rounded, size: 18, color: Fx.sub),
+            const SizedBox(width: 8),
+            if (trailing != null) trailing!,
           ],
         ),
       ),
@@ -371,11 +386,12 @@ class _MoreRow extends StatelessWidget {
   }
 }
 
-/// 播放设置里的档位行：左图标 + 标题，右侧一排可点档位按钮
-/// （竞品三行式布局：画面比例 / 镜像模式共用）。
-/// 档位多于一行时自动换行，选项整体右对齐。
-class _MoreChoiceRow extends StatelessWidget {
-  const _MoreChoiceRow({
+/// 档位行：左图标 + 标题，下面是可点片（画面比例 / 镜像模式共用）。
+///
+/// 面板只有 ~336dp 宽，档位挤在同一行会被压成蚂蚁字，所以档位单独占一行
+/// 放在标题下方，横向排不下就换行。
+class _SideChoiceRow extends StatelessWidget {
+  const _SideChoiceRow({
     required this.icon,
     required this.title,
     required this.options,
@@ -394,44 +410,36 @@ class _MoreChoiceRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Row(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Icon(icon, size: 19, color: Fx.sub),
-          ),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 56,
-            child: Padding(
-              padding: const EdgeInsets.only(top: 7),
-              child: Text(
+          Row(
+            children: [
+              Icon(icon, size: 19, color: kFxSidePanelSub),
+              const SizedBox(width: 10),
+              Text(
                 title,
                 style: const TextStyle(
                   fontSize: 13.5,
                   fontWeight: FontWeight.w600,
-                  color: Fx.ink,
+                  color: kFxSidePanelInk,
                 ),
               ),
-            ),
+            ],
           ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Wrap(
-              alignment: WrapAlignment.end,
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                for (final (key, label) in options)
-                  _MoreChip(
-                    label: label,
-                    active: key == selected,
-                    onTap: () => onSelect(key),
-                  ),
-              ],
-            ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final (key, label) in options)
+                _SideChip(
+                  label: label,
+                  active: key == selected,
+                  onTap: () => onSelect(key),
+                ),
+            ],
           ),
         ],
       ),
@@ -439,8 +447,8 @@ class _MoreChoiceRow extends StatelessWidget {
   }
 }
 
-class _MoreChip extends StatelessWidget {
-  const _MoreChip({
+class _SideChip extends StatelessWidget {
+  const _SideChip({
     required this.label,
     required this.active,
     required this.onTap,
@@ -457,12 +465,14 @@ class _MoreChip extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 140),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
         decoration: BoxDecoration(
-          color: active ? Fx.accent : const Color(0xFFF3F6FC),
-          borderRadius: BorderRadius.circular(11),
+          color: active
+              ? kFxSidePanelAccent
+              : const Color(0x1AFFFFFF),
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(
-            color: active ? Fx.accent : const Color(0xFFE7EDF7),
+            color: active ? kFxSidePanelAccent : const Color(0x24FFFFFF),
           ),
         ),
         child: Text(
@@ -470,7 +480,7 @@ class _MoreChip extends StatelessWidget {
           style: TextStyle(
             fontSize: 11.5,
             fontWeight: active ? FontWeight.w700 : FontWeight.w600,
-            color: active ? Colors.white : Fx.sub,
+            color: active ? Colors.white : kFxSidePanelSub,
           ),
         ),
       ),

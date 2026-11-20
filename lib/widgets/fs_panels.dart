@@ -6,6 +6,7 @@ import '../services/app_settings.dart';
 import '../services/video_marks.dart';
 import '../theme.dart';
 import 'fs_controls.dart';
+import 'fs_side_panel.dart';
 import 'player_theme.dart';
 
 /* ========================================================================== */
@@ -980,48 +981,63 @@ class _FsChip extends StatelessWidget {
   }
 }
 
-/// 打开底部选集抽屉，返回选中的集数；取消返回 null。
+/// 打开右侧选集面板，返回选中的集数；取消返回 null。
+///
+/// SIDE_PANEL（2026-11-20）：从「底部抽屉」改成「右侧竖排面板」，和
+/// 「播放设置」共用 `FxSidePanel` 壳体 —— 宽度 / 圆角 / 背景 / × / 外点
+/// 关闭全部一致，不会再出现两个面板长得不一样。
 Future<int?> showFsEpisodeSheet(
   BuildContext context, {
   required List<Episode> episodes,
   required int current,
+  String title = '',
 }) {
-  return showModalBottomSheet<int>(
-    context: context,
-    backgroundColor: Colors.transparent,
-    isScrollControlled: true,
-    useSafeArea: true,
-    barrierColor: Colors.black.withValues(alpha: .38),
-    builder: (_) => FsEpisodeSheet(episodes: episodes, current: current),
+  return showFxSidePanel<int>(
+    context,
+    builder: (_) => FsEpisodeSheet(
+      episodes: episodes,
+      current: current,
+      title: title,
+    ),
   );
 }
 
-/// 全屏底部选集抽屉：当前集高亮，打开时自动滚到可见位置。
+/// 右侧选集面板：标题「选集 · 第N集 · 共M集」+ 5 列正方形数字网格。
+///
+/// 当前集紫色实底白字；长剧集上下滚，打开时自动定位到当前集。
 class FsEpisodeSheet extends StatefulWidget {
   const FsEpisodeSheet({
     super.key,
     required this.episodes,
     required this.current,
+    this.title = '',
   });
 
   final List<Episode> episodes;
   final int current;
+
+  /// 附带片名（一起看房间用）；空串只显示「选集 · 第N集 · 共M集」。
+  final String title;
 
   @override
   State<FsEpisodeSheet> createState() => _FsEpisodeSheetState();
 }
 
 class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
-  static const double _itemExtent = 44;
+  /// 网格列数：腾讯视频就是 5 列（EPISODE_GRID_5）。
+  static const int _columns = 5;
+
+  /// 格子间距；格子本身正方形（childAspectRatio: 1）。
   static const double _gap = 8;
 
+  /// 网格左右内边距。
+  static const double _padH = 16;
+
+  /// 网格滚动控制器：打开时直接跳到当前集那一行。
   final ScrollController _scroll = ScrollController();
 
-  @override
-  void initState() {
-    super.initState();
-    _scrollToCurrent();
-  }
+  /// 只自动定位一次：用户手动滑走之后重建不能又把位置拽回来。
+  bool _located = false;
 
   @override
   void dispose() {
@@ -1029,18 +1045,27 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
     super.dispose();
   }
 
-  void _scrollToCurrent() {
+  /// 自动定位到当前集。
+  ///
+  /// 不用 `ensureVisible`：GridView 是懒加载的，100 集的剧里当前集那一格
+  /// 可能还没建出来 —— 拿不到 context 就永远不会定位。这里改成按
+  /// 「第几行 × 行高」一次 jumpTo，格子边长由 [LayoutBuilder] 给的可用宽度
+  /// 现算（面板宽度随屏幕变，不能写死）。
+  void _locateCurrent(double contentWidth) {
+    if (_located) return;
+    final index = widget.episodes.indexWhere((e) => e.n == widget.current);
+    if (index < 0) return;
+    final cell = (contentWidth - _padH * 2 - _gap * (_columns - 1)) / _columns;
+    if (cell <= 0) return;
+    _located = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scroll.hasClients) return;
-      final width = MediaQuery.sizeOf(context).width;
-      final columns = (width / 86).floor().clamp(4, 9);
-      final index = widget.episodes.indexWhere((e) => e.n == widget.current);
-      if (index < 0) return;
-      final row = index ~/ columns;
       final max = _scroll.position.maxScrollExtent;
-      final target = row * (_itemExtent + _gap) -
-          _scroll.position.viewportDimension / 2 +
-          _itemExtent / 2;
+      final row = index ~/ _columns;
+      // 当前集停在视口偏上（35%）的位置，前后集都能顺带看到。
+      final target = row * (cell + _gap) -
+          _scroll.position.viewportDimension * .35 +
+          cell / 2;
       _scroll.jumpTo(target.clamp(0.0, max).toDouble());
     });
   }
@@ -1054,159 +1079,108 @@ class _FsEpisodeSheetState extends State<FsEpisodeSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.sizeOf(context);
-    final pad = MediaQuery.paddingOf(context);
-    // EPISODE_SHEET_FIT（2026-11-12）：按「实际可用高度」算，不是按屏幕高度。
-    // 全屏播放是横屏，size.height 拿到的是竖屏高度，减掉安全区后
-    // 弹窗会超出可见区域 → 底部集数被裁掉。这里改用 constraints 的实际高度。
-    // PANEL_COMPACT（2026-11-15）：用户反馈选集面板占了大半屏。
-    // 上限压到屏高的 35%（最低 240，最高 460），内部滚动，默认只露 2~3 行。
-    final limit = (size.height * 0.35).clamp(240.0, 460.0).toDouble();
-    final avail = (size.height - pad.top - pad.bottom - 24)
-        .clamp(240.0, limit)
-        .toDouble();
-    final height = avail;
-    final width = size.width;
-    final columns = (width / 86).floor().clamp(4, 9);
+    final episodes = widget.episodes;
     final current = widget.current;
-    final total = widget.episodes.length;
-    final count = fxMainEpisodeCount(widget.episodes);
-    return Container(
-      height: height,
-      decoration: BoxDecoration(
-        // 全屏播放里弹窗用深色，白底在暗画面里太刺眼。
-        color: const Color(0xFF16181D),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      child: Column(
+    final total = episodes.length;
+    // 「共 M 集」按主剧情集算（花絮 / 预告不计入总数），和详情页一致。
+    final count = total == 0 ? 0 : fxMainEpisodeCount(episodes);
+    return FxSidePanel(
+      header: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 16, 14, 10),
-            child: Row(
-              children: [
-                Container(
-                  width: 30,
-                  height: 30,
-                  decoration: BoxDecoration(
-                    gradient: Fx.brand,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Icon(Icons.video_library_rounded,
-                      size: 17, color: Colors.white),
-                ),
-                const SizedBox(width: 9),
-                const Text(
-                  '选集',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    '${_labelFor(current)} · 共 $count 集',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 11.5, color: Color(0xFF9AA3B2)),
-                  ),
-                ),
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => Navigator.of(context).pop(),
-                  child: const Padding(
-                    padding: EdgeInsets.all(6),
-                    child: Icon(Icons.close_rounded,
-                        size: 20, color: Color(0xFF9AA3B2)),
-                  ),
-                ),
-              ],
+          Text(
+            '选集 · ${_labelFor(current)} · 共 ${count == 0 ? total : count} 集',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: kFxSidePanelInk,
             ),
           ),
-          const Divider(height: 1, color: Color(0xFF2A2E36)),
-          Expanded(
-            child: total == 0
-                ? const Center(
-                    child: Text(
-                      '暂无剧集信息',
-                      style: TextStyle(fontSize: 12, color: Color(0xFF9AA3B2)),
-                    ),
-                  )
-                : GridView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(16, 14, 16, 22),
-                    itemCount: total,
-                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: columns,
-                      mainAxisExtent: _itemExtent,
-                      crossAxisSpacing: _gap,
-                      mainAxisSpacing: _gap,
-                    ),
-                    itemBuilder: (context, i) {
-                      final e = widget.episodes[i];
-                      final active = e.n == current;
-                      // 只显示两位数字（01 02 … 99），不显示「第N集」。
-                      final label = e.n.toString().padLeft(2, '0');
-                      return GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () => Navigator.of(context).pop(e.n),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 140),
-                          alignment: Alignment.center,
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          decoration: BoxDecoration(
-                            gradient: active ? Fx.brand : null,
-                            color: active ? null : const Color(0xFF23262E),
-                            borderRadius: BorderRadius.circular(11),
-                            border: Border.all(
-                              color: active
-                                  ? Colors.transparent
-                                  : const Color(0xFF31353F),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color:
-                                    Fx.accent.withValues(alpha: active ? .28 : .03),
-                                blurRadius: 10,
-                                offset: const Offset(0, 3),
-                              ),
-                            ],
-                          ),
-                          // 纯两位数：不用 Flexible/ellipsis，
-                          // 之前「第N集」占位太长被截成「第…」。
-                          child: Stack(
-                            alignment: Alignment.center,
-                            children: [
-                              Text(
-                                label,
-                                maxLines: 1,
-                                style: TextStyle(
-                                  fontSize: 13.5,
-                                  fontWeight: active
-                                      ? FontWeight.w700
-                                      : FontWeight.w500,
-                                  color: Colors.white,
-                                  letterSpacing: .4,
-                                ),
-                              ),
-                              if (active)
-                                const Positioned(
-                                  left: 4,
-                                  child: Icon(Icons.play_arrow_rounded,
-                                      size: 12, color: Colors.white),
-                                ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-          ),
+          if (widget.title.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              widget.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 11, color: kFxSidePanelSub),
+            ),
+          ],
         ],
       ),
+      child: total == 0
+          ? const Center(
+              child: Text(
+                '暂无剧集信息',
+                style: TextStyle(fontSize: 12, color: kFxSidePanelSub),
+              ),
+            )
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                _locateCurrent(constraints.maxWidth);
+                return GridView.builder(
+              controller: _scroll,
+              padding: const EdgeInsets.fromLTRB(_padH, 14, _padH, 22),
+              physics: const ClampingScrollPhysics(),
+              itemCount: total,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: _columns,
+                // 正方形格子：宽 = 高。
+                childAspectRatio: 1,
+                crossAxisSpacing: _gap,
+                mainAxisSpacing: _gap,
+              ),
+              itemBuilder: (context, i) {
+                final e = episodes[i];
+                final active = e.n == current;
+                // 只显示两位数字（01 02 … 99），不显示「第N集」。
+                final label = e.n.toString().padLeft(2, '0');
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => Navigator.of(context).pop(e.n),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 140),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      // 当前集：紫色实底 + 白字（SIDE_PANEL 强调色）。
+                      color: active
+                          ? kFxSidePanelAccent
+                          : const Color(0x1AFFFFFF),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: active
+                            ? kFxSidePanelAccent
+                            : const Color(0x24FFFFFF),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: kFxSidePanelAccent.withValues(
+                            alpha: active ? .38 : .0,
+                          ),
+                          blurRadius: 10,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Text(
+                      label,
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight:
+                            active ? FontWeight.w700 : FontWeight.w500,
+                        color: active ? Colors.white : kFxSidePanelInk,
+                        letterSpacing: .4,
+                      ),
+                    ),
+                  ),
+                );
+              },
+                );
+              },
+            ),
     );
   }
 }

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -7,8 +6,8 @@ import '../api.dart';
 import '../models.dart';
 import '../services/cms_bridge.dart';
 import '../theme.dart';
+import 'fs_panels.dart';
 import 'fx_cards.dart';
-import 'player_theme.dart';
 import 'together_ui.dart';
 
 /// 一起看 · 选片弹层：搜索 / 从热门选。
@@ -30,17 +29,15 @@ Future<int?> showTogetherEpisodePicker(
   required int current,
   String title = '',
 }) {
-  return showModalBottomSheet<int>(
-    context: context,
-    isScrollControlled: true,
-    useSafeArea: true,
-    backgroundColor: Colors.transparent,
-    barrierColor: Colors.black.withValues(alpha: .28),
-    builder: (_) => _TogetherEpisodePicker(
-      episodes: episodes,
-      current: current,
-      title: title,
-    ),
+  // SIDE_PANEL（2026-11-20）：一起看全屏复用**同一个**右侧选集面板
+  // （`FsEpisodeSheet`），不再自己画一套浅色底部抽屉 —— 主播放全屏和
+  // 一起看全屏点「选集」必须长得一样、行为一样（右侧滑入、5 列正方形
+  // 网格、当前集紫色实底、自动定位、外点关闭）。
+  return showFsEpisodeSheet(
+    context,
+    episodes: episodes,
+    current: current,
+    title: title,
   );
 }
 
@@ -578,166 +575,6 @@ class _VideoTile extends StatelessWidget {
             style: TextStyle(fontSize: 9, color: Fx.sub.withValues(alpha: .85)),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _TogetherEpisodePicker extends StatelessWidget {
-  const _TogetherEpisodePicker({
-    required this.episodes,
-    required this.current,
-    required this.title,
-  });
-
-  final List<Episode> episodes;
-  final int current;
-  final String title;
-
-  String _labelFor(int n) {
-    for (final e in episodes) {
-      if (e.n == n) return fxEpisodeLabel(e.n, e.name);
-    }
-    return fxEpisodeLabel(n);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // PANEL_COMPACT（2026-11-15）：与主播放全屏的选集面板同一个高度规则 ——
-    // 屏高 35%（最低 240、最高 460），内部滚动，别占大半屏。
-    final size = MediaQuery.sizeOf(context);
-    final pad = MediaQuery.paddingOf(context);
-    final height = math
-        .min(460.0, math.max(240.0, size.height * .35))
-        .toDouble();
-    final available = math
-        .max(240.0, size.height - pad.top - pad.bottom - 24)
-        .toDouble();
-    return SizedBox(
-      height: math.min(height, available),
-      child: Container(
-        decoration: const BoxDecoration(
-          color: Color(0xFFF9FBFF),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-          boxShadow: [
-            BoxShadow(
-              color: Color(0x33263A5A),
-              blurRadius: 40,
-              offset: Offset(0, -8),
-            ),
-          ],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: SafeArea(
-          top: false,
-          child: Column(
-            children: [
-              const SizedBox(height: 8),
-              Container(
-                width: 38,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFD4DCEA),
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(18, 10, 12, 4),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            title.isEmpty ? '选集' : '选集 · $title',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w800,
-                              color: Fx.ink,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '共 ${fxMainEpisodeCount(episodes)} 集 · 当前 ${_labelFor(current)}',
-                            style: const TextStyle(
-                              fontSize: 10.5,
-                              color: Fx.sub,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    TogetherCircleButton(
-                      icon: Icons.close_rounded,
-                      size: 34,
-                      onTap: () => Navigator.of(context).pop(),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: episodes.isEmpty
-                    ? Center(
-                        child: Text(
-                          '暂无剧集信息',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Fx.sub.withValues(alpha: .8),
-                          ),
-                        ),
-                      )
-                    : GridView.builder(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                        itemCount: episodes.length,
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 5,
-                              childAspectRatio: 1.62,
-                              mainAxisSpacing: 8,
-                              crossAxisSpacing: 8,
-                            ),
-                        itemBuilder: (context, i) {
-                          final ep = episodes[i];
-                          final active = ep.n == current;
-                          return GestureDetector(
-                            onTap: () => Navigator.of(context).pop(ep.n),
-                            child: Container(
-                              alignment: Alignment.center,
-                              decoration: BoxDecoration(
-                                gradient: active ? Fx.brand : null,
-                                color: active
-                                    ? null
-                                    : Colors.white.withValues(alpha: .72),
-                                borderRadius: BorderRadius.circular(11),
-                                border: Border.all(
-                                  color: active
-                                      ? Colors.transparent
-                                      : Colors.white.withValues(alpha: .95),
-                                ),
-                              ),
-                              child: Text(
-                                fxEpisodeLabel(ep.n, ep.name),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: active
-                                      ? FontWeight.w700
-                                      : FontWeight.w500,
-                                  color: active ? Colors.white : Fx.ink,
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }
