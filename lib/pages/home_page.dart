@@ -843,6 +843,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               },
               child: PageView.builder(
                 controller: _bannerCtrl,
+                // BANNER_FULL（2026-11-20）：满宽显示单张，去掉首尾 padding，
+                // 否则第一张会左移、右边露出下一张的一角（用户说「只显示一半」）。
+                padEnds: false,
                 itemCount: banners.length,
                 onPageChanged: (i) => _bannerPage.value = i,
                 itemBuilder: (ctx, i) {
