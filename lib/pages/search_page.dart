@@ -399,8 +399,17 @@ class _SearchPageState extends State<SearchPage> {
   void _noteArrival(List<VideoCard> items) {
     if (items.isEmpty) return;
     final seen = <String>{for (final card in _arrived) card.id};
+    // DEDUPE_TITLE（2026-11-20）：同一部片在库里可能有多条记录（来自不同线路，
+    // vod_id 不同），只按 id 去重去不掉 —— 用户搜「济公传」会看到两个。
+    // 这里再按「片名 + 年份 + 分类」拦一道，保留最先到的那条。
+    final seenTitle = <String>{
+      for (final card in _arrived)
+        '${card.title}|${card.year}|${card.type}',
+    };
     for (final card in items) {
       if (!seen.add(card.id)) continue;
+      final tKey = '${card.title}|${card.year}|${card.type}';
+      if (card.title.trim().isNotEmpty && !seenTitle.add(tKey)) continue;
       _arrived.add(card);
       final key = card.sourceLabel.trim().toLowerCase();
       if (key.isNotEmpty && !_arrivalOrder.contains(key)) {
