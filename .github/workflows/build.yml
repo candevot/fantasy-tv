@@ -419,19 +419,25 @@ jobs:
       # SEARCH_RANK：搜索结果按「实际分辨率」跨源全局排序的回归。
       - name: Search rank regressions
         run: flutter test test/search_rank_test.dart
-      # SEARCH_RELEVANCE / DEDUPE_LINES / PANEL_CAP / FS_ICON_SPEC（2026-11-15）：
-      # 这一轮现场问题的回归，四件事各自钉死：
+      # SEARCH_RELEVANCE / DEDUPE_LINES / SIDE_PANEL / FS_ICON_SPEC：
+      # 这一轮现场问题的回归，五件事各自钉死：
       #   · 搜「济公传」时不能出现「背着善宰跑」这类无关片
       #     （外部接口不保证按关键词搜，客户端必须有相关性闸门）；
       #   · 没有任何可用线路的空壳记录在搜索/列表阶段就丢掉；同名记录去重保留
       #     线路多的那条（搜索里那条点进去必失败的重复记录就是这样没的）；
-      #   · 播放设置面板横屏 ≤55% 屏高且 ≤360dp、竖屏 ≤40% 且 ≤480dp，内部可滚；
+      #   · SIDE_PANEL（2026-11-20）：播放设置 / 选集两个面板从「底部弹层」
+      #     改成「右侧竖排面板」—— 宽 = 屏宽 42%、不超过半屏、放得下时最少
+      #     300dp，高 = 屏高 − 上下各 12dp，只左两角圆角，黑 72% + blur 18，
+      #     右上角 × 与外点关闭；播放设置 4 列等宽图标 + 开关 / 箭头行全部保留；
+      #     选集 5 列正方形网格、当前集紫色实底、长剧集自动定位。
+      #     旧的「面板不盖满屏（≤55%/40% 屏高）」断言随实现作废（PANEL_CAP）。
       #   · 全屏控件只有一套规格（底 30 / 图标 19.5 / tint .13 / 热区 44）。
       - name: Search relevance & panel/control spec regressions
         run: |
           flutter test test/search_relevance_test.dart
           flutter test test/search_dedupe_test.dart
           flutter test test/player_more_panel_test.dart
+          flutter test test/fs_episode_panel_test.dart
           flutter test test/fs_controls_spec_test.dart
       # SOURCE_LABEL（2026-11-15）：搜索结果卡片的「来源」标注回归。
       #

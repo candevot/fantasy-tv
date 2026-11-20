@@ -29,6 +29,7 @@ void main() {
     bool diagnostics = false,
     ValueChanged<FxLoopMode>? onLoopChanged,
     ValueChanged<bool>? onDiagnosticsChanged,
+    bool live = false,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1.0;
@@ -46,8 +47,8 @@ void main() {
                   onLoopChanged: onLoopChanged ?? (_) {},
                   onJumpPanel: () {},
                   onSleepTimer: () {},
-                  onDownload: () {},
-                  onSpeed: () {},
+                  onDownload: live ? null : () {},
+                  onSpeed: live ? null : () {},
                   onBackground: () {},
                   onFeedback: () {},
                   diagnosticsOn: diagnostics,
@@ -93,6 +94,31 @@ void main() {
     final rect = tester.getRect(find.byType(FxSidePanel));
     expect(rect.width, closeTo(180, .01));
     expect(rect.height, closeTo(776, .01));
+  });
+
+  testWidgets('手机竖屏全屏 360×800：半屏宽 180，图标行不溢出', (tester) async {
+    await pumpPanel(tester, const Size(360, 800));
+    expect(
+      tester.getSize(find.byType(FxSidePanel)).width,
+      closeTo(180, .01),
+    );
+    // 溢出会以异常形式抛出，这里显式兜一层。
+    expect(tester.takeException(), isNull);
+    for (final label in <String>['定时关闭', '下载本集', '倍速', '后台播放']) {
+      expect(find.text(label), findsOneWidget);
+    }
+  });
+
+  testWidgets('直播（无下载 / 无倍速）：图标行按剩余 2 项等分', (tester) async {
+    await pumpPanel(tester, const Size(800, 360), live: true);
+    expect(find.text('定时关闭'), findsOneWidget);
+    expect(find.text('后台播放'), findsOneWidget);
+    expect(find.text('下载本集'), findsNothing);
+    expect(find.text('倍速'), findsNothing);
+    // 2 列等分：内容宽 296 → 每列 148。
+    final gap = tester.getCenter(find.text('后台播放')).dx -
+        tester.getCenter(find.text('定时关闭')).dx;
+    expect(gap, closeTo(148, .5));
   });
 
   testWidgets('壳体规格：左两角圆角 20 + blur 18 + 黑 72%', (tester) async {

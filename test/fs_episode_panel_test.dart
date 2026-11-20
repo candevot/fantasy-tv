@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:fantasy_tv/models.dart';
 import 'package:fantasy_tv/widgets/fs_panels.dart';
 import 'package:fantasy_tv/widgets/fs_side_panel.dart';
+import 'package:fantasy_tv/widgets/together_picker.dart';
 
 /// SIDE_PANEL（2026-11-20）：选集面板 = **右侧竖排面板**（腾讯视频样式）。
 ///
@@ -144,6 +145,45 @@ void main() {
         episodes: eps(12), current: 2, title: '示例片名');
     expect(find.text('选集 · 第02集 · 共 12 集'), findsOneWidget);
     expect(find.text('示例片名'), findsOneWidget);
+  });
+
+  testWidgets('一起看全屏复用同一个面板（行为一致）', (tester) async {
+    // 一起看全屏的「选集」走 together_page._pickEpisode →
+    // showTogetherEpisodePicker，后者现在直接调 showFsEpisodeSheet。
+    // 这里直接开那个入口，断言拿到的是**同一个**右侧面板 / 5 列网格。
+    tester.view.physicalSize = const Size(800, 360);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => Center(
+              child: ElevatedButton(
+                onPressed: () => showTogetherEpisodePicker(
+                  context,
+                  episodes: eps(20),
+                  current: 4,
+                  title: '一起看示例',
+                ),
+                child: const Text('一起看选集'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('一起看选集'));
+    await tester.pumpAndSettle();
+    expect(find.byType(FxSidePanel), findsOneWidget);
+    expect(find.text('选集 · 第04集 · 共 20 集'), findsOneWidget);
+    final grid = tester.widget<GridView>(find.byType(GridView));
+    final delegate =
+        grid.gridDelegate as SliverGridDelegateWithFixedCrossAxisCount;
+    expect(delegate.crossAxisCount, 5);
+    await tester.tap(find.text('09'));
+    await tester.pumpAndSettle();
+    expect(find.byType(FxSidePanel), findsNothing);
   });
 
   testWidgets('空剧集：暂无剧集信息', (tester) async {
