@@ -9,6 +9,7 @@ import '../services/cms_bridge.dart';
 import '../services/search_rank.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
+import '../services/auto_resume.dart';
 import '../services/episode_step.dart';
 import '../services/exo_player.dart';
 import '../services/fx_player.dart';
@@ -317,6 +318,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 详情页被另一层详情覆盖中：此时 bootstrap 完成后不要自动出声。
   bool _covered = false;
 
+  /// **用户意图**：现在应该是暂停的（AUTO_RESUME 2026-11-20）。
+  ///
+  /// 只有用户自己按过暂停（点画面 / 双击 / 底部暂停键）才置 true，点播放
+  /// 置回 false。系统的、以及我们自己（换线前先停旧实例、报错、切后台）
+  /// 的暂停**都不算** —— 以前拿 `isPlaying` 当用户意图，于是每次换线都会
+  /// 把「旧实例被我们 pause 了 / 缓冲中 isPlaying=false」当成「用户暂停」，
+  /// 新线路起播后立刻又被暂停，画面就停在第一帧不动。
+  bool _userPaused = false;
+
   int get _episodeCount {
     final d = widget.detail;
     if (d == null) return 0;
@@ -558,15 +568,22 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         old.value.isInitialized &&
         !old.value.hasError &&
         !_error;
-    // 切换动作默认「继续播放」；只有切换前确实是暂停（用户主动暂停）
-    // 才保持暂停。未就绪 / 报错时按继续处理，避免自动换线后停在暂停。
-    final continuePlayback = _shouldContinuePlayback(old);
+    // 切换动作默认「继续播放」；只有**用户自己按过暂停**才保持暂停
+    // （系统 / 我们先 pause 旧实例都不算，见 `_shouldContinuePlayback`）。
+    // 以前这里读 `old.value.isPlaying`，而下面几行就会 `old?.pause()`，
+    // 于是自动换线永远被判成「用户暂停」→ 新线路停帧。
+    final continuePlayback =
+        !_covered && fxShouldPlayAfterSwitch(userPaused: _userPaused);
     // LINE_EP_ALIGN（2026-11-15）：一次切换可能同时改线路和集数 ——
     // 详情页换到集数更少的线路时会把集号夹小（第 29 集 → 第 28 集），
     // 这时 `old.value.position` 是**上一集**的位置，原样带过去就是
     // 「第 28 集从第 29 集播到的中段开始」。只有集号没变才沿用当前位置，
     // 集号变了就按该集自己保存的进度续播。
     final sameEp = targetEp == _ep;
+    // AUTO_RESUME：**在停旧实例之前**把可信位置抓下来。`old.pause()` 之后
+    // 播放器报错 / 复位时位置会变 0，再读就晚了；这里抓一次快照，换线后
+    // 用它接续（最多回退 [fxAutoSwitchMaxRewind] = 3 秒）。
+    final snap = playbackSnapshot();
     final resume = healthy && sameEp ? old.value.position : Duration.zero;
     final oldDuration = old?.value.duration;
     var resumeSeconds = resume.inMilliseconds / 1000.0;
@@ -581,6 +598,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 不足 60 秒视为刚看片头，不把 20 秒进度当成续播。
         resumeSeconds = saved >= fxResumeMinSeconds ? saved : 0;
         if (!mounted) return;
+      }
+      if (sameEp) {
+        // 换线接续：以切换前的位置为准，磁盘进度只允许往回差 3 秒以内。
+        resumeSeconds = fxResumeSecondsAfterSwitch(
+          snapshotSeconds: snap.seconds,
+          candidateSeconds: resumeSeconds,
+          maxRewindSeconds: fxAutoSwitchMaxRewind.inSeconds.toDouble(),
+        );
       }
 
       _loadToken++;
@@ -632,6 +657,16 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 线路已切换：静默，不弹遮挡画面的提示。
         // 自动尝试下一条成功时同步外层高亮，避免 UI 仍指着失败线路。
         widget.onLineFallback?.call(actualLine);
+        // 同步「父级最后一次告诉我的线路」：父级随后 rebuild 会带**这条**
+        // 线路 id 下来（onLineFallback → 详情页 setState），不回填就会在
+        // didUpdateWidget 里再跑一次换线（同一地址再 open 一遍 = 画面又闪
+        // 一次加载）。回填成实际生效的线路，不是此刻的 widget.line。
+        _lastWidgetLine = actualLine;
+        // AUTO_RESUME：新线路必须真的播起来（用户没按过暂停）。
+        unawaited(_ensureAutoPlay(lineName: _lineName));
+        // 续播点重新 arm：按新线路 + 接上的位置落一次盘，首页「继续观看」
+        // 的预取目标（线路 id + 秒数）才不会指向刚失败的那条线。
+        unawaited(_saveProgress());
       } else {
         // 两条线路都失败：停在最后尝试的线路，错误页的重试按钮直接重试它。
         final lastTried = attempts.isEmpty ? targetLine : attempts.last;
@@ -714,16 +749,50 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     return attempts.take(_maxLineAttempts).toList(growable: false);
   }
 
-  /// 切换线路 / 切集时是否继续播放：
-  /// - 已初始化且正常播放：继续；
-  /// - 已初始化但暂停：用户主动暂停，保持暂停；
-  /// - 未就绪 / 出错 / 刚播完：按继续处理（切换动作就是继续看）。
-  bool _shouldContinuePlayback([FxPlayer? player]) {
-    final c = player ?? _controller;
-    if (c == null) return true;
-    final v = c.value;
-    if (!v.isInitialized || v.hasError || v.isCompleted) return true;
-    return v.isPlaying;
+  /// 切换线路 / 切集时是否继续播放。
+  ///
+  /// 唯一依据是**用户意图**（[PlayerViewState._userPaused]）：
+  /// - 用户没按过暂停 → 继续播（未就绪 / 出错 / 缓冲中 / 我们先 pause 过
+  ///   旧实例，全都属于这一类，切换动作本身就是「继续看」）；
+  /// - 用户自己按过暂停 → 保持暂停。
+  ///
+  /// 以前这里读 `player.value.isPlaying`，而调用点在此之前刚
+  /// `_controller?.pause()`，ExoPlayer 缓冲中 `isPlaying` 也是 false ——
+  /// 于是自动换线被读成「用户暂停」，新线路起播后又被 pause 回去，
+  /// 画面停在第一帧、必须手点播放（AUTO_RESUME 2026-11-20 的根因）。
+  bool _shouldContinuePlayback() =>
+      fxShouldPlayAfterSwitch(userPaused: _userPaused);
+
+  /// 自动换线 / 切集成功后的「起播兜底」（AUTO_RESUME 2026-11-20）。
+  ///
+  /// 正常路径上 `_bootstrap(playOverride: …)` 已经带着 `play: true` 打开，
+  /// 这里只兜两种残余：原生在 `prepare` 之后把 `playWhenReady` 吞掉了、
+  /// 或首帧前一瞬间状态被上一次 open 的收尾覆盖。用户按过暂停就直接返回
+  /// （用户的暂停永远优先，自动换线不许把它顶掉）。
+  Future<void> _ensureAutoPlay({required String lineName}) async {
+    if (_userPaused || !mounted) return;
+    final c = _controller;
+    if (c == null) return;
+    var nudged = false;
+    for (var i = 0; i < 12; i++) {
+      if (!mounted) return;
+      final v = c.value;
+      if (v.hasError) return;
+      if (v.isPlaying) {
+        if (nudged) fxPlayLog('auto resume line=$lineName ok');
+        return;
+      }
+      // 已就绪但没在播：补一次 play()。缓冲中会被原生排到缓冲结束之后，
+      // 所以这里每 150ms 看一眼，最多看 1.8 秒。
+      if (v.isInitialized) {
+        nudged = true;
+        try {
+          await c.play();
+        } catch (_) {}
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
+    if (nudged) fxPlayLog('auto resume line=$lineName 未起播（交给看门狗）');
   }
 
   @override
@@ -1436,6 +1505,12 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           controller,
           openFuture,
           hevc: target.hevc,
+          // SH4K_RETRY：令牌解析线路（SH4K / 幻想4K / hxparse 包装地址）
+          // 给 20 秒无进展窗口；直链仍是 8 秒。
+          noProgress: fxStartupNoProgressWindowFor(
+            url: url,
+            lineName: openLineName,
+          ),
         );
         // 被新一次 open 取代：只回收**本次新建**的实例。
         //
@@ -1644,8 +1719,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 已试过的线路：本轮不再重复（restart 时从第一条开始）。
     final tried = <String>{if (!restart && _line.isNotEmpty) _line};
     final snap = playbackSnapshot();
-    final resumeAt = restart ? 0.0 : snap.seconds;
-    final playState = restart ? true : snap.playing;
+    // AUTO_RESUME（2026-11-20）：**接上切换前的位置，最多回退 3 秒**。
+    final resumeAt = restart
+        ? 0.0
+        : fxResumeSecondsAfterSwitch(
+            snapshotSeconds: snap.seconds,
+            candidateSeconds: snap.seconds,
+            maxRewindSeconds: fxAutoSwitchMaxRewind.inSeconds.toDouble(),
+          );
+    // 自动换线成功必须自动起播 —— 判据只有一个：用户自己按过暂停没有。
+    // 看 `snap.playing` 是根因所在：进 `_bootstrap` 第一件事就是
+    // `_controller?.pause()`（先停旧实例），缓冲中 `isPlaying` 也是 false，
+    // 于是「切换前在播」被读成 false，新线路 open 完又被暂停（画面停帧）。
+    final playState =
+        restart || fxShouldPlayAfterSwitch(userPaused: _userPaused);
     final ep = _ep;
     final videoId = widget.videoId;
     // LINE_COOLDOWN：10 分钟内失败过的线路沉到最后；本轮里它们先跳过，
@@ -1675,7 +1762,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 失败窗口。记一笔日志与冷却（下次排序也不会再排前面）。
         if (isDeadLineName(candidate.displayName)) {
           deadSkipped++;
-          FxLineCooldown.markFailed(videoId, candidate.displayName);
+          FxLineCooldown.markFailed(
+            videoId,
+            candidate.displayName,
+            reason: 'dead_line',
+          );
           fxPlayLog(
             fxAutoLineLog(
               attempt: attempt + 1,
@@ -1687,7 +1778,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           );
           continue;
         }
-        // 冷却中的线路本轮直接跳过（10 分钟内不再试它）。
+        // 冷却中的线路本轮直接跳过（真坏 10 分钟 / 抖动 2 分钟，见
+        // `auto_resume.dart` 的 fxCooldownWindowFor）。
         if (FxLineCooldown.isCooling(videoId, candidate.displayName)) {
           skippedCooling++;
           continue;
@@ -1698,27 +1790,59 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           // 进度提示：让用户知道在动，而不是卡死。
           showResolving(fxTryingLineText(attempt, total));
           _lastOpenError = '';
-          final watch = Stopwatch()..start();
-          final opened = await _bootstrap(
-            seekToSaved: false,
-            saveOld: false,
-            lineOverride: candidate.id,
-            epOverride: ep,
-            resumeSeconds: resumeAt,
-            playOverride: playState,
-            commitLine: true,
-            reportFailure: false,
-            force: true,
+          // SH4K_RETRY（2026-11-20）：令牌解析线路的首帧天然比直链慢
+          // （本站 302 → 上游清单 → AES key → 首片，冷启动实测 5~7 秒）。
+          // 判死之前补**一次**快速重试（间隔 [fxFastRetryDelay] = 1.5 秒），
+          // 别让上游一次抖动就把整条线路标死。真坏（4xx / 解析失败 /
+          // 清单非法 / DNS）不补 —— 那几种再要一次也是一样的结果。
+          final tokenLine = fxIsTokenParseLine(
+            lineName: candidate.displayName,
           );
-          watch.stop();
+          var opened = false;
+          var reason = '';
+          for (var retry = 0; retry <= 1; retry++) {
+            if (retry > 0) {
+              if (!mounted) return false;
+              fxPlayLog(
+                'auto line retry fast line=${candidate.displayName} '
+                'reason=$reason delay=${fxFastRetryDelay.inMilliseconds}ms',
+              );
+              await Future<void>.delayed(fxFastRetryDelay);
+              if (!mounted) return false;
+            }
+            final watch = Stopwatch()..start();
+            opened = await _bootstrap(
+              seekToSaved: false,
+              saveOld: false,
+              lineOverride: candidate.id,
+              epOverride: ep,
+              resumeSeconds: resumeAt,
+              playOverride: playState,
+              commitLine: true,
+              reportFailure: false,
+              // 补重试必须重新要一次地址：令牌 / 一次性地址可能已经用掉。
+              forcePlayInfo: retry > 0,
+              force: true,
+            );
+            watch.stop();
+            if (opened && mounted) {
+              reason = '';
+              break;
+            }
+            // 失败原因：预检失败 / 真失败（4xx/5xx、DNS、TLS）/ 无进展 / 慢网。
+            reason = fxOpenFailReason(
+              elapsedMs: watch.elapsedMilliseconds,
+              error: _lastOpenError,
+            );
+            if (!fxShouldFastRetry(
+              reason: reason,
+              retries: retry,
+              tokenLine: tokenLine,
+            )) {
+              break;
+            }
+          }
           ok = opened && mounted;
-          // 失败原因：预检失败 / 真失败（4xx/5xx、DNS、TLS）/ 8 秒无进展 / 慢网。
-          final reason = ok
-              ? ''
-              : fxOpenFailReason(
-                  elapsedMs: watch.elapsedMilliseconds,
-                  error: _lastOpenError,
-                );
           // PROBE（2026-11-15）：预检日志已经挪到 `onProbeResult` 回调里
           // （预检改成并行后，这里读 `lastProbe` 时它多半还没回来）。
           fxPlayLog(
@@ -1734,14 +1858,29 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             _line = candidate.id;
             FxLineCooldown.markHealthy(videoId, candidate.displayName);
             widget.onLineFallback?.call(candidate.id);
+            // 见 `_switchLine`：父级 rebuild 带来的就是这条线路，不该再触发
+            // 一次换线（否则自动换线成功后画面会再闪一次加载）。
+            _lastWidgetLine = candidate.id;
+            // 自动换线成功 → 必须真的播起来（用户没按过暂停）。
+            unawaited(_ensureAutoPlay(lineName: candidate.displayName));
+            // 续播点重新 arm：新线路 + 接上的位置立刻落一次盘。
+            unawaited(_saveProgress());
             break;
           }
-          // 失败：立刻记 10 分钟临时不可用，并马上试下一条（不等用户）。
-          FxLineCooldown.markFailed(videoId, candidate.displayName);
+          // 失败：按原因记冷却（真坏 10 分钟 / 抖动 2 分钟），马上试下一条。
+          FxLineCooldown.markFailed(
+            videoId,
+            candidate.displayName,
+            reason: reason,
+          );
         } catch (e) {
           skip = true;
           _lastOpenError = '$e';
-          FxLineCooldown.markFailed(videoId, candidate.displayName);
+          FxLineCooldown.markFailed(
+            videoId,
+            candidate.displayName,
+            reason: 'bootstrap_exception',
+          );
           fxPlayLog(
             fxAutoLineLog(
               attempt: attempt,
@@ -1998,6 +2137,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     FxPlayer controller,
     Future<void> open, {
     required bool hevc,
+    Duration? noProgress,
   }) {
     _openProgress.reset();
     _openWaited = Duration.zero;
@@ -2006,8 +2146,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       controller,
       open,
       progress: _openProgress,
-      // HEVC 候选的无进展窗口收紧到 8 秒；普通候选按默认 8 秒。
-      noProgress: hevc ? IqCodecGate.hevcOpenTimeout : _openNoProgressWindow,
+      // 窗口来源三档：调用方按线路类型给的（令牌段 20 秒）→ HEVC 收紧到
+      // 8 秒 → 直链默认 8 秒。
+      noProgress: noProgress ??
+          (hevc ? IqCodecGate.hevcOpenTimeout : _openNoProgressWindow),
       onSample: _onOpenProgressSample,
     );
   }
@@ -2108,7 +2250,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         reason: 'stuck_no_progress',
       ),
     );
-    FxLineCooldown.markFailed(widget.videoId, _lineName);
+    FxLineCooldown.markFailed(
+      widget.videoId,
+      _lineName,
+      reason: 'stuck_no_progress',
+    );
     // 立刻切下一条（不等用户，也不弹错误提示）。
     unawaited(autoTryAllLines());
   }
@@ -2429,6 +2575,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       seekToSaved: true,
       saveOld: false,
       forcePlayInfo: true,
+      playOverride: !_covered && _shouldContinuePlayback(),
       force: true,
     );
     // 这次重试自己也没成：必须有明确结果，绝不留悬空 loading。
@@ -2496,9 +2643,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     final ui = _uiPosition;
     if (ui != null && ui > pos) pos = ui;
-    final playing = v == null
-        ? true
-        : (v.isPlaying || !v.isInitialized || v.hasError || v.isCompleted);
+    // AUTO_RESUME：这份快照的 `playing` 只表示**用户意图**，不是播放器现状。
+    // 拿 `isPlaying` 当证据时，换线前那句 `_controller?.pause()`（还有缓冲中
+    // 必然是 false 的 isPlaying）会被读成「用户暂停了」，新线路就停在暂停。
+    final playing = fxShouldPlayAfterSwitch(userPaused: _userPaused);
     return FxPlaybackSnapshot(
       ep: _ep,
       position: pos,
@@ -2570,6 +2718,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
     // 以播放器真实状态为准：交给内核切换，按钮图标随后续
     // player.stream.playing 事件刷新，不用本地布尔抢先改状态。
+    // AUTO_RESUME：但**意图**要记下来 —— 只有这里（用户自己点的）才算暂停，
+    // 之后自动换线 / 切集才不会把用户的暂停当成「系统暂停」又播起来。
+    _userPaused = c.value.isPlaying;
     unawaited(c.playOrPause());
     _touch();
   }

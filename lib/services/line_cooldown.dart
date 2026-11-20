@@ -13,7 +13,11 @@
 ///   · 键是 `videoId|线路名`（线路名来自 `LineInfo.displayName`，播放页与详情页
 ///     用的是同一套名字，所以两边都能查）；
 ///   · 存 SharedPreferences（`fx_line_cooldown_v1`），杀掉进程再进来仍然生效；
-///   · 过期条目在读取时就被丢掉，不额外起定时器。
+///   · 过期条目在读取时就被丢掉，不额外起定时器；
+///   · 冷却时长**按失败原因区分**（SH4K_RETRY 2026-11-20）：真坏（4xx /
+///     解析失败 / 清单非法 / DNS）留 10 分钟，抖动（8 秒无进展、慢网超时、
+///     一次 5xx）只留 2 分钟 —— 原来一律 10 分钟，SH4K 这种令牌线路慢一次
+///     就被封十分钟，用户下次进来还是「线路用不了」。
 library;
 
 import 'dart:async';
@@ -22,6 +26,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models.dart';
+import 'auto_resume.dart' show fxCooldownWindowFor;
 import 'fallback_match.dart';
 import 'play_log.dart';
 
@@ -35,6 +40,11 @@ class FxLineCooldown {
 
   /// `videoId|线路名` → 失败时刻（毫秒时间戳）。
   static final Map<String, int> _failedAt = <String, int>{};
+
+  /// `videoId|线路名` → 这条记录的冷却时长（毫秒）。
+  ///
+  /// 和 [_failedAt] 同生同灭；缺省（老数据 / 没写原因）按真坏 10 分钟算。
+  static final Map<String, int> _windowMs = <String, int>{};
 
   static bool _loaded = false;
   static Future<void>? _loading;
@@ -59,9 +69,18 @@ class FxLineCooldown {
           if (decoded is Map) {
             final now = DateTime.now().millisecondsSinceEpoch;
             for (final entry in decoded.entries) {
-              final at = int.tryParse('${entry.value}') ?? 0;
-              if (!fxCoolingActive(at, now)) continue;
+              final raw = entry.value;
+              // 老格式是一条时间戳；新格式是 {"a":失败时刻,"w":冷却毫秒}。
+              final at = raw is Map
+                  ? int.tryParse('${raw['a']}') ?? 0
+                  : int.tryParse('$raw') ?? 0;
+              final windowMs = raw is Map ? int.tryParse('${raw['w']}') ?? 0 : 0;
+              final window = windowMs > 0
+                  ? Duration(milliseconds: windowMs)
+                  : fxLineCooldownWindow;
+              if (!fxCoolingActive(at, now, window: window)) continue;
               _failedAt['${entry.key}'] = at;
+              if (windowMs > 0) _windowMs['${entry.key}'] = windowMs;
             }
           }
         }
@@ -86,24 +105,39 @@ class FxLineCooldown {
     final at = _failedAt[key];
     if (at == null) return false;
     final ms = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    if (fxCoolingActive(at, ms)) return true;
+    final windowMs = _windowMs[key] ?? 0;
+    final window = windowMs > 0
+        ? Duration(milliseconds: windowMs)
+        : fxLineCooldownWindow;
+    if (fxCoolingActive(at, ms, window: window)) return true;
     // 过期了顺手清掉，别让表一直长。
     _failedAt.remove(key);
+    _windowMs.remove(key);
     return false;
   }
 
-  /// 记一次失败（10 分钟内不再试这条线路）。
+  /// 记一次失败（按 [reason] 决定冷却多久，默认真坏 10 分钟）。
+  ///
+  /// [reason] 用 `fallback_match.dart` 的 `fxOpenFailReason` 口径
+  /// （`http_404` / `no_first_frame` / `stuck_no_progress` …）。
   static void markFailed(
     String videoId,
     String lineName, {
     DateTime? now,
+    String reason = '',
   }) {
     final id = videoId.trim();
     final name = lineName.trim();
     if (id.isEmpty || name.isEmpty) return;
     final ms = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    _failedAt[keyOf(id, name)] = ms;
-    fxPlayLog('cooldown mark video=$id line=$name window=${fxLineCooldownWindow.inMinutes}min');
+    final window = fxCooldownWindowFor(reason);
+    final key = keyOf(id, name);
+    _failedAt[key] = ms;
+    _windowMs[key] = window.inMilliseconds;
+    fxPlayLog(
+      'cooldown mark video=$id line=$name window=${window.inMinutes}min '
+      'reason=${reason.trim().isEmpty ? 'unknown' : reason.trim()}',
+    );
     _prune();
     _scheduleSave();
   }
@@ -111,7 +145,9 @@ class FxLineCooldown {
   /// 这条线路又播成功了：从冷却表里删掉（别让它无辜背 10 分钟锅）。
   static void markHealthy(String videoId, String lineName) {
     final key = keyOf(videoId, lineName);
-    if (_failedAt.remove(key) == null) return;
+    final removed = _failedAt.remove(key);
+    _windowMs.remove(key);
+    if (removed == null) return;
     _scheduleSave();
   }
 
@@ -120,12 +156,14 @@ class FxLineCooldown {
     final prefix = '${videoId.trim()}|';
     final before = _failedAt.length;
     _failedAt.removeWhere((key, _) => key.startsWith(prefix));
+    _windowMs.removeWhere((key, _) => key.startsWith(prefix));
     if (_failedAt.length != before) _scheduleSave();
   }
 
   /// 清空全部（调试 / 设置里「重置」用）。
   static Future<void> clearAll() async {
     _failedAt.clear();
+    _windowMs.clear();
     _dirty = true;
     await flush();
   }
@@ -186,6 +224,7 @@ class FxLineCooldown {
     final drop = _failedAt.length - maxEntries;
     for (var i = 0; i < drop && i < entries.length; i++) {
       _failedAt.remove(entries[i].key);
+      _windowMs.remove(entries[i].key);
     }
   }
 
@@ -207,9 +246,12 @@ class FxLineCooldown {
     try {
       final sp = await SharedPreferences.getInstance();
       final now = DateTime.now().millisecondsSinceEpoch;
-      final out = <String, int>{};
+      final out = <String, Map<String, int>>{};
       _failedAt.forEach((key, at) {
-        if (fxCoolingActive(at, now)) out[key] = at;
+        final windowMs = _windowMs[key] ?? fxLineCooldownWindow.inMilliseconds;
+        final window = Duration(milliseconds: windowMs);
+        if (!fxCoolingActive(at, now, window: window)) return;
+        out[key] = <String, int>{'a': at, 'w': windowMs};
       });
       await sp.setString(prefKey, jsonEncode(out));
     } catch (_) {

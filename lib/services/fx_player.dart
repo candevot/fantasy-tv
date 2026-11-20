@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models.dart';
+import 'auto_resume.dart';
 import 'cms_bridge.dart';
 import 'exo_player.dart';
 import 'hls_segment_index.dart';
@@ -1003,6 +1004,20 @@ class FxPlayer implements Listenable {
     }
   }
 
+  /// 这次起播「连续无进展」的内核窗口（SH4K_RETRY 2026-11-20）。
+  ///
+  /// 首帧前：令牌解析线路（`/hxparse/xo?u=SH4K-…` / 幻想4K）等 20 秒，
+  /// 直链仍按 8 秒。用户口径是「自动换线要能自动起来」——SH4K 要多走本站
+  /// 解析 302 + 上游清单 + AES key 三跳，冷启动实测 5~7 秒，8 秒窗口会把
+  /// 正常的首帧判成死线路（这正是「SH4K 有时加载不出来」的一半原因）。
+  /// 首帧之后仍按 [playbackStallTimeout]（6 秒）判卡顿：那时管线已经通了。
+  Duration _startupWindow(bool hasRenderedFirstFrame) {
+    final base = stallTimeoutFor(hasRenderedFirstFrame: hasRenderedFirstFrame);
+    if (hasRenderedFirstFrame) return base;
+    final token = fxStartupNoProgressWindowFor(url: _sourceUrl);
+    return token > base ? token : base;
+  }
+
   /// 等首帧，但把「还在下载（慢）」和「卡死（真失败）」区分开。
   ///
   /// SLOW_NET（2026-11-15）用户定稿：
@@ -1022,7 +1037,7 @@ class FxPlayer implements Listenable {
   ///     连接被拒、TLS、清单非法、0 分片）→ **立刻**放弃，不等窗口。
   Future<void> _awaitReadyOrProgress(Future<void> ready, int token) async {
     final watch = Stopwatch()..start();
-    final progress = FxProgressWindow(window: fxStartupNoProgressWindow);
+    final progress = FxProgressWindow(window: _startupWindow(false));
     var slowCapMs = _openSlowCap.inMilliseconds;
     var lastLogMs = -1000;
     while (true) {
@@ -1038,8 +1053,8 @@ class FxPlayer implements Listenable {
       final st = _engine.state.value;
       final firstFrame =
           st.hasRenderedFirstFrame || _value.hasRenderedFirstFrame;
-      // 首帧前后用同一个「无进展」口径，只是窗口长度不同（8s / 10s）。
-      progress.window = stallTimeoutFor(hasRenderedFirstFrame: firstFrame);
+      // 首帧前后用同一个「无进展」口径，只是窗口长度不同。
+      progress.window = _startupWindow(firstFrame);
       progress.add(
         FxProgressSample(
           atMs: watch.elapsedMilliseconds,

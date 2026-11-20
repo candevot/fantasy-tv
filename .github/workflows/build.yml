@@ -146,6 +146,66 @@ jobs:
           exit $code
       - name: Playback recovery regressions
         run: flutter test test/playback_regressions_test.dart
+
+      # AUTO_RESUME / SH4K_RETRY（2026-11-20）：两个现场问题的门禁。
+      #
+      # ① 「自动切线路之后画面停着不动，要手动点播放」。
+      #    根因不是「切完没调 play」，而是**要不要继续播判错了**：
+      #    `_bootstrapSource` 一进来就 `_controller?.pause()`（先停旧实例），
+      #    ExoPlayer 缓冲中 `isPlaying` 也是 false —— 两者都被当成「用户暂停」，
+      #    于是新线路 open 完又立刻 pause 回去（画面停帧）。
+      #    所以这里钉两件事：判定只走 `fxShouldPlayAfterSwitch`（用户意图），
+      #    换线成功后还有一次起播兜底；反面门禁是「不许再用 isPlaying 判」。
+      #
+      # ② 「SH4K 有时加载不出来，报线路用不了」。
+      #    服务端实测 5 个样本全部 302→200（137/141/139/97 个分片），上游是好的；
+      #    客户端这边令牌线路要多走本站 302 + 上游清单 + AES key，冷启动 5~7 秒，
+      #    8 秒无进展窗口太紧，一次抖动还冷却 10 分钟。现在钉住：
+      #    令牌线路 20 秒窗口、判死前补一次 1.5 秒快速重试、抖动冷却 2 分钟。
+      - name: Auto line switch autoplay & SH4K fast retry regressions
+        run: |
+          set -e
+          # ① 用户意图是唯一判据：两个播放页都要有 _userPaused，且都走判定函数。
+          grep -q 'bool _userPaused' lib/pages/player_page.dart
+          grep -q 'bool _userPaused' lib/pages/fullscreen_page.dart
+          grep -q 'fxShouldPlayAfterSwitch(userPaused: _userPaused)' lib/pages/player_page.dart
+          grep -q 'fxShouldPlayAfterSwitch(userPaused: _userPaused)' lib/pages/fullscreen_page.dart
+          # 用户真的点了暂停/播放，意图要落下来（点播放键那两个入口）。
+          grep -q '_userPaused = c.value.isPlaying;' lib/pages/player_page.dart
+          grep -q '_userPaused = c.value.isPlaying;' lib/pages/fullscreen_page.dart
+          # 自动换线成功后必须自动起播（兜底），并把续播点按新线路重新 arm。
+          grep -q '_ensureAutoPlay' lib/pages/player_page.dart
+          grep -q 'auto resume line=' lib/pages/player_page.dart
+          # 接续位置：最多回退 3 秒。
+          grep -q 'fxAutoSwitchMaxRewind' lib/pages/player_page.dart
+          grep -q 'fxResumeSecondsAfterSwitch' lib/pages/player_page.dart
+          # 反面门禁：换线「要不要继续播」不许再拿 isPlaying 当用户意图。
+          if grep -A2 'bool _shouldContinuePlayback' lib/pages/player_page.dart | grep -q 'isPlaying'; then
+            echo '换线是否继续播不许用 isPlaying 判定（缓冲中/我们自己 pause 后都是 false）' >&2
+            exit 1
+          fi
+          if grep -A2 'bool _shouldContinuePlayback' lib/pages/fullscreen_page.dart | grep -q 'isPlaying'; then
+            echo '全屏页换集是否继续播不许用 isPlaying 判定' >&2
+            exit 1
+          fi
+          # ② SH4K：令牌线路窗口 / 快速重试 / 按原因分档的冷却。
+          grep -q 'fxTokenStartupNoProgressWindow' lib/services/auto_resume.dart
+          grep -q 'fxStartupNoProgressWindowFor' lib/pages/player_page.dart
+          grep -q 'fxStartupNoProgressWindowFor' lib/services/fx_player.dart
+          grep -q 'fxFastRetryDelay' lib/pages/player_page.dart
+          grep -q 'auto line retry fast' lib/pages/player_page.dart
+          grep -q 'fxShouldFastRetry' lib/pages/player_page.dart
+          grep -q 'fxCooldownWindowFor' lib/services/line_cooldown.dart
+          grep -q "reason: 'stuck_no_progress'" lib/pages/player_page.dart
+          # 反面门禁：令牌线路的窗口必须是 15 秒（改小回去就红）。
+          grep -q 'fxTokenStartupNoProgressWindow = Duration(seconds: 20)' \
+            lib/services/auto_resume.dart
+          # 全屏看门狗不许再写一份自己的数字（竖屏 / 全屏 / 内核共用一个）。
+          grep -q '_parseLineFirstFrameTimeout =' lib/pages/fullscreen_page.dart
+          grep -q 'fxTokenStartupNoProgressWindow;' lib/pages/fullscreen_page.dart
+          grep -q 'fxTransientCooldownWindow = Duration(minutes: 2)' \
+            lib/services/auto_resume.dart
+          flutter test test/auto_resume_test.dart
       # NET_SPEED（2026-11-15）：实时网速。
       #
       # 用户实测「缓冲时转圈下面一直 0 KB/s，从来没变过」：计数器的字节数

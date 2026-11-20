@@ -9,6 +9,7 @@ import '../services/cms_bridge.dart';
 import '../services/playback_progress.dart';
 import '../services/cast_service.dart';
 import '../services/app_settings.dart';
+import '../services/auto_resume.dart';
 import '../services/device_status.dart';
 import '../services/fx_player.dart';
 import '../services/iq_codec_gate.dart';
@@ -163,11 +164,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 这类地址点下去先是「服务端解析令牌 → 返回真实 m3u8」，解析期几秒内
   /// 字节 / 缓冲 / 位置全是 0，对「按进展判活」的看门狗来说等于一动不动，
   /// 8 秒就被判死 —— 用户看到的就是「SH4K 一会能用一会说线路用不了」。
-  /// 直链保持 8 秒不变，解析型给 20 秒。
-  static const Duration _parseLineFirstFrameTimeout = Duration(seconds: 20);
+  /// 直链保持 8 秒不变，解析型给 [fxTokenStartupNoProgressWindow]（20 秒）；
+  /// 数字只在 `auto_resume.dart` 里写一次，竖屏 / 全屏 / 内核共用。
+  static const Duration _parseLineFirstFrameTimeout =
+      fxTokenStartupNoProgressWindow;
 
-  static bool _isParseUrl(String? u) =>
-      u != null && u.contains('hxparse');
+  static bool _isParseUrl(String? u) => fxIsTokenParseLine(url: u ?? '');
 
   /// 连续播放失败次数；首帧真正出现后清零。
 
@@ -265,6 +267,13 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 回前台只重建 Video 输出层（换 key），播放器实例与进度保持不动。
   int _videoEpoch = 0;
   bool _locked = false;
+
+  /// **用户意图**：现在应该是暂停的（AUTO_RESUME 2026-11-20）。
+  ///
+  /// 和竖屏页同一个口径：只有用户自己按暂停才置 true。换集 / 换线时
+  /// `_bootstrapSource` 会先 `c.pause()` 旧流，缓冲中 `isPlaying` 也是 false，
+  /// 拿它当「用户暂停」会让新流起播后又停在暂停（画面停帧）。
+  bool _userPaused = false;
 
   /* ------------------------------------------------------- 播放方向自适应 */
 
@@ -737,13 +746,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     }
   }
 
-  /// 切集 / 重载时是否继续播放：暂停态保持暂停，未就绪 / 出错 / 刚播完
-  /// 则按「继续播放」处理。
-  bool _shouldContinuePlayback(FxPlayer c) {
-    final v = c.value;
-    if (!v.isInitialized || v.hasError || v.isCompleted) return true;
-    return v.isPlaying;
-  }
+  /// 切集 / 重载时是否继续播放：只认**用户意图**（AUTO_RESUME 2026-11-20）。
+  ///
+  /// 不再看 `c.value.isPlaying`：调用点在此之前已经 `c.pause()` 了旧流，
+  /// 而且缓冲中 `isPlaying` 恒为 false，两者都不是「用户想暂停」。
+  bool _shouldContinuePlayback(FxPlayer c) =>
+      fxShouldPlayAfterSwitch(userPaused: _userPaused);
 
   Future<void> _bootstrapSource({
     required bool seekToSaved,
@@ -1764,6 +1772,9 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       unawaited(CastService.instance.stop());
     }
     // 直接让内核切换，图标由 playingStream 驱动，避免本地态覆盖。
+    // 但用户意图要记下来：自动换线 / 换集不许把用户的暂停顶掉，反过来
+    // 用户没暂停时也不许因为我们自己 pause 过旧流就停在暂停。
+    _userPaused = c.value.isPlaying;
     unawaited(c.playOrPause());
     _wake();
   }

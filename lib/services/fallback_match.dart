@@ -89,11 +89,22 @@ String fxFallbackSwitchedText(String sourceName) {
 const Duration fxLineCooldownWindow = Duration(minutes: 10);
 
 /// 冷却期是否仍然有效：[failedAtMs] 是失败时刻（毫秒时间戳，0 = 没记录）。
-bool fxCoolingActive(int failedAtMs, int nowMs) {
+///
+/// [window] 默认是 [fxLineCooldownWindow]（真坏：10 分钟）。抖动类失败
+/// （慢网首帧超时 / 一次 5xx）用短窗口，见 `auto_resume.dart` 的
+/// `fxCooldownWindowFor` —— 冷却太长会让用户「下次进来还说线路用不了」。
+bool fxCoolingActive(
+  int failedAtMs,
+  int nowMs, {
+  Duration window = fxLineCooldownWindow,
+}) {
   if (failedAtMs <= 0) return false;
   final gap = nowMs - failedAtMs;
   if (gap < 0) return true;
-  return gap < fxLineCooldownWindow.inMilliseconds;
+  final span = window.inMilliseconds <= 0
+      ? fxLineCooldownWindow.inMilliseconds
+      : window.inMilliseconds;
+  return gap < span;
 }
 
 /// 单条线路的失败原因归类（日志里的 `reason=`，也是冷却判定的依据）。
