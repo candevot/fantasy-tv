@@ -13,6 +13,8 @@ import '../services/fx_player.dart';
 import '../services/iq_codec_gate.dart';
 import '../services/iqiyi_codec.dart';
 import '../services/fallback_match.dart';
+import '../services/live_edge.dart';
+import '../services/live_source.dart';
 import '../services/play_log.dart';
 import '../services/play_orientation.dart';
 import '../services/screen_orientation.dart';
@@ -21,6 +23,7 @@ import '../widgets/player_theme.dart';
 import '../widgets/together_chat.dart';
 import '../widgets/together_client.dart';
 import '../widgets/together_fullscreen.dart';
+import '../widgets/together_live.dart';
 import '../widgets/together_picker.dart';
 import '../widgets/together_room.dart';
 import '../widgets/together_room_picker.dart';
@@ -311,6 +314,15 @@ class _TogetherPageState extends State<TogetherPage>
   int _liveReloadAt = 0;
   bool _liveJumping = false;
 
+  /// 直播刷新进行中（自己点刷新 / 跟着别人刷新）：连点时只认第一次，
+  /// 避免同时发起两次 re-open 把播放器换掉两次。
+  bool _liveRefreshing = false;
+
+  /// 本次直播拉流的原因：`open` / `switch` / `refresh` / `peer-refresh` /
+  /// `reconnect` / `stall`。只用于 `[FxLive]` 探针日志 —— 排查时一眼能看出
+  /// 「这一跳是本地刷新，还是跟着房间刷新」。
+  String _liveLoadReason = 'open';
+
   /// 无感救援链第③步已试过的线路 id：每轮拉流重置，每条只换一次。
   final List<String> _liveRescueTried = <String>[];
 
@@ -543,7 +555,8 @@ class _TogetherPageState extends State<TogetherPage>
       _appendSystem('已重新连接服务器');
       if (_isLive) {
         // 直播断线重连：直接重新拉流回到直播边缘，不等旧流慢慢追。
-        _liveJumpToEdge(force: true);
+        // 纯本地动作：不上报、不广播，别人不看这条连接。
+        _liveJumpToEdge(force: true, reason: 'reconnect');
       } else {
         _syncVideo();
       }
@@ -725,11 +738,12 @@ class _TogetherPageState extends State<TogetherPage>
     _resetSyncState();
     _downReported = false;
     if (_isLive) {
-      // 直播房一建好就默认在播：先把本地权威状态置为 playing，
-      // 再广播给服务器 / 成员，不能等服务端回一个默认的暂停态。
-      _livePlaying = true;
+      // 直播房一建好就默认在播（直播没有「暂停」这回事）。
+      // LIVE_TOGETHER：**不广播播放态** —— 房间只广播切台 / 刷新两种动作，
+      // 频道信息在 create 报文里已经带上，成员进房按同一频道自己起播。
+      _setLivePlayingLocal(true);
       _position.value = 0;
-      if (_isHost && _online) _sendLiveState(true);
+      _liveLoadReason = 'open';
       _syncVideo();
       return;
     }
@@ -775,12 +789,25 @@ class _TogetherPageState extends State<TogetherPage>
     }
     final prev = _remote;
     final incomingLive = state.liveChannel;
-    if (_isLive || state.isLive) {
+    if (state.mode == 'live' || _isLive || state.isLive) {
       final live = incomingLive ?? _liveChannel;
+      // 进房首次对齐不算「谁切了台」：只有已经在房里、频道真的变了才是切台。
+      final firstJoin = !_isLive;
       final changedChannel =
-          live != null && (!_isLive || live.id != _liveChannel?.id);
+          live != null &&
+          (firstJoin ||
+              togetherLiveShouldFollowChannel(
+                incomingId: live.id,
+                currentId: _liveChannel?.id ?? '',
+              ));
       if (changedChannel) {
+        _liveLoadReason = firstJoin ? 'open' : 'switch';
         _setupLive(live, _liveLineId, create: false);
+        if (!firstJoin && !live.id.isEmpty) {
+          // 频道是同步的（LIVE_TOGETHER ①）：别人切台，我这边跟着切，
+          // 给一条轻提示，别让人以为画面自己跳了。
+          togetherToast(context, togetherLiveChannelToast(live.title));
+        }
       }
       final targetLine = state.line.trim();
       final validLine =
@@ -804,20 +831,18 @@ class _TogetherPageState extends State<TogetherPage>
         _isHost = _leaderIsMe(state);
       });
       _downReported = false;
-      if (changedChannel && _isLive) {
+      // 直播没有可跟随的播放态（LIVE_TOGETHER ②）：进来就在播，
+      // 绝不用 room_state 的 playing 去暂停 / 播放对方的画面。
+      _setLivePlayingLocal(true);
+      if (changedChannel || changedLine) {
         _loadedKey = '';
         _loadingKey = '';
+        if (!changedChannel) _liveLoadReason = 'switch';
+        _syncVideo();
       }
-      // 成员以房主最新状态为准：房主暂停 / 回到开头后再邀请，
-      // 新成员也必须先按暂停态拉流，不能先自己播一段再跳。
-      if (!_isHost) _livePlaying = state.playing;
-      if (changedChannel || changedLine) _syncVideo();
-      if (!_isHost) {
-        _applyLiveRemote(state, prev);
-      } else if (_needsHostResync) {
-        _needsHostResync = false;
-        _sendLiveState(state.playing);
-      }
+      // 直播房的权威状态里没有「进度 / 播放态」这两个概念可对，
+      // 所以不退回 vod 的 _applyRemoteState：位置永远由本地决定。
+      _needsHostResync = false;
       return;
     }
     final changedVideo = state.videoId.isNotEmpty && state.videoId != _videoId;
@@ -1006,6 +1031,16 @@ class _TogetherPageState extends State<TogetherPage>
         text: op.label,
       ),
     );
+    // 刷新是直播房唯一会广播的位置类动作（LIVE_TOGETHER ③）：
+    // 收到别人的刷新，本机执行**同一个**本地动作 —— 重新拉流并落到边缘前
+    // 3 秒，然后弹一句「XX 已同步刷新直播」。自己发出去的回声不重复执行。
+    if (togetherLiveShouldRefreshOnOp(
+      action: op.action,
+      mine: mine,
+      isLive: _isLive,
+    )) {
+      unawaited(_refreshLiveTogether(fromPeer: true, by: op.name));
+    }
   }
 
   /// 追加一条操作流水。
@@ -1235,6 +1270,8 @@ class _TogetherPageState extends State<TogetherPage>
       'liveCover': channel.cover,
       'liveGroup': channel.group,
       'lines': [for (final line in channel.lines) line.toJson()],
+      // 完整频道（含线路播放地址）：成员进房 / 跟随切台都靠它起播。
+      'liveChannel': channel.toMap(),
     };
   }
 
@@ -1288,56 +1325,56 @@ class _TogetherPageState extends State<TogetherPage>
     if (mounted) setState(() {});
   }
 
-  /// 房主广播直播播放状态：只同步 play/pause 和线路，不传进度。
+  /// 直播房：**不同步播放态**（LIVE_TOGETHER 2026-11-20）。
   ///
-  /// [userAction] 只有「用户主动点播放/暂停」才传 true，此时带 `op` 生成操作
-  /// 提示；重连重广播、首帧兜底、回前台重拉流都传 false（quiet），
-  /// 否则直播房会重复刷「你 开始播放」（OP_NO_BOUNCE）。
-  void _sendLiveState(bool playing, {bool userAction = false}) {
+  /// 用户口径：「正常看的话双方不会同步」。所以这里只剩本地状态，
+  /// 不再给服务端发 play / pause —— 直播房会广播的只有切台和刷新两种。
+  void _setLivePlayingLocal(bool playing) {
     _livePlaying = playing;
-    if (!_online) return;
-    _client.sendState(
-      playing ? 'play' : 'pause',
-      0,
-      line: _liveLineId,
-      live: true,
-      quiet: !userAction,
-      op: userAction ? (playing ? 'play' : 'pause') : null,
-    );
-    _markRemote(playing ? 'play' : 'pause', 0);
   }
 
-  /// 重新拉流回到直播边缘（成员暂停后恢复 / 卡顿 / 重连时调用）。
-  void _liveJumpToEdge({bool force = false}) {
+  /// 重新拉流回到直播边缘（断线重连 / 卡顿自愈时调用）。
+  ///
+  /// **纯本地动作**：不上报、不广播，别人不会因为这里重拉而被拉位置。
+  void _liveJumpToEdge({bool force = false, String reason = 'stall'}) {
     if (!mounted) return;
-    // 只有房主能主动暂停/播放；成员的暂停恢复由房主状态触发。
-    if (_isHost && !force) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     if (_liveJumping || now - _liveReloadAt < 3000) return;
+    if (!force && _liveRefreshing) return;
     _liveJumping = true;
     _liveReloadAt = now;
+    _liveLoadReason = reason;
     _loadedKey = '';
     _loadingKey = '';
     _loadLiveVideo().whenComplete(() => _liveJumping = false);
   }
 
-  /// 成员收到直播权威状态：只跟 play/pause；从暂停恢复时回到直播最新位置。
-  void _applyLiveRemote(TogetherRoomState state, TogetherRoomState? prev) {
-    if (_isHost) return;
-    _livePlaying = state.playing;
-    final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
-    if (!state.playing) {
-      if (controller.value.isPlaying) {
-        unawaited(controller.pause().catchError((_) {}));
-      }
-      return;
+  /// 直播房「刷新」：本地点刷新 → 广播给房间；跟着别人刷新 → 只本地执行。
+  ///
+  /// LIVE_TOGETHER（2026-11-20）用户口径：「一方点了刷新之后，两边才会同时
+  /// 刷新」—— 刷新是直播房**唯一**会广播的位置类动作。双方执行的完全是同一
+  /// 个本地动作（重新拉流 + 落到直播边缘前 3 秒），谁也拿不到对方的进度。
+  Future<void> _refreshLiveTogether({bool fromPeer = false, String by = ''}) async {
+    if (!mounted || !_isLive) return;
+    if (_liveRefreshing) return;
+    _liveRefreshing = true;
+    _liveLoadReason = fromPeer
+        ? togetherLiveRefreshReasonPeer
+        : togetherLiveRefreshReasonSelf;
+    // 自己点的刷新才广播；收到别人的刷新不再回播，避免两个人互相弹消息。
+    if (!fromPeer) _client.sendLiveRefresh();
+    _loadedKey = '';
+    _loadingKey = '';
+    _cancelLiveFirstFrameTimer();
+    if (fromPeer && mounted) {
+      togetherToast(context, togetherLiveRefreshToast(by));
     }
-    final wasPaused = prev != null && !prev.playing;
-    if (wasPaused || !controller.value.isPlaying) {
-      // 直播没有可 seam 的进度：重新拉流即回到最新位置（静默，不提示）。
-      _liveJumpToEdge();
-      return;
+    try {
+      await _loadLiveVideo();
+      if (!mounted) return;
+      if (!fromPeer) togetherToast(context, togetherLiveRefreshSelfToast);
+    } finally {
+      _liveRefreshing = false;
     }
   }
 
@@ -1361,7 +1398,7 @@ class _TogetherPageState extends State<TogetherPage>
     }
     if (_liveLastProgressAt > 0 && now - _liveLastProgressAt > 6000) {
       _liveLastProgressAt = now;
-      _liveJumpToEdge(force: _isHost);
+      _liveJumpToEdge(reason: 'stall');
     }
   }
 
@@ -1692,14 +1729,9 @@ class _TogetherPageState extends State<TogetherPage>
   void _resync() {
     if (_stage != _TogetherStage.room) return;
     if (_isLive) {
-      final controller = _controller;
-      if (_isHost) {
-        final playing = controller?.value.isPlaying ?? _livePlaying;
-        _sendLiveState(playing);
-      } else {
-        final remote = _remote;
-        if (remote != null) _applyLiveRemote(remote, remote);
-      }
+      // 直播房没有进度 / 播放态可同步（LIVE_TOGETHER ②）：
+      // 重连回来只把本地画面重新拉到直播边缘，不上报、不广播。
+      _liveJumpToEdge(force: true, reason: 'reconnect');
       return;
     }
     if (_isHost) {
@@ -1732,7 +1764,8 @@ class _TogetherPageState extends State<TogetherPage>
   /// [_watchHostBuffering] 的 1 秒停住上报。
   void _hostHeartbeat() {
     if (!mounted || !_isHost || !_online || !_foreground) return;
-    if (_isLive) return; // 直播只广播 play/pause，不按秒同步进度。
+    // 直播房不广播任何进度（连 quiet 心跳都没有）：只广播切台 / 刷新。
+    if (_isLive) return;
     _pushHostProgressThrottled();
   }
 
@@ -2606,19 +2639,10 @@ class _TogetherPageState extends State<TogetherPage>
     if (controller == null || !controller.value.isInitialized) {
       return;
     }
+    // 直播房没有「一起暂停 / 一起继续」（LIVE_TOGETHER ③）：按钮本身就不渲染，
+    // 这里再兜一层 —— 万一从全屏或手势漏进来，也绝不暂停、绝不广播播放态。
+    if (_isLive) return;
     _claimControl();
-    if (_isLive) {
-      final next = !controller.value.isPlaying;
-      if (next) {
-        controller.play().catchError((_) {});
-      } else {
-        controller.pause().catchError((_) {});
-      }
-      // 用户主动点了播放 / 暂停：这是真正的操作，带 op 让全员看到。
-      _sendLiveState(next, userAction: true);
-      if (mounted) setState(() {});
-      return;
-    }
     final position = controller.value.position.inMilliseconds / 1000.0;
     if (controller.value.isPlaying) {
       controller.pause().catchError((_) {});
@@ -2967,12 +2991,93 @@ class _TogetherPageState extends State<TogetherPage>
     await _setLiveLine(picked);
   }
 
-  Future<void> _setLiveLine(String lineId) async {
-    if (lineId == _liveLineId) return;
-    if (!_online) {
+  /// 直播房广播「频道 + 线路」（直播房唯一会广播的频道动作）。
+  ///
+  /// 报文只带频道级信息：**没有进度、没有播放态**。
+  void _broadcastLiveChannel(LiveChannel channel, String lineId) {
+    _client.sendLiveChannel(
+      channelId: channel.id,
+      name: channel.title,
+      cover: channel.cover,
+      group: channel.group,
+      line: lineId,
+      lines: <TogetherLine>[
+        for (final line in channel.lines)
+          TogetherLine(
+            name: line.name,
+            id: line.id,
+            quality: line.qualityLabel,
+          ),
+      ],
+      channel: channel.toMap(),
+      title: encodeLiveRoomTitle(channel),
+    );
+  }
+
+  /// 房间内换台（LIVE_TOGETHER ①：频道是同步的）。
+  ///
+  /// 这里是「我主动切」的那一侧：先广播频道（只带频道 + 线路），再本地换台。
+  /// 别人切台时走的是 room_state 分支（见 [_onState]），不会回播成环路。
+  Future<void> _switchLiveChannel(LiveChannel channel) async {
+    if (!mounted || !_isLive) return;
+    final lineId = channel.lines.isEmpty ? '' : channel.lines.first.id;
+    if (channel.id == _liveChannel?.id && lineId == _liveLineId) return;
+    if (_online) _broadcastLiveChannel(channel, lineId);
+    setState(() {
+      _setupLive(channel, lineId, create: false);
+      _videoError = '';
+    });
+    _loadedKey = '';
+    _loadingKey = '';
+    _liveLoadReason = 'switch';
+    _syncVideo();
+  }
+
+  /// 换台选择器：频道清单来自直播源目录（与直播 Tab 同一份）。
+  Future<void> _pickLiveChannel() async {
+    if (!_isLive) return;
+    final cached = LiveSourceService.last;
+    List<LiveChannel> channels = <LiveChannel>[
+      if (cached != null)
+        for (final group in cached.groups) ...group.channels,
+    ];
+    if (channels.isEmpty) {
+      try {
+        final catalog = await LiveSourceService.load();
+        channels = <LiveChannel>[
+          for (final group in catalog.groups) ...group.channels,
+        ];
+      } catch (_) {
+        if (mounted) togetherToast(context, '直播台列表加载失败，稍后再试');
+        return;
+      }
+    }
+    if (!mounted) return;
+    if (channels.isEmpty) {
+      togetherToast(context, '当前没有可切换的直播台');
       return;
     }
-    _claimControl();
+    final picked = await showTogetherChannelSheet(
+      context,
+      channels: channels,
+      current: _liveChannel?.id ?? '',
+    );
+    if (!mounted || picked == null || picked.isEmpty) return;
+    for (final channel in channels) {
+      if (channel.id == picked) {
+        await _switchLiveChannel(channel);
+        return;
+      }
+    }
+  }
+
+  Future<void> _setLiveLine(String lineId) async {
+    if (lineId == _liveLineId) return;
+    final channel = _liveChannel;
+    if (channel == null) return;
+    // 换线路 = 换同一个台的另一个地址：属于频道级变更，走 switchChannel 广播
+    // （只带频道 + 线路，**不带进度**）。离线时只本地切，不广播。
+    if (_online) _broadcastLiveChannel(channel, lineId);
     setState(() {
       _liveLineId = lineId;
       _videoLine = lineId;
@@ -2980,13 +3085,8 @@ class _TogetherPageState extends State<TogetherPage>
     });
     _loadedKey = '';
     _loadingKey = '';
+    _liveLoadReason = 'switch';
     _syncVideo();
-    // 换线路不能把房主的暂停态「换」成播放：优先跟随当前播放器，
-    // 播放器还没就绪时用最近一次广播的状态。
-    final playing = _controller?.value.isPlaying ?? _livePlaying;
-    _livePlaying = playing;
-    _client.sendState(playing ? 'play' : 'pause', 0, line: lineId, live: true);
-    _markRemote(playing ? 'play' : 'pause', 0);
   }
 
   Future<void> _setQuality(String? key) async {
@@ -3268,9 +3368,8 @@ class _TogetherPageState extends State<TogetherPage>
     if (previous != null) await _releasePlayer(previous);
     if (stale()) return;
 
-    // 直播默认在播；房主暂停时沿用本地状态，成员以最新 room_state 为准。
-    // 这里先记下期望值，open 完成后还会再取一次，避免加载期间房主切了状态。
-    final shouldPlay = _isHost ? _livePlaying : (_remote?.playing ?? true);
+    // 直播恒在播：没有暂停态要跟随（LIVE_TOGETHER ②，直播房不广播播放态）。
+    const shouldPlay = true;
     _armLiveFirstFrameTimeout(seq);
     FxPlayer? controller;
     try {
@@ -3295,17 +3394,7 @@ class _TogetherPageState extends State<TogetherPage>
 
       // open(play:true) 只负责起播意图：ready 之后必须再显式 play，
       // 否则部分直播源停在首帧不动，用户得手点一次播放。
-      final wantPlay = _isHost
-          ? _livePlaying
-          : (_remote?.playing ?? shouldPlay);
-      if (wantPlay) {
-        await controller.play().catchError((_) {});
-      } else {
-        // 暂停态也先拉一帧，避免房主暂停后成员看到纯黑。
-        await controller.play().catchError((_) {});
-        await Future<void>.delayed(const Duration(milliseconds: 60));
-        await controller.pause().catchError((_) {});
-      }
+      await controller.play().catchError((_) {});
       if (stale()) {
         await _dropLivePlayer(controller);
         return;
@@ -3329,12 +3418,12 @@ class _TogetherPageState extends State<TogetherPage>
         _videoLoading = false;
         _videoError = '';
       });
-      debugPrint(
-        'room autoplay ep=$_ep state=${wantPlay ? 'playing' : 'paused'} live=1',
-      );
-      // 房主重新拉流后广播当前播放状态，成员跟着对齐。
-      if (_isHost) _sendLiveState(wantPlay);
-      _applyLiveRemote(_remote ?? _emptyLiveState(), _remote);
+      debugPrint('room autoplay ep=$_ep state=playing live=1');
+      // LIVE_TOGETHER：不广播播放态 / 进度。重新拉流后只做一件本地的事 ——
+      // 落到直播窗口末端前 3 秒（刷新 / 切台 / 进房 / 重连都走这里），
+      // 探针日志 `[FxLive] land ... reason=refresh|peer-refresh|switch|open`
+      // 就是「谁把这一跳推起来的」的验收证据。
+      await _landLiveOnEdge(controller, _liveLoadReason);
     } catch (_) {
       // 失败也要先把本次创建（可能已挂到 _controller）的实例释放掉，
       // 再决定是否展示错误，避免卡顿重连叠加时遗留孤儿播放器。
@@ -3349,6 +3438,48 @@ class _TogetherPageState extends State<TogetherPage>
         _videoError = '直播源加载失败，请重试';
       });
     }
+  }
+
+  /// 拉流就绪后落到直播边缘：窗口末端前 3 秒。
+  ///
+  /// 只在「刚重新拉流」之后调用一次（进房 / 切台 / 刷新 / 重连 / 卡顿自愈）；
+  /// 播放过程中**不做任何定时位置检查、不自动追平**：落后就让它落后。
+  ///
+  /// 探针：`[FxLive] land pos=… end=… lag=… seek=… reason=…`。
+  /// `reason=refresh` / `peer-refresh` 两种行就是「刷新是两边一起刷」的证据；
+  /// 正常观看时永远不会出现新的 land 行。
+  Future<void> _landLiveOnEdge(FxPlayer player, String reason) async {
+    if (!mounted) return;
+    // open 刚返回时 duration 可能还是 0（清单还没解析完）：等它出现，
+    // 8 秒还拿不到就说明窗口时长本来就未知，交给 seekToLiveEdge 走兜底。
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (mounted &&
+        identical(_controller, player) &&
+        player.value.isInitialized &&
+        !player.value.hasError &&
+        player.value.duration <= Duration.zero &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    if (!mounted || !identical(_controller, player)) return;
+    final landed = await player.seekToLiveEdge(
+      rewind: fxLiveRefreshRewind,
+      reason: reason,
+    );
+    if (!mounted || !identical(_controller, player)) return;
+    fxPlayLog(
+      fxLiveProbeLog(
+        event: 'land',
+        position: player.value.position,
+        duration: player.value.duration,
+        target: fxLiveEdgeTarget(
+          player.value.duration,
+          rewind: fxLiveRefreshRewind,
+        ),
+        reason: landed ? reason : '$reason-skip',
+      ),
+    );
+    _liveLoadReason = 'open';
   }
 
   /// 直播首帧兜底：10 秒还没有画面参数就放弃本次拉流并显示重试入口，
@@ -3393,25 +3524,6 @@ class _TogetherPageState extends State<TogetherPage>
     if (identical(_controller, player)) _controller = null;
     await _releasePlayer(player);
   }
-
-  /// 成员刚进房还没收到 state 时的兜底：按播放处理。
-  TogetherRoomState _emptyLiveState() => TogetherRoomState(
-    code: _roomCode,
-    title: _roomTitle,
-    hostId: '',
-    members: _members,
-    videoId: _videoId,
-    ep: 1,
-    line: _liveLineId,
-    playing: true,
-    ended: false,
-    position: 0,
-    serverTime: 0,
-    seq: 0,
-    rate: 1,
-    kind: 'live',
-    liveChannel: _liveChannel,
-  );
 
   void _syncVideo() {
     if (_isLive) {
@@ -3949,6 +4061,8 @@ class _TogetherPageState extends State<TogetherPage>
     _loadedKey = '';
     _loadingKey = '';
     _videoError = '';
+    // 出错重试是「我自己重开」，纯本地：不上报、不广播。
+    if (_isLive) _liveLoadReason = 'retry';
     _syncVideo();
   }
 
@@ -4184,6 +4298,8 @@ class _TogetherPageState extends State<TogetherPage>
       onMembers: () => unawaited(_showMembers()),
       onMedia: () => unawaited(_showMediaSheet()),
       onSwitchLine: () => unawaited(_pickLine()),
+      onRefreshLive: _isLive ? () => unawaited(_refreshLiveTogether()) : null,
+      onSwitchChannel: _isLive ? () => unawaited(_pickLiveChannel()) : null,
       onChangeDrama: () => unawaited(_pickDrama()),
       onEpisodes: () => unawaited(_pickEpisode()),
       onTogglePlay: _togglePlay,

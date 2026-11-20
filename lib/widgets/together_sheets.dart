@@ -592,6 +592,124 @@ Future<String?> showTogetherLineSheet(
   );
 }
 
+/// 直播换台：返回频道 id；null 表示取消。
+///
+/// LIVE_TOGETHER（2026-11-20）：频道是**同步**的 —— 谁在这里换了台，
+/// 房间里所有人跟着切到同一个台（只广播频道 + 线路，不带进度）。
+Future<String?> showTogetherChannelSheet(
+  BuildContext context, {
+  required List<LiveChannel> channels,
+  required String current,
+}) {
+  return showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    useSafeArea: true,
+    barrierColor: Colors.black.withValues(alpha: .28),
+    builder: (ctx) => SafeArea(
+      top: false,
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+        padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(ctx).height * .62,
+        ),
+        decoration: const BoxDecoration(
+          color: Color(0xFFF9FBFF),
+          borderRadius: BorderRadius.all(Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '换台',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w800,
+                color: Fx.ink,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              '切台后房间里所有人一起切到同一个台（直播进度各自跟着走）',
+              style: TextStyle(fontSize: 10.5, color: Fx.sub),
+            ),
+            const SizedBox(height: 10),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: channels.length,
+                itemBuilder: (ctx, index) {
+                  final channel = channels[index];
+                  final active = channel.id == current;
+                  return InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () => Navigator.of(ctx).pop(channel.id),
+                    child: Container(
+                      height: 44,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      margin: const EdgeInsets.only(bottom: 4),
+                      decoration: BoxDecoration(
+                        color: active
+                            ? Fx.accent.withValues(alpha: .12)
+                            : Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: active
+                              ? Fx.accent.withValues(alpha: .55)
+                              : const Color(0xFFE6ECF5),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              channel.title.trim().isEmpty
+                                  ? channel.id
+                                  : channel.title.trim(),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: active
+                                    ? FontWeight.w700
+                                    : FontWeight.w500,
+                                color: Fx.ink,
+                              ),
+                            ),
+                          ),
+                          if (channel.group.trim().isNotEmpty)
+                            Text(
+                              channel.group.trim(),
+                              style: const TextStyle(
+                                fontSize: 10.5,
+                                color: Fx.sub,
+                              ),
+                            ),
+                          if (active) ...<Widget>[
+                            const SizedBox(width: 6),
+                            Icon(
+                              Icons.check_rounded,
+                              size: 16,
+                              color: Fx.accent,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 /// 倍速选择，返回倍速；null 表示取消。
 Future<double?> showTogetherSpeedSheet(
   BuildContext context, {

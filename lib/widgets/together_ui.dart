@@ -643,6 +643,10 @@ const Set<String> togetherUserOpActions = <String>{
   'switchLine',
   'switchTitle',
   'switchSource',
+  // 直播房的两个广播动作（LIVE_TOGETHER）：切台 / 刷新追边。
+  // 它们同样要进聊天区的操作流水，并沿用同一套 3 秒去重。
+  'switchChannel',
+  'liveRefresh',
 };
 
 /// 服务端 `op` 字段是否值得广播成一条操作提示。

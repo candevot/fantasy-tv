@@ -585,6 +585,36 @@ jobs:
           # 客户端报文层：起一个本地假 ws 服务器，验证建房带「源 + 片 + 线路」、
           # switchLine 带当前进度、switchTitle 带新线路列表、心跳带 quiet。
           flutter test test/together_client_ws_test.dart
+      # LIVE_TOGETHER（2026-11-20）：一起看**直播房**的同步口径。
+      #
+      # 用户第三次澄清（最终口径，之前作废）：
+      #   「一方点了刷新之后，两边才会同时刷新，跟随电视直播的进度，
+      #     我是说双方不会同步。正常看的话」
+      #
+      # 钉住三件事，回退了必然复现现场：
+      #   ① 频道同步：进房同一个台，谁切台双方一起切（只广播 channelId + 线路）；
+      #   ② 正常观看不同步：直播房**不广播** seek / 位置 / 暂停 / 播放 / 切集，
+      #      各自落后多少算多少（电视直播本来就有延迟）；
+      #   ③ 刷新同步：任何一方点刷新，双方都落到直播边缘前 3 秒
+      #      （唯一会广播的位置类动作），自己的回声不重复刷。
+      #
+      # 顺带锁住：直播房没有「一起暂停」按钮（widget 断言）、
+      # 房间模式标记 mode = vod | live 能从 create / room_state 读出来。
+      - name: together live-mode regressions
+        run: |
+          set -e
+          # 口径常量必须在：白名单只有 switchChannel / liveRefresh。
+          grep -q "togetherLiveChannelAction = 'switchChannel'" lib/widgets/together_live.dart
+          grep -q "togetherLiveRefreshAction = 'liveRefresh'" lib/widgets/together_live.dart
+          grep -q 'togetherLiveShowsTogetherPause = false' lib/widgets/together_live.dart
+          # 直播房不许再发 play / pause 的权威状态（老 _sendLiveState 已删除）。
+          if grep -q '_sendLiveState' lib/pages/together_page.dart; then
+            echo '直播房又出现了 play/pause 广播（_sendLiveState）'; exit 1
+          fi
+          # 刷新落点必须走统一口径（窗口末端前 3 秒），不许另写 magic number。
+          grep -q 'fxLiveRefreshRewind' lib/pages/together_page.dart
+          grep -q 'togetherLiveRefreshTarget' lib/widgets/together_live.dart
+          flutter test test/together_live_mode_test.dart
       # TOGETHER_SYNC_POLICY（2026-11-15）：一起看的同步验收口径。
       #
       # 钉住用户给的数字：偏差 ±2 秒内只微调 ±0.05x 倍速、超过 2 秒才硬 seek；

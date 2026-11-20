@@ -66,6 +66,8 @@ class TogetherRoomView extends StatefulWidget {
     this.keyboardVisible = false,
     this.isLive = false,
     this.opText = '',
+    this.onRefreshLive,
+    this.onSwitchChannel,
   });
 
   final FxPlayer? player;
@@ -132,6 +134,15 @@ class TogetherRoomView extends StatefulWidget {
 
   /// 直播房：隐藏进度、选集、换剧，显示 LIVE。
   final bool isLive;
+
+  /// 直播房「刷新」：重新拉流并落到直播边缘前 3 秒。
+  ///
+  /// LIVE_TOGETHER（2026-11-20）：刷新是直播房唯一会**广播**的位置类动作 ——
+  /// 点它的人本地刷新并广播，房里其他人收到后执行同一个动作。
+  final VoidCallback? onRefreshLive;
+
+  /// 直播房「换台」：频道是同步的，切台会广播给整个房间。
+  final VoidCallback? onSwitchChannel;
 
   /// 最近一次房间操作：「小明 换了线路 → 幻想4K」。空串时整行不渲染。
   final String opText;
@@ -536,6 +547,18 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
         priority: 0,
         onTap: widget.onInvite,
       ),
+      // 直播房多一个「换台」：频道是同步的（LIVE_TOGETHER ①），
+      // 谁切台，房里其他人跟着切到同一个台。
+      if (widget.isLive && widget.onSwitchChannel != null)
+        TogetherActionItem(
+          id: 'channel',
+          label: '换台',
+          icon: Icons.live_tv_rounded,
+          showLabel: true,
+          always: true,
+          priority: 1,
+          onTap: widget.onSwitchChannel!,
+        ),
       TogetherActionItem(
         id: 'line',
         label: widget.isLive ? '换线' : '换源',
@@ -749,10 +772,19 @@ class _TogetherRoomViewState extends State<TogetherRoomView> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              PGlassIcon.fs(
-                icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                tooltip: playing ? '暂停' : '播放',
-                onTap: _togglePlay,
+              // LIVE_TOGETHER（2026-11-20）：直播房**没有**一起暂停 / 继续。
+              // 直播只有「现在」，暂停只会让自己落在后面还追不回来；
+              // 这里换成刷新 —— 追到直播边缘前 3 秒，并且两边一起刷。
+              TogetherLivePrimaryAction(
+                live: widget.isLive,
+                playing: playing,
+                onTogglePlay: _togglePlay,
+                onRefresh: widget.onRefreshLive == null
+                    ? null
+                    : () {
+                        _wake();
+                        widget.onRefreshLive!.call();
+                      },
               ),
               const SizedBox(width: 6),
               if (widget.isLive)
@@ -1126,3 +1158,38 @@ class _RoomProgress extends StatelessWidget {
   }
 }
 
+/// 直播房画面左下角的主操作：直播只有「刷新」，点播才有「暂停 / 播放」。
+///
+/// 单独抽成组件是为了能在 widget 测试里直接渲染断言：
+/// `live: true` 时**不存在**播放 / 暂停按钮（LIVE_TOGETHER ③）。
+/// 直播没有暂停 —— 暂停只会让自己越落越远，且无法把别人拉回来。
+class TogetherLivePrimaryAction extends StatelessWidget {
+  const TogetherLivePrimaryAction({
+    super.key,
+    required this.live,
+    required this.playing,
+    required this.onTogglePlay,
+    this.onRefresh,
+  });
+
+  final bool live;
+  final bool playing;
+  final VoidCallback onTogglePlay;
+  final VoidCallback? onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    if (live) {
+      return PGlassIcon.fs(
+        icon: Icons.refresh_rounded,
+        tooltip: '刷新直播',
+        onTap: onRefresh,
+      );
+    }
+    return PGlassIcon.fs(
+      icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+      tooltip: playing ? '暂停' : '播放',
+      onTap: onTogglePlay,
+    );
+  }
+}

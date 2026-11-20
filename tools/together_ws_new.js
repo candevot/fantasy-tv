@@ -119,6 +119,15 @@ function roomStatePayload(room) {
     code: room.code,
     title: room.title,
     kind: room.kind || '',
+    /* 房间模式：live / vod（LIVE_TOGETHER）。 */
+    mode: room.mode || (room.kind === 'live' ? 'live' : 'vod'),
+    /* 直播频道级字段：切台只动这里，不动进度。 */
+    channelId: room.channelId || '',
+    liveName: room.liveName || '',
+    liveCover: room.liveCover || '',
+    liveGroup: room.liveGroup || '',
+    /* 完整频道（含线路播放地址）：跟随方靠它起播。 */
+    liveChannel: room.liveChannel || null,
     /* 创建者只用于展示（谁开的房），不再有任何权限含义。 */
     hostId: room.creatorMid,
     creatorId: room.creatorMid,
@@ -180,13 +189,15 @@ function systemTo(room, text) {
  */
 const USER_OP_ACTIONS = new Set([
   'play', 'pause', 'seek', 'rate',
-  'episode', 'switchLine', 'switchTitle', 'switchSource'
+  'episode', 'switchLine', 'switchTitle', 'switchSource',
+  /* LIVE_TOGETHER（2026-11-20）：直播房只广播两种动作 —— 切台 / 刷新追边。 */
+  'switchChannel', 'liveRefresh'
 ]);
 /** 同一个人 + 同一个动作的去重窗口（与客户端 togetherOpDedupeWindow 同口径）。 */
 const OP_DEDUPE_MS = 3000;
 
 /** 广播「谁做了什么」：UI 用它显示「小明 换了线路 → 幻想4K」。 */
-function announceOp(room, ws, action, label, from, to) {
+function announceOp(room, ws, action, label, from, to, force = false) {
   const act = str(action);
   // 非用户动作一律不播：心跳 / 进度 / 未知动作不进聊天区。
   if (!USER_OP_ACTIONS.has(act)) {
@@ -200,7 +211,9 @@ function announceOp(room, ws, action, label, from, to) {
   const who = actorOf(ws);
   const now = Date.now();
   const last = room.lastAnnounce;
-  const duplicate = !!(last && last.id === who.id && last.action === act &&
+  // force = true 时不做服务端去重：直播的「刷新」必须每次都真的广播出去
+  // （两边一起刷），提示的去重交给客户端那套 3 秒窗口。
+  const duplicate = !force && !!(last && last.id === who.id && last.action === act &&
       now - last.at <= OP_DEDUPE_MS);
   room.lastAnnounce = { id: who.id, action: act, at: now };
   const actor = markController(room, ws, action, label);
@@ -376,6 +389,17 @@ function handleWsMessage(ws, raw) {
         code,
         title: str(msg.title, vodName ? `${vodName} · 一起看` : '一起看'),
         kind: isLive ? 'live' : 'video',
+        /* 房间模式标记：live / vod，客户端据此分支（不再靠字段有没有猜）。 */
+        mode: isLive ? 'live' : 'vod',
+        /* 直播频道：切换只改这几个字段，进度 / 播放态永远不参与。 */
+        channelId: isLive ? (str(msg.channelId) || videoId) : '',
+        liveName: isLive ? (str(msg.liveName) || vodName || '电视直播') : '',
+        liveCover: isLive ? str(msg.liveCover) : '',
+        liveGroup: isLive ? str(msg.liveGroup) : '',
+        /* 完整频道（含线路播放地址）：房间线路表只存名字 / 画质，
+           成员要能真起播必须拿到带 url 的这一份。 */
+        liveChannel: isLive && msg.liveChannel && typeof msg.liveChannel === 'object'
+          ? msg.liveChannel : null,
         videoId: videoId || (external ? '' : (store.get('SELECT id FROM videos ORDER BY rowid LIMIT 1') || {}).id || ''),
         ep: clampNum(msg.ep, 1, 9999, 1),
         line: lineKey,
@@ -410,6 +434,10 @@ function handleWsMessage(ws, raw) {
           title: room.title, videoId: room.videoId, ep: room.ep,
           line: room.line, lineName: room.lineName,
           kind: room.kind,
+          mode: room.mode,
+          channelId: room.channelId,
+          liveName: room.liveName, liveCover: room.liveCover, liveGroup: room.liveGroup,
+          liveChannel: room.liveChannel,
           sourceKey: room.sourceKey, sourceName: room.sourceName,
           sourceKind: room.sourceKind, sourceApi: room.sourceApi,
           vodId: room.vodId, vodName: room.vodName, vodYear: room.vodYear,
@@ -450,6 +478,31 @@ function handleWsMessage(ws, raw) {
 
     case 'state': {
       if (!needRoom()) return;
+      // LIVE_TOGETHER ②：直播房**不接受**进度 / 播放态 / 切集。
+      // 只允许顺带更新频道级字段（频道 / 线路 / 线路列表），其余照旧忽略。
+      // 这样即使旧客户端还在发 play / pause / seek，也不会把别人拉走。
+      if (room.kind === 'live') {
+        let changed = false;
+        if (msg.channelId) { room.channelId = str(msg.channelId); changed = true; }
+        if (msg.liveName) { room.liveName = str(msg.liveName); changed = true; }
+        if (msg.lines !== undefined) {
+          const nextLines = normalizeRoomLines(msg.lines);
+          if (nextLines.length) { room.lines = nextLines; changed = true; }
+        }
+        const liveLine = str(msg.lineId) || str(msg.line);
+        if (liveLine) {
+          room.line = liveLine;
+          room.lineName = lineNameOf(room, liveLine);
+          changed = true;
+        }
+        room.state = 'play';
+        room.position = 0;
+        if (changed) {
+          bumpRev(room);
+          broadcastRoom(room, roomStatePayload(room));
+        }
+        return;
+      }
       // 纯进度心跳（quiet）不改主导者；非主导者的心跳也不允许覆盖权威状态。
       const quiet = msg.quiet === true;
       const prevPosition = room.position;
@@ -519,6 +572,12 @@ function handleWsMessage(ws, raw) {
 
     case 'seek': {
       if (!needRoom()) return;
+      // LIVE_TOGETHER ②：直播房没有进度可对，seek 一律丢弃。
+      // 老客户端 / 旧缓存里残留的 seek 也拉不动别人的画面。
+      if (room.kind === 'live') {
+        console.log(`[together] drop seek：直播房不同步进度 room=${room.code}`);
+        return;
+      }
       const prevPosition = room.position;
       if (msg.position !== undefined && msg.position !== null) {
         room.position = Math.max(0, Number(msg.position) || 0);
@@ -636,6 +695,62 @@ function handleWsMessage(ws, raw) {
       announceOp(room, ws, 'switchSource', `换成了源「${room.sourceName}」`, prevSource, room.sourceName);
       bumpRev(room);
       broadcastRoom(room, roomStatePayload(room));
+      return;
+    }
+
+    /* 直播房：切台（频道同步）—— 只改频道 / 线路，不动进度。 */
+    case 'switchChannel': {
+      if (!needRoom()) return;
+      if (room.kind !== 'live') {
+        return sendTo(ws, { action: 'error', code: 'not_live', msg: '这不是直播房间' });
+      }
+      const channelId = str(msg.channelId);
+      if (!channelId) return sendTo(ws, { action: 'error', code: 'bad_request', msg: '缺少 channelId' });
+      const prevName = room.liveName || room.channelId || '电视直播';
+      room.channelId = channelId;
+      room.videoId = channelId;
+      room.liveName = str(msg.liveName) || room.liveName || '电视直播';
+      if (msg.liveCover) room.liveCover = str(msg.liveCover);
+      if (msg.liveGroup) room.liveGroup = str(msg.liveGroup);
+      if (msg.liveChannel && typeof msg.liveChannel === 'object') {
+        room.liveChannel = msg.liveChannel;
+      }
+      const nextLines = normalizeRoomLines(msg.lines);
+      if (nextLines.length) room.lines = nextLines;
+      const nextLine = str(msg.line) || str(msg.lineId) ||
+        (nextLines[0] ? (nextLines[0].id || nextLines[0].name) : '');
+      if (nextLine) {
+        room.line = nextLine;
+        room.lineName = lineNameOf(room, nextLine);
+      }
+      // 换台后双方都从「现在」开始看：进度归零，播放态恒为 play。
+      room.state = 'play';
+      room.position = 0;
+      room.at = Date.now();
+      // 老客户端从 title 里还原频道：客户端会把带播放地址的频道编码进 title，
+      // 优先用它的那一份，拿不到才退回「台名 · 一起看」。
+      room.title = str(msg.title) || `${room.liveName} · 一起看`;
+      // force=true：每次切台都是真实事件，提示去重交给客户端 3 秒窗口。
+      announceOp(room, ws, 'switchChannel', `切到 ${room.liveName}`,
+        prevName, room.liveName, true);
+      bumpRev(room);
+      broadcastRoom(room, roomStatePayload(room));
+      console.log(`[together] switchChannel room=${room.code} id=${channelId} name=${room.liveName} line=${room.line}`);
+      return;
+    }
+
+    /* 直播房：刷新追边 —— 唯一会广播的位置类动作（两边一起刷）。 */
+    case 'liveRefresh': {
+      if (!needRoom()) return;
+      if (room.kind !== 'live') return;
+      room.state = 'play';
+      room.position = 0;
+      room.at = Date.now();
+      // force=true：刷新必须每次都真的广播出去（客户端自己点的那次不回声）。
+      announceOp(room, ws, 'liveRefresh', '刷新了直播', '', '', true);
+      bumpRev(room);
+      broadcastRoom(room, roomStatePayload(room));
+      console.log(`[together] liveRefresh room=${room.code} by=${ident.name} seq=${room.rev}`);
       return;
     }
 

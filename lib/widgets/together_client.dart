@@ -213,6 +213,13 @@ class TogetherRoomState {
   /// 房间类型：`live` = 直播一起看；普通剧集为空 / `video`。
   final String kind;
 
+  /// 房间模式标记（LIVE_TOGETHER 2026-11-20）：`live` 一起看直播 / `vod` 点播。
+  ///
+  /// 服务端会在 create / room_state 里带 `mode`；老服务端没有这个字段时，
+  /// 按 [kind] 与频道数据推断，所以**永远**能拿到确定值，不会出现空串。
+  /// 页面所有「直播下不广播进度」的分支都读它，而不是各自去猜 kind。
+  String get mode => isLive ? 'live' : 'vod';
+
   /// 直播房解析出的频道（含线路）；普通房为 null。
   final LiveChannel? liveChannel;
 
@@ -261,6 +268,9 @@ class TogetherRoomState {
     final title = '${j['title'] ?? '一起看'}';
     final live = togetherLiveChannel(j) ?? decodeLiveRoomTitle(title);
     final rawKind = '${j['kind'] ?? ''}'.trim();
+    // 服务端显式下发的房间模式（`live` / `vod`）：只在老服务端没给 kind 时
+    // 用来补齐，避免新客户端看到「有 mode 但 kind 空」的房间被当成点播。
+    final rawMode = '${j['mode'] ?? ''}'.trim();
     return TogetherRoomState(
       code: '${j['code'] ?? ''}',
       title: title,
@@ -280,7 +290,11 @@ class TogetherRoomState {
       serverTime: serverTime,
       seq: seq,
       rate: togetherClampRate(togetherDouble(j['rate'], 1)),
-      kind: rawKind.isEmpty ? (live != null ? 'live' : '') : rawKind,
+      kind: rawKind.isNotEmpty
+          ? rawKind
+          : (rawMode.isNotEmpty
+                ? rawMode
+                : (live != null ? 'live' : '')),
       liveChannel: live,
       leaderId: '${j['leaderId'] ?? ''}'.trim(),
       leaderName: '${j['leader'] ?? ''}'.trim(),
@@ -350,6 +364,13 @@ class TogetherRoomState {
 ///
 /// 新服务端给 `kind/channelId/lines`；老服务端只把频道编码在 title 里。
 LiveChannel? togetherLiveChannel(Map<String, dynamic> j) {
+  // 服务端下发的完整频道（含每条线路的播放地址）：跟着切台时用这一份，
+  // 否则房间线路表里没有 url，跟随方切过去就起播不了。
+  final nested = j['liveChannel'] ?? j['channel'];
+  if (nested is Map) {
+    final channel = LiveChannel.tryFrom(Map<String, dynamic>.from(nested));
+    if (channel != null) return channel;
+  }
   final kind = '${j['kind'] ?? j['roomKind'] ?? ''}'.trim();
   final id = '${j['channelId'] ?? ''}'.trim();
   final lines = j['lines'] ?? j['liveLines'];
@@ -400,6 +421,11 @@ class TogetherRoomInfo {
   final String kind;
   final LiveChannel? liveChannel;
 
+  /// 房间模式：`live` / `vod`（老服务端没有 `mode` 时按 kind 推断）。
+  String get mode => isLive ? 'live' : 'vod';
+
+  bool get isLive => kind == 'live' || liveChannel != null;
+
   /// 建房时绑定的「源 + 片 + 线路列表」。
   final String leaderId;
   final String sourceKey;
@@ -414,6 +440,8 @@ class TogetherRoomInfo {
   factory TogetherRoomInfo.fromJson(Map<String, dynamic> j) {
     final title = '${j['title'] ?? '一起看'}';
     final live = togetherLiveChannel(j) ?? decodeLiveRoomTitle(title);
+    final rawKind = '${j['kind'] ?? ''}'.trim();
+    final rawMode = '${j['mode'] ?? ''}'.trim();
     return TogetherRoomInfo(
       code: '${j['code'] ?? ''}',
       title: title,
@@ -427,9 +455,11 @@ class TogetherRoomInfo {
           .whereType<Map>()
           .map((e) => TogetherMember.fromJson(togetherMap(e)))
           .toList(),
-      kind: '${j['kind'] ?? ''}'.trim().isEmpty
-          ? (live != null ? 'live' : '')
-          : '${j['kind']}'.trim(),
+      kind: rawKind.isNotEmpty
+          ? rawKind
+          : (rawMode.isNotEmpty
+                ? rawMode
+                : (live != null ? 'live' : '')),
       liveChannel: live,
       leaderId: '${j['leaderId'] ?? ''}'.trim(),
       sourceKey: '${j['sourceKey'] ?? ''}'.trim(),
@@ -956,6 +986,9 @@ class TogetherClient {
         'action': 'create',
         // 直播频道 id 不是影片 id：不能传 videoId，否则服务端会报 not_found。
         'kind': 'live',
+        // 房间模式标记（LIVE_TOGETHER）：进房就带上，room_state 原样带回，
+        // 成员不需要再从频道字段里反推「这是不是直播房」。
+        'mode': 'live',
         'channelId': _hostChannelId,
         'line': _hostLine,
         if (_hostTitle.isNotEmpty) 'title': _hostTitle,
@@ -964,6 +997,9 @@ class TogetherClient {
     }
     return <String, dynamic>{
       'action': 'create',
+      // 点播房也显式带 mode：服务端 / 日志一眼能看出房间模式，
+      // 成员侧 room_state 里也能读到确定值（不是靠「有没有频道」猜）。
+      'mode': 'vod',
       'videoId': _hostVideoId,
       'ep': _hostEp,
       'line': _hostLine,
@@ -1042,6 +1078,7 @@ class TogetherClient {
       if (quiet) 'quiet': true,
       if (live) ...<String, dynamic>{
         'kind': 'live',
+        'mode': 'live',
         'channelId': _hostChannelId,
         ..._hostLive,
       },
@@ -1079,6 +1116,70 @@ class TogetherClient {
     _flushHostState();
     _send({'action': 'rate', 'rate': rate});
   }
+
+  /* ---------------------------------------------------- 直播房的两种广播 */
+
+  /// 直播房：切台 / 换线路（**频道同步**，直播房唯一会广播的频道动作）。
+  ///
+  /// 报文只带「频道 + 线路 + 线路列表」，**不带进度、不带播放态**：
+  /// 直播没有可对齐的进度，跟随方收到 room_state 后自己拉流并落到直播边缘。
+  /// 换线路也走这里 —— 线路是频道的一部分，属于频道级变更。
+  bool sendLiveChannel({
+    required String channelId,
+    required String name,
+    String cover = '',
+    String group = '',
+    required String line,
+    List<TogetherLine> lines = const <TogetherLine>[],
+    Map<String, dynamic>? channel,
+    String title = '',
+  }) {
+    final id = channelId.trim();
+    if (id.isEmpty) return false;
+    final lineKey = line.trim();
+    final nextLines = lines.isEmpty ? null : lines;
+    // 断线重连若房间已解散，会按 _hostLive / _hostChannelId 重建：
+    // 换台后必须同步更新，否则重连会把人带回旧台。
+    _hostChannelId = id;
+    _hostVideoId = id;
+    if (nextLines != null) _hostLines = nextLines;
+    _hostLive = <String, dynamic>{
+      if (name.trim().isNotEmpty) 'liveName': name.trim(),
+      if (cover.trim().isNotEmpty) 'liveCover': cover.trim(),
+      if (group.trim().isNotEmpty) 'liveGroup': group.trim(),
+      if (title.trim().isNotEmpty) 'title': title.trim(),
+      if (nextLines != null)
+        'lines': <Map<String, dynamic>>[
+          for (final l in nextLines) l.toJson(),
+        ],
+      // 跟随方要真的能起播，必须拿到**带播放地址**的完整频道：
+      // 服务端的房间线路表只存名字 / 画质（url 不进房间表），
+      // 所以频道本体单独带一份（`LiveChannel.toMap()` 含每条线路的 url）。
+      if (channel != null) 'liveChannel': channel,
+    };
+    // 切台是「立刻生效」的操作：合并窗口里攒着的旧负载必须丢掉。
+    _dropHostState();
+    return _send(<String, dynamic>{
+      'action': 'switchChannel',
+      'mode': 'live',
+      'kind': 'live',
+      'channelId': id,
+      if (lineKey.isNotEmpty) 'line': lineKey,
+      // 老服务端 / 老客户端只认标题里编码的频道，两个都带上。
+      if (title.trim().isNotEmpty) 'title': title.trim(),
+      ..._hostLive,
+    });
+  }
+
+  /// 直播房：刷新追边广播（「一方点刷新，两边一起刷新」）。
+  ///
+  /// 这是直播房**唯一**会广播的位置类动作：正常观看时客户端不会发它，
+  /// 服务端也不会定时广播。收到它的人只是重新拉流并落到直播边缘前 3 秒，
+  /// 不会互相传进度。
+  bool sendLiveRefresh() => _send(<String, dynamic>{
+    'action': 'liveRefresh',
+    'mode': 'live',
+  });
 
   /// 房主：拖动进度。
   ///
