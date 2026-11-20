@@ -474,7 +474,7 @@ class CategoryPage extends StatefulWidget {
     super.key,
     this.initialType = '',
     this.initialTitle,
-    this.initialSort = 'latest',
+    this.initialSort = 'hot',
     this.standalone = false,
     this.embedded = false,
   });
@@ -540,7 +540,8 @@ class _CategoryPageState extends State<CategoryPage> {
     _Opt('2018', '2018'),
   ];
   static const List<_Opt> _sorts = [
-    _Opt('latest', '最新'),
+    _Opt('hot', '热播'),
+      _Opt('latest', '最新'),
     _Opt('rating', '评分'),
     _Opt('hot', '热度'),
   ];

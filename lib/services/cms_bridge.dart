@@ -290,7 +290,7 @@ class CmsBridge {
     String type = '',
     String area = '',
     String year = '',
-    String sort = 'latest',
+    String sort = 'hot',
     int page = 1,
   }) async {
     final result = await categoryPage(
@@ -308,7 +308,7 @@ class CmsBridge {
     String type = '',
     String area = '',
     String year = '',
-    String sort = 'latest',
+    String sort = 'hot',
     int page = 1,
   }) async {
     _boot();
