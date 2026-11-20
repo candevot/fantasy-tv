@@ -782,10 +782,20 @@ class SourceHub extends ChangeNotifier {
   /// jar 源现在是「开着但插件没装」的状态（界面据此提示去装）。
   bool get jarMissing => _jarReady == false && hasJarSources;
 
+  /// 一个 jar 源在「片源管理」里的状态（可用 / jar 未安装 / 已停用）。
+  FxJarSourceState jarSourceState(String label) => fxJarSourceStateOf(
+        installed: jarReady,
+        enabled: jarSourceEnabled(label),
+      );
+
   /// jar 插件没装时的可读提示（装好了返回空串）。
+  ///
+  /// 文案固定以「jar 未就绪」开头：搜索页 / 详情页的提示条都直接用它，
+  /// 用户在任何一处看到的都是同一句话（用户口径第 4 条）。
   String get jarNotice {
     if (!jarMissing) return '';
-    return 'jar 源需要先安装 spider.jar：设置 → 片源管理 → 安装 / 更新';
+    return 'jar 未就绪：咕噜 / 橘汁 / 剧圈 / 下饭 四个源需要先装 spider.jar，'
+        '去 设置 → 片源管理 → 安装 / 更新';
   }
 
   /// 查一次 jar 插件状态（幂等，结果缓存）。

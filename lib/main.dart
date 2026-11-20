@@ -15,6 +15,7 @@ import 'services/app_update_service.dart';
 import 'services/playback_params.dart';
 import 'services/download_service.dart';
 import 'services/cms_bridge.dart';
+import 'services/jar_plugin.dart';
 import 'services/line_health.dart';
 import 'services/source_hub.dart';
 import 'models.dart';
@@ -125,6 +126,21 @@ class Boot {
     } catch (e, st) {
       AppLog.write('boot.sources', e, st);
     }
+
+    // JAR_BOOT（2026-11-21 用户要求）：**首次进 App 自动装 spider.jar**。
+    //
+    // 不装 jar 时那四个 jar 源（咕噜 / 橘汁 / 剧圈 / 下饭）一条线路都出不来，
+    // 详情页 chips 全灰，用户以为功能坏了。这里放到 source hub 就绪之后
+    // fire-and-forget：
+    //   · 不挡首屏 —— 不 await，装 1.5MB 也不影响进主界面；
+    //   · 静默 —— 失败不弹窗、不阻断任何功能，只把状态写成 failed，
+    //     设置 → 片源管理里标红并给原因；
+    //   · 带 md5 校验 —— 地址 / md5 都取 `AppSettings`（默认服务器那份），
+    //     原生侧校验不过直接失败，不会装半个 jar；
+    //   · 装完自动重查 jar 状态（`JarPluginManager._syncHub`），搜索 / 详情
+    //     下一次取数就按「已就绪」走，不用重启。
+    // 日志：`adb logcat | grep JarBoot` 看「开始 / 结果」两条。
+    unawaited(JarPluginManager.instance.bootSilently());
 
     // PARAMS_ALIGN（2026-11-15 · 阶段 2）：把「缓冲档位 / 音轨偏好 / 隧道」
     // 推到原生内核。

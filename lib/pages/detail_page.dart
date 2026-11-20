@@ -184,6 +184,14 @@ class _DetailPageState extends State<DetailPage>
   /// jar 源子线路合并是否正在进行（防重入）。
   bool _jarMerging = false;
 
+  /// 上一次看到的「jar 已就绪」状态：false → true 那一刻要补一次 jar 线路
+  /// （JAR_BOOT 2026-11-21：冷启动边装边用，装好的时候详情页可能已经开着）。
+  bool _jarWasReady = false;
+
+  /// 上一次看到的「jar 缺插件」状态：只有它变了才 setState（提示条显隐），
+  /// 免得片源中心每通知一次都整页重绘。
+  bool _jarMissingShown = false;
+
   /// PLATFORM_PENDING：平台线路永远显示，解析在后台进行。
   /// 正在现场解析的线路 id（同一条只发一次请求）。
   final Set<String> _resolvingLines = <String>{};
@@ -244,11 +252,37 @@ class _DetailPageState extends State<DetailPage>
     );
     _downloads.addListener(_onDownloadsChanged);
     unawaited(_downloads.init());
+    // JAR_BOOT：进页面就问一次 jar 状态（幂等、只读），并监听「装好了」那一刻。
+    _jarWasReady = SourceHub.instance.jarReady;
+    _jarMissingShown = SourceHub.instance.jarMissing;
+    SourceHub.instance.addListener(_onHubChanged);
+    unawaited(SourceHub.instance.ensureJarStatus());
     _init();
   }
 
   void _onDownloadsChanged() {
     if (mounted) setState(() {});
+  }
+
+  /// jar 插件状态变化：从「未装」翻到「已装」时**现场补一次 jar 线路**。
+  ///
+  /// 不做这件事的话，冷启动（边装边用）或用户刚点完「安装 / 更新」时，
+  /// 已经开着的详情页会一直停在「四个 jar 大类全灰」——得退出重进才生效。
+  void _onHubChanged() {
+    if (!mounted) return;
+    final hub = SourceHub.instance;
+    final ready = hub.jarReady;
+    final flipped = ready && !_jarWasReady;
+    _jarWasReady = ready;
+    // 只有「缺 jar 提示条」的显隐真的变了才重绘（片源中心会频繁通知）。
+    if (hub.jarMissing != _jarMissingShown) {
+      _jarMissingShown = hub.jarMissing;
+      setState(() {});
+    }
+    if (!flipped) return;
+    final d = _detail;
+    if (d == null) return;
+    unawaited(_mergeJarLines(d, fillHits: true));
   }
 
   Future<void> _init() async {
@@ -284,6 +318,7 @@ class _DetailPageState extends State<DetailPage>
 
   @override
   void dispose() {
+    SourceHub.instance.removeListener(_onHubChanged);
     _downloads.removeListener(_onDownloadsChanged);
     _stableTimer?.cancel();
     _lineChainWatchdog?.cancel();
@@ -403,7 +438,11 @@ class _DetailPageState extends State<DetailPage>
       unawaited(_enrichLines(d));
       // FUSION（2026-11-21）：这部片在启用的 jar 源里也有时，把它们的子线路
       // 并进来（`咕噜·4K` 这种），不新增记录、也不阻塞首屏。
-      unawaited(_mergeJarLines(d));
+      //
+      // JAR_BOOT：带上 fillHits —— 从首页 / 收藏直接点进来的详情页没有搜索
+      // 期的索引，只有现场补一次命中，四个 jar 大类才不会一直灰着。
+      // jar 没装时这一步什么都不发（`fillJarHitsFor` 先看 jarReady）。
+      unawaited(_mergeJarLines(d, fillHits: true));
       _scheduleLineRefresh();
       // PLATFORM_PENDING：平台线路进页面就先在后台解析一次（fire-and-forget），
       // 用户点之前大概率已经 ready，点下去不用等。
@@ -1776,21 +1815,24 @@ class _DetailPageState extends State<DetailPage>
     fxToast(context, '当前为游客模式，登录后即可发表评论');
   }
 
-  /// ENRICH（2026-11-15）：按「片名 + 年份」补两条线路。
-  ///
-  /// 只补 `幻想爱奇艺` 与 `SH4K`（福盈蓝光 PAN1 的解析接口坏了，补上去是
-  /// 死线路，明确不补）。集数按对方实际集数，探不到就不补；命中缓存 24 小时。
-  /// 补进来的线路 id 带 `enrich:` 前缀，播放地址由 `LineEnrich.resolvePlay`
-  /// 现算 —— 服务端库一行都不改。
   /// 把 jar 源的同名子线路合并进当前记录（FUSION 2026-11-21）。
   ///
-  /// 触发条件只有一个：搜索时 jar 波次命中了这部片（`JarMergeIndex` 里有
-  /// 记录）。没搜过就直接从首页点进来的，这里一条都不加 —— 用户没要
-  /// 「进详情就全源再搜一遍」那种行为。
-  Future<void> _mergeJarLines(VideoDetail d) async {
+  /// 命中来源有两条：
+  ///   1. 搜索时 jar 波次命中了这部片 —— `JarMergeIndex` 里已经有记录；
+  ///   2. jar 插件**装好之后**进详情 / 详情页开着时装好了（[fillHits]）——
+  ///      按片名现场补一次命中。没有这一条，冷启动边装边用时四个 jar 大类
+  ///      会一直置灰（用户 2026-11-21 实测的第二个问题）。
+  ///
+  /// 无论哪条路，都只在 **jar 已就绪** 时才会真的向 jar 源发请求：
+  /// [CmsBridge.fillJarHitsFor] / [CmsBridge.jarLinesFor] 进来先看 `jarReady`。
+  Future<void> _mergeJarLines(VideoDetail d, {bool fillHits = false}) async {
     if (_jarMerging || CmsBridge.isJarLine(_lineId)) return;
     _jarMerging = true;
     try {
+      // JAR_BOOT（2026-11-21）：jar 刚装好时索引里通常没有这部片（搜索那一轮
+      // 被整段跳过了）。这里按片名补一次命中，否则四个 jar 大类会一直置灰。
+      // jar 没装时 [CmsBridge.fillJarHitsFor] 直接返回 0，一条请求都不发。
+      if (fillHits) await CmsBridge.fillJarHitsFor(d);
       final extra = await CmsBridge.jarLinesFor(d);
       if (!mounted || extra.isEmpty) return;
       final current = _detail;
@@ -1821,6 +1863,12 @@ class _DetailPageState extends State<DetailPage>
     }
   }
 
+  /// ENRICH（2026-11-15）：按「片名 + 年份」补两条线路。
+  ///
+  /// 只补 `幻想爱奇艺` 与 `SH4K`（福盈蓝光 PAN1 的解析接口坏了，补上去是
+  /// 死线路，明确不补）。集数按对方实际集数，探不到就不补；命中缓存 24 小时。
+  /// 补进来的线路 id 带 `enrich:` 前缀，播放地址由 `LineEnrich.resolvePlay`
+  /// 现算 —— 服务端库一行都不改。
   Future<void> _enrichLines(VideoDetail d) async {
     final EnrichEntry? entry;
     try {
@@ -2293,6 +2341,9 @@ class _DetailPageState extends State<DetailPage>
           SizedBox(height: 76, child: _linePlaceholder())
         else
           _noLinesHint(),
+        // JAR_BOOT（2026-11-21 用户要求第 4 条）：jar 没装时说清楚为什么那四个
+        // 大类是灰的，并给出装的地方（搜索页用同一句话，见 SourceHub.jarNotice）。
+        if (SourceHub.instance.jarMissing) _jarNotReadyHint(),
         if (visibleEpisodes.isNotEmpty) ...[
           const SizedBox(height: 22),
           _episodeHeader(totalAll, available: visibleEpisodes.length),
@@ -2561,6 +2612,34 @@ class _DetailPageState extends State<DetailPage>
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: skin.hairline),
         ),
+      ),
+    );
+  }
+
+  /// 「jar 未就绪」提示条：只在 jar 没装、且确实有启用的 jar 源时出现。
+  ///
+  /// 它不是错误 —— 自有线路照常能播；这条只解释「第一行那四个 jar 大类为什么
+  /// 是灰的」，免得用户以为功能坏了（用户 2026-11-21 截图里的第二个问题）。
+  Widget _jarNotReadyHint() {
+    final skin = FxDetailSkin.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.extension_off_rounded, size: 13, color: skin.hint),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              SourceHub.instance.jarNotice,
+              style: TextStyle(
+                fontSize: 10.5,
+                height: 1.45,
+                color: skin.hint,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

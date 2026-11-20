@@ -1,11 +1,15 @@
-/// 设置 → 片源管理（JAR_RESTORE 2026-11-21）。
+/// 设置 → 片源管理（JAR_RESTORE 2026-11-21 / JAR_BOOT 2026-11-21）。
 ///
-/// 只做一件事：**逐个启停用户挑中的那几个 jar 源**，外加看 / 装 `spider.jar`。
+/// 两件事：**逐个启停用户挑中的那几个 jar 源**、**看每个源的状态并装 / 重装
+/// `spider.jar`**。状态三档与用户口径一一对应：`可用` / `jar 未安装` / `已停用`
+/// （见 [fxJarSourceStateLabel]）。
+///
+/// 自动安装由启动流程（`Boot.run` → `JarPluginManager.bootSilently`）负责；
+/// 这一页的「安装 / 更新」是**手动重装**入口，`force: true`，不受自动开关限制。
 ///
 /// 故意不恢复的东西（用户明确说过不要）：
 ///   · 「+ 添加接口」用户自加源；
-///   · 「导入 TVBox 配置」（含加密配置 / depot 地址）；
-///   · 启动自动安装 spider.jar。
+///   · 「导入 TVBox 配置」（含加密配置 / depot 地址）。
 ///
 /// 页面上只有白名单里的源（[kEnabledJarSources]），别的肥猫源一条都不显示 ——
 /// 显示一堆点不动的源只会让用户以为功能坏了。
@@ -13,6 +17,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../services/jar_plugin.dart';
 import '../services/jar_sources.dart';
 import '../services/source_hub.dart';
 import '../theme.dart';
@@ -48,6 +53,17 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
 
   Future<void> _toggle(String label, bool value) async {
     await _hub.setJarSourceEnabled(label, value);
+  }
+
+  /// 手动「安装 / 更新」spider.jar（用户主动动作，走 force 分支不受自动开关限制）。
+  Future<void> _installJar() async {
+    try {
+      await JarPluginManager.instance.ensureReady(force: true);
+    } catch (_) {
+      // 失败原因已经写在 JarPluginManager.error 里，卡片上会标红显示。
+    }
+    if (!mounted) return;
+    await _hub.refreshJarStatus();
   }
 
   /// 这个 jar 源在片源表里的类名（`csp_Gulu`），给用户看一眼。
@@ -90,8 +106,9 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
                     label: label,
                     api: _apiOf(label),
                     enabled: _hub.jarSourceEnabled(label),
-                    installed: _hub.jarReady,
+                    state: _hub.jarSourceState(label),
                     onChanged: (v) => _toggle(label, v),
+                    onInstall: () => _installJar(),
                   ),
                 if (labels.isEmpty)
                   const Padding(
@@ -133,21 +150,33 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
   }
 }
 
-/// 一行：某个 jar 源 + 开关。
+/// 一行：某个 jar 源 + 状态 + 开关。
+///
+/// 状态三档（用户口径）：`可用` / `jar 未安装` / `已停用`；`jar 未安装` 时
+/// 这一行右侧直接给「安装 / 更新」，不用再往上找卡片。
 class _JarSourceRow extends StatelessWidget {
   const _JarSourceRow({
     required this.label,
     required this.api,
     required this.enabled,
-    required this.installed,
+    required this.state,
     required this.onChanged,
+    required this.onInstall,
   });
 
   final String label;
   final String api;
   final bool enabled;
-  final bool installed;
+  final FxJarSourceState state;
   final ValueChanged<bool> onChanged;
+  final VoidCallback onInstall;
+
+  /// 状态色：可用绿、缺 jar 用强调色（要用户处理）、停用灰。
+  Color get _stateColor => switch (state) {
+        FxJarSourceState.available => const Color(0xFF2FA985),
+        FxJarSourceState.jarMissing => Fx.accent,
+        FxJarSourceState.disabled => const Color(0xFFA6B1C2),
+      };
 
   @override
   Widget build(BuildContext context) {
@@ -171,13 +200,35 @@ class _JarSourceRow extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 6),
-                    if (!installed)
-                      Text(
-                        '未装 jar',
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        color: _stateColor.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        fxJarSourceStateLabel(state),
                         style: TextStyle(
                           fontSize: 9.5,
-                          fontWeight: FontWeight.w600,
-                          color: Fx.accent.withValues(alpha: .9),
+                          fontWeight: FontWeight.w700,
+                          color: _stateColor,
+                        ),
+                      ),
+                    ),
+                    if (state == FxJarSourceState.jarMissing)
+                      TextButton(
+                        onPressed: onInstall,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          minimumSize: const Size(0, 26),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: const Text(
+                          '安装 / 更新',
+                          style: TextStyle(fontSize: 10.5, color: Fx.accent),
                         ),
                       ),
                   ],

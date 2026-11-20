@@ -407,8 +407,10 @@ class _JarPluginCardState extends State<JarPluginCard> {
             children: [
               TextButton(
                 onPressed: busy ? null : _install,
+                // 手动重装入口：装好了是「更新」，没装是「安装 / 更新」——
+                // 和片源管理里每个源右上角那个按钮叫同一件事。
                 child: Text(
-                  installed ? '更新 jar' : '安装 jar',
+                  installed ? '更新 jar' : '安装 / 更新',
                   style: const TextStyle(color: Fx.accent),
                 ),
               ),

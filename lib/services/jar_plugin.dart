@@ -21,6 +21,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import 'app_settings.dart';
+import 'jar_log.dart';
 import 'jar_spider.dart';
 import 'source_hub.dart';
 
@@ -133,6 +134,41 @@ class JarPluginManager extends ChangeNotifier {
     });
   }
 
+  /// 冷启动入口（JAR_BOOT 2026-11-21）：**后台静默装**，永不抛异常。
+  ///
+  /// 调用点只有一个：`Boot.run()` 里 source hub 就绪之后 fire-and-forget。
+  /// 三条硬口径：
+  ///   1. 不挡首屏 —— 外层不 await 它，装多久都不影响进主界面；
+  ///   2. 失败不阻断使用 —— 只把 phase 写成 failed（设置页标红并给原因），
+  ///      jar 源那时按「未安装」处理：搜索 / 详情**一条请求都不发**；
+  ///   3. 有日志 —— `[JarBoot]` 两条（开始 / 结果），真机 logcat 能直接看出
+  ///      是「没装」「装失败」还是「装好了但自检不过」。
+  Future<void> bootSilently() async {
+    final settings = AppSettings.instance;
+    try {
+      await settings.init();
+    } catch (_) {
+      // 设置读不出来不是错误：下面按默认值（默认自动安装）继续。
+    }
+    fxJarLog(
+      '启动检查 auto=${settings.jarAutoInstall} url=${settings.jarUrl}',
+      tag: fxJarBootTag,
+    );
+    try {
+      await ensureReady();
+    } catch (e) {
+      // ensureReady 内部已经把失败写进 phase / error，这里只补日志。
+      fxJarLog('结果 phase=failed err=${fxJarClip('$e', max: 160)}',
+          tag: fxJarBootTag);
+      return;
+    }
+    fxJarLog(
+      '结果 phase=${_phase.name} installed=$installed '
+      'md5=${_status.shortMd5} size=${_status.sizeLabel} err=$_error',
+      tag: fxJarBootTag,
+    );
+  }
+
   Future<void> _ensureReady({required bool auto, required bool force}) async {
     if (!JarSpider.supported) {
       _fail('当前平台不支持 jar 插件（只有 Android 客户端能用）');
@@ -159,9 +195,9 @@ class JarPluginManager extends ChangeNotifier {
 
     final settings = AppSettings.instance;
     await settings.init();
-    // JAR_RESTORE（2026-11-21）：用户不要「启动自动安装」，所以后台触发
-    // （auto=true 但没人点）一律不装；设置页里点「安装 / 更新」时走
-    // `force: true`，那是用户主动动作，不受这个开关限制。
+    // JAR_BOOT（2026-11-21）：自动安装**默认开** —— 冷启动
+    // （[bootSilently]）就是靠这个开关决定的；用户在设置里把它关掉之后，
+    // 纯后台触发一律不装，只留「安装 / 更新」那条手动路（force=true）。
     if (!settings.jarAutoInstall && !force) {
       _fail('还没安装 spider.jar（点「安装 / 更新」再装一次）');
       return;

@@ -514,13 +514,9 @@ jobs:
           grep -q 'csp_JuXiaFan' lib/services/jar_sources.dart
           # 通道契约不许改（方法名 / 参数名保持原样）
           grep -q "MethodChannel('fantasy_tv/spider')" lib/services/jar_spider.dart
-          # 反面门禁：TVBox 配置导入 / 自动安装不回来
+          # 反面门禁：TVBox 配置导入不回来
           if grep -q 'importTvBox' lib/ -r; then
             echo '不许恢复 TVBox 配置导入' >&2
-            exit 1
-          fi
-          if grep -q 'jarAutoInstall = true' lib/services/app_settings.dart; then
-            echo '不许恢复「启动自动安装 spider.jar」' >&2
             exit 1
           fi
           flutter test test/jar_fusion_test.dart
@@ -528,6 +524,62 @@ jobs:
           flutter test test/jar_plugin_test.dart
           flutter test test/tvbox_crypto_test.dart
           flutter test test/search_group_test.dart test/search_group_pinned_test.dart
+          # ---- JAR_BOOT（2026-11-21 用户实测）：首次进 App 自动装 jar ------
+          #
+          # 现场：装完 App 打开详情页，四个 jar 源 chips 全灰 —— 根因是
+          # spider.jar 没装（jar 通道不可用 → 源没有线路 → 置灰）。
+          # 现在的口径：**冷启动自动装**（后台静默 + md5 校验 + 失败不阻断），
+          # 装好之后四个源立刻可用；没装时搜索 / 详情一条 jar 请求都不发。
+          test -f lib/services/app_settings.dart
+
+          # ① 默认开关必须是「开」，默认地址 / md5 指向自建服务器那份。
+          grep -q "defaultJarAutoInstall = true" lib/services/app_settings.dart
+          grep -q "http://125.94.244.87/spider.jar" lib/services/app_settings.dart
+          grep -q "cbe016eb3cb002ae62058604843f5106" lib/services/app_settings.dart
+          grep -q "?? defaultJarAutoInstall" lib/services/app_settings.dart
+
+          # ② 启动流程真的调了自动安装，而且**不许 await**（不挡首屏）。
+          grep -q "JarPluginManager.instance.bootSilently()" lib/main.dart
+          if grep -q "await JarPluginManager.instance.bootSilently" lib/main.dart; then
+            echo '启动装 jar 不许 await（挡首屏）' >&2
+            exit 1
+          fi
+
+          # ③ 自动装带日志：真机 `adb logcat | grep JarBoot` 能看出装没装。
+          grep -q "const String fxJarBootTag = 'JarBoot'" lib/services/jar_log.dart
+          grep -q "tag: fxJarBootTag" lib/services/jar_plugin.dart
+          grep -q "启动检查 auto=" lib/services/jar_plugin.dart
+          grep -q "结果 phase=" lib/services/jar_plugin.dart
+
+          # ④ jar 没装时搜索 / 详情不发请求（不白等），并提示「jar 未就绪」。
+          grep -q 'final jarSources = hub.jarReady ? plan.external : const <KSource>\[\];' lib/services/cms_bridge.dart
+          grep -q 'if (!hub.jarReady) return 0;' lib/services/cms_bridge.dart
+          grep -q 'if (!hub.jarReady) return const <LineInfo>\[\];' lib/services/cms_bridge.dart
+          grep -q 'jar 未就绪' lib/services/source_hub.dart
+          grep -q '_jarNoticeBar' lib/pages/search_page.dart
+          grep -q '_jarNotReadyHint' lib/pages/detail_page.dart
+
+          # ⑤ 装好之后详情页会「现场补命中」+ 重合并，chips 不再置灰。
+          grep -q 'static Future<int> fillJarHitsFor' lib/services/cms_bridge.dart
+          grep -q 'fillHits: true' lib/pages/detail_page.dart
+          grep -q '_onHubChanged' lib/pages/search_page.dart
+          grep -q '_onHubChanged' lib/pages/detail_page.dart
+
+          # ⑥ 两行线路的**第一行大类按线路名前缀判**（不再按数据来源）：
+          #    库里裸名字 `咕噜` 必须进咕噜大类，自有的 `量子` 仍在幻想大类。
+          grep -q 'String fxLineGroupLabelOfName(String name)' lib/services/jar_sources.dart
+          grep -q 'if (raw.startsWith(label) || plain.startsWith(label)) return label;' lib/services/jar_sources.dart
+          # 反面门禁：不许再只认带分隔符的 `$label·`（那正是本次 bug 的根因）。
+          if grep -q "name.startsWith('\$label·')" lib/services/jar_sources.dart; then
+            echo '分组不许再只认「前缀+分隔符」（裸名字咕噜会漏到幻想大类）' >&2
+            exit 1
+          fi
+          # ⑦ 片源管理里的三档状态文案。
+          grep -q "FxJarSourceState.jarMissing => 'jar 未安装'" lib/services/jar_sources.dart
+          grep -q "FxJarSourceState.disabled => '已停用'" lib/services/jar_sources.dart
+          grep -q "FxJarSourceState.available => '可用'" lib/services/jar_sources.dart
+          flutter test test/line_group_prefix_test.dart test/jar_autoboot_test.dart
+
           # 服务器上的 spider.jar 必须还在、md5 必须和默认值一致。
           # 非阻塞：服务器偶发抖动不该让整个构建红掉，但日志里要能看见。
           python3 tools/check_spider_url.py || true

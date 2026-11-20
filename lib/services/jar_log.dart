@@ -24,6 +24,17 @@ const String fxJarSearchTag = 'JarSearch';
 const String fxJarDetailTag = 'JarDetail';
 const String fxJarPlayTag = 'JarPlay';
 
+/// 冷启动自动安装 jar 的日志前缀（JAR_BOOT 2026-11-21）。
+///
+/// 真机排查「首次进 App 到底装没装、卡在哪一步」：
+/// `adb logcat | grep JarBoot`：
+///
+/// ```
+/// [JarBoot] 启动检查 auto=true url=http://125.94.244.87/spider.jar
+/// [JarBoot] 结果 phase=ready installed=true md5=cbe016eb size=1.8 MB err=
+/// ```
+const String fxJarBootTag = 'JarBoot';
+
 /// 写一条 jar 链路日志。[tag] 默认 [fxJarSearchTag]。
 void fxJarLog(String body, {String tag = fxJarSearchTag}) {
   debugPrint('[$tag] $body');

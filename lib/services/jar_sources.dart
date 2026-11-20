@@ -12,8 +12,12 @@
 ///   3. [JarMergeIndex] —— 搜索期的融合索引：哪部片在哪个 jar 源里也有，
 ///      详情页据此把 jar 的子线路合并进我们那条记录。
 ///
-/// **不恢复的行为**（用户没要）：TVBox 配置导入、启动自动安装 spider.jar、
-/// 首页 / 分类 / 排行榜使用 jar 源。这里只为「搜索 + 播放解析」服务。
+/// **不恢复的行为**（用户没要）：TVBox 配置导入、首页 / 分类 / 排行榜使用
+/// jar 源。这里只为「搜索 + 详情 + 播放解析」服务。
+///
+/// 启动自动安装 spider.jar 的口径在 JAR_BOOT（2026-11-21）**改回来了**：
+/// 用户要求「首次进 App 自动装」，实现放在 `jar_plugin.dart`
+/// （`JarPluginManager.bootSilently`），不在这一层。
 library;
 
 import '../models.dart';
@@ -101,11 +105,54 @@ String _stripDecor(String raw) {
 /// 白名单里的源名（给 UI 展示大类标题用）。
 List<String> get kJarLabels => kEnabledJarSources;
 
+/* -------------------------------------------------- 设置页的源状态 */
+
+/// 一个 jar 源在「设置 → 片源管理」里的状态。
+///
+/// 用户口径（2026-11-21）：「显示每个源的状态：可用 / jar 未安装 / 已停用」。
+/// 三种状态互斥，判定顺序见 [fxJarSourceStateOf]。
+enum FxJarSourceState {
+  /// jar 已装 + 源开着 → 搜索 / 详情会向它发请求。
+  available,
+
+  /// 源开着，但 spider.jar 没装 → 线路一条都出不来（chips 置灰）。
+  jarMissing,
+
+  /// 用户自己关掉了这个源。
+  disabled,
+}
+
+/// 状态判定：**用户关掉的优先显示「已停用」**。
+///
+/// 一个关掉的源为什么置灰，用户自己刚改过，比「jar 没装」更直接；
+/// 反过来，一个开着的源置灰才是 jar 的问题 —— 那才需要提示去装。
+FxJarSourceState fxJarSourceStateOf({
+  required bool installed,
+  required bool enabled,
+}) {
+  if (!enabled) return FxJarSourceState.disabled;
+  return installed ? FxJarSourceState.available : FxJarSourceState.jarMissing;
+}
+
+/// 状态的展示文案（`可用` / `jar 未安装` / `已停用`）。
+String fxJarSourceStateLabel(FxJarSourceState state) => switch (state) {
+      FxJarSourceState.available => '可用',
+      FxJarSourceState.jarMissing => 'jar 未安装',
+      FxJarSourceState.disabled => '已停用',
+    };
+
 /// 「我们自己的线路」那个大类的 key。
 const String kOwnLineGroupKey = 'own';
 
 /// 我们自己的线路在两大类里的显示名。
 const String kOwnLineGroupLabel = '幻想';
+
+/// 子线路名和大类名完全相同时的显示名。
+///
+/// 服务端采集入库的 `vod_play_from` 里有一条**裸名字** `咕噜`（咕噜 4K 经
+/// playerContent 解析后的主线路，见 `glu_collect.php`）。它属于「咕噜」大类，
+/// 第二行再显示一次「咕噜」纯属重复，所以显示成「默认」。
+const String kBareLineSubName = '默认';
 
 /* ------------------------------------------------------------ 线路 id */
 
@@ -168,18 +215,46 @@ bool fxIsJarLine(LineInfo line) => fxParseJarLineId(line.id) != null;
 
 /* ------------------------------------------------------------ 大类分组 */
 
+/// 线路名 → 大类（返回空串 = 不属于任何 jar 大类，归「幻想」）。
+///
+/// LINE_PREFIX（2026-11-21 用户实测 bug）：服务端采集入库的线路名**本身就带
+/// 源名前缀** —— 库里 `vod_play_from` 有 `咕噜`、`咕噜·量子资源`、`咕噜·暴风资源`。
+///
+/// 旧实现只认 `咕噜·`（**必须带分隔符**），于是裸名字那条 `咕噜` 落进了
+/// 「幻想」大类：详情页第一行选中「幻想」、第二行赫然出现「咕噜 / 幻想爱奇艺
+/// / 红牛」，而且「咕噜」被高亮 —— 就是用户截图里那个错。
+///
+/// 现在按**前缀**判，分隔符可有可无：
+///   · `咕噜`、`咕噜·量子资源`、`咕噜·4K`  → 咕噜大类
+///   · `剧圈·…`、`橘汁·…`、`下饭·…`        → 各自的 jar 大类
+///   · `量子`、`SH4K`、`幻想爱奇艺`、`红牛`  → 幻想大类
+///
+/// 注意 `咕噜·量子资源`（咕噜源自己的子线路）和自有的 `量子` 是**两条不同的
+/// 线路**：前者进咕噜大类、后者留在幻想大类，两者互不影响、也不许互相覆盖。
+String fxLineGroupLabelOfName(String name) {
+  final raw = name.trim();
+  if (raw.isEmpty) return '';
+  // 装饰字符（emoji / 竖线 / 空格）先剥掉再比：`🕊┃︎咕噜┃APP` 也算咕噜。
+  final plain = _stripDecor(raw);
+  for (final label in kEnabledJarSources) {
+    if (raw.startsWith(label) || plain.startsWith(label)) return label;
+  }
+  return '';
+}
+
 /// 一条线路属于哪个大类：`own` 或白名单源名。
 ///
-/// 先看 id（新数据都编码了），再看名字前缀（房间线路 / 老数据只有名字）。
+/// 先看 id（新数据都编码了），再看名字前缀（服务端采集的线路 / 房间线路 /
+/// 老数据只有名字）。
 String fxLineGroupKeyOf(LineInfo line) {
   final ref = fxParseJarLineId(line.id);
   if (ref != null) return ref.label;
-  final name = line.displayName.trim();
-  for (final label in kEnabledJarSources) {
-    if (name.startsWith('$label·') || name.startsWith('$label・')) return label;
-  }
-  return kOwnLineGroupKey;
+  final label = fxLineGroupLabelOfName(line.displayName);
+  return label.isEmpty ? kOwnLineGroupKey : label;
 }
+
+/// 前缀后面紧跟的分隔符（`咕噜·4K` / `咕噜 4K` / `咕噜-4K` / `咕噜|4K`）。
+final RegExp _fxLinePrefixSep = RegExp(r'^[·・•‧∙⋅|｜/／\-–—_~～\s]+');
 
 /// 一个大类（源）以及它下面的子线路。
 class FxLineGroup {
@@ -236,16 +311,30 @@ List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
   ];
 }
 
-/// 子线路的显示名：去掉 `<大类>·` 前缀（前缀已经在第一行体现）。
+/// 子线路的显示名：去掉 `<大类>` / `<大类>·` 前缀（前缀已经在第一行体现）。
+///
+/// · `咕噜·量子资源` 在咕噜大类下 → `量子资源`；
+/// · 名字就是大类名（裸 `咕噜`）→ [kBareLineSubName]（`默认`），否则第二行
+///   会出现一条和大类一字不差的 chip；
+/// · 大类是「幻想」时**只剥带分隔符的写法**：`幻想爱奇艺` 原样显示，
+///   剥掉就只剩「爱奇艺」，用户会以为那是另一个源。
 String fxLineSubName(LineInfo line, String groupLabel) {
   final full = line.displayName.trim();
   if (full.isEmpty) return line.id;
-  final prefix = '$groupLabel·';
-  if (groupLabel.isNotEmpty && full.startsWith(prefix)) {
-    final rest = full.substring(prefix.length).trim();
-    return rest.isEmpty ? full : rest;
+  final label = groupLabel.trim();
+  if (label.isEmpty) return full;
+  if (full == label) return kBareLineSubName;
+  if (!full.startsWith(label)) return full;
+  var rest = full.substring(label.length);
+  final cut = _fxLinePrefixSep.firstMatch(rest);
+  if (cut != null) {
+    rest = rest.substring(cut.end);
+  } else if (!kEnabledJarSources.contains(label)) {
+    // 「幻想」大类：只剥 `幻想·xxx` 这种带分隔符的写法。
+    return full;
   }
-  return full;
+  rest = rest.trim();
+  return rest.isEmpty ? kBareLineSubName : rest;
 }
 
 /// 自有线路在前、jar 线路在后（同组内保持原顺序）。

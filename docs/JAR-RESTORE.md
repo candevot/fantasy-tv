@@ -14,7 +14,7 @@
 | 文件 | 行数 | 作用 |
 | --- | --- | --- |
 | `lib/services/jar_spider.dart` | 1215 | jar 通道封装（search / detail / playerContent）+ TVBox JSON → 模型 |
-| `lib/services/jar_plugin.dart` | 399 | jar 安装 / 自检状态机（只被设置页手动触发） |
+| `lib/services/jar_plugin.dart` | 399 | jar 安装 / 自检状态机（**JAR_BOOT 2026-11-21 起冷启动会自动装**，见 `LINE-PREFIX-AND-JAR-BOOT.md`） |
 | `lib/services/jar_log.dart` | 39 | `[JarSearch] / [JarDetail] / [JarPlay]` 链路日志 |
 | `lib/services/tvbox_crypto.dart` | 185 | 配置解密（保留，别再删一次又得找） |
 | `lib/services/search_group.dart` | 246 | 源名归一（`咕噜 • APP` → `咕噜`）/ 分组纯逻辑 |
@@ -102,7 +102,9 @@ jar 片源
     grep -q "'咕噜', '橘汁', '剧圈', '下饭'" lib/services/jar_sources.dart
     grep -q 'csp_Gulu' lib/services/jar_sources.dart
     ...
-    # 反面门禁：TVBox 配置导入 / 自动安装不许回来
+    # 反面门禁：TVBox 配置导入不许回来
+    # （「启动自动安装 spider.jar」这条旧门禁已在 JAR_BOOT 2026-11-21 按用户
+    #   要求反过来：现在冷启动**必须**自动装，新门禁见同 step 的 JAR_BOOT 段）
     flutter test test/jar_fusion_test.dart
     flutter test test/jar_source_toggle_test.dart
     flutter test test/jar_plugin_test.dart
@@ -119,3 +121,11 @@ jar 片源
 2. 搜索一部我们库里**没有**的片（jar 里有）：出现一张新卡片，能点开、能播。
 3. 一起看：建房选线路 / 房间线路面板 / 全屏底栏线路入口都是同一套两行结构；
    房主切「咕噜 → 4K」，全员跟着切到 `咕噜·4K`（沿用 `switchLine` 广播）。
+
+## 6. 后续（2026-11-21 第二轮）
+
+用户实测报了两个问题，改法与真值表见 [`LINE-PREFIX-AND-JAR-BOOT.md`](LINE-PREFIX-AND-JAR-BOOT.md)：
+
+1. 第一行大类改成**按线路名前缀**判（库里裸名字 `咕噜` 必须进咕噜大类）；
+2. 「启动不自动装 spider.jar」的口径**作废** —— 现在首次进 App 后台静默装
+   （md5 校验、失败不阻断），装好后四个源立刻可用。

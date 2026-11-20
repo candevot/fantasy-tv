@@ -1564,6 +1564,91 @@ class CmsBridge {
     return detail.copyWith(lines: _jarLinesOf(detail, label, vodId));
   }
 
+  /// **只在详情页用**：jar 装好之后按片名在启用的 jar 源里补一次命中
+  /// （JAR_BOOT 2026-11-21）。
+  ///
+  /// 为什么需要它：搜索时 jar 还没装好（冷启动刚开始装 / 用户刚点完「安装 /
+  /// 更新」），`searchStream` 里那一段 jar 波次整段被跳过，`JarMergeIndex`
+  /// 里没有这部片 —— 于是即使 jar 后来装好了，详情页那四个 jar 大类也永远
+  /// 置灰，用户得重新搜一次才行。
+  ///
+  /// 三条口径：
+  ///   1. **jar 没装就一条请求都不发**（用户要求第 4 条「不要白等」）：
+  ///      这里先过 `jarReady`，没过直接返回 0；
+  ///   2. 只查**当前这部片的名字**，命中就记进 [JarMergeIndex]（源名 + vod_id），
+  ///      后面照旧走 [jarLinesFor] 合并子线路 —— 不新增卡片、不动自有线路；
+  ///   3. 一个源失败 / 超时只丢这一个源，不影响其它源和详情页本身。
+  ///
+  /// 返回新记下的命中源数（0 = 没有任何源有这个片名 / 没装 jar / 已经有命中）。
+  static Future<int> fillJarHitsFor(VideoDetail detail) async {
+    final title = detail.title.trim();
+    if (title.isEmpty) return 0;
+    final hub = SourceHub.instance;
+    await hub.ensureReady();
+    if (!hub.hasJarSources) return 0;
+    await hub.ensureJarStatus();
+    if (!hub.jarReady) return 0;
+    // 索引里已经有这部片（搜索时命中的）：不用再敲一遍 jar。
+    if (JarMergeIndex.instance
+        .hitsFor(title: title, year: detail.year)
+        .isNotEmpty) {
+      return 0;
+    }
+    final wantKey = JarMergeIndex.keyOf(title, detail.year);
+    final wantName = JarMergeIndex.keyOf(title, 0);
+    final hits = <String, String>{};
+    await Future.wait(<Future<void>>[
+      for (final source in hub.jarSources) _fillOne(source, title, wantKey, wantName, hits),
+    ]);
+    for (final entry in hits.entries) {
+      JarMergeIndex.instance.attach(
+        title: title,
+        year: detail.year,
+        label: entry.key,
+        vodId: entry.value,
+      );
+    }
+    fxJarLog(
+      'detail 补命中 title=$title 源=${hits.isEmpty ? '-' : hits.keys.join('/')}',
+      tag: fxJarDetailTag,
+    );
+    return hits.length;
+  }
+
+  /// [fillJarHitsFor] 的单源一步：命中就写进 [hits]（源名 → vod_id）。
+  static Future<void> _fillOne(
+    KSource source,
+    String title,
+    String wantKey,
+    String wantName,
+    Map<String, String> hits,
+  ) async {
+    final label = SourceHub.jarLabelOf(source);
+    if (label.isEmpty) return;
+    try {
+      final report = await JarSpider.searchWithFallback(
+        api: source.api,
+        ext: source.ext,
+        key: title,
+        label: label,
+      ).timeout(SourceHub.sourceTimeout);
+      for (final card in report.cards) {
+        // 年份也要对得上；jar 常把年份写成 0 / 空，那就只比片名。
+        final exact = JarMergeIndex.keyOf(card.title, card.year) == wantKey;
+        final byName = JarMergeIndex.keyOf(card.title, 0) == wantName;
+        if (!exact && !byName) continue;
+        if (card.id.trim().isEmpty) continue;
+        hits[label] = card.id;
+        return;
+      }
+    } catch (e) {
+      fxJarLog(
+        'detail 补命中 source=$label 失败：${fxJarClip('$e', max: 120)}',
+        tag: fxJarDetailTag,
+      );
+    }
+  }
+
   /// **融合**：我们这条记录在 jar 源里也有时，把它们的子线路并进来。
   ///
   /// 搜索期 `JarMergeIndex` 记下了「这部片在哪个 jar 源、哪个 vod_id」，

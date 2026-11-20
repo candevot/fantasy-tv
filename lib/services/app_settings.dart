@@ -75,17 +75,22 @@ class AppSettings extends ChangeNotifier {
   ///   · 下载地址（默认指向我们自己的服务器）
   ///   · 可选 md5（填了就强校验，防下到错误页面）
   ///
-  /// JAR_RESTORE（2026-11-21）：这两个字段只服务「设置 → 片源管理」里
-  /// 用户手动点的「安装 / 更新 spider.jar」。**启动不自动装**，也不导入
-  /// TVBox 配置 —— 那两件事用户明确说过不要。
+  /// JAR_BOOT（2026-11-21 用户要求）：首次进 App 自动下载并安装 spider.jar，
+  /// 装失败不阻断使用（只在设置里标红）。这两个字段同时服务「自动安装」和
+  /// 「设置 → 片源管理 → 安装 / 更新」的手动重装 —— 地址一样，md5 一样。
   static const String _kJarUrl = 'fx_settings_jar_url';
   static const String _kJarMd5 = 'fx_settings_jar_md5';
 
-  /// 是否允许「没人点、纯后台触发」时装 jar。
+  /// 是否允许「没人点、纯后台触发」时装 jar。**默认开**。
   ///
-  /// 默认 **关**（JAR_RESTORE 口径）：用户明确不要「启动自动安装 spider.jar」。
-  /// 装 jar 只有一条路 —— 设置 → 片源管理里用户自己点「安装 / 更新」。
+  /// 为什么默认开（改了 2026-11-21 的口径）：没装 jar 时那四个 jar 源一条线路
+  /// 都出不来，详情页 chips 全灰，用户以为功能坏了 —— 现场四个源全灰就是这么
+  /// 来的。所以改成「首次进 App 后台静默装」：内置 jar 优先（不联网、秒装），
+  /// 没有再走下载 + md5 校验；失败只记状态，不阻断任何功能。
   static const String _kJarAutoInstall = 'fx_settings_jar_auto_install';
+
+  /// 「首次使用自动安装 spider.jar」的默认值。
+  static const bool defaultJarAutoInstall = true;
 
   /// 服务器上那份 spider.jar 的 md5（2026-11-15 实测 1,929,492 B）。
   static const String defaultJarMd5 = 'cbe016eb3cb002ae62058604843f5106';
@@ -143,7 +148,7 @@ class AppSettings extends ChangeNotifier {
   bool _playbackDiagnostics = defaultPlaybackDiagnostics;
   String _jarUrl = defaultJarUrl;
   String _jarMd5 = defaultJarMd5;
-  bool _jarAutoInstall = false;
+  bool _jarAutoInstall = defaultJarAutoInstall;
   DownloadLocation _downloadLocation = DownloadLocation.phone;
 
   /// 用户自选的下载基目录（真正写入 `<它>/幻想影视`）；null = 用默认 Download。
@@ -178,8 +183,16 @@ class AppSettings extends ChangeNotifier {
   /// jar 期望 md5（空串 = 不校验；填了就强校验）。
   String get jarMd5 => _jarMd5;
 
-  /// 是否允许纯后台自动安装（默认关，见 [_kJarAutoInstall]）。
+  /// 是否允许纯后台自动安装（**默认开**，见 [_kJarAutoInstall]）。
   bool get jarAutoInstall => _jarAutoInstall;
+
+  /// 改「首次使用自动安装」开关（关掉后只有手动点「安装 / 更新」才装）。
+  Future<void> setJarAutoInstall(bool value) async {
+    if (_jarAutoInstall == value) return;
+    _jarAutoInstall = value;
+    notifyListeners();
+    await _saveBool(_kJarAutoInstall, value);
+  }
 
   /// 改 jar 下载地址（空串 = 不下载，只用内置 / 手动安装的 jar）。
   Future<void> setJarUrl(String value) async {
@@ -248,7 +261,7 @@ class AppSettings extends ChangeNotifier {
       // 没存过 = 用默认 md5；用户主动清空（存了空串）= 不校验。
       final jarMd5 = sp.getString(_kJarMd5);
       _jarMd5 = jarMd5 == null ? defaultJarMd5 : jarMd5.trim();
-      _jarAutoInstall = sp.getBool(_kJarAutoInstall) ?? false;
+      _jarAutoInstall = sp.getBool(_kJarAutoInstall) ?? defaultJarAutoInstall;
       _downloadLocation = downloadLocationFromKey(
         sp.getString(_kDownloadLocation),
       );

@@ -84,6 +84,16 @@ class _SearchPageState extends State<SearchPage> {
   /// 输入即搜的防抖计时器（停手 400ms 才发请求）。
   Timer? _debounce;
 
+  /// jar 插件状态（元数据 / 入口）：jar 没装时结果区顶部给一句「jar 未就绪」。
+  final SourceHub _hub = SourceHub.instance;
+
+  /// 上一次看到的 jar 就绪状态：翻到 true 的那一刻把这一轮搜索重跑一次，
+  /// 让 jar 那四个源参与进来（JAR_BOOT 2026-11-21）。
+  bool _jarWasReady = false;
+
+  /// 上一次看到的「jar 缺插件」状态：只有它变了才 setState（提示条显隐）。
+  bool _jarMissingShown = false;
+
   String? _mode;
   String? _lastQuery;
   String? _error;
@@ -103,6 +113,11 @@ class _SearchPageState extends State<SearchPage> {
     _scroll.addListener(_onScroll);
     _loadHistory();
     _loadHotWords();
+    // JAR_BOOT：只读一次 jar 状态（幂等），并监听「装好了」那一刻。
+    _jarWasReady = _hub.jarReady;
+    _jarMissingShown = _hub.jarMissing;
+    _hub.addListener(_onHubChanged);
+    unawaited(_hub.ensureJarStatus());
     if (widget.openAi) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _aiFocus.requestFocus();
@@ -114,6 +129,7 @@ class _SearchPageState extends State<SearchPage> {
   void dispose() {
     _q.removeListener(_onQueryChanged);
     _scroll.removeListener(_onScroll);
+    _hub.removeListener(_onHubChanged);
     _sub?.cancel();
     _skeletonTimer?.cancel();
     _watchdog?.cancel();
@@ -128,6 +144,31 @@ class _SearchPageState extends State<SearchPage> {
 
   void _onQueryChanged() {
     if (mounted) setState(() {});
+  }
+
+  /// jar 插件状态变了：从「未装」翻到「已装」时，**把这一轮搜索重跑一次**。
+  ///
+  /// 冷启动是边装边用的：用户往往在 jar 装好之前就已经搜过一次，那一轮里
+  /// jar 波次被整段跳过（`SourceHub.jarReady == false` 时不发车）。装好之后
+  /// 不重跑的话，搜索结果里永远没有那四个源，详情页的 jar 大类也一直灰着。
+  ///
+  /// 只翻一次就够（`_jarWasReady` 记住），不会反复重跑。
+  void _onHubChanged() {
+    if (!mounted) return;
+    final ready = _hub.jarReady;
+    final flipped = ready && !_jarWasReady;
+    _jarWasReady = ready;
+    if (_hub.jarMissing != _jarMissingShown) {
+      _jarMissingShown = _hub.jarMissing;
+      setState(() {});
+    }
+    if (!flipped) return;
+    final last = _lastQuery?.trim() ?? '';
+    if (_mode != 'search' || last.isEmpty) return;
+    // 用户已经在输入框里敲了别的词：重跑旧词会把输入框内容顶掉，交给用户
+    // 自己那一次搜索（它本来就带 jar）。
+    if (_q.text.trim() != last) return;
+    unawaited(_search(last, keepFocus: true));
   }
 
   /// 输入即搜（SEARCH_TYPEAHEAD 2026-11-15）。
@@ -1008,6 +1049,7 @@ class _SearchPageState extends State<SearchPage> {
     final items = _arrived;
     return Column(
       children: [
+        if (_hub.jarMissing) _jarNoticeBar(),
         _resultsHeader(),
         Expanded(
           child: CustomScrollView(
@@ -1049,6 +1091,37 @@ class _SearchPageState extends State<SearchPage> {
           ),
         ),
       ],
+    );
+  }
+
+  /// 「jar 未就绪」提示条（JAR_BOOT 2026-11-21 用户要求第 4 条）。
+  ///
+  /// jar 没装时搜索**不向那四个 jar 源发请求**（省掉十几秒白等），代价是结果里
+  /// 看不到它们 —— 这条提示就是告诉用户「为什么少了四个源、去哪装」。
+  /// 文案与详情页共用 [SourceHub.jarNotice]，两处一字不差。
+  Widget _jarNoticeBar({bool padded = true}) {
+    return Padding(
+      padding: padded
+          ? const EdgeInsets.fromLTRB(16, 2, 16, 0)
+          : const EdgeInsets.only(bottom: 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.extension_off_rounded,
+              size: 13, color: Color(0xFFA6B1C2)),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              _hub.jarNotice,
+              style: const TextStyle(
+                fontSize: 10.5,
+                height: 1.45,
+                color: Color(0xFFA6B1C2),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1159,6 +1232,7 @@ class _SearchPageState extends State<SearchPage> {
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(16, 28, 16, 32),
       children: [
+        if (!ai && _hub.jarMissing) _jarNoticeBar(padded: false),
         FxEmptyView(
           icon: ai ? Icons.auto_awesome_rounded : Icons.search_off_rounded,
           title: ai ? '没有找到合适的片子' : '没有找到相关影片',
