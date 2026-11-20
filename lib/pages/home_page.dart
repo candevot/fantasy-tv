@@ -29,7 +29,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// 短剧 / 少儿，共七项）。直播是底部导航的独立入口，这一轮不接。
   static const List<CmsChannel> _channels = CmsBridge.channels;
 
-  final PageController _bannerCtrl = PageController(viewportFraction: .88);
+  final PageController _bannerCtrl = PageController(viewportFraction: 1.0);
   final Map<String, HomeData> _cache = {};
 
   /// 云端片源配置刷新 / 直播地址变化时，首页跟着重算一次。
@@ -422,7 +422,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final list = <HomeSection>[
       for (final s in raw)
         if (s.items.isNotEmpty)
-          HomeSection(_sectionLabel(s.title), s.items.take(10).toList()),
+          HomeSection(_sectionLabel(s.title), s.items.take(30).toList()),
     ];
     // 排序：已知分区按 _sectionOrder 排前面，未知分区按原顺序跟后面。
     //
