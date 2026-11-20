@@ -86,7 +86,7 @@ class CmsBridge {
   ];
 
   /// 每行最多给 12 条（首页只显示 10 条，多两条留给横滑）。
-  static const int _rowCount = 20;
+  static const int _rowCount = 40;
 
   /// 首页 banner 取推荐页第一组有数据的分类的前 5 条。
   static const int _bannerCount = 5;
@@ -202,12 +202,21 @@ class CmsBridge {
     // RULE_SRC（2026-11-15）：首页只铺我们自己的片源（hx）。
     // 不带 `src` 时服务端把 hx / xo 两条同名片一起给回来，首页第一行就会
     // 出现「八仙（幻想）」和「八仙（官采切片）」并排。
-    final vods = await CmsApi.listVod(
-      type: typeId,
-      page: 1,
-      sort: 'hot',
-      src: CmsApi.ownSrc,
-    );
+    // HOME_MORE（2026-11-20）：用户要求推荐多给几条。一页只有 20 条，
+    // 这里拉两页合并成 40 条（同一部片按 id 去重）。
+    final pages = await Future.wait(<Future<List<dynamic>>>[
+      CmsApi.listVod(type: typeId, page: 1, sort: 'hot', src: CmsApi.ownSrc),
+      CmsApi.listVod(type: typeId, page: 2, sort: 'hot', src: CmsApi.ownSrc),
+    ]);
+    final seen = <String>{};
+    final vods = <dynamic>[];
+    for (final pg in pages) {
+      for (final v in pg) {
+        final id = '${(v as dynamic).vodId ?? v.vod_id ?? v}';
+        if (!seen.add(id)) continue;
+        vods.add(v);
+      }
+    }
     final list = <VideoCard>[];
     for (final vod in vods) {
       if (!CmsApi.hasPlayUrl(vod)) continue;
