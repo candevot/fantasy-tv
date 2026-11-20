@@ -12,6 +12,9 @@ import 'cms_client.dart';
 import 'cms_request.dart';
 import 'dns_profile.dart';
 import 'fallback_match.dart' show fxNormTitle;
+import 'jar_sources.dart';
+import 'jar_log.dart';
+import 'jar_spider.dart';
 import 'source_log.dart';
 import 'parse_registry.dart';
 import 'sniff_rules.dart';
@@ -29,10 +32,11 @@ enum KSourceKind {
   /// `type: "live"` —— 直播播放列表（M3U / TXT / JSON）。
   live,
 
-  /// `type: 3` —— TVBox 的 jar 解析插件（历史值，App 已不再接入）。
+  /// `type: 3` —— TVBox 的 jar 解析插件（`spider.jar` 里 `csp_*` 那批源）。
   ///
-  /// 只保留枚举位以兼容老配置 / 老缓存的反序列化；这种源在解析入口就被丢掉，
-  /// 不会进检索计划，也不会出现在任何界面上。
+  /// JAR_RESTORE（2026-11-21）：只服务**搜索**和**播放解析**两处；
+  /// 首页 / 分类 / 排行榜永远只用我们自己的片源。能不能用、用哪几个，
+  /// 由 [SourceHub.jarSources]（白名单 + 用户开关，见 `jar_sources.dart`）决定。
   jar,
 
   /// `type: 4`（python 解析脚本）—— 暂不支持。
@@ -380,7 +384,10 @@ class SourceSearchPlan {
   /// 我们自己的一批（云端下发的幻想线路 + 主站采集库）。
   final List<KSource> own;
 
-  /// 外部那批（肥猫的 jar 源 + 用户自加）。
+  /// jar 源那批（白名单里用户开着的那几个）。
+  ///
+  /// 它们的卡片不直接上屏：搜索期先跟自有结果按「片名 + 年份」对齐 ——
+  /// 我们有的片合并线路，没有的片才新增一条卡片（见 `cms_bridge` 的 jar 波次）。
   final List<KSource> external;
 
   int get total => own.length + external.length;
@@ -458,8 +465,9 @@ class SourceSearchResult {
 ///   2. **多源检索**：搜索 / 分类并行查云端下发的幻想线路，按「片名 + 年份」
 ///      去重，结果统一标「幻想」（见 [KSource.resultLabel]）。
 ///
-/// 影视壳（TVBox / jar 插件）接入层已经整层拆掉：这里不再有导入、自加源、
-/// 换源面板，也不再有 jar 插件状态。
+/// jar 源（TVBox `type: 3`）**只在搜索和播放解析时**参与：片源表里保留
+/// 白名单内的那几条（见 `jar_sources.dart`），首页 / 分类 / 排行榜永远只用
+/// 我们自己的片源。TVBox 配置导入、用户自加源、换源面板仍然不存在。
 ///
 /// id 约定：老记录里可能还带 `@src:<源key>::<vod_id>` 前缀（详情 / 播放
 /// 据此路由回它自己的源）；主站 hx 库与主站采集库是同一套编号，id 保持
@@ -495,6 +503,12 @@ class SourceHub extends ChangeNotifier {
 
   /// 源级失败账本的落盘键（[SourceFailureLedger]）。
   static const String _kSourceFailure = 'fx_source_failure_v1';
+
+  /// jar 源启停的落盘键（设置 → 片源管理里逐个开关）。
+  ///
+  /// 存的是「用户显式改过的结果」：没有这个键时按白名单
+  /// [kEnabledJarSources] 给默认值（默认开的只有用户挑中的那几个）。
+  static const String _kJarEnabled = 'fx_jar_enabled_v1';
 
   /// 「幻想」这个默认源在界面上的名字。
   static const String ownSourceName = '幻想';
@@ -546,6 +560,13 @@ class SourceHub extends ChangeNotifier {
 
   List<KSource> _cloud = const <KSource>[];
   Set<String> _removed = <String>{};
+
+  /// jar 源的启停（key = 白名单里的源名）。null = 还没读过磁盘，
+  /// 此时按 [kEnabledJarSources] 给默认值。
+  Set<String>? _jarEnabled;
+
+  /// jar 插件是否可用（null = 还没查过）。
+  bool? _jarReady;
   String _liveUrl = '';
   int _fetchedAt = 0;
   String _error = '';
@@ -646,6 +667,160 @@ class SourceHub extends ChangeNotifier {
   /// 没有「换源」这回事：外部源接入层已经整层拆掉。
   static const String ownSourceKey = '@own';
 
+  /* ------------------------------------------------------------- jar 源 */
+
+  /// jar 源（`type: 3`）在片源表里的白名单标签（`咕噜` / `橘汁` …）。
+  ///
+  /// 不在 [kEnabledJarSources] 里的一律返回空串 —— 设置页不显示、
+  /// 搜索不发请求、播放解析也不认。
+  static String jarLabelOf(KSource source) {
+    if (source.kind != KSourceKind.jar) return '';
+    final byName = fxJarLabelOf(source.name);
+    if (byName.isNotEmpty) return byName;
+    return fxJarLabelOf(source.key);
+  }
+
+  /// 把内置目录里的那几条 jar 源补进片源表。
+  ///
+  /// 为什么需要补：云端 `/api/config` 目前只下发一条 CMS 源，没有 jar 站点，
+  /// 但用户点名的这四个源要能在「片源管理」里看到、要能手动启停，所以
+  /// 类名 / `ext` 内置在 `jar_sources.dart`；云端将来真下发了同名的 jar 站点，
+  /// 以云端那份为准（`ext` 可能更新），内置的只做兜底。
+  void _injectJarCatalog() {
+    final jar = <KSource>[
+      for (final s in _cloud)
+        if (s.kind == KSourceKind.jar && jarLabelOf(s).isNotEmpty) s,
+    ];
+    final out = <KSource>[
+      for (final s in _cloud)
+        if (s.kind != KSourceKind.jar) s,
+      ...jar,
+    ];
+    for (final def in kBuiltinJarSources) {
+      final label = fxJarLabelOf(def.name);
+      if (label.isEmpty) continue;
+      if (jar.any((s) => jarLabelOf(s) == label)) continue;
+      out.add(
+        KSource(
+          key: label,
+          name: def.name,
+          api: def.api,
+          kind: KSourceKind.jar,
+          origin: KSourceOrigin.cloud,
+          ext: def.ext,
+        ),
+      );
+    }
+    _cloud = out;
+  }
+
+  /// jar 源的默认开关：白名单里的都算「用户挑中的」，默认启用。
+  bool _jarDefaultEnabled(String label) => kEnabledJarSources.contains(label);
+
+  /// 这个 jar 源当前是否启用（用户改过就按用户的，没改过按白名单）。
+  bool jarSourceEnabled(String label) {
+    final key = fxJarLabelOf(label).isEmpty ? label : fxJarLabelOf(label);
+    if (key.isEmpty) return false;
+    final saved = _jarEnabled;
+    if (saved != null) return saved.contains(key);
+    return _jarDefaultEnabled(key);
+  }
+
+  /// 设置页里逐个开关 jar 源。
+  ///
+  /// 第一次改动时把「当前默认值」整体落盘，之后再改只动这一条 ——
+  /// 这样用户关掉咕噜不会把另外三个也一起关掉。
+  Future<void> setJarSourceEnabled(String label, bool enabled) async {
+    final key = fxJarLabelOf(label).isEmpty ? label.trim() : fxJarLabelOf(label);
+    if (key.isEmpty) return;
+    final next = <String>{
+      for (final l in kEnabledJarSources)
+        if (jarSourceEnabled(l)) l,
+    };
+    if (enabled) {
+      next.add(key);
+    } else {
+      next.remove(key);
+    }
+    _jarEnabled = next;
+    notifyListeners();
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setStringList(_kJarEnabled, next.toList()..sort());
+    } catch (_) {
+      // 写不进去只是下次启动回到默认值，本轮照样生效。
+    }
+  }
+
+  /// 参与搜索的 jar 源：白名单 ∩ 用户开着 ∩ 没被删。
+  ///
+  /// **顺序就是白名单顺序**（咕噜 / 橘汁 / 剧圈 / 下饭），不受云端配置里的
+  /// 排列影响 —— 详情页大类 chip 的顺序、搜索发车顺序都以它为准。
+  List<KSource> get jarSources {
+    final byLabel = <String, KSource>{};
+    for (final s in visibleCloud) {
+      final label = jarLabelOf(s);
+      if (label.isEmpty) continue;
+      byLabel.putIfAbsent(label, () => s);
+    }
+    return <KSource>[
+      for (final label in kEnabledJarSources)
+        if (byLabel[label] != null && jarSourceEnabled(label))
+          byLabel[label]!,
+    ];
+  }
+
+  /// 有没有启用中的 jar 源。
+  bool get hasJarSources => jarSources.isNotEmpty;
+
+  /// jar 插件（`spider.jar`）是否已装好。
+  ///
+  /// 没装就**不**去敲那四个 jar 源（每个都要现下载 dex / 初始化，白等十几秒），
+  /// 搜索流直接跳过；设置页里给一句可读的提示。
+  bool get jarReady => _jarReady == true;
+
+  /// jar 源现在是「开着但插件没装」的状态（界面据此提示去装）。
+  bool get jarMissing => _jarReady == false && hasJarSources;
+
+  /// jar 插件没装时的可读提示（装好了返回空串）。
+  String get jarNotice {
+    if (!jarMissing) return '';
+    return 'jar 源需要先安装 spider.jar：设置 → 片源管理 → 安装 / 更新';
+  }
+
+  /// 查一次 jar 插件状态（幂等，结果缓存）。
+  Future<void> ensureJarStatus() {
+    if (_jarReady != null) return Future<void>.value();
+    return refreshJarStatus();
+  }
+
+  /// 重新查询 jar 插件状态。
+  Future<void> refreshJarStatus() async {
+    try {
+      if (!JarSpider.supported) {
+        _jarReady = false;
+        notifyListeners();
+        return;
+      }
+      final status = await JarSpider.status();
+      _jarReady = status.installed;
+      fxJarLog(
+        'jar 插件状态 installed=${status.installed} '
+        'md5=${status.shortMd5} size=${status.sizeLabel}',
+      );
+    } catch (e) {
+      _jarReady = false;
+      fxJarLog('jar 插件状态查询失败 err=$e');
+    }
+    notifyListeners();
+  }
+
+  /// 装好 / 卸掉 jar 之后把状态清掉重查（`JarPluginManager` 装完会调）。
+  void invalidateJarStatus() {
+    _jarReady = null;
+    notifyListeners();
+  }
+
   /// 参与搜索 / 分类的源：只有我们自己的那批（云端下发的幻想线路）。
   ///
   /// 同一个地址只留一份，直播源 / 非影视源不在此列。
@@ -653,6 +828,9 @@ class SourceHub extends ChangeNotifier {
     final out = <KSource>[];
     final seen = <String>{};
     for (final s in visibleCloud) {
+      // jar 源单独走 [jarSources]：它是「搜索 + 播放解析」专用的一批，
+      // 不进自有源的检索计划（首页 / 分类 / 排行永远只有自有源）。
+      if (s.kind == KSourceKind.jar) continue;
       // SOURCE_BLOCK：网盘 / 课堂 / 体育 / 音频 / 配置文件这类源不参与检索。
       if (!usableForContent(s)) continue;
       // FAIL_LEDGER（第 8 条）：这个源正在冷却 —— 批量检索跳过它，
@@ -679,12 +857,10 @@ class SourceHub extends ChangeNotifier {
   /// 云端配置里是不是显式配了直播地址（设置页用它提示）。
   bool get hasCloudLiveUrl => liveUrl.isNotEmpty;
 
-  /// 一轮检索要查的源。
-  ///
-  /// 只有我们自己的那批（云端下发的幻想线路）—— 外部源接入层已经拆掉，
-  /// 所以「自己的 / 外部的」这个分组也不存在了。
+  /// 一轮检索要查的源：`own` = 自有源（云端下发的幻想线路），
+  /// `external` = 启用的 jar 源（白名单里那几个，见 [jarSources]）。
   SourceSearchPlan get searchPlan =>
-      SourceSearchPlan(own: querySources, external: const <KSource>[]);
+      SourceSearchPlan(own: querySources, external: jarSources);
 
   DateTime? get fetchedAt =>
       _fetchedAt <= 0 ? null : DateTime.fromMillisecondsSinceEpoch(_fetchedAt);
@@ -835,6 +1011,8 @@ class SourceHub extends ChangeNotifier {
     if (protocol.hasProtocolSections) {
       _applyProtocolSections(protocol);
     }
+    // 云端没下发 jar 站点时把内置目录补进来（用户挑中的那四个源）。
+    _injectJarCatalog();
   }
 
   /// 取第一个非空文本（配置里同一项可能有多种写法）。
@@ -853,9 +1031,9 @@ class SourceHub extends ChangeNotifier {
     final site = FxSite.from(m);
     if (site == null) return null;
     final kind = kindOf(m['type']);
-    // type 3（jar 插件）/ type 4（python 脚本）不再接入：解析阶段就丢掉，
-    // 免得它们混进检索计划或界面。
-    if (kind == KSourceKind.unsupported || kind == KSourceKind.jar) return null;
+    // type 4（python 脚本）等仍不支持，解析阶段就丢掉；type 3（jar 插件）
+    // 保留下来，但只有白名单里的源会被 [SourceHub.jarSources] 选出来。
+    if (kind == KSourceKind.unsupported) return null;
     return KSource(
       key: site.key,
       name: site.name,
@@ -898,8 +1076,9 @@ class SourceHub extends ChangeNotifier {
       case 1:
         return KSourceKind.cms;
       case 3:
-        // type 3 是 TVBox 的 jar 插件源：接入层已整层拆掉，按「不支持」处理。
-        return KSourceKind.unsupported;
+        // type 3 是 TVBox 的 jar 插件源（`spider.jar`）。是否真的参与检索
+        // 由白名单决定（见 `jar_sources.dart` 的 [kEnabledJarSources]）。
+        return KSourceKind.jar;
       case 4:
         return KSourceKind.unsupported;
       default:
@@ -911,7 +1090,6 @@ class SourceHub extends ChangeNotifier {
     if (kind != KSourceKind.unsupported) return '';
     final text = _text(raw);
     final n = int.tryParse(text);
-    if (n == 3) return 'type 3（jar 插件源）已不再支持';
     if (n == 4) return 'type 4（python 解析脚本）暂不支持';
     return 'type $text 暂不支持';
   }
@@ -1065,6 +1243,71 @@ class SourceHub extends ChangeNotifier {
                 cover: Api.coverOf(card.cover, root: source.api),
               ),
         ];
+
+    if (source.kind == KSourceKind.jar) {
+      // jar 源（`type: 3`）：走原生 `fantasy_tv/spider` 通道，两种 quick 都在
+      // [JarSpider.searchWithFallback] 里试过，这里只加一层源级兜底超时。
+      try {
+        final report = await JarSpider.searchWithFallback(
+          api: source.api,
+          ext: source.ext,
+          key: q,
+          page: page,
+          label: label,
+        ).timeout(limit);
+        final cards = prepared(report.cards);
+        final status = cards.isNotEmpty
+            ? SourceSearchStatus.ok
+            : report.allTimedOut
+                ? SourceSearchStatus.timeout
+                : report.allFailed
+                    ? SourceSearchStatus.error
+                    : SourceSearchStatus.empty;
+        if (cards.isEmpty) {
+          fxJarLog(
+            'source=$label key=$q 结局=${status.name}'
+            '${report.note.isEmpty ? '' : ' err=${fxJarClip(report.note, max: 120)}'}'
+            ' 耗时=${spent().inMilliseconds}ms',
+          );
+        }
+        record(status, report.note);
+        return SourceSearchResult(
+          source: source,
+          cards: cards,
+          status: status,
+          elapsed: spent(),
+          rawCount: report.cards.length,
+          note: report.note,
+          quickFallback: report.usedFallback,
+        );
+      } on TimeoutException {
+        fxJarLog(
+          'source=$label key=$q 结局=timeout（源级 ${limit.inSeconds}s 兜底）'
+          ' 耗时=${spent().inMilliseconds}ms',
+        );
+        record(SourceSearchStatus.timeout, '源级超时');
+        return SourceSearchResult(
+          source: source,
+          cards: const <VideoCard>[],
+          status: SourceSearchStatus.timeout,
+          elapsed: spent(),
+          note: '源级超时',
+        );
+      } catch (e) {
+        fxJarLog(
+          'source=$label key=$q 结局=error err=${fxJarClip('$e', max: 120)}'
+          ' 耗时=${spent().inMilliseconds}ms',
+        );
+        record(SourceSearchStatus.error, '$e');
+        return SourceSearchResult(
+          source: source,
+          cards: const <VideoCard>[],
+          status: SourceSearchStatus.error,
+          elapsed: spent(),
+          note: '$e',
+        );
+      }
+    }
 
     try {
       final cards = await CmsClient.of(source.api)
@@ -1309,6 +1552,8 @@ class SourceHub extends ChangeNotifier {
       }
       final removedRaw = sp.getStringList(_kRemoved);
       if (removedRaw != null) _removed = removedRaw.toSet();
+      final jarRaw = sp.getStringList(_kJarEnabled);
+      if (jarRaw != null) _jarEnabled = jarRaw.toSet();
       _liveUrl = sp.getString(_kLiveUrl) ?? '';
       _fetchedAt = sp.getInt(_kFetchedAt) ?? 0;
       final protocolRaw = sp.getString(_kProtocol);
@@ -1323,6 +1568,8 @@ class SourceHub extends ChangeNotifier {
     } catch (_) {
       // 缓存坏了就当没有：下次 refresh 会重新写一遍。
     }
+    // 不管缓存里有没有 jar 站点，白名单里那几条都要在片源表里（设置页能开关）。
+    _injectJarCatalog();
     // 源级失败账本：读盘失败按空表处理（多试一次源总比一直白等强）。
     await _failures.ensureLoaded();
     _loaded = true;

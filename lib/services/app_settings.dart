@@ -71,6 +71,28 @@ class AppSettings extends ChangeNotifier {
   /// 隧道播放（壳 `tunnel` 的语义，默认关）。
   static const String _kTunneling = 'fx_settings_tunneling';
 
+  /// JAR 源（TVBox type 3 的 spider.jar）：
+  ///   · 下载地址（默认指向我们自己的服务器）
+  ///   · 可选 md5（填了就强校验，防下到错误页面）
+  ///
+  /// JAR_RESTORE（2026-11-21）：这两个字段只服务「设置 → 片源管理」里
+  /// 用户手动点的「安装 / 更新 spider.jar」。**启动不自动装**，也不导入
+  /// TVBox 配置 —— 那两件事用户明确说过不要。
+  static const String _kJarUrl = 'fx_settings_jar_url';
+  static const String _kJarMd5 = 'fx_settings_jar_md5';
+
+  /// 是否允许「没人点、纯后台触发」时装 jar。
+  ///
+  /// 默认 **关**（JAR_RESTORE 口径）：用户明确不要「启动自动安装 spider.jar」。
+  /// 装 jar 只有一条路 —— 设置 → 片源管理里用户自己点「安装 / 更新」。
+  static const String _kJarAutoInstall = 'fx_settings_jar_auto_install';
+
+  /// 服务器上那份 spider.jar 的 md5（2026-11-15 实测 1,929,492 B）。
+  static const String defaultJarMd5 = 'cbe016eb3cb002ae62058604843f5106';
+
+  /// jar 插件默认下载地址（服务器上放的肥猫 spider.jar）。
+  static const String defaultJarUrl = 'http://125.94.244.87/spider.jar';
+
   static const String defaultQualityKey = 'auto';
 
   static const bool defaultAutoNext = true;
@@ -119,6 +141,9 @@ class AppSettings extends ChangeNotifier {
   int _sleepEndsAt = 0;
   bool _wifiOnlyDownload = defaultWifiOnlyDownload;
   bool _playbackDiagnostics = defaultPlaybackDiagnostics;
+  String _jarUrl = defaultJarUrl;
+  String _jarMd5 = defaultJarMd5;
+  bool _jarAutoInstall = false;
   DownloadLocation _downloadLocation = DownloadLocation.phone;
 
   /// 用户自选的下载基目录（真正写入 `<它>/幻想影视`）；null = 用默认 Download。
@@ -146,6 +171,15 @@ class AppSettings extends ChangeNotifier {
 
   /// 播放诊断浮层是否打开（默认关，见 [_kPlaybackDiagnostics]）。
   bool get playbackDiagnostics => _playbackDiagnostics;
+
+  /// jar 插件下载地址（空串 = 不下载，只用内置 / 手动安装的 jar）。
+  String get jarUrl => _jarUrl;
+
+  /// jar 期望 md5（空串 = 不校验；填了就强校验）。
+  String get jarMd5 => _jarMd5;
+
+  /// 是否允许纯后台自动安装（默认关，见 [_kJarAutoInstall]）。
+  bool get jarAutoInstall => _jarAutoInstall;
 
   DownloadLocation get downloadLocation => _downloadLocation;
   int get downloadConcurrency => _downloadConcurrency;
@@ -188,6 +222,12 @@ class AppSettings extends ChangeNotifier {
           sp.getBool(_kWifiOnlyDownload) ?? defaultWifiOnlyDownload;
       _playbackDiagnostics =
           sp.getBool(_kPlaybackDiagnostics) ?? defaultPlaybackDiagnostics;
+      final jarUrl = sp.getString(_kJarUrl)?.trim();
+      _jarUrl = jarUrl == null ? defaultJarUrl : jarUrl;
+      // 没存过 = 用默认 md5；用户主动清空（存了空串）= 不校验。
+      final jarMd5 = sp.getString(_kJarMd5);
+      _jarMd5 = jarMd5 == null ? defaultJarMd5 : jarMd5.trim();
+      _jarAutoInstall = sp.getBool(_kJarAutoInstall) ?? false;
       _downloadLocation = downloadLocationFromKey(
         sp.getString(_kDownloadLocation),
       );

@@ -4,6 +4,9 @@ import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
 import 'cms_client.dart';
+import 'jar_log.dart';
+import 'jar_sources.dart';
+import 'jar_spider.dart';
 import 'source_log.dart';
 import 'play_log.dart';
 import 'play_path.dart';
@@ -161,9 +164,12 @@ class CmsBridge {
     }
     final allFailed = lists.every((list) => list == null);
     if (sections.isEmpty) {
+      // HOME_NOFAIL（2026-11-21）：首页推荐**不再整体报「加载失败」**。
+      // 用户实测：分类页正常、只有推荐页挂 —— 只要任一行成功就必须出内容；
+      // 全部失败也先返回空数据让页面显示自己的重试态，不要再把异常抛给页面。
       if (allFailed && failure != null) {
-        if (!legacyEnabled) throw failure!;
-        return _legacyHome(ch);
+        if (legacyEnabled) return _legacyHome(ch);
+        return HomeData(const <BannerItem>[], const <HomeSection>[]);
       }
       if (!legacyEnabled) {
         return HomeData(const <BannerItem>[], const <HomeSection>[]);
@@ -1071,6 +1077,21 @@ class CmsBridge {
   /// 命中旧快照就永远刷不出来。
   static Future<VideoDetail> detail(String id, {bool fresh = false}) async {
     _boot();
+    final jar = await _jarSourceOf(id);
+    if (jar != null) {
+      return _jarGuard(
+        jarLabelOf: SourceHub.jarLabelOf(jar),
+        run: () async {
+          final detail = await JarSpider.detail(
+            api: jar.api,
+            ext: jar.ext,
+            vodId: SourceHub.rawIdOf(id),
+          );
+          return _withJarLines(detail, jar, SourceHub.rawIdOf(id));
+        },
+        wait: jarDetailTimeout,
+      );
+    }
     final external = await _externalSource(id);
     if (external != null) {
       final detail = await CmsClient.of(external.api).detail(
@@ -1174,6 +1195,24 @@ class CmsBridge {
     bool fresh = false,
   }) async {
     _boot();
+    // jar 源线路：**播放时现场解析**（playerContent），库里不存地址。
+    final jarRef = fxParseJarLineId(line);
+    if (jarRef != null) {
+      final source = await _jarSourceByLabel(jarRef.label);
+      if (source == null) {
+        throw ApiException('${jarRef.label} 源已停用，换条线路试试');
+      }
+      return _jarGuard(
+        jarLabelOf: jarRef.label,
+        run: () => JarSpider.play(
+          api: source.api,
+          ext: source.ext,
+          vodId: jarRef.vodId,
+          lineName: jarRef.from,
+          ep: ep,
+        ),
+      );
+    }
     final external = await _externalSource(vodId);
     if (external != null) {
       final info = await CmsClient.of(external.api).play(
@@ -1217,6 +1256,11 @@ class CmsBridge {
 
   /// 只要直链（下载 / 投屏 / 外挂播放）。
   static Future<String> playUrl(String vodId, String line, int ep) async {
+    final jarRef = fxParseJarLineId(line);
+    if (jarRef != null) {
+      final info = await play(vodId, ep, line);
+      return info.url;
+    }
     final external = await _externalSource(vodId);
     if (external != null) {
       final info = await CmsClient.of(external.api).play(
