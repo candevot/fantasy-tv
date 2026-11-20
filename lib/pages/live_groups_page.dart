@@ -6,13 +6,14 @@ import '../widgets/fx_cards.dart';
 import 'live_detail_page.dart';
 import '../utils/fx_route.dart';
 
-/// 直播 Tab 的固定分组顺序：央视 → 卫视 → 少儿 → 地方 → 港澳台 → 体育 → 其他。
+/// 直播 Tab 的固定分组顺序：央视 → 卫视 → 少儿 → 地方 → 港澳台 → 海外 → 体育 → 其他。
 const List<String> kLiveSectionOrder = <String>[
   '央视频道',
   '卫视频道',
   '少儿频道',
   '地方频道',
   '港澳台',
+  '海外频道',
   '体育频道',
   '其他',
 ];
@@ -113,6 +114,7 @@ String liveSectionName(String raw) {
       name.contains('台湾')) {
     return '港澳台';
   }
+  if (name.contains('海外') || name.contains('国际')) return '海外频道';
   if (name.contains('体育')) return '体育频道';
   if (name.contains('地方') || liveProvinceOfName(name).isNotEmpty) {
     return _localSection;
@@ -163,14 +165,18 @@ bool liveChannelMatches(LiveChannel channel, String query) {
 String _normalize(String raw) =>
     raw.toLowerCase().replaceAll(RegExp(r'[\s\-_·.]+'), '');
 
-/// 当前台最高清晰度：只在有 720P 及以上线路时显示真实分辨率（1920x1080），
+/// 当前台最高清晰度：有 720P 及以上线路时显示 `1080P` / `720P` / `4K`，
 /// 没有高清线路时为空（标清线路不打标签）。
+///
+/// LIVE_SCAN（2026-11-20）：服务端 `hx_live.json` 会带 ffprobe 实测的
+/// 真实宽高，所以这里尽量按真实高度分档；拿不到高度时才退回线路名判断。
 String liveChannelQuality(LiveChannel channel) {
   var height = 0;
   for (final line in channel.lines) {
     if (line.height > height) height = line.height;
   }
-  return height >= 720 ? liveQualityLabel(height) : '';
+  if (height >= 720) return liveQualityTag(height);
+  return '';
 }
 
 /// 频道卡副标题：地方台优先展示省份，其余展示所属分组。
@@ -187,6 +193,7 @@ String liveChannelSubtitle(LiveChannel channel) {
 
 IconData liveSectionIcon(String name) {
   if (name.contains('港澳台')) return Icons.public_rounded;
+  if (name.contains('海外')) return Icons.language_rounded;
   if (name.contains('体育')) return Icons.sports_soccer_rounded;
   if (name.contains('央视')) return Icons.live_tv_rounded;
   if (name.contains('卫视')) return Icons.satellite_alt_rounded;

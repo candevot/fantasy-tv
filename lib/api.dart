@@ -38,6 +38,16 @@ class Api {
   /// 一起看的 WebSocket 地址：**由 [base] 推导**，永远同一台服务器。
   static String wsBase = wsFromBase(base);
 
+  /// 实测直播清单：`GET /api/live`（服务端直出 `hx_live.json`）。
+  ///
+  /// LIVE_SCAN（2026-11-20）：直播页不再依赖后台下发 `live_url`，
+  /// 云端没配时默认读这台服务器的 `/api/live`，里面只有 ffprobe 实测
+  /// 连得通的台（含真实分辨率），所以「列表里点进去打不开」会少很多。
+  static String get liveEndpoint {
+    final root = base.replaceAll(RegExp(r'/+$'), '');
+    return '$root/live';
+  }
+
   /// 把 `http(s)://host[:port]/api` 推成 `ws(s)://host[:port]/ws/together`。
   ///
   /// 单独抽成纯函数是因为这里踩过两次坑：

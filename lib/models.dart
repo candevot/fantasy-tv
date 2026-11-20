@@ -366,6 +366,12 @@ String liveQualityLabel(int height) {
   return dims == null ? '' : '${dims.$1}x${dims.$2}';
 }
 
+/// 直播卡片用的分档标签：4K / 1080P / 720P / 标清。
+///
+/// 与服务端 `hx_live.json` 的 `quality` 字段同一套口径，卡片上只放一个短标签
+/// （`1080P`），真实宽高留在线路详情里看。
+String liveQualityTag(int height) => _liveTierLabel(height);
+
 /// 通俗分档标签：4K / 1080P / 720P / 标清；0 高度返回空串。
 /// 仅在拿不到真实宽高时兜底显示。
 String _liveTierLabel(int height) {

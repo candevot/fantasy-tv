@@ -1,13 +1,9 @@
 import 'package:flutter/material.dart';
 
-import '../api.dart';
 import '../models.dart';
-import '../services/cms_bridge.dart';
 import '../services/live_source.dart';
-import '../services/source_hub.dart';
 import '../theme.dart';
 import '../utils/fx_route.dart';
-import 'category_page.dart' show fxErrorText;
 import 'live_detail_page.dart';
 import 'live_groups_page.dart' show LiveChannelCard, LiveSection, buildLiveSections;
 
@@ -75,62 +71,14 @@ class _LiveAllPageState extends State<LiveAllPage> {
       });
     } catch (e) {
       if (!mounted || req != _req) return;
-      // 接口没带 lives：这是空态，不是错误（不弹「加载失败」、不白屏）。
-      if (SourceHub.instance.liveUrl.trim().isEmpty) {
-        setState(() {
-          _loading = false;
-          _refreshing = false;
-          _error = null;
-          _noLive = true;
-          _sections = const <LiveSection>[];
-        });
-        return;
-      }
-      if (!CmsBridge.legacyEnabled) {
-        // 旧接口（8787）已随迁移下线：不再拿它兜底，直接把真实原因说清楚。
-        // 「后台还没配直播接口地址」比先转 16 秒（8 秒超时 ×2 次重试）再报
-        // 一个看不懂的网络错误有用得多。
-        setState(() {
-          _loading = false;
-          _refreshing = false;
-          _error = fxErrorText(e);
-        });
-        return;
-      }
-      await _loadLegacy(e, req);
-    }
-  }
-
-  /// 云端没配 / 拉不到：回落到旧接口的分组数据。
-  Future<void> _loadLegacy(Object cause, int req) async {
-    if (!CmsBridge.legacyEnabled) {
-      if (!mounted || req != _req) return;
+      // LIVE_SCAN（2026-11-20）：拉不到数据（扫描还没跑完 / 弱网 / 服务刚重启）
+      // 不白屏、也不甩错误码 —— 显示「正在同步直播源，请稍候」，等后台出数据。
       setState(() {
         _loading = false;
         _refreshing = false;
-        _error = fxErrorText(cause);
-      });
-      return;
-    }
-    try {
-      final groups = await Api.liveGroups();
-      if (!mounted || req != _req) return;
-      final sections = buildLiveSections(groups);
-      if (!mounted || req != _req) return;
-      setState(() {
-        _sections = sections;
-        _catalog = null;
-        _fromLegacy = true;
-        _loading = false;
-        _refreshing = false;
-        _error = sections.isEmpty ? fxErrorText(cause) : null;
-      });
-    } catch (_) {
-      if (!mounted || req != _req) return;
-      setState(() {
-        _loading = false;
-        _refreshing = false;
-        _error = fxErrorText(cause);
+        _error = null;
+        _noLive = true;
+        _sections = const <LiveSection>[];
       });
     }
   }
@@ -171,16 +119,16 @@ class _LiveAllPageState extends State<LiveAllPage> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32),
               child: Text(
-                '加载失败：$_error',
+                '正在同步直播源，请稍候',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Fx.sub),
               ),
             ),
             const SizedBox(height: 6),
-            const Text(
-              '直播跟着接口走：接口里带直播列表时才有频道',
+            Text(
+              '后台正在重扫频道（$_error）',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 11, color: Color(0xFFA6B1C2)),
+              style: const TextStyle(fontSize: 11, color: Color(0xFFA6B1C2)),
             ),
             const SizedBox(height: 12),
             FilledButton(
@@ -215,12 +163,12 @@ class _LiveAllPageState extends State<LiveAllPage> {
             const Icon(Icons.live_tv_rounded, size: 40, color: Fx.sub),
             const SizedBox(height: 10),
             const Text(
-              '当前接口没有直播源',
+              '正在同步直播源，请稍候',
               style: TextStyle(fontSize: 14, color: Fx.ink),
             ),
             const SizedBox(height: 6),
             const Text(
-              '直播跟着接口走：接口里带直播列表时，频道会自动出现在这里。',
+              '服务端会定时重扫所有频道，只保留实测能连通的台；稍等片刻或点刷新。',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 11, height: 1.5, color: Fx.sub),
             ),

@@ -94,18 +94,11 @@ class LiveSourceService {
   /// 拉取直播列表：网络优先，失败用缓存，地址都没配就抛错让页面提示。
   static Future<LiveCatalog> load({bool force = false}) async {
     await SourceHub.instance.ensureReady();
-    final url = SourceHub.instance.liveUrl.trim();
-    if (url.isEmpty) {
-      final cached = await _readCache();
-      if (cached != null && cached.body.trim().isNotEmpty) {
-        final catalog = _build(cached.body, url: cached.url, fromCache: true, at: cached.at);
-        _last = catalog;
-        return catalog;
-      }
-      // LIVE_FOLLOW_INTERFACE（2026-11-17）：接口没带 lives 就说这个，
-      // 页面对应的是**空态**（不是错误），措辞也别再说「后台没配」。
-      throw ApiException('当前接口没有直播源');
-    }
+    // LIVE_SCAN（2026-11-20）：云端下发的 live_url 优先（后台还能换源），
+    // 没配时默认读本服务器的 `/api/live` —— 那份清单是 ffprobe 实测过的，
+    // 每条都是真能连通的台，还带真实分辨率。
+    final cloudUrl = SourceHub.instance.liveUrl.trim();
+    final url = cloudUrl.isEmpty ? Api.liveEndpoint : cloudUrl;
     if (!force && _last != null && _last?.sourceUrl == url) return _last!;
     final running = _running;
     if (running != null) return running;
@@ -382,6 +375,7 @@ class LiveSourceService {
           url,
           group: groupName.isEmpty ? group : groupName,
           cover: cover,
+          height: _intOf(m['height']),
         );
         if (channel != null) out.add(channel);
         // 有的源把备用地址放在 urls / lines 里，一并收下。
@@ -453,6 +447,9 @@ class LiveSourceService {
         text.contains('台湾')) {
       return '港澳台';
     }
+    if (text.contains('海外') || text.contains('国际')) {
+      return '海外频道';
+    }
     if (text.contains('体育') || text.contains('赛事') || upper.contains('CCTV-5')) {
       return '体育频道';
     }
@@ -473,6 +470,7 @@ class LiveSourceService {
     String name, String url, {
     String group = '',
     String cover = '',
+    int height = 0,
   }) {
     final title = name.trim();
     final address = url.trim();
@@ -485,7 +483,8 @@ class LiveSourceService {
       url: address,
       group: group.trim(),
       lines: <LiveLine>[
-        LiveLine(id: '${id}_1', name: '', url: address),
+        // 服务端实测的分辨率（hx_live.json 的 height）：卡片靠它打 1080P 标签。
+        LiveLine(id: '${id}_1', name: '', url: address, height: height),
       ],
     );
   }
@@ -513,6 +512,13 @@ class LiveSourceService {
   static String _hostOf(String url) {
     final host = Uri.tryParse(url)?.host ?? '';
     return host.isEmpty ? '未命名频道' : host;
+  }
+
+  static int _intOf(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value.trim()) ?? 0;
+    return 0;
   }
 
   static String _firstText(List<Object?> values) {
