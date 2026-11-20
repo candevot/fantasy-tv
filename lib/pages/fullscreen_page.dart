@@ -158,6 +158,17 @@ class _FullPlayerPageState extends State<FullPlayerPage>
   /// 有进展就继续等（慢网），连续无进展才进错误页。
   static const Duration _firstFrameTimeout = fxStallNoProgressWindow;
 
+  /// 需要服务端解析的线路（hxparse 地址）起播判死窗口。
+  ///
+  /// 这类地址点下去先是「服务端解析令牌 → 返回真实 m3u8」，解析期几秒内
+  /// 字节 / 缓冲 / 位置全是 0，对「按进展判活」的看门狗来说等于一动不动，
+  /// 8 秒就被判死 —— 用户看到的就是「SH4K 一会能用一会说线路用不了」。
+  /// 直链保持 8 秒不变，解析型给 20 秒。
+  static const Duration _parseLineFirstFrameTimeout = Duration(seconds: 20);
+
+  static bool _isParseUrl(String? u) =>
+      u != null && u.contains('hxparse');
+
   /// 连续播放失败次数；首帧真正出现后清零。
 
   /// 首帧超时看门狗。
@@ -1148,6 +1159,12 @@ class _FullPlayerPageState extends State<FullPlayerPage>
     return w > 0 && h > 0;
   }
 
+  /// 当前起播该用的判死窗口：解析型地址放宽到 20 秒。
+  Duration _firstFrameBudget() {
+    final u = _watchdogUrl();
+    return _isParseUrl(u) ? _parseLineFirstFrameTimeout : _firstFrameTimeout;
+  }
+
   void _armFirstFrameTimer() {
     _firstFrameTimer?.cancel();
     _firstFrameWatch.reset();
@@ -1157,7 +1174,7 @@ class _FullPlayerPageState extends State<FullPlayerPage>
         _sampleOf(baseline, DateTime.now().millisecondsSinceEpoch),
       );
     }
-    _firstFrameTimer = Timer(_firstFrameTimeout, () {
+    _firstFrameTimer = Timer(_firstFrameBudget(), () {
       if (!mounted || _error || _exiting) return;
       if (!_firstFrame && _hasFirstFrame(_controller)) {
         _firstFrame = true;
