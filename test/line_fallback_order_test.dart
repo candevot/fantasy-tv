@@ -209,7 +209,7 @@ void main() {
     ];
     expect(
       fxFallbackLineOrder(lines: lines).map((l) => l.displayName).toList(),
-      <String>['幻想爱奇艺', 'SH4K', '咕噜·4K'],
+      <String>['咕噜·4K', '幻想爱奇艺', 'SH4K'],
     );
   });
 
@@ -219,7 +219,7 @@ void main() {
       fxFallbackLineOrder(lines: lines, currentLineId: 'id_已移除')
           .map((l) => l.displayName)
           .toList(),
-      <String>['SH4K', '咕噜·4K'],
+      <String>['咕噜·4K', 'SH4K'],
     );
   });
 
@@ -263,15 +263,15 @@ void main() {
     ];
     final order = fxFallbackLineOrder(lines: lines);
     expect(order.map((l) => l.displayName).toList(), <String>[
+      '咕噜·4K',
       '幻想爱奇艺',
       'SH4K',
       '红牛',
-      '咕噜·4K',
     ]);
     // 生效中的默认线路沉到**幻想大类内部**最后，而不是排到咕噜后面。
     expect(
       fxSortDegradedWithinGroups(order).map((l) => l.displayName).toList(),
-      <String>['SH4K', '红牛', '幻想爱奇艺', '咕噜·4K'],
+      <String>['咕噜·4K', 'SH4K', '红牛', '幻想爱奇艺'],
     );
   });
 }
