@@ -5,105 +5,84 @@ import 'package:fantasy_tv/models.dart';
 import 'package:fantasy_tv/services/jar_sources.dart';
 import 'package:fantasy_tv/widgets/fx_line_group_selector.dart';
 
-/// LINE_PREFIX（2026-11-21 用户实测 bug）回归：两行线路的**第一行大类**
-/// 按「线路名前缀」判，不再按数据来源判。
+/// JAR_ONLY_BY_ID（2026-11-21 用户实测 bug）回归：两行线路的**第一行大类**
+/// 只按「jar 线路 id」判，绝不按线路名前缀判。
 ///
-/// 现场（截图）：详情页第一行选中「幻想」，第二行却是
-/// 「咕噜 / 幻想爱奇艺 / 红牛」，「咕噜」还高亮着 —— 原因是服务端采集入库的
-/// 线路名本身带源名前缀（库里 `vod_play_from` 有 `咕噜`、`咕噜·量子资源`），
-/// 旧实现只认 `咕噜·`（必须带分隔符），裸名字那条 `咕噜` 就落进了「幻想」。
+/// 现场（截图）：详情页「八仙」第一行 咕噜 选中，第二行只有「暴风资源」一条；
+/// 「济公传」第二行只有「默认」一条。这两条其实是**我们采集入库的线路** ——
+/// 库里 `vod_play_from` 真的就叫 `咕噜` / `咕噜·暴风资源` / `咕噜·量子资源`，
+/// 旧实现按名字前缀把它们塞进了咕噜大类，冒充成 jar 的子线路；而 jar 真返回的
+/// `咕噜4K` / `咖啡4K超清` / `金牌极速` / `玫瑰4K` … 一条都没出现。
 ///
-/// 这里把用户给的分组规则钉成真值表：**每条线路名 → 归属哪个大类**。
+/// 现在的口径（用户原话）：
+///   · 「CMS 采集的线路只归幻想大类，绝不能塞进 jar 源的大类里冒充」；
+///   · 「没有的话就消失」——没有真实子线路的源，大类整条不出现。
 void main() {
   LineInfo line(String name, {String? id}) =>
       LineInfo(id ?? 'id_$name', name, 'hls', 0);
 
+  /// jar 真返回的线路（`JarSpider` 产出的形态：id 编码 + 名字带前缀）。
+  LineInfo jarLine(String label, String from, {String vodId = '1'}) =>
+      LineInfo(fxJarLineId(label, vodId, from), '$label·$from', 'hls', 0);
+
   /* ------------------------------------------------------- 真值表 */
 
-  /// 用户口径原文：
-  /// ```
-  /// 线路名以「咕噜」开头          → 咕噜大类（显示时去掉「咕噜·」前缀）
-  /// 线路名以「剧圈」「橘汁」「下饭」开头 → 各自大类
-  /// 其余（SH4K / 幻想爱奇艺 / shvip / bilibili / qq / mgtv / youku /
-  ///       量子 / 红牛）→ 幻想大类
-  /// ```
-  const Map<String, String> truthTable = <String, String>{
-    // 咕噜：裸名字 + 采集器写出来的 `咕噜·<源线路名>` 全是咕噜大类。
-    '咕噜': '咕噜',
-    '咕噜·量子资源': '咕噜',
-    '咕噜·暴风资源': '咕噜',
-    '咕噜·非凡资源': '咕噜',
-    '咕噜·电影天堂': '咕噜',
-    '咕噜·4K': '咕噜',
-    '咕噜4K': '咕噜',
-    // 另外三个 jar 源：前缀同样归各自大类。
-    '剧圈·线路1': '剧圈',
-    '剧圈': '剧圈',
-    '橘汁·高清': '橘汁',
-    '下饭·线路2': '下饭',
-    // 其余一律「幻想」—— 包括自有的 `量子`（和 `咕噜·量子资源` 是两条线）。
-    '量子': kOwnLineGroupKey,
-    'SH4K': kOwnLineGroupKey,
-    '幻想爱奇艺': kOwnLineGroupKey,
-    '幻想自建': kOwnLineGroupKey,
-    'shvip': kOwnLineGroupKey,
-    'bilibili': kOwnLineGroupKey,
-    'qq': kOwnLineGroupKey,
-    'mgtv': kOwnLineGroupKey,
-    'youku': kOwnLineGroupKey,
-    '红牛': kOwnLineGroupKey,
-    'TW线路': kOwnLineGroupKey,
-  };
-
-  test('分组真值表：每条线路名 → 归属大类', () {
+  test('采集线路名带「咕噜」前缀也仍然归幻想大类', () {
+    const Map<String, String> truthTable = <String, String>{
+      // 我们自己库里的 vod_play_from（实测 八仙 / 济公传）
+      '咕噜': kOwnLineGroupKey,
+      '咕噜·旋风VIP': kOwnLineGroupKey,
+      '咕噜·暴风资源': kOwnLineGroupKey,
+      '咕噜·量子资源': kOwnLineGroupKey,
+      '咕噜·非凡资源': kOwnLineGroupKey,
+      '咕噜·电影天堂': kOwnLineGroupKey,
+      '剧圈·线路1': kOwnLineGroupKey,
+      '橘汁·高清': kOwnLineGroupKey,
+      '下饭·线路2': kOwnLineGroupKey,
+      '量子': kOwnLineGroupKey,
+      'SH4K': kOwnLineGroupKey,
+      '幻想爱奇艺': kOwnLineGroupKey,
+      '红牛': kOwnLineGroupKey,
+    };
     for (final entry in truthTable.entries) {
       expect(
         fxLineGroupKeyOf(line(entry.key)),
         entry.value,
-        reason: '线路名「${entry.key}」应该归「${entry.value}」大类',
+        reason: '采集线路「${entry.key}」必须留在幻想大类',
       );
     }
   });
 
-  test('「咕噜」「咕噜·量子资源」「量子」三条互不混淆', () {
-    final gulu = line('咕噜');
-    final guluQuantum = line('咕噜·量子资源');
-    final ownQuantum = line('量子');
-    expect(fxLineGroupKeyOf(gulu), '咕噜');
-    expect(fxLineGroupKeyOf(guluQuantum), '咕噜');
-    // 自有的「量子」不许被「咕噜·量子资源」带走。
-    expect(fxLineGroupKeyOf(ownQuantum), kOwnLineGroupKey);
+  test('只有 jar 编码的 id 才进 jar 大类', () {
+    expect(fxLineGroupKeyOf(jarLine('咕噜', '4K')), '咕噜');
+    expect(fxLineGroupKeyOf(jarLine('剧圈', 'YZ有广')), '剧圈');
+    // 不在白名单里的源（已去掉的橘汁 / 下饭）就算带了 id 也只算自有线路，
+    // 防止老历史数据把它们又拉回第一行。
+    expect(fxLineGroupKeyOf(jarLine('橘汁', '高清')), kOwnLineGroupKey);
+    expect(fxLineGroupKeyOf(jarLine('下饭', '线路2')), kOwnLineGroupKey);
+  });
 
-    final groups = fxLineGroups(<LineInfo>[gulu, guluQuantum, ownQuantum]);
-    final own = groups.firstWhere((g) => g.own);
-    final guluGroup = groups.firstWhere((g) => g.key == '咕噜');
-    expect(own.lines.map((l) => l.name).toList(), <String>['量子']);
+  test('「咕噜」采集线路和「咕噜·4K」jar 线路不再混为一谈', () {
+    final groups = fxLineGroups(<LineInfo>[
+      line('咕噜'), // 采集入库的裸名字
+      line('咕噜·量子资源'), // 采集入库的子线路
+      jarLine('咕噜', '4K'), // jar 真返回
+    ]);
+    expect(groups.map((g) => g.label).toList(), <String>['幻想', '咕噜']);
     expect(
-      guluGroup.lines.map((l) => l.name).toList(),
+      groups[0].lines.map((l) => l.name).toList(),
       <String>['咕噜', '咕噜·量子资源'],
     );
-    // 两条「量子」不同 id，不合并。
-    expect(guluGroup.lines[1].id, isNot(own.lines[0].id));
-  });
-
-  test('装饰字符 / 分隔符不影响前缀判定', () {
-    expect(fxLineGroupKeyOf(line('🕊┃︎咕噜┃APP')), '咕噜');
-    expect(fxLineGroupKeyOf(line('咕噜 4K')), '咕噜');
-    expect(fxLineGroupKeyOf(line('咕噜・暴风资源')), '咕噜');
-    expect(fxLineGroupKeyOf(line('咕噜|量子资源')), '咕噜');
-  });
-
-  test('jar 编码的线路 id 优先于名字（房间线路 / 老数据）', () {
-    final line = LineInfo(fxJarLineId('剧圈', '42', '线路1'), '线路1', 'hls', 0);
-    expect(fxLineGroupKeyOf(line), '剧圈');
+    expect(groups[1].lines.map((l) => l.name).toList(), <String>['咕噜·4K']);
+    expect(groups[1].lines.single.id, isNot(groups[0].lines.first.id));
   });
 
   /* --------------------------------------------------- 子线路显示名 */
 
   test('第二行去掉前缀；裸名字显示「默认」；幻想爱奇艺不剥', () {
-    expect(fxLineSubName(line('咕噜·量子资源'), '咕噜'), '量子资源');
-    expect(fxLineSubName(line('咕噜·暴风资源'), '咕噜'), '暴风资源');
-    expect(fxLineSubName(line('剧圈·线路1'), '剧圈'), '线路1');
+    expect(fxLineSubName(jarLine('咕噜', '量子资源'), '咕噜'), '量子资源');
+    expect(fxLineSubName(jarLine('咕噜', '暴风资源'), '咕噜'), '暴风资源');
+    expect(fxLineSubName(jarLine('剧圈', '线路1'), '剧圈'), '线路1');
     // 名字就是大类名：再显示一次「咕噜」纯属重复。
     expect(fxLineSubName(line('咕噜'), '咕噜'), kBareLineSubName);
     expect(kBareLineSubName, '默认');
@@ -111,37 +90,41 @@ void main() {
     expect(fxLineSubName(line('幻想爱奇艺'), '幻想'), '幻想爱奇艺');
     expect(fxLineSubName(line('幻想·蓝光'), '幻想'), '蓝光');
     expect(fxLineSubName(line('SH4K'), '幻想'), 'SH4K');
-    expect(fxLineSubName(line('量子'), '幻想'), '量子');
   });
 
-  /* ------------------------------------------- 类别固定 + 置灰口径 */
+  /* ------------------------------------------- 有数据才出现，空就消失 */
 
-  test('大类固定五个；没有线路的大类 available=false（置灰）', () {
-    final groups = fxLineGroups(<LineInfo>[
-      line('SH4K'),
-      line('量子'),
-      line('咕噜'),
-    ]);
-    expect(groups.map((g) => g.label).toList(),
-        <String>['幻想', '咕噜', '橘汁', '剧圈', '下饭']);
-    expect(groups[0].available, isTrue);
-    expect(groups[1].available, isTrue);
-    expect(groups[2].available, isFalse);
-    expect(groups[3].available, isFalse);
-    expect(groups[4].available, isFalse);
+  test('没有子线路的 jar 源整条不出现（不置灰、不占位）', () {
+    final groups = fxLineGroups(<LineInfo>[line('SH4K'), line('量子')]);
+    expect(groups.map((g) => g.label).toList(), <String>['幻想']);
   });
 
-  test('四个 jar 源都有子线路时，四个大类全部可用（不再置灰）', () {
+  test('有子线路的源才出现在第一行，顺序按白名单', () {
     final groups = fxLineGroups(<LineInfo>[
       line('SH4K'),
-      line('咕噜·4K'),
-      line('橘汁·高清'),
-      line('剧圈·线路1'),
-      line('下饭·线路2'),
+      jarLine('剧圈', 'YZ有广'),
+      jarLine('咕噜', '4K'),
+      jarLine('咕噜', '暴风资源'),
     ]);
-    expect(groups.skip(1).every((g) => g.available), isTrue);
-    expect(groups.skip(1).map((g) => g.key).toList(),
-        <String>['咕噜', '橘汁', '剧圈', '下饭']);
+    expect(
+      groups.map((g) => g.label).toList(),
+      <String>['幻想', '咕噜', '剧圈'],
+    );
+    expect(groups.every((g) => g.available), isTrue);
+    expect(groups[1].lines.length, 2);
+  });
+
+  test('已去掉的源（橘汁 / 下饭）不会出现在第一行', () {
+    expect(kEnabledJarSources, <String>['咕噜', '剧圈']);
+    final groups = fxLineGroups(<LineInfo>[
+      line('SH4K'),
+      jarLine('橘汁', '高清'),
+      jarLine('下饭', '线路2'),
+      jarLine('咕噜', '4K'),
+    ]);
+    expect(groups.map((g) => g.label).toList(), <String>['幻想', '咕噜']);
+    // 橘汁 / 下饭的老线路退回幻想大类，不丢数据也不冒充。
+    expect(groups[0].lines.length, 3);
   });
 
   /* --------------------------------------------- 设置页的源状态文案 */
@@ -159,11 +142,6 @@ void main() {
       fxJarSourceStateOf(installed: true, enabled: false),
       FxJarSourceState.disabled,
     );
-    // 用户自己关掉的优先显示「已停用」（是他刚改的，比缺 jar 更直接）。
-    expect(
-      fxJarSourceStateOf(installed: false, enabled: false),
-      FxJarSourceState.disabled,
-    );
     expect(fxJarSourceStateLabel(FxJarSourceState.available), '可用');
     expect(fxJarSourceStateLabel(FxJarSourceState.jarMissing), 'jar 未安装');
     expect(fxJarSourceStateLabel(FxJarSourceState.disabled), '已停用');
@@ -171,15 +149,14 @@ void main() {
 
   /* -------------------------------------------------- 组件层（两行） */
 
-  testWidgets('第一行点「咕噜」→ 第二行换成咕噜的子线路（chip 可点）',
-      (tester) async {
+  testWidgets('第一行点「咕噜」→ 第二行换成咕噜的真子线路', (tester) async {
     final lines = <LineInfo>[
       line('SH4K'),
       line('幻想爱奇艺'),
       line('红牛'),
-      line('咕噜'),
-      line('咕噜·量子资源'),
-      line('剧圈·线路1'),
+      jarLine('咕噜', '4K'),
+      jarLine('咕噜', '暴风资源'),
+      jarLine('剧圈', 'YZ有广'),
     ];
     LineInfo? picked;
     await tester.pumpWidget(MaterialApp(
@@ -194,25 +171,23 @@ void main() {
         ),
       ),
     ));
-    // 默认展开「幻想」：第二行是自有的三条。
-    expect(find.text('红牛'), findsOneWidget);
-    expect(find.text(kBareLineSubName), findsNothing);
+    // 第一行：幻想 / 咕噜 / 剧圈（没有线路的源不出现）。
+    expect(find.text('咕噜'), findsOneWidget);
+    expect(find.text('剧圈'), findsOneWidget);
+    expect(find.text('橘汁'), findsNothing);
+    expect(find.text('下饭'), findsNothing);
 
-    // 点「咕噜」大类 chip（第一行）。可点 = 不置灰。
     await tester.tap(find.text('咕噜'));
     await tester.pumpAndSettle();
     // 切大类会自动选中它的第一条（详情页口径）。
-    expect(picked?.name, '咕噜');
-    // 第二行换成咕噜的子线路：裸名字显示「默认」，另一条剥掉前缀。
-    expect(find.text(kBareLineSubName), findsOneWidget);
-    expect(find.text('量子资源'), findsOneWidget);
-    // 幻想大类的子线路已经不在第二行。
+    expect(picked?.name, '咕噜·4K');
+    expect(find.text('4K'), findsOneWidget);
+    expect(find.text('暴风资源'), findsOneWidget);
     expect(find.text('红牛'), findsNothing);
   });
 
-  testWidgets('没有线路的大类点不动（置灰）', (tester) async {
+  testWidgets('没有线路的源连 chip 都不显示', (tester) async {
     final lines = <LineInfo>[line('SH4K'), line('量子')];
-    LineInfo? picked;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: SizedBox(
@@ -220,15 +195,13 @@ void main() {
           child: FxLineGroupSelector(
             lines: lines,
             currentLineId: 'id_SH4K',
-            onSelected: (l) => picked = l,
+            onSelected: (_) {},
           ),
         ),
       ),
     ));
-    await tester.tap(find.text('剧圈'));
-    await tester.pumpAndSettle();
-    expect(picked, isNull);
-    // 第二行还是幻想自己的线路。
-    expect(find.text('量子'), findsOneWidget);
+    expect(find.text('咕噜'), findsNothing);
+    expect(find.text('剧圈'), findsNothing);
+    expect(find.text('暂无线路'), findsNothing);
   });
 }

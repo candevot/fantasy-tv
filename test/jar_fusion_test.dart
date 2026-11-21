@@ -75,19 +75,21 @@ void main() {
   /* -------------------------------------------------- 1. 纯逻辑：白名单 */
 
   test('白名单按源名前缀匹配（咕噜 • APP 命中 咕噜）', () {
-    expect(kEnabledJarSources, containsAll(<String>['咕噜', '橘汁', '剧圈', '下饭']));
+    expect(kEnabledJarSources, <String>['咕噜', '剧圈']);
     expect(fxJarLabelOf('咕噜 • APP'), '咕噜');
     expect(fxJarLabelOf('🕊┃︎咕噜┃APP'), '咕噜');
     expect(fxJarLabelOf('剧圈99'), '剧圈');
-    expect(fxJarLabelOf('下饭 • APP'), '下饭');
+    // 实测不可用的源（橘汁 searchContent 恒空 / 下饭 25～49 秒回空）已去掉。
+    expect(fxJarLabelOf('橘汁 • APP'), '');
+    expect(fxJarLabelOf('下饭 • APP'), '');
     expect(fxJarLabelOf('豆瓣 • 首页'), '');
   });
 
-  test('内置目录只含白名单里的四个源', () {
-    expect(kBuiltinJarSources.length, 4);
+  test('内置兜底目录只含实测可用的两个源', () {
+    expect(kBuiltinJarSources.length, 2);
     expect(
-      kBuiltinJarSources.map((e) => e.api),
-      containsAll(<String>['csp_Gulu', 'csp_AppDrama', 'csp_App99', 'csp_JuXiaFan']),
+      kBuiltinJarSources.map((e) => e.api).toList(),
+      <String>['csp_Gulu', 'csp_App99'],
     );
     for (final def in kBuiltinJarSources) {
       expect(fxJarLabelOf(def.name), def.key);
@@ -126,10 +128,10 @@ void main() {
     final index = JarMergeIndex.instance;
     index.attach(title: '八仙', year: 2016, label: '咕噜', vodId: '418792');
     index.attach(title: '八仙', year: 2016, label: '咕噜', vodId: '418792');
-    index.attach(title: '八仙', year: 2016, label: '下饭', vodId: '77');
+    index.attach(title: '八仙', year: 2016, label: '剧圈', vodId: '77');
     final hits = index.hitsFor(title: '八仙', year: 2016);
     expect(hits.length, 2);
-    expect(hits.map((e) => e.label), <String>['咕噜', '下饭']);
+    expect(hits.map((e) => e.label), <String>['咕噜', '剧圈']);
     // 年份对不上时退一步按片名找（jar 常把年份写成 0）。
     expect(index.hitsFor(title: '八仙', year: 0).length, 2);
     // 没搜过的片一条都没有。
@@ -152,26 +154,22 @@ void main() {
 
   /* -------------------------------------------------- 4. 两行分组 */
 
-  test('两行线路：大类固定五个，子线路不带前缀', () {
+  test('两行线路：有子线路的源才出现，子线路不带前缀', () {
     final lines = <LineInfo>[
       LineInfo('hl_4k', 'SH4K', 'hls', 1),
       LineInfo('hl_qiyi', '幻想爱奇艺', 'hls', 2),
+      // jar 真返回的两条（id 编码）+ 采集入库的同名线路（只按名字）。
       LineInfo(fxJarLineId('咕噜', '1', '4K'), '咕噜·4K', 'hls', 0),
       LineInfo(fxJarLineId('咕噜', '1', '暴风资源'), '咕噜·暴风资源', 'hls', 0),
-      LineInfo(fxJarLineId('剧圈', '2', '线路1'), '剧圈·线路1', 'hls', 0),
+      LineInfo('hl_gulu_cms', '咕噜·暴风资源', 'hls', 3),
     ];
     final groups = fxLineGroups(lines);
-    // 第一行：幻想 + 四个 jar 源（没有线路的也显示，只是置灰）。
-    expect(
-      groups.map((g) => g.label),
-      <String>['幻想', '咕噜', '橘汁', '剧圈', '下饭'],
-    );
+    // 第一行：幻想 + 真有线路的咕噜（剧圈没有 → 不出现）。
+    expect(groups.map((g) => g.label).toList(), <String>['幻想', '咕噜']);
     expect(groups[0].own, isTrue);
-    expect(groups[0].lines.length, 2);
+    // 采集那条「咕噜·暴风资源」留在幻想大类，不进咕噜。
+    expect(groups[0].lines.length, 3);
     expect(groups[1].lines.length, 2);
-    expect(groups[2].available, isFalse);
-    expect(groups[3].lines.length, 1);
-    expect(groups[4].available, isFalse);
     // 第二行：子线路去掉前缀。
     expect(fxLineSubName(groups[1].lines[0], '咕噜'), '4K');
     expect(fxLineSubName(groups[1].lines[1], '咕噜'), '暴风资源');

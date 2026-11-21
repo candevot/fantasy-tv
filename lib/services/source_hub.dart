@@ -12,6 +12,7 @@ import 'cms_client.dart';
 import 'cms_request.dart';
 import 'dns_profile.dart';
 import 'fallback_match.dart' show fxNormTitle;
+import 'jar_config.dart';
 import 'jar_sources.dart';
 import 'jar_log.dart';
 import 'jar_spider.dart';
@@ -696,7 +697,9 @@ class SourceHub extends ChangeNotifier {
         if (s.kind != KSourceKind.jar) s,
       ...jar,
     ];
-    for (final def in kBuiltinJarSources) {
+    // 源的 api / ext 以**接口**（`hx_all.json`）为准，内置那份只是兜底：
+    // ext 抄错一个字整条线路就是空的（`csp_AppDrama` 空 ext 直接 NPE）。
+    for (final def in JarConfig.instance.defs) {
       final label = fxJarLabelOf(def.name);
       if (label.isEmpty) continue;
       if (jar.any((s) => jarLabelOf(s) == label)) continue;
@@ -902,6 +905,10 @@ class SourceHub extends ChangeNotifier {
   }
 
   Future<void> _boot() async {
+    // jar 源的 api / ext 从接口取（内部已带「网络 → 缓存 → 内置」三级兜底，
+    // 永不抛异常）。放在最前面：缓存里那条 KSource 的 ext 可能是上一版抄错的，
+    // 必须在注入目录之前把正确配置拿到手。
+    await JarConfig.instance.ensureLoaded();
     await _loadCache();
     // 缓存过期或从来没拉过：后台补一次，不挡首屏。
     final age = _fetchedAt <= 0
@@ -1021,7 +1028,7 @@ class SourceHub extends ChangeNotifier {
     if (protocol.hasProtocolSections) {
       _applyProtocolSections(protocol);
     }
-    // 云端没下发 jar 站点时把内置目录补进来（用户挑中的那四个源）。
+    // 云端没下发 jar 站点时把 jar 源目录补进来（白名单里那几个）。
     _injectJarCatalog();
   }
 

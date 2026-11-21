@@ -776,14 +776,30 @@ class JarSpiderLoader(
      */
     fun search(api: String, ext: String, key: String, quick: Boolean, page: Int = 1): String {
         val started = System.currentTimeMillis()
+        val pageText = page.coerceAtLeast(1).toString()
+        val two = arrayOf<Any?>(key, quick)
+        val three = arrayOf<Any?>(key, quick, pageText)
+        // SEARCH_ARITY（2026-11-21 服务器实测）：
+        //
+        // 旧实现**先试三参**，只有「没实现」才回退两参。可线上这份 jar 里
+        // `App99`（剧圈）是**两参有数据、三参恒空** —— 实测同一个词：
+        //   两参 searchContent("八仙", false) → 17 条（首条 八仙全传）
+        //   三参 searchContent("八仙", false, "1") → {"list":[]}
+        // 于是剧圈在 App 里永远是灰的，用户看到的就是「显示可用但没线路」。
+        //
+        // 现在照壳（FongMi）的口径：**首页 page=1 先走两参**，翻页才先走三参；
+        // 第一形态返回空（不只是抛异常）就换另一形态再试一次，两边都有数据
+        // 时以第一形态为准。
         val out = guard("searchContent") {
-            val pageText = page.coerceAtLeast(1).toString()
-            try {
-                call(api, ext, "searchContent", arrayOf<Any?>(key, quick, pageText))
-            } catch (e: JarSpiderException) {
-                if (e.code != "no_method") throw e
-                call(api, ext, "searchContent", arrayOf<Any?>(key, quick))
-            }
+            val first = if (page <= 1) two else three
+            val second = if (page <= 1) three else two
+            val a = trySearch(api, ext, first) ?: ""
+            val aOk = a.isNotEmpty() && !looksEmptySearch(a)
+            // 第一形态有数据就不再打第二次（每个源的上游配额都是钱）。
+            val b = if (aOk) "" else (trySearch(api, ext, second) ?: "")
+            val bOk = b.isNotEmpty() && !looksEmptySearch(b)
+            // 两边都空：把第一形态的空结果交出去（上层据此显示「没搜到」）。
+            if (aOk) a else if (bOk) b else a.ifEmpty { b }
         }
         val elapsed = System.currentTimeMillis() - started
         Log.i(
@@ -792,6 +808,21 @@ class JarSpiderLoader(
                 "bytes=${out.length} elapsed=${elapsed}ms",
         )
         return out
+    }
+
+    /** 调一形态的 searchContent；「没实现这个参数个数」返回 null。 */
+    private fun trySearch(api: String, ext: String, args: Array<Any?>): String? =
+        try {
+            call(api, ext, "searchContent", args)
+        } catch (e: JarSpiderException) {
+            if (e.code == "no_method") null else throw e
+        }
+
+    /** 空结果判定：`{"list":[]}` / 只有空白的串。不解析 JSON，够用且不会抛。 */
+    private fun looksEmptySearch(raw: String): Boolean {
+        val text = raw.replace(" ", "").replace("\n", "")
+        if (text.isEmpty() || text == "{}") return true
+        return text.contains("\"list\":[]")
     }
 
     /** 取播放地址。flag = 线路名，id = 该集地址。 */

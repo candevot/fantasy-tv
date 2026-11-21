@@ -1473,7 +1473,12 @@ class _DetailPageState extends State<DetailPage>
       unawaited(player.reload());
       return;
     }
-    if (lineId.isNotEmpty) _failedLines.add(lineId);
+    if (lineId.isNotEmpty) {
+      _failedLines.add(lineId);
+      // LINE_VANISH（2026-11-21 用户口径）：「有就有，没有就跳、自动跳、消失」。
+      // 播不出来的那条**直接从线路列表里移除**，不置灰、不占位。
+      _dropLine(lineId);
+    }
     // 之后全自动：把本片**所有**线路依次试一遍，画面显示
     // 「正在尝试其他线路（2/11）」，用户不用点任何东西。
     if (player != null) {
@@ -1485,6 +1490,21 @@ class _DetailPageState extends State<DetailPage>
       return;
     }
     _switchNextLine(auto: true, issue: issue);
+  }
+
+  /// 把一条播不出来的线路从当前详情里剔除（列表、两行选择器、播放页线路面板
+  /// 用的都是这一份 `_detail.lines`，所以一处移除处处消失）。
+  void _dropLine(String id) {
+    final d = _detail;
+    if (d == null || id.isEmpty) return;
+    final rest = <LineInfo>[
+      for (final l in d.lines)
+        if (l.id != id) l,
+    ];
+    if (rest.length == d.lines.length) return;
+    fxPlayLog('chain drop line=$id rest=${rest.length}');
+    if (!mounted) return;
+    setState(() => _detail = d.copyWith(lines: rest));
   }
 
   /// 挂 / 重置自动换线哨兵（详见字段 [_lineChainWatchdog]）。

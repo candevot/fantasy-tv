@@ -27,13 +27,25 @@ import 'fallback_match.dart' show fxNormTitle;
 ///
 /// 空列表 = 全部不启用（保留这个语义：清空名单就退回「没有 jar 源」）。
 /// 匹配是「源名前缀」：配置里叫 `咕噜 • APP` 也能命中 `咕噜`。
-const List<String> kEnabledJarSources = <String>['咕噜', '橘汁', '剧圈', '下饭'];
+/// 白名单：**只放服务器上实测真能出线路的源**（2026-11-21 服务器 jar 实测）。
+///
+///   · `咕噜`（`csp_Gulu`，ext 空）—— search/detail 全通，八仙 15 条线路；
+///   · `剧圈`（`csp_App99` + host/buildSignature）—— 两参 search 通，济公传 2 条；
+///   · `橘汁`（`csp_AppDrama`）—— homeContent 正常但 searchContent **恒空**
+///     （换关键词 / 换 ext 都空），已从白名单去掉；
+///   · `下饭`（`csp_JuXiaFan`）—— searchContent 25～49 秒后回空列表，已去掉。
+///
+/// 去掉的源**不再出现在任何界面**：不显示大类、不置灰、不占位。
+const List<String> kEnabledJarSources = <String>['咕噜', '剧圈'];
 
 /// 内置 jar 源目录：类名 + `ext`。
 ///
-/// 前三条里 `csp_Gulu` 不需要 `ext`，`csp_App99` / `csp_AppDrama` 必须带
-/// `ext`（同一个类被多个站点复用，靠 `ext` 里的 host / pkg 区分），
-/// 内容与线上 `hx_all.json` 一致。
+/// 这份只是**兜底**（接口 `hx_all.json` 和本地缓存都拿不到时用它，
+/// 见 `jar_config.dart`）。`csp_Gulu` 不需要 `ext`；`csp_App99` 必须带
+/// `ext`（同一个类被多个站点复用，靠 `ext` 里的 host / 包名 / 签名区分），
+/// 传空会直接 `IllegalArgumentException: Empty key`。
+///
+/// 内容与线上 `hx_all.json` 的 `剧圈99` 逐字段一致（2026-11-21 实测）。
 class FxJarSourceDef {
   const FxJarSourceDef({
     required this.key,
@@ -66,15 +78,12 @@ class FxJarSourceDef {
 /// 内置目录（只放白名单里那几个；别的肥猫源一概不出现）。
 const List<FxJarSourceDef> kBuiltinJarSources = <FxJarSourceDef>[
   FxJarSourceDef(key: '咕噜', name: '咕噜 • APP', api: 'csp_Gulu'),
-  FxJarSourceDef(key: '橘汁', name: '橘汁 • APP', api: 'csp_AppDrama',
-      ext: '{"appName":"橘汁","publicKey":"MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCr8SzZhjYy+rsya1K09t8d2K50pWFoBkgUqMpKOiW+3IEVKd4eTdvg9RSOjQ82kypL6R9BnsmrS1V8s4PVDwjQbUtYhTPPC9Hz16qY7rpD6m0d2vr09/UpWQ5uOy9PR0QTrsioveZ+DIe9jc3C+zBCu/kZSY/R8stwJoiitki3gwIDAQAB","dataKey":"ZU1DSFFWNENKMDYXVUQRN0ZJDUC4PQ==","dataIv":"OC1A06E197EF10CF3F6058CA7A803B5E","pkg":"com.asjdhjhd.mgd.p3","host":"","site":"https://1848463092.cdn.123clouddisk.com/1848463092/cct/az.txt","version":"3.0.7.0","decrypt":"1"}'),
   FxJarSourceDef(
     key: '剧圈',
     name: '剧圈 • APP',
     api: 'csp_App99',
     ext: '{"host":"http://124.221.3.182:19987/app/bn","versionName":"1.2.0","name":"剧圈圈","package":"com.qingtangxiaozhuan.xyz","buildNumber":"2002","buildSignature":"054FA8DDA4319C6B6A9B954CA5777541C993F00B1B0BD4394F7EDE48184C4594"}',
   ),
-  FxJarSourceDef(key: '下饭', name: '下饭 • APP', api: 'csp_JuXiaFan'),
 ];
 
 /// 白名单匹配：源名 / key 以名单里的某一项**开头**即命中。
@@ -244,13 +253,20 @@ String fxLineGroupLabelOfName(String name) {
 
 /// 一条线路属于哪个大类：`own` 或白名单源名。
 ///
-/// 先看 id（新数据都编码了），再看名字前缀（服务端采集的线路 / 房间线路 /
-/// 老数据只有名字）。
+/// **只认 jar 线路 id**（`jar::<源名>::…`），不看线路名。
+///
+/// JAR_ONLY_BY_ID（2026-11-21 用户实测 bug）：上一版按名字前缀分（`咕噜·暴风
+/// 资源` → 咕噜大类），结果**我们自己采集入库的线路**（库里 `vod_play_from`
+/// 真的就叫 `咕噜` / `咕噜·暴风资源` / `咕噜·量子资源`）被塞进了 jar 大类，
+/// 冒充成「咕噜的子线路」——用户在详情页看到的「暴风资源」「默认」就是它们，
+/// 而 jar 真返回的 `咕噜·4K` / `咖啡4K超清` / `金牌极速` … 一条都没出现。
+///
+/// 现在：CMS 采集线路**永远**归「幻想」大类，只有 `JarSpider` 产出的、
+/// 带 `jar::` 前缀的线路才进对应 jar 源的大类。
 String fxLineGroupKeyOf(LineInfo line) {
   final ref = fxParseJarLineId(line.id);
-  if (ref != null) return ref.label;
-  final label = fxLineGroupLabelOfName(line.displayName);
-  return label.isEmpty ? kOwnLineGroupKey : label;
+  if (ref == null) return kOwnLineGroupKey;
+  return kEnabledJarSources.contains(ref.label) ? ref.label : kOwnLineGroupKey;
 }
 
 /// 前缀后面紧跟的分隔符（`咕噜·4K` / `咕噜 4K` / `咕噜-4K` / `咕噜|4K`）。
@@ -276,11 +292,15 @@ class FxLineGroup {
   String toString() => 'FxLineGroup($label, ${lines.length})';
 }
 
-/// 把线路按大类切好：**固定五个大类**（幻想 + 白名单里的 jar 源）。
+/// 把线路按大类切好：**「幻想」+ 真的有线路的 jar 源**。
 ///
-/// 固定而不是「有啥显示啥」：设置里禁用了某个源、或者那部片它没有，
-/// 大类仍然显示（置灰不可点），用户知道「这个源存在但现在没有」，
-/// 不会因为少了一个 chip 以为功能没了。
+/// JAR_APPEAR_ON_DATA（2026-11-21 用户口径）：
+///
+/// > 每个片源搜索出来，点进去播放详情，里面有的话就跳出来线路，没有的话就消失。
+///
+/// 所以不再固定五个大类：某个 jar 源这部片没搜到 / 详情没线路，它那一格
+/// **整条不出现** —— 不置灰、不占位、不显示「暂无线路」。只有真拿到子线路
+/// 的源才出现在第一行（用户看到的灰 chip 全是这种「假占位」）。
 List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
   final own = <LineInfo>[];
   final byLabel = <String, List<LineInfo>>{
@@ -302,12 +322,13 @@ List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
       own: true,
     ),
     for (final label in kEnabledJarSources)
-      FxLineGroup(
-        key: label,
-        label: label,
-        lines: byLabel[label] ?? const <LineInfo>[],
-        own: false,
-      ),
+      if ((byLabel[label] ?? const <LineInfo>[]).isNotEmpty)
+        FxLineGroup(
+          key: label,
+          label: label,
+          lines: byLabel[label]!,
+          own: false,
+        ),
   ];
 }
 
