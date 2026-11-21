@@ -370,12 +370,28 @@ class LiveSourceService {
         m['tvg_logo'],
       ]);
       if (_looksLikeUrl(url)) {
+        // LIVE_LINES（2026-11-21）：服务端 hx_live.json 每个台都带 `lines[]`
+        // （同台多条实测可用线路，4K→1080P 排好序）。以前这里只取顶层 `url`，
+        // 备用线路全被丢掉 —— 主线路一断，用户看到的就是「点进去播不了」，
+        // 播放器的线路轮换 / 救援链也没有第二条可换。现在整组收进来。
+        final extraLines = <Object?>[];
+        final rawLines = m['lines'];
+        if (rawLines is List) {
+          for (final e in rawLines) {
+            if (e is Map) {
+              extraLines.add(Map<String, dynamic>.from(e));
+            } else if (e is String && _looksLikeUrl(e)) {
+              extraLines.add(e);
+            }
+          }
+        }
         final channel = _channel(
           name.isEmpty ? _hostOf(url) : name,
           url,
           group: groupName.isEmpty ? group : groupName,
           cover: cover,
           height: _intOf(m['height']),
+          extraLines: extraLines,
         );
         if (channel != null) out.add(channel);
         // 有的源把备用地址放在 urls / lines 里，一并收下。
@@ -471,6 +487,7 @@ class LiveSourceService {
     String group = '',
     String cover = '',
     int height = 0,
+    List<Object?> extraLines = const <Object?>[],
   }) {
     final title = name.trim();
     final address = url.trim();
@@ -482,11 +499,55 @@ class LiveSourceService {
       cover: cover.trim(),
       url: address,
       group: group.trim(),
-      lines: <LiveLine>[
-        // 服务端实测的分辨率（hx_live.json 的 height）：卡片靠它打 1080P 标签。
-        LiveLine(id: '${id}_1', name: '', url: address, height: height),
-      ],
+      lines: _linesFor(address, height, extraLines),
     );
+  }
+
+  /// 主地址 + 服务端 `lines[]` → 线路列表（LIVE_LINES 2026-11-21）。
+  ///
+  /// 主地址始终排在最前（服务端已经按 4K→1080P 排好并标了真实高度），
+  /// 后面接同台的备用线路；按高度降序、按地址去重，和
+  /// `LiveChannel.fromJson` 的 `_parseLiveLines` 同一套口径。
+  static List<LiveLine> _linesFor(
+    String address,
+    int height,
+    List<Object?> extra,
+  ) {
+    final raw = <LiveLine>[
+      LiveLine(id: '', name: '', url: address, height: height),
+    ];
+    for (final e in extra) {
+      if (e is String) {
+        if (_looksLikeUrl(e)) raw.add(LiveLine(id: '', name: '', url: e.trim()));
+      } else if (e is Map) {
+        final line = LiveLine.fromJson(Map<String, dynamic>.from(e));
+        if (line.url.trim().isNotEmpty) raw.add(line);
+      }
+    }
+    final indexed = <MapEntry<int, LiveLine>>[
+      for (var i = 0; i < raw.length; i++) MapEntry<int, LiveLine>(i, raw[i]),
+    ];
+    indexed.sort((a, b) {
+      final byHeight = b.value.height.compareTo(a.value.height);
+      return byHeight != 0 ? byHeight : a.key.compareTo(b.key);
+    });
+    final seen = <String>{};
+    final out = <LiveLine>[];
+    for (final entry in indexed) {
+      final line = entry.value;
+      if (!seen.add(line.url)) continue;
+      out.add(
+        LiveLine(
+          id: line.id.trim().isEmpty ? 'l${out.length + 1}' : line.id.trim(),
+          name: line.name,
+          url: line.url,
+          height: line.height,
+          ok: line.ok,
+          deadReason: line.deadReason,
+        ),
+      );
+    }
+    return out;
   }
 
   /// 频道 id：台名 + 地址，跨分组去重和收藏都用它。

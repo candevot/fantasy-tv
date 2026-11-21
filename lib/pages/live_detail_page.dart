@@ -10,6 +10,7 @@ import '../models.dart';
 import '../services/cast_service.dart';
 import '../services/fx_player.dart';
 import '../services/live_edge.dart';
+import '../services/live_validity.dart';
 import '../services/play_log.dart';
 import '../services/screen_orientation.dart';
 import '../theme.dart';
@@ -145,6 +146,17 @@ class _LiveDetailPageState extends State<LiveDetailPage>
     }
   }
 
+  /// 播放彻底失败：把这一台记成「本会话失效」，并轻提示用户。
+  ///
+  /// 只在**确认拿不到流**时调用（open 抛错 / 本台一条可用线路都没有 /
+  /// 播放器报错）。播放器 open 内部已经把本台线路轮过一轮（rescueLines），
+  /// 所以不会因为一次瞬时抖动就把好台藏起来。
+  /// 标记只存在内存里（[LiveValidity]），直播页 / 首页直播区立刻不再显示它。
+  void _markChannelBroken(String message) {
+    LiveValidity.markBroken(_channel.id);
+    if (mounted) fxToast(context, message);
+  }
+
   Future<void> _init() async {
     var channel = _channel;
     if (channel.lines.isEmpty) {
@@ -160,6 +172,7 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         _loading = false;
         _error = '该频道暂无可用直播线路';
       });
+      _markChannelBroken('该频道已失效，本次不再显示');
       return;
     }
     setState(() {
@@ -317,6 +330,8 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         _loading = false;
         _error = '直播源加载失败，请重试或切换线路';
       });
+      // 本台线路在 playback 层已经轮过一遍仍拿不到流 → 记失效，列表里不再显示。
+      _markChannelBroken('该频道已失效，本次不再显示');
       return null;
     }
   }
@@ -359,6 +374,9 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         _loading = false;
         _error = '播放中断，请重试';
       });
+      // 救援链已经把本台其它线路试完了还报错 → 这个台本次会话不再显示，
+      // 免得用户在同一张卡上反复点进去、反复黑屏。
+      _markChannelBroken('该频道已失效，本次不再显示');
       return;
     }
     if (mounted) setState(() {});
@@ -513,10 +531,14 @@ class _LiveDetailPageState extends State<LiveDetailPage>
         if (dead != null) await _dropPlayer(dead);
         if (mounted) {
           setState(() {
+            _channel = next;
+            _lineId = '';
             _loading = false;
             _error = '该频道暂无可用直播线路';
           });
         }
+        // 切到的这个台本会话不再显示（分组选集里也一并消失）。
+        _markChannelBroken('该频道已失效，本次不再显示');
         return;
       }
       await _openAndLand(_lineId, reason: 'switch');

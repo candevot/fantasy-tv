@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models.dart';
 import '../services/live_source.dart';
+import '../services/live_validity.dart';
 import '../theme.dart';
 import '../utils/fx_route.dart';
 import 'live_detail_page.dart';
@@ -43,7 +44,23 @@ class _LiveAllPageState extends State<LiveAllPage> {
   @override
   void initState() {
     super.initState();
+    // LIVE_INVALID（2026-11-21）：播放页确认拿不到流时会登记失效台，
+    // 这里跟着重建分组 —— 用户从播放页退回来，列表已经少掉那一台。
+    LiveValidity.revision.addListener(_rebuildSections);
     _load();
+  }
+
+  @override
+  void dispose() {
+    LiveValidity.revision.removeListener(_rebuildSections);
+    super.dispose();
+  }
+
+  /// 只重建分组（不重新拉数据）：失效标记 / 分组变化用。
+  void _rebuildSections() {
+    final catalog = _catalog;
+    if (!mounted || catalog == null) return;
+    setState(() => _sections = buildLiveSections(catalog.groups));
   }
 
   Future<void> _load({bool force = false}) async {
@@ -188,18 +205,27 @@ class _LiveAllPageState extends State<LiveAllPage> {
     );
   }
 
-  /// 顶部状态条：来源格式 + 频道数 + 更新时间（缓存时会说明）。
+  /// 顶部状态条：一行搞定 —— `512 个台 · 更新 19:58`。
+  ///
+  /// LIVE_UI（2026-11-21）：原来这里还拼了来源格式（`JSON · 512 个台 …`），
+  /// 用户看不懂也没用，还和「离线缓存」挤在一起显得乱。格式只在**兜底 / 缓存**
+  /// 这类需要解释的状态下才出现，正常情况就是「台数 · 更新时间」两段。
   Widget _statusBar() {
     final catalog = _catalog;
-    final chips = <String>[
-      if (_fromLegacy) '旧接口兜底',
-      if (catalog != null) catalog.formatLabel,
-      if (catalog != null) '${catalog.channelCount} 个台',
-      if (catalog?.fromCache == true) '离线缓存',
-    ];
+    if (catalog == null && _error == null) return const SizedBox.shrink();
+    // 台数按**当前显示**的台算：会话内被标记失效的台已经不在列表里，
+    // 数字不跟着变会显得对不上。
+    var visible = 0;
+    for (final s in _sections) {
+      visible += s.count;
+    }
     final at = catalog?.fetchedAt;
-    if (at != null) chips.add('更新 ${_timeText(at)}');
-    if (chips.isEmpty && _error == null) return const SizedBox.shrink();
+    final parts = <String>[];
+    if (visible > 0) parts.add('$visible 个台');
+    if (at != null) parts.add('更新 ${_timeText(at)}');
+    if (catalog?.fromCache == true) parts.add('离线缓存');
+    if (_fromLegacy) parts.add('旧接口');
+    if (parts.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: Row(
@@ -208,7 +234,7 @@ class _LiveAllPageState extends State<LiveAllPage> {
           const SizedBox(width: 4),
           Expanded(
             child: Text(
-              chips.isEmpty ? '$_error' : chips.join(' · '),
+              parts.join(' · '),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 11, color: Fx.sub),
@@ -229,6 +255,24 @@ class _LiveAllPageState extends State<LiveAllPage> {
     return sameDay ? '今天 $hm' : '${at.month}-${at.day} $hm';
   }
 
+  /// 3 列网格的卡片高度（LIVE_UI 2026-11-21）。
+  ///
+  /// 原来是 `childAspectRatio: 1.15`：卡片高度跟着宽度走，台名一行 / 两行、
+  /// 台标加载出来 / 没加载出来，视觉上就参差。现在改成固定高度 ——
+  /// 台标区吃掉剩余空间（16:10 左右），文字按当前系统字号预留，
+  /// 每张卡完全同高，缺台标的卡也不会比有台标的矮一截。
+  double _cardExtent(BuildContext context, double crossAxisExtent) {
+    const columns = 3;
+    const spacing = 10.0;
+    final cardWidth =
+        ((crossAxisExtent - spacing * (columns - 1)) / columns).clamp(60.0, 400.0);
+    final scaler = MediaQuery.textScalerOf(context);
+    final logo = cardWidth * .62;
+    // 6 上内边距 + 台标 + 7 间距 + 台名 + 2 间距 + 副标题 + 6 下内边距
+    final text = scaler.scale(12.5 * 1.2) + 2 + scaler.scale(10 * 1.2);
+    return (logo + text + 21).clamp(96.0, 260.0);
+  }
+
   Widget _section(LiveSection s) {
     return Padding(
       padding: const EdgeInsets.only(top: 16),
@@ -246,37 +290,52 @@ class _LiveAllPageState extends State<LiveAllPage> {
                 ),
               ),
               const SizedBox(width: 8),
-              Text(
-                s.name,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: Fx.ink,
+              Expanded(
+                child: Text(
+                  s.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Fx.ink,
+                  ),
                 ),
               ),
-              const SizedBox(width: 6),
+              const SizedBox(width: 8),
+              // 数量靠右：用户扫右边缘就知道每个分组有多少台，
+              // 不用在标题后面找那一小串灰字。
               Text(
-                '${s.channels.length} 个台',
-                style: const TextStyle(fontSize: 11, color: Fx.sub),
+                '${s.count}',
+                style: const TextStyle(
+                  fontSize: 12,
+                  height: 1.1,
+                  fontWeight: FontWeight.w700,
+                  color: Fx.sub,
+                ),
               ),
             ],
           ),
           const SizedBox(height: 10),
-          GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 3,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 10,
-              childAspectRatio: 1.15,
-            ),
-            itemCount: s.channels.length,
-            itemBuilder: (ctx, i) {
-              final c = s.channels[i];
-              return LiveChannelCard(
-                channel: c,
-                onTap: () => _open(c, s.channels),
+          LayoutBuilder(
+            builder: (ctx, constraints) {
+              return GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                  mainAxisExtent: _cardExtent(ctx, constraints.maxWidth),
+                ),
+                itemCount: s.channels.length,
+                itemBuilder: (ctx, i) {
+                  final c = s.channels[i];
+                  return LiveChannelCard(
+                    channel: c,
+                    onTap: () => _open(c, s.channels),
+                  );
+                },
               );
             },
           ),
@@ -286,12 +345,16 @@ class _LiveAllPageState extends State<LiveAllPage> {
   }
 
   void _open(LiveChannel c, List<LiveChannel> playlist) {
-    Navigator.of(context).push(
-      FxPageRoute(
-        builder: (_) => LiveDetailPage(channel: c, playlist: playlist),
-      ),
-    );
+    // 点卡片直接进播放页（播放页进来就会起播）；返回时按失效登记重建一次，
+    // 播不起来的台退回来就不在列表里了。
+    Navigator.of(context)
+        .push(
+          FxPageRoute(
+            builder: (_) => LiveDetailPage(channel: c, playlist: playlist),
+          ),
+        )
+        .whenComplete(() {
+      if (mounted) _rebuildSections();
+    });
   }
-
-
 }

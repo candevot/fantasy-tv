@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models.dart';
+import '../services/live_validity.dart';
 import '../theme.dart';
 import '../widgets/fx_cards.dart';
 import 'live_detail_page.dart';
@@ -41,6 +42,11 @@ class LiveSection {
 }
 
 /// 把 `/api/live` 的 groups 归并成固定顺序的 7 个分组，空组直接丢掉。
+///
+/// LIVE_INVALID（2026-11-21）：本会话里播放失败过的台（[LiveValidity]）
+/// 在归并阶段就被剔除 —— 首页直播区和直播页共用这一个入口，
+/// 用户点开播不了的台之后，退回来它就不在列表里了。
+/// 剔除后为空的分组同样不出现，所以分组标题永远不会是「0 个台」。
 List<LiveSection> buildLiveSections(List<LiveGroup> groups) {
   final buckets = <String, List<LiveChannel>>{};
   final seen = <String>{};
@@ -50,6 +56,7 @@ List<LiveSection> buildLiveSections(List<LiveGroup> groups) {
     for (final channel in group.channels) {
       final id = channel.id.trim();
       if (id.isNotEmpty && !seen.add(id)) continue;
+      if (LiveValidity.isBroken(id)) continue;
       list.add(channel);
     }
   }
@@ -202,6 +209,125 @@ IconData liveSectionIcon(String name) {
     return Icons.location_city_rounded;
   }
   return Icons.tv_rounded;
+}
+
+/// 分组色（LIVE_UI 2026-11-21）：台标加载不出来时占位块的底色。
+///
+/// 同一个分组的台永远是同一个颜色，用户在 3 列网格里扫一眼就能分出
+/// 「这几张是央视、那几张是地方台」；不再是一排灰底白字、看着像加载失败。
+Color liveSectionColor(String name) {
+  if (name.contains('少儿')) return const Color(0xFFF09A3E);
+  if (name.contains('港澳台')) return const Color(0xFF7C5CFF);
+  if (name.contains('海外')) return const Color(0xFF2F80ED);
+  if (name.contains('体育')) return const Color(0xFF2FAF6A);
+  if (name.contains('央视')) return const Color(0xFFE0573B);
+  if (name.contains('卫视')) return const Color(0xFF3D7EFF);
+  if (name.contains('地方') || name.endsWith('频道')) {
+    return const Color(0xFF12A594);
+  }
+  return const Color(0xFF6B7A90);
+}
+
+/// 单台所属分区名（卡片拿不到分组对象，按 group / 台名反推）。
+String liveChannelSection(LiveChannel channel) {
+  final group = channel.group.trim();
+  return liveSectionName(group.isEmpty ? channel.title : group);
+}
+
+/// 台名首字：`CCTV-1 综合` → `C`，`湖南卫视` → `湖`，`4K 超高清` → `4`。
+String liveInitialOf(String title) {
+  final text = title.trim();
+  if (text.isEmpty) return '·';
+  return text.characters.first.toUpperCase();
+}
+
+/// 频道台标：图能加载就显示图，加载不出（防盗链 / 黑洞图床 / 空地址）
+/// 就显示**统一的「首字 + 分组色」占位**，任何情况下都不出现空白灰块。
+class LiveChannelLogo extends StatelessWidget {
+  const LiveChannelLogo({
+    super.key,
+    required this.channel,
+    this.radius = 10,
+  });
+
+  final LiveChannel channel;
+  final double radius;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = channel.title.trim();
+    final cover = channel.cover.trim();
+    final tint = liveSectionColor(liveChannelSection(channel));
+    final placeholder = _LiveLogoPlaceholder(
+      initial: liveInitialOf(title),
+      tint: tint,
+    );
+    if (cover.isEmpty) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: placeholder,
+      );
+    }
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          final cacheWidth = width.isFinite && width > 0
+              ? (width * dpr).round().clamp(64, 2048).toInt()
+              : null;
+          return FxNetworkImage(
+            url: cover,
+            fit: BoxFit.cover,
+            cacheWidth: cacheWidth,
+            fallback: placeholder,
+            loading: placeholder,
+            semanticLabel: title.isEmpty ? null : title,
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _LiveLogoPlaceholder extends StatelessWidget {
+  const _LiveLogoPlaceholder({required this.initial, required this.tint});
+
+  final String initial;
+  final Color tint;
+
+  @override
+  Widget build(BuildContext context) {
+    final deep = Color.lerp(tint, const Color(0xFF1B2434), .42) ?? tint;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final side = constraints.biggest.shortestSide;
+        final size = (side.isFinite ? side : 56) * .42;
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: <Color>[tint, deep],
+            ),
+          ),
+          child: Center(
+            child: Text(
+              initial,
+              maxLines: 1,
+              style: TextStyle(
+                fontSize: size.clamp(15, 34),
+                height: 1,
+                fontWeight: FontWeight.w800,
+                color: Colors.white.withValues(alpha: .95),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 /// 点分组卡：地方频道先进入省份索引，其余直接进分组播放页。
@@ -428,7 +554,14 @@ class LiveGroupCard extends StatelessWidget {
   }
 }
 
-/// 搜索结果里的频道卡：封面 + 台名 + 最高分辨率标签。
+/// 搜索结果 / 直播网格里的频道卡：台标 + 台名 + 分组。
+///
+/// LIVE_UI（2026-11-21）：用户反馈「界面太乱」，具体是三点：
+///   1. 台标加载不出来时是一块灰底文字，和正常台标混在一起，网格看着高低不齐；
+///   2. 卡片上堆了 LIVE、分辨率、分组等好几层角标；
+///   3. 3 列网格用 childAspectRatio 撑高，字号变大 / 台名变长就参差。
+/// 处理：台标区固定 16:10 的**同一块区域**（有图显示图，没图显示首字 + 分组色），
+/// 角标只留 `LIVE` + 分辨率两个，卡片高度由外层网格用固定 mainAxisExtent 统一。
 class LiveChannelCard extends StatelessWidget {
   const LiveChannelCard({
     super.key,
@@ -442,7 +575,6 @@ class LiveChannelCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final title = channel.title.trim().isEmpty ? '未命名频道' : channel.title.trim();
-    final cover = channel.cover.trim();
     final quality = liveChannelQuality(channel);
     return RepaintBoundary(
       child: GestureDetector(
@@ -469,32 +601,12 @@ class LiveChannelCard extends StatelessWidget {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    if (cover.isEmpty)
-                      Container(
-                        decoration: BoxDecoration(
-                          gradient: Fx.brand,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Center(
-                          child: Icon(
-                            Icons.live_tv_rounded,
-                            color: Colors.white,
-                            size: 30,
-                          ),
-                        ),
-                      )
-                    else
-                      FxCover(
-                        url: cover,
-                        title: title,
-                        radius: 10,
-                        showText: false,
-                      ),
-                    const Positioned(top: 6, left: 6, child: _LiveTag()),
+                    LiveChannelLogo(channel: channel, radius: 10),
+                    const Positioned(top: 5, left: 5, child: _LiveTag()),
                     if (quality.isNotEmpty)
                       Positioned(
-                        top: 6,
-                        right: 6,
+                        top: 5,
+                        right: 5,
                         child: _QualityTag(label: quality),
                       ),
                   ],
@@ -506,7 +618,7 @@ class LiveChannelCard extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                  fontSize: 13,
+                  fontSize: 12.5,
                   height: 1.2,
                   fontWeight: FontWeight.w600,
                   color: Fx.ink,
