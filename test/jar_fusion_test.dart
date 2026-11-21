@@ -175,16 +175,17 @@ void main() {
       LineInfo('hl_gulu_cms', '咕噜·暴风资源', 'hls', 3),
     ];
     final groups = fxLineGroups(lines);
-    // 第一行：幻想 + 真有线路的咕噜（剧圈没有 → 不出现）。
-    expect(groups.map((g) => g.label).toList(), <String>['幻想', '咕噜']);
-    expect(groups[0].own, isTrue);
+    // GROUP_ORDER：咕噜（jar）排第一，幻想排第二。
+    expect(groups.map((g) => g.label).toList(), <String>['咕噜', '幻想']);
+    expect(groups[0].own, isFalse);
+    expect(groups[1].own, isTrue);
     // 采集那条「咕噜·暴风资源」留在幻想大类，不进咕噜。
-    expect(groups[0].lines.length, 3);
-    expect(groups[1].lines.length, 2);
+    expect(groups[0].lines.length, 2);   // 咕噜：jar 的两条
+    expect(groups[1].lines.length, 3);   // 幻想：SH4K + 采集的两条
     // 第二行：子线路去掉前缀。
-    expect(fxLineSubName(groups[1].lines[0], '咕噜'), '4K');
-    expect(fxLineSubName(groups[1].lines[1], '咕噜'), '暴风资源');
-    expect(fxLineSubName(groups[0].lines[0], '幻想'), 'SH4K');
+    expect(fxLineSubName(groups[0].lines[0], '咕噜'), '4K');
+    expect(fxLineSubName(groups[0].lines[1], '咕噜'), '暴风资源');
+    expect(fxLineSubName(groups[1].lines[0], '幻想'), 'SH4K');
   });
 
   test('自有线路永远在 jar 线路前面（同组内保序）', () {
