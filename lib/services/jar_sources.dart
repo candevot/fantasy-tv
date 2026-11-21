@@ -285,6 +285,7 @@ class FxLineGroup {
     required this.label,
     required this.lines,
     required this.own,
+    this.pending = false,
   });
 
   final String key;
@@ -292,10 +293,19 @@ class FxLineGroup {
   final List<LineInfo> lines;
   final bool own;
 
+  /// JAR_PENDING（2026-11-22）：这个大类**正在取线路**（还没拿到）。
+  ///
+  /// 第一行先按「加载中」占位显示，拿到就原地填充（[lines] 变成真线路、
+  /// [pending] 变回 false）；这部片在该源里没有的话，整个大类直接消失。
+  /// 只有「jar 已就绪 + 源已启用」时才可能 pending —— 没装 jar 不许有占位，
+  /// 否则第一行会永远挂着一个转圈的「咕噜」。
+  final bool pending;
+
+  /// 能不能点（有子线路才能点；pending 只能看）。
   bool get available => lines.isNotEmpty;
 
   @override
-  String toString() => 'FxLineGroup($label, ${lines.length})';
+  String toString() => 'FxLineGroup($label, ${lines.length}${pending ? ', pending' : ''})';
 }
 
 /// 把线路按大类切好：**「幻想」+ 真的有线路的 jar 源**。
@@ -307,7 +317,20 @@ class FxLineGroup {
 /// 所以不再固定五个大类：某个 jar 源这部片没搜到 / 详情没线路，它那一格
 /// **整条不出现** —— 不置灰、不占位、不显示「暂无线路」。只有真拿到子线路
 /// 的源才出现在第一行（用户看到的灰 chip 全是这种「假占位」）。
-List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
+/// [pendingLabels]：**正在取线路**的那些源（JAR_PENDING 2026-11-22）。
+///
+/// 进详情页时 jar 是就绪的，但这个片名还得异步去 jar 里搜一次（几百毫秒到
+/// 十几秒）。以前这段等待是「空白」：第一行只有幻想，用户以为没有咕噜，
+/// 等线路补上来，大类突然冒出来、顺序还整体右移 —— 就是「先显示幻想再跳成
+/// 咕噜」的错位。现在 pending 标签按原顺序先占位（`咕噜 · 加载中`），
+/// 拿到线路原地填充；没有就整条消失、回落到幻想。
+///
+/// pending 只对**白名单里、且还没有真线路**的标签生效 —— 已经拿到线路的源
+/// 不会被 pending 覆盖成占位。
+List<FxLineGroup> fxLineGroups(
+  List<LineInfo> lines, {
+  Iterable<String> pendingLabels = const <String>[],
+}) {
   final own = <LineInfo>[];
   final byLabel = <String, List<LineInfo>>{
     for (final label in kEnabledJarSources) label: <LineInfo>[],
@@ -320,6 +343,10 @@ List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
       byLabel.putIfAbsent(key, () => <LineInfo>[]).add(line);
     }
   }
+  final pending = <String>{
+    for (final label in pendingLabels)
+      if (kEnabledJarSources.contains(label)) label,
+  };
   // GROUP_ORDER（2026-11-22）：用户要求「优先使用咕噜」——
   // 有线路的 jar 源排在前面，幻想（自有）排在最后。
   // 这样默认选中/默认播放的就是咕噜的第一条子线路。
@@ -331,6 +358,14 @@ List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
           label: label,
           lines: byLabel[label]!,
           own: false,
+        )
+      else if (pending.contains(label))
+        FxLineGroup(
+          key: label,
+          label: label,
+          lines: const <LineInfo>[],
+          own: false,
+          pending: true,
         ),
     if (own.isNotEmpty)
       FxLineGroup(
@@ -340,6 +375,20 @@ List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
         own: true,
       ),
   ];
+}
+
+/// 默认该播哪一条：**咕噜的第一个大类里的第一条子线路**，没有就 null。
+///
+/// JAR_FIRST（2026-11-22 用户口径）：「优先使用咕噜」。这里只回答「有咕噜
+/// 该选哪条」，没有咕噜时返回 null，调用方回落到原来的健康度默认线
+/// （`LineHealth.defaultLine`）—— 绝不替它做决定、也不碰死线路判断。
+LineInfo? fxJarDefaultLine(List<LineInfo> lines) {
+  final groups = fxLineGroups(lines);
+  for (final group in groups) {
+    if (group.own || group.lines.isEmpty) continue;
+    return group.lines.first;
+  }
+  return null;
 }
 
 /// 子线路的显示名：去掉 `<大类>` / `<大类>·` 前缀（前缀已经在第一行体现）。

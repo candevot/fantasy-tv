@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 
 import '../api.dart';
@@ -640,7 +641,19 @@ class CmsApi {
 
   /* ------------------------------------------------------------ 请求 */
 
+  /// TEST_SEAM（2026-11-22）：单测用的取数钩子（生产恒为 null）。
+  ///
+  /// 「推荐页空白」这种事只在手机上出现，离线没法复现 —— `home()` 的整条链
+  /// （取数 → 去重 → 可播过滤 → 转卡片 → 降级重试）必须能在 `flutter test`
+  /// 里跑通，所以把「一次 `ac=detail` 请求」抽成一个可替换的函数。
+  /// 设了它以后 [_vod] 完全不联网；跑完记得 `= null` 复位（见测试 tearDown）。
+  @visibleForTesting
+  static Future<Map<String, dynamic>> Function(Map<String, String> query)?
+      debugFetch;
+
   static Future<Map<String, dynamic>> _vod(Map<String, String> query) async {
+    final hook = debugFetch;
+    if (hook != null) return hook(query);
     final uri = Uri.parse('$root$vodPath').replace(
       queryParameters: <String, String>{'at': 'json', ...query},
     );

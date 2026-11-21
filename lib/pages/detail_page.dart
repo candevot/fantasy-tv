@@ -185,6 +185,22 @@ class _DetailPageState extends State<DetailPage>
   /// jar 源子线路合并是否正在进行（防重入）。
   bool _jarMerging = false;
 
+  /// JAR_PENDING（2026-11-22）：咕噜大类正在「加载中」占位。
+  ///
+  /// 进详情页时 jar 就绪 → 这部片在咕噜里有没有还得异步搜一次（几百毫秒到
+  /// 十几秒）。这段时间第一行先按 `咕噜 · 加载中` 占位（顺序固定咕噜在前），
+  /// 拿到线路原地填充；没拿到就整条消失、回落到幻想。
+  bool _jarPending = false;
+
+  /// 已经跑过一轮 jar 合并（成功 / 空都算）：刷新详情时不再重复挂占位。
+  bool _jarMergeDone = false;
+
+  /// 用户亲手点过线路：之后到达的 jar 线路**不许**再改默认选中。
+  bool _linePickedByUser = false;
+
+  /// 占位的兜底计时器：jar 源再慢也不能让「加载中」一直转。
+  Timer? _jarPendingTimer;
+
   /// 上一次看到的「jar 已就绪」状态：false → true 那一刻要补一次 jar 线路
   /// （JAR_BOOT 2026-11-21：冷启动边装边用，装好的时候详情页可能已经开着）。
   bool _jarWasReady = false;
@@ -281,9 +297,49 @@ class _DetailPageState extends State<DetailPage>
       setState(() {});
     }
     if (!flipped) return;
+    // jar 刚装好：上一轮合并是「没装 jar 时」跑的（空手而归），
+    // 这一轮要重新走一遍，占位也重新挂上。
+    _jarMergeDone = false;
+    // JAR_PENDING：jar 刚刚就绪 → 先把咕噜大类占位显示出来，再去取线路。
+    // 否则用户会先看到「只有幻想」，几秒后咕噜整条冒出来、顺序右移。
+    _startJarPending();
     final d = _detail;
     if (d == null) return;
     unawaited(_mergeJarLines(d, fillHits: true));
+  }
+
+  /// jar 能不能给这部片补线路：插件已装 + 有启用的 jar 源。
+  ///
+  /// JAR_PENDING：**没装 jar 就不许有占位** —— 否则第一行会永远挂着一个
+  /// 转圈的「咕噜」，比不显示更糟。
+  bool get _jarUsable {
+    final hub = SourceHub.instance;
+    return hub.hasJarSources && hub.jarReady;
+  }
+
+  /// 把咕噜大类挂成「加载中」占位（幂等；已经合并过就不再挂）。
+  void _startJarPending() {
+    if (!mounted || !_jarUsable || _jarMergeDone) return;
+    _jarPendingTimer?.cancel();
+    _jarPendingTimer = Timer(const Duration(seconds: 20), () {
+      if (!mounted || !_jarPending) return;
+      setState(() => _jarPending = false);
+      debugPrint('[JAR_PENDING] 占位超时，回落到自有线路');
+    });
+    if (_jarPending) return;
+    setState(() => _jarPending = true);
+  }
+
+  /// 收起「加载中」占位（线路到了 / 没有 / 超时都走这里）。
+  void _stopJarPending() {
+    _jarPendingTimer?.cancel();
+    _jarPendingTimer = null;
+    if (!_jarPending) return;
+    if (!mounted) {
+      _jarPending = false;
+      return;
+    }
+    setState(() => _jarPending = false);
   }
 
   Future<void> _init() async {
@@ -324,6 +380,7 @@ class _DetailPageState extends State<DetailPage>
     _stableTimer?.cancel();
     _lineChainWatchdog?.cancel();
     _lineRefreshTimer?.cancel();
+    _jarPendingTimer?.cancel();
     _scroll.dispose();
     _fade.dispose();
     super.dispose();
@@ -393,12 +450,20 @@ class _DetailPageState extends State<DetailPage>
         if (fromRoute != null && !isDeadLineName(fromRoute.displayName)) {
           lineId = widget.line;
         } else {
-          final pick = LineHealth.instance.defaultLine(widget.id, lines);
+          // JAR_FIRST（2026-11-22 用户口径）：**优先咕噜**。
+          // 这次详情如果已经把 jar 子线路带回来了（索引命中 / 外部 jar 记录），
+          // 默认就选咕噜的第一条子线路；没有咕噜才用原来的健康度默认线。
+          final jarPick = fxJarDefaultLine(lines);
+          final LineInfo? pick =
+              (jarPick != null && !isDeadLineName(jarPick.displayName))
+                  ? jarPick
+                  : LineHealth.instance.defaultLine(widget.id, lines);
           lineId = pick?.id ?? '';
           if (pick != null) {
             fxPlayLog(
               'default line=${pick.displayName} '
               'from=${fromRoute?.displayName ?? '-'} '
+              'jar=${jarPick != null} '
               'total=${lines.length} skip=${lines.length - 1}',
             );
           }
@@ -429,6 +494,11 @@ class _DetailPageState extends State<DetailPage>
         _lineId = lineId;
         _ep = ep;
         _error = lines.isEmpty ? '这部片暂无可播放地址' : null;
+        // JAR_PENDING（2026-11-22）：jar 就绪时**这一帧就把咕噜挂成
+        // 「加载中」**——不能等合并开始时再挂，那会先闪一帧「只有幻想」，
+        // 正是用户说的「先显示幻想再突然跳成咕噜」。
+        _jarPending =
+            _jarUsable && !_jarMergeDone && !CmsBridge.isJarLine(lineId);
         // 从历史 / 播放器带集数进来时，选集条要切到能看见这一集的分组，
         // 才能高亮并滚动到对应集数。
         _groupIndex = _groupIndexOf(_episodeGroups, ep);
@@ -1155,6 +1225,8 @@ class _DetailPageState extends State<DetailPage>
   }
 
   void _selectLine(LineInfo line) {
+    // JAR_FIRST：用户亲手点过线路，之后到达的 jar 线路不许再改默认选中。
+    _linePickedByUser = true;
     // 切换中仍然接受点击：播放器会把这次选择记成 pendingSwitch，
     // 当前切换一结束就立刻执行，最多 12 秒僵死也会强制接管。
     // 之前这里直接 return，用户会觉得「点了没反应」。
@@ -1851,13 +1923,16 @@ class _DetailPageState extends State<DetailPage>
   Future<void> _mergeJarLines(VideoDetail d, {bool fillHits = false}) async {
     if (_jarMerging || CmsBridge.isJarLine(_lineId)) return;
     _jarMerging = true;
+    // JAR_PENDING：取线路的整个过程（补命中 + 拉详情）都挂着「加载中」占位，
+    // 用户看到的第一行永远是 `咕噜(加载中) / 幻想` 这个固定顺序。
+    if (_jarUsable) _startJarPending();
     try {
       // JAR_BOOT（2026-11-21）：jar 刚装好时索引里通常没有这部片（搜索那一轮
       // 被整段跳过了）。这里按片名补一次命中，否则四个 jar 大类会一直置灰。
       // jar 没装时 [CmsBridge.fillJarHitsFor] 直接返回 0，一条请求都不发。
       if (fillHits) await CmsBridge.fillJarHitsFor(d);
       final extra = await CmsBridge.jarLinesFor(d);
-      if (!mounted || extra.isEmpty) return;
+      if (!mounted) return;
       final current = _detail;
       if (current == null) return;
       // 同一个 id / 同名子线路只留一条（用户口径：「咕噜·4K」只出现一次）。
@@ -1867,23 +1942,57 @@ class _DetailPageState extends State<DetailPage>
         for (final line in extra)
           if (!haveId.contains(line.id) && !haveName.contains(line.name)) line,
       ];
-      if (add.isEmpty) return;
+      if (add.isEmpty) {
+        debugPrint('[JAR_PENDING] 这部片在 jar 源里没有线路，大类回落到幻想');
+        return;
+      }
+      final merged = fxOwnLinesFirst(
+        LineHealth.instance.rankLines(widget.id, <LineInfo>[
+          ...current.lines,
+          ...add,
+        ]),
+      );
       setState(() {
-        _detail = current.copyWith(
-          // 先排序（自有线路按健康度），再把 jar 线路整体压到后面。
-          lines: fxOwnLinesFirst(
-            LineHealth.instance.rankLines(widget.id, <LineInfo>[
-              ...current.lines,
-              ...add,
-            ]),
-          ),
-        );
+        _detail = current.copyWith(lines: merged);
       });
+      // JAR_FIRST（2026-11-22）：线路到齐后**默认选中咕噜的第一条子线路**。
+      _applyJarDefault(merged);
+      FxPlayCache.warm(widget.id, _ep, _lineId);
     } catch (e) {
       debugPrint('jar merge failed: $e');
     } finally {
       _jarMerging = false;
+      _jarMergeDone = true;
+      _stopJarPending();
     }
+  }
+
+  /// JAR_FIRST（2026-11-22）：jar 线路到齐后，把默认线路落到**咕噜的第一条
+  /// 子线路**上（用户口径：「优先使用咕噜」）。
+  ///
+  /// 判据只有两条：
+  ///   1. 用户还没亲手点过线路（[_linePickedByUser]）——点过就永远听用户的；
+  ///   2. 咕噜真给了线路（[fxJarDefaultLine] 非空）。
+  ///
+  /// 已经在播自有线路时**同样切**：用户要的就是「优先咕噜」，而切换走的是
+  /// 播放器自己的换线通道（`PlayerView.didUpdateWidget → _switchLine`）——
+  /// 记住当前集 + 进度、最多回退 3 秒续播，不是从头再来，也不弹 toast。
+  /// 播放器在详情页一挂上就会 bootstrap 自有线路，不在这里切的话，「默认
+  /// 咕噜」在真实使用里几乎永远轮不到（首帧播放往往比 jar 搜片名快）。
+  void _applyJarDefault(List<LineInfo> lines) {
+    if (!mounted || _linePickedByUser) return;
+    final pick = fxJarDefaultLine(lines);
+    if (pick == null || pick.id == _lineId) return;
+    final current = _detail;
+    if (current == null) return;
+    setState(() {
+      _lineId = pick.id;
+      _ep = _clampEpisode(_episodesOf(current, pick.id), _ep);
+      _groupIndex = _groupIndexOf(_episodeGroups, _ep);
+      _autoLineTries = 0;
+    });
+    unawaited(_saveHistory());
+    debugPrint('[JAR_FIRST] 默认线路 = ${pick.displayName}（咕噜优先）');
   }
 
   /// ENRICH（2026-11-15）：按「片名 + 年份」补两条线路。
@@ -2353,11 +2462,17 @@ class _DetailPageState extends State<DetailPage>
         // LINE_GROUPS（2026-11-21）：线路区改成**两行** ——
         // 第一行大类（幻想 / 咕噜 / 剧圈 / 橘汁 / 下饭），第二行该大类的子线路。
         // 组件在 `widgets/fx_line_group_selector.dart`，一起看三处入口共用同一份。
-        if (d.lines.isNotEmpty)
+        // 一行自有线路都没有、但 jar 正在取线路时不摆「暂无线路」：
+        // 直接把咕噜大类的「加载中」占位显示出来（JAR_PENDING）。
+        if (d.lines.isNotEmpty || _jarPending)
           FxLineGroupSelector(
             lines: d.lines,
             currentLineId: _lineId,
             onSelected: _selectLine,
+            // JAR_PENDING：咕噜正在取线路时先按「加载中」占位（顺序固定
+            // 咕噜在前），拿到就原地填充，没有就整条消失 —— 不会出现
+            // 「先显示幻想，等线路补上再整体跳成咕噜」的错位。
+            pendingGroups: _jarPending ? kEnabledJarSources : const <String>[],
           )
         else if (_lineRefreshTimer != null)
           // 补线进行中：同尺寸骨架占位，线路到了直接替换，不跳版。

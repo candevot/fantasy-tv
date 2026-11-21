@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
+
 import '../api.dart';
 import '../models.dart';
 import 'cms_api.dart';
@@ -151,15 +153,35 @@ class CmsBridge {
     Object? failure;
     final lists = await Future.wait(<Future<List<VideoCard>?>>[
       for (final row in rows)
-        _tryRow(row.typeId, onError: (Object e) => failure ??= e),
+        _tryRow(row.typeId, label: row.label,
+            onError: (Object e) => failure ??= e),
     ]);
 
-    final sections = <HomeSection>[];
-    for (var i = 0; i < rows.length; i++) {
-      final items = lists[i];
-      if (items == null || items.isEmpty) continue;
-      sections.add(
-        HomeSection(rows[i].label, items.take(_rowCount).toList()),
+    var sections = _sectionsOf(rows, lists);
+    // HOME_PLAIN_FALLBACK（2026-11-22）：一行都没铺出内容时**降级重试一次**。
+    //
+    // 热播那一路（`order=vod_hits&by=desc` + 第 2 页合并）对服务端要求最高：
+    // 排序字段改过名 / 排序方向被后台改回升序 / 第 1 页整页都是无地址记录，
+    // 都会让 sections 变空 —— 而同一时刻分类页（不带 order、单页）却完全正常
+    // （用户实测就是这样）。这时**不带任何 order、只取第一页**再问一次：
+    // t=1 先试（用户点名的口径），其余分类同口径补一遍，宁可用「最新入库」
+    // 排出来的推荐，也不给用户一个「这个频道暂时没有内容」。
+    if (sections.isEmpty) {
+      final plain = await Future.wait(<Future<List<VideoCard>>>[
+        for (final row in rows) _tryPlainRow(row.typeId, label: row.label),
+      ]);
+      final plainSections = _sectionsOf(rows, plain);
+      if (plainSections.isNotEmpty) {
+        _homeRowLog(
+          '推荐页降级重试成功：不带 order 的第一页出内容 '
+          'sections=${plainSections.length} '
+          '（t=1 ${plain.isEmpty ? 0 : plain.first.length} 条）',
+        );
+        return HomeData(_bannersOf(plain), plainSections);
+      }
+      _homeRowLog(
+        '推荐页降级重试仍然为空：sections=0 rows=${rows.length} '
+        'firstFailure=${failure?.runtimeType ?? '-'}',
       );
     }
     final allFailed = lists.every((list) => list == null);
@@ -185,18 +207,38 @@ class CmsBridge {
 
     // banner 用第一条有数据的分类：封面空的片子交给 FxCover 的
     // 首字渐变占位块，不会出现灰块或白屏。
-    var bannerSource = const <VideoCard>[];
+    return HomeData(_bannersOf(lists), sections);
+  }
+
+  /// 各行结果 → 首页分区（丢掉「这一行没有」的行）。
+  static List<HomeSection> _sectionsOf(
+    List<CmsChannel> rows,
+    List<List<VideoCard>?> lists,
+  ) {
+    final sections = <HomeSection>[];
+    for (var i = 0; i < rows.length && i < lists.length; i++) {
+      final items = lists[i];
+      if (items == null || items.isEmpty) continue;
+      sections.add(
+        HomeSection(rows[i].label, items.take(_rowCount).toList()),
+      );
+    }
+    return sections;
+  }
+
+  /// banner 取第一组有数据的分类的前 5 条。
+  static List<BannerItem> _bannersOf(List<List<VideoCard>?> lists) {
+    var source = const <VideoCard>[];
     for (final list in lists) {
       if (list != null && list.isNotEmpty) {
-        bannerSource = list;
+        source = list;
         break;
       }
     }
-    final banners = <BannerItem>[
-      for (final card in bannerSource.take(_bannerCount))
+    return <BannerItem>[
+      for (final card in source.take(_bannerCount))
         BannerItem(card.id, card.title, card.cover, card.desc, card.rating),
     ];
-    return HomeData(banners, sections);
   }
 
   /// 取一行；失败抛出去，由 [home] 决定是回落还是报错。
@@ -206,59 +248,174 @@ class CmsBridge {
   /// （1,200,000 → 1,187,000…），所以这里直接把排序交给服务端：
   /// 之前按 `vod_time` 拉，首页展示的其实是「最近入库」，用户看到的当然
   /// 不是热播剧。
-  static Future<List<VideoCard>> _row(int typeId) async {
-    // HOME_PLAYABLE（2026-11-15）：**没有播放地址的记录不进首页**。
-    // 热播榜只写 `vod_hits`，按它排出来的第一批里混着 `vod_play_url` 为空 /
-    // 只有占位的记录 —— 点进去必然没有线路，用户看到的是「点开播不了」。
-    // 这里在转模型之前就滤掉，宁可少一条卡片，也不给一条点不开的。
-    // RULE_SRC（2026-11-15）：首页只铺我们自己的片源（hx）。
-    // 不带 `src` 时服务端把 hx / xo 两条同名片一起给回来，首页第一行就会
-    // 出现「八仙（幻想）」和「八仙（官采切片）」并排。
-    // HOME_MORE（2026-11-20）：用户要求推荐多给几条。一页只有 20 条，
-    // 这里拉两页合并成 40 条（同一部片按 id 去重）。
-    // HOME_MORE_SAFE：第 1 页必须有，第 2 页只是「多给点」——
-    // 第 2 页失败（越界 / 接口偶发 500）不能把整行、进而整页首页拖垮。
-    final first = await CmsApi.listVod(
-        type: typeId, page: 1, sort: 'hot', src: CmsApi.ownSrc);
-    List<dynamic> second = const <dynamic>[];
+  ///
+  /// HOME_PLAYABLE（2026-11-15）：**没有播放地址的记录不进首页**。
+  /// 热播榜只写 `vod_hits`，按它排出来的第一批里混着 `vod_play_url` 为空 /
+  /// 只有占位的记录 —— 点进去必然没有线路，用户看到的是「点开播不了」。
+  /// 这里在转模型之前就滤掉，宁可少一条卡片，也不给一条点不开的。
+  /// RULE_SRC（2026-11-15）：首页只铺我们自己的片源（hx）。
+  /// 不带 `src` 时服务端把 hx / xo 两条同名片一起给回来，首页第一行就会
+  /// 出现「八仙（幻想）」和「八仙（官采切片）」并排。
+  /// HOME_MORE（2026-11-20）：用户要求推荐多给几条。一页只有 20 条，
+  /// 这里拉两页合并成 40 条（同一部片按 id 去重）。
+  /// HOME_MORE_SAFE：第 1 页必须有，第 2 页只是「多给点」——
+  /// 第 2 页失败（越界 / 接口偶发 500）不能把整行、进而整页首页拖垮。
+  static Future<List<VideoCard>> _row(
+    int typeId, {
+    String label = '',
+  }) async {
+    final tag = '${label.isEmpty ? '行' : label} t=$typeId';
+    // HOME_ROW_KEYS（2026-11-22）：失败打点要带「第一条记录有哪些字段」——
+    // 字段名对不上（服务端改名 / 少给）是这类空白最隐蔽的原因。
+    var firstKeys = const <String>[];
+    var raw = 0;
     try {
-      second = await CmsApi.listVod(
-          type: typeId, page: 2, sort: 'hot', src: CmsApi.ownSrc);
-    } catch (_) {
-      second = const <dynamic>[];
+      final first = await CmsApi.listVod(
+          type: typeId, page: 1, sort: 'hot', src: CmsApi.ownSrc);
+      raw += first.length;
+      if (first.isNotEmpty) firstKeys = _keysOf(first.first);
+      final pages = <List<Map<String, dynamic>>>[first];
+      try {
+        final second = await CmsApi.listVod(
+            type: typeId, page: 2, sort: 'hot', src: CmsApi.ownSrc);
+        raw += second.length;
+        pages.add(second);
+      } catch (e) {
+        // HOME_MORE_SAFE：第 2 页只是「多给点」，失败不影响这一行。
+        _homeRowLog('$tag 第 2 页取数失败 ${e.runtimeType}', keys: firstKeys);
+      }
+      final cards = _cardsOfPages(pages, tag: tag, raw: raw, keys: firstKeys);
+      if (cards.isEmpty) {
+        _homeRowLog(
+          '$tag $raw 条原始记录一条卡片都没剩下（看下面的 drop* 分布）',
+          keys: firstKeys,
+        );
+      }
+      return cards;
+    } catch (e) {
+      // HOME_ROW_ERR（2026-11-22）：**不再静默**。这一行是哪一类、抛了什么、
+      // 第一条记录有哪些字段，一行打全；release 版不打（见 [_homeRowLog]）。
+      _homeRowLog('$tag 取数失败 ${e.runtimeType}: $e', keys: firstKeys);
+      rethrow;
     }
-    final pages = <List<dynamic>>[first, second];
+  }
+
+  /// 降级版取一行：**不带 order、只取第一页**（HOME_PLAIN_FALLBACK 用）。
+  ///
+  /// 和 [_row] 的唯一差别就是「不排序、不翻第 2 页」—— 它就是分类页一直在用
+  /// 的那条路径，所以分类页正常时它必然正常。同样不吞异常（失败记 debug 点、
+  /// 返回空列表，由 [home] 决定要不要显示空态）。
+  static Future<List<VideoCard>> _tryPlainRow(
+    int typeId, {
+    String label = '',
+  }) async {
+    final tag = '${label.isEmpty ? '行' : label} t=$typeId 降级';
+    var firstKeys = const <String>[];
+    try {
+      final page = await CmsApi.listVod(
+          type: typeId, page: 1, src: CmsApi.ownSrc);
+      if (page.isNotEmpty) firstKeys = _keysOf(page.first);
+      return _cardsOfPages(
+        <List<Map<String, dynamic>>>[page],
+        tag: tag,
+        raw: page.length,
+        keys: firstKeys,
+      );
+    } catch (e) {
+      _homeRowLog('$tag 取数失败 ${e.runtimeType}: $e', keys: firstKeys);
+      return const <VideoCard>[];
+    }
+  }
+
+  /// 原始记录 → 首页卡片：按 id 去重 → 滤掉没有播放地址的 → 转模型 → 去直播。
+  ///
+  /// HOME_ROW_DROP（2026-11-22）：每一步丢掉多少条都记进 debug 打点 ——
+  /// 「服务端 20 条、首页 0 条」时，一眼就能看出是哪一步吃掉的
+  /// （`dropNoPlay` = 播不了、`dropCard` = 转换抛异常、`dropLive` = 直播）。
+  static List<VideoCard> _cardsOfPages(
+    List<List<Map<String, dynamic>>> pages, {
+    required String tag,
+    required int raw,
+    List<String> keys = const <String>[],
+  }) {
     final seen = <String>{};
-    final vods = <dynamic>[];
-    for (final pg in pages) {
-      for (final v in pg) {
-        final id = '${(v as dynamic).vodId ?? v.vod_id ?? v}';
+    final vods = <Map<String, dynamic>>[];
+    for (final page in pages) {
+      for (final vod in page) {
+        // ID_SAFE（2026-11-22，**首页推荐空白的根因**）：这里原来是
+        //   `final id = '${(v as dynamic).vodId ?? v.vod_id ?? v}';`
+        // `v` 是 `Map<String, dynamic>`，动态取 `vodId` 直接抛
+        // `NoSuchMethodError: Class '_Map<String, dynamic>' has no instance
+        // getter 'vodId'` —— `??` 只兜 null、兜不住异常，于是这一行在
+        // 「去重」这一步就整条抛错，5 行全变 null，sections 空，
+        // 推荐页永远是「这个频道暂时没有内容」（分类页走的是另一条路径，
+        // 所以完全正常）。按 Map 的键读，不猜 getter。
+        final id = '${vod['vod_id'] ?? vod['vodId'] ?? ''}'.trim();
+        if (id.isEmpty) continue;
         if (!seen.add(id)) continue;
-        vods.add(v);
+        vods.add(vod);
       }
     }
     final list = <VideoCard>[];
+    var noPlay = 0;
+    var badCard = 0;
+    Object? cardError;
     for (final vod in vods) {
-      if (!CmsApi.hasPlayUrl(vod)) continue;
+      if (!CmsApi.hasPlayUrl(vod)) {
+        noPlay++;
+        continue;
+      }
       try {
         list.add(CmsApi.cardOf(vod));
-      } catch (_) {
-        // 单条坏数据不影响整行。
+      } catch (e) {
+        // 单条坏数据不影响整行，但**必须留下痕迹**（异常类型 + 字段名）。
+        badCard++;
+        cardError ??= e;
       }
     }
     final clean = _withoutLive(list);
+    final dropped = noPlay + badCard + (list.length - clean.length);
+    if (dropped > 0 || clean.isEmpty) {
+      _homeRowLog(
+        '$tag raw=$raw uniq=${vods.length} dropNoPlay=$noPlay '
+        'dropCard=$badCard dropLive=${list.length - clean.length} '
+        'out=${clean.length}'
+        '${cardError == null ? '' : ' cardError=${cardError.runtimeType}'}',
+        keys: keys,
+      );
+    }
     _markAll(clean, CmsOrigin.cms);
     return clean;
+  }
+
+  /// 一条记录的字段名（打点用，最多 16 个，按字母序保证可断言）。
+  static List<String> _keysOf(Map<String, dynamic> vod) {
+    final keys = vod.keys.map((k) => '$k').toList()..sort();
+    return keys.length <= 16 ? keys : keys.sublist(0, 16);
+  }
+
+  /// HOME_ROW_LOG（2026-11-22）：推荐页取数的 debug 打点，**只在 debug 版打**。
+  ///
+  /// 一行里带三样东西：**哪一行**（分类名 + type id）、**异常类型**、**第一条
+  /// 记录的 key 列表**。推荐页再空白时，`flutter run --debug` 一眼就能定位是
+  /// 哪一类、哪一步、缺了哪个字段 —— 不用再靠猜。
+  static void _homeRowLog(String what, {List<String> keys = const <String>[]}) {
+    if (!kDebugMode) return;
+    final tail = keys.isEmpty
+        ? ' keys=[]'
+        : ' keys=[${keys.join(',')}]';
+    debugPrint('[HOME_ROW] $what$tail');
   }
 
   /// 取一行；失败返回 null（首页按「这一行没有」处理，不影响其它行），
   /// 同时把错误记给 [onError] —— 六行全挂时才知道是真不通。
   static Future<List<VideoCard>?> _tryRow(
     int typeId, {
+    String label = '',
     void Function(Object error)? onError,
   }) async {
     try {
-      return await _row(typeId);
+      return await _row(typeId, label: label);
     } catch (e) {
       onError?.call(e);
       return null;

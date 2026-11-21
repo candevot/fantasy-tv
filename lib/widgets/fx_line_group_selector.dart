@@ -34,6 +34,7 @@ class FxLineGroupSelector extends StatefulWidget {
     this.padding = const EdgeInsets.symmetric(horizontal: 16),
     this.showHint = true,
     this.selectFirstOnGroupChange = true,
+    this.pendingGroups = const <String>[],
   });
 
   /// 全部线路（自有 + jar 混在一起，组件自己按大类分组）。
@@ -59,6 +60,14 @@ class FxLineGroupSelector extends StatefulWidget {
   ///    具体哪一条 —— 否则点「咕噜」弹层立刻关掉，第二行根本没机会显示。
   final bool selectFirstOnGroupChange;
 
+  /// JAR_PENDING（2026-11-22）：**正在取线路**的源名（`咕噜`）。
+  ///
+  /// 进详情页时 jar 是就绪的，但这部片在咕噜里有没有还得异步搜一次。
+  /// 这段时间第一行就按「咕噜 · 加载中」占位显示，并且默认停在这一格
+  /// —— 用户看到的是「咕噜正在加载」，而不是「只有幻想，然后突然多出一个
+  /// 咕噜、顺序整体右移」。线路到了原地填充，没有就整条消失回落到幻想。
+  final List<String> pendingGroups;
+
   @override
   State<FxLineGroupSelector> createState() => _FxLineGroupSelectorState();
 }
@@ -70,23 +79,70 @@ class _FxLineGroupSelectorState extends State<FxLineGroupSelector> {
   @override
   void initState() {
     super.initState();
-    _groupKey = _groupOfCurrent();
+    _groupKey = _initialGroupKey();
   }
 
   @override
   void didUpdateWidget(covariant FxLineGroupSelector oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 播放中的线路换了大类（房主广播 / 自动切线）：第一行要跟着切过去，
-    // 否则用户看到的是「高亮在 A，第二行显示的是 B」。
+    // 播放中的线路换了大类（房主广播 / 自动切线 / 用户点了别的类）：
+    // 第一行要跟着切过去，否则用户看到的是「高亮在 A，第二行显示的是 B」。
+    //
+    // 只有**线路 id 真的变了**才跟随：JAR_PENDING 期间 currentLineId 还是
+    // 幻想那条（咕噜还没回来），无条件跟随会把「咕噜 · 加载中」的高亮
+    // 拽回幻想 —— 那正是要消灭的错位。
+    final lineChanged =
+        widget.currentLineId.trim() != oldWidget.currentLineId.trim();
     final want = _groupOfCurrent();
-    if (want.isNotEmpty && want != _groupKey) {
+    if (lineChanged && want.isNotEmpty && want != _groupKey) {
       _groupKey = want;
+    }
+    // JAR_PENDING：占位消失（没拿到线路）时把选中格落回第一个能点的大类，
+    // 否则会停在一个已经不存在的 key 上（build 里虽然有 orElse 兜，
+    // 但 _groupKey 留着旧值，下一次换线路又会被它拉回去）。
+    final pendingChanged =
+        widget.pendingGroups.join('|') != oldWidget.pendingGroups.join('|');
+    final linesChanged = widget.lines.length != oldWidget.lines.length;
+    if (pendingChanged || linesChanged) {
+      final keys = _groups().map((g) => g.key).toSet();
+      if (!keys.contains(_groupKey)) {
+        _groupKey = _initialGroupKey();
+      }
     }
   }
 
-  /// 当前线路属于哪个大类；找不到就用第一个有线路的大类。
+  /// 首帧该高亮哪个大类。
+  ///
+  /// JAR_PENDING（2026-11-22 用户口径）：有源正在取线路时**就停在这一格**
+  /// （咕噜排在前面），进详情页第一眼看到的就是「咕噜 · 加载中」，而不是
+  /// 「幻想高亮 → 两秒后跳成咕噜」。
+  String _initialGroupKey() {
+    final groups = _groups();
+    final current = widget.currentLineId.trim();
+    if (current.isNotEmpty) {
+      for (final group in groups) {
+        // 已经在播 jar 线路：就停在它那一格，别抢。
+        if (!group.own && group.lines.any((line) => line.id == current)) {
+          return group.key;
+        }
+      }
+    }
+    for (final group in groups) {
+      if (group.pending) return group.key;
+    }
+    for (final group in groups) {
+      if (group.available) return group.key;
+    }
+    return kOwnLineGroupKey;
+  }
+
+  List<FxLineGroup> _groups() =>
+      fxLineGroups(widget.lines, pendingLabels: widget.pendingGroups);
+
+  /// 当前线路属于哪个大类；找不到时优先停在「正在加载」的大类，其次第一个
+  /// 有线路的大类。
   String _groupOfCurrent() {
-    final groups = fxLineGroups(widget.lines);
+    final groups = _groups();
     final current = widget.currentLineId.trim();
     if (current.isNotEmpty) {
       for (final group in groups) {
@@ -94,6 +150,9 @@ class _FxLineGroupSelectorState extends State<FxLineGroupSelector> {
           if (line.id == current) return group.key;
         }
       }
+    }
+    for (final group in groups) {
+      if (group.pending) return group.key;
     }
     for (final group in groups) {
       if (group.available) return group.key;
@@ -114,12 +173,14 @@ class _FxLineGroupSelectorState extends State<FxLineGroupSelector> {
 
   @override
   Widget build(BuildContext context) {
-    final groups = fxLineGroups(widget.lines);
+    final groups = _groups();
     var active = groups.firstWhere(
       (g) => g.key == _groupKey,
       orElse: () => groups.first,
     );
-    if (!active.available) {
+    // pending 的大类没有子线路，但它就是「当前该显示的格」——
+    // 不能因为 `available == false` 就被踢回幻想（那正是要消灭的错位）。
+    if (!active.available && !active.pending) {
       final fallback = groups.where((g) => g.available);
       if (fallback.isNotEmpty) active = fallback.first;
     }
@@ -131,9 +192,11 @@ class _FxLineGroupSelectorState extends State<FxLineGroupSelector> {
           Padding(
             padding: widget.padding.copyWith(top: 0, bottom: 6),
             child: Text(
-              active.own
-                  ? '先选片源，再选它的线路'
-                  : '${active.label} 的子线路',
+              active.pending
+                  ? '${active.label} 正在加载线路…'
+                  : active.own
+                      ? '先选片源，再选它的线路'
+                      : '${active.label} 的子线路',
               style: TextStyle(
                 fontSize: 10.5,
                 color: Fx.sub.withValues(alpha: .9),
@@ -155,7 +218,9 @@ class _FxLineGroupSelectorState extends State<FxLineGroupSelector> {
                 own: group.own,
                 active: group.key == active.key,
                 // 大类里没有任何可用子线路：置灰不可点（用户口径第 4 条）。
+                // pending（正在取线路）同样不可点，但**看得见**。
                 enabled: group.available,
+                pending: group.pending,
                 onTap: () => _pickGroup(group),
               );
             },
@@ -172,7 +237,7 @@ class _FxLineGroupSelectorState extends State<FxLineGroupSelector> {
             itemBuilder: (context, i) {
               if (active.lines.isEmpty) {
                 return _SubChip(
-                  label: '暂无线路',
+                  label: active.pending ? '线路加载中…' : '暂无线路',
                   active: false,
                   enabled: false,
                   onTap: null,
@@ -208,6 +273,7 @@ class _GroupChip extends StatelessWidget {
     required this.active,
     required this.enabled,
     required this.onTap,
+    this.pending = false,
   });
 
   final String label;
@@ -215,6 +281,9 @@ class _GroupChip extends StatelessWidget {
   final bool own;
   final bool active;
   final bool enabled;
+
+  /// 正在取这个源的线路：显示成 `咕噜 · 加载中`，不可点。
+  final bool pending;
   final VoidCallback onTap;
 
   @override
@@ -248,6 +317,26 @@ class _GroupChip extends StatelessWidget {
                 color: active ? Fx.accent : ink,
               ),
             ),
+            if (pending) ...[
+              const SizedBox(width: 5),
+              SizedBox(
+                width: 9,
+                height: 9,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.4,
+                  color: Fx.accent.withValues(alpha: .8),
+                ),
+              ),
+              const SizedBox(width: 3),
+              Text(
+                '加载中',
+                style: TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w600,
+                  color: Fx.sub.withValues(alpha: .9),
+                ),
+              ),
+            ],
             if (enabled && count > 1) ...[
               const SizedBox(width: 4),
               Text(
