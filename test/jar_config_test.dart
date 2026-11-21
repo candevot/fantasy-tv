@@ -23,13 +23,13 @@ void main() {
 {"key":"橘汁","name":"橘汁 • APP","type":3,"api":"csp_AppDrama","searchable":1,"quickSearch":1,"filterable":1,"ext":{"appName":"橘汁","publicKey":"MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCr8SzZhjYy+rsya1K09t8d2K50pWFoBkgUqMpKOiW+3IEVKd4eTdvg9RSOjQ82kypL6R9BnsmrS1V8s4PVDwjQbUtYhTPPC9Hz16qY7rpD6m0d2vr09/UpWQ5uOy9PR0QTrsioveZ+DIe9jc3C+zBCu/kZSY/R8stwJoiitki3gwIDAQAB","dataKey":"ZU1DSFFWNENKMDYXVUQRN0ZJDUC4PQ==","dataIv":"OC1A06E197EF10CF3F6058CA7A803B5E","pkg":"com.asjdhjhd.mgd.p3","host":"","site":"https://1848463092.cdn.123clouddisk.com/1848463092/cct/az.txt","version":"3.0.7.0","decrypt":"1"}}
 ]}''';
 
-  test('只收白名单里的源：咕噜 + 剧圈', () {
+  test('只收白名单里的源：只保留 咕噜', () {
     final defs = JarConfig.parseSitesJson(realSites);
-    expect(defs.map((d) => d.key).toList(), <String>['咕噜', '剧圈']);
+    expect(defs.map((d) => d.key).toList(), <String>['咕噜']);
     expect(defs.map((d) => d.api).toList(), <String>['csp_Gulu', 'csp_App99']);
   });
 
-  test('剧圈 ext 逐字段保留（对象序列化成 JSON 串）', () {
+  test('剧圈不在白名单，但配置解析仍保留其 ext（备用，不参与运行）', () {
     final ju = JarConfig.parseSitesJson(realSites)
         .firstWhere((d) => d.key == '剧圈');
     expect(ju.name, '剧圈 • APP');

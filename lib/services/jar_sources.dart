@@ -36,7 +36,10 @@ import 'fallback_match.dart' show fxNormTitle;
 ///   · `下饭`（`csp_JuXiaFan`）—— searchContent 25～49 秒后回空列表，已去掉。
 ///
 /// 去掉的源**不再出现在任何界面**：不显示大类、不置灰、不占位。
-const List<String> kEnabledJarSources = <String>['咕噜', '剧圈'];
+// KEEP_GULU_ONLY（2026-11-21）：用户最终只要「咕噜」一个 jar 源。
+// 剧圈/橘汁/下饭 实测不可用（剧圈要特殊两参+ext 才行、橘汁搜索恒空、下饭类损坏），
+// 一律不入白名单。
+const List<String> kEnabledJarSources = <String>['咕噜'];
 
 /// 内置 jar 源目录：类名 + `ext`。
 ///

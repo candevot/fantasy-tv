@@ -243,9 +243,9 @@ void main() {
       ..._detailOf(title: '八仙').lines,
       ...extra,
     ]);
-    // 第一行：幻想 + 真的有线路的 jar 源（白名单 = 咕噜 / 剧圈）。
+    // 第一行：幻想 + 真的有线路的 jar 源（白名单 = 只保留 咕噜）。
     expect(groups.map((g) => g.label).toList(),
-        <String>['幻想', '咕噜', '剧圈']);
+        <String>['幻想', '咕噜']);
     expect(groups.skip(1).every((g) => g.available), isTrue);
     // 第二行：`咕噜·4K` 去掉前缀，且「量子资源」不会和自有的「量子」混。
     final gulu = groups.firstWhere((g) => g.key == '咕噜');
