@@ -1,25 +1,27 @@
 import 'package:flutter/material.dart';
 
-import '../models.dart';
 import '../services/cms_bridge.dart';
+import '../services/platform_rank.dart';
 import '../theme.dart';
+import '../utils/fx_route.dart';
 import '../widgets/player_theme.dart' show fxToast;
 import 'category_page.dart';
 import 'detail_page.dart';
-import '../utils/fx_route.dart';
 
-class _RankType {
-  const _RankType(this.key, this.label);
-  final String key;
-  final String label;
-}
-
-class _Period {
-  const _Period(this.key, this.name);
-  final String key;
-  final String name;
-}
-
+/// 排行榜页（RANK_BOARD 2026-11-21）。
+///
+/// 改版原因：以前这一页读的是 `CmsBridge.rank` —— 服务端按 `vod_hits` 排出来的
+/// **我们库内的热度榜**，和腾讯 / 爱奇艺的榜单一毛钱关系都没有（谁先进库谁靠前）。
+/// 现在直接读平台榜：
+///
+///   腾讯 pbaccess / 爱奇艺 mesh → `mac_hot_rank`（每 3 小时同步）
+///     → `GET /api/rank?source=&type=` → [PlatformRankApi]
+///
+/// 页面结构：顶部切平台（腾讯热播 / 爱奇艺热播），下面切分类（电影 / 电视剧 /
+/// 动漫 / 综艺），列表显示**平台真实名次**。拿不到数据时只说「榜单同步中」，
+/// 绝不回落库内热度排序冒充平台榜 —— 那正是这次要改掉的事。
+///
+/// 旧的 [CmsBridge.rank] 保留着（别处可能还在用），本页不再调它。
 class RankPage extends StatefulWidget {
   const RankPage({super.key});
 
@@ -28,35 +30,13 @@ class RankPage extends StatefulWidget {
 }
 
 class _RankPageState extends State<RankPage> {
-  static const List<_RankType> _types = [
-    _RankType('juji', '剧集'),
-    _RankType('movie', '电影'),
-    _RankType('zongyi', '综艺'),
-    _RankType('manhua', '动漫'),
-  ];
-  static const List<_Period> _periods = [
-    _Period('week', '周榜'),
-    _Period('day', '日榜'),
-    _Period('month', '月榜'),
-    _Period('total', '总榜'),
-  ];
+  String _source = PlatformRankApi.platforms.first.key;
+  int _type = PlatformRankApi.channels.first.type;
 
-  String _type = 'juji';
-  String _period = 'week';
-  List<VideoCard> _items = [];
+  PlatformRankBoard _board = PlatformRankBoard.empty;
   bool _loading = true;
   String? _error;
   int _req = 0;
-
-  /// 榜单接口不返回简介：可见卡片按需拉一次详情补齐，失败就保持占位文案。
-  final Map<String, String> _desc = <String, String>{};
-
-  /// 详情返回的线路名；列表接口没给 source 时用它给卡片补来源小字。
-  final Map<String, String> _source = <String, String>{};
-  final Set<String> _descPending = <String>{};
-  final List<String> _descQueue = <String>[];
-  int _descActive = 0;
-  static const int _descConcurrency = 3;
 
   @override
   void initState() {
@@ -64,42 +44,24 @@ class _RankPageState extends State<RankPage> {
     _load();
   }
 
-  String get _periodName {
-    for (final p in _periods) {
-      if (p.key == _period) return p.name;
-    }
-    return '周榜';
-  }
+  RankPlatform get _platform => PlatformRankApi.platformOf(_source);
+  RankChannel get _channel => PlatformRankApi.channelOf(_type);
 
-  /// 这个周期读几页样本：日榜 1 页、周榜 2 页、月榜 4 页、总榜 8 页。
-  ///
-  /// 服务端不认 `order=`（三种排序返回同一序列），榜单的「真实排序」是在
-  /// CmsBridge.rank 里按「热度 → 评分 → 更新时间」做的；周期在这里体现在
-  /// 样本窗口上 —— 总榜看得更远，日榜只看最近这一页。
-  int get _scanPages {
-    switch (_period) {
-      case 'day':
-        return 1;
-      case 'week':
-        return 2;
-      case 'month':
-        return 4;
-      default:
-        return 8;
-    }
-  }
-
-  Future<void> _load() async {
+  /// [force] = 跳过 60 秒本地缓存（下拉刷新 / 点刷新按钮）。
+  Future<void> _load({bool force = false}) async {
     final req = ++_req;
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final list = await CmsBridge.rank(_type, pages: _scanPages);
+      final board = await PlatformRankApi.fetch(_source, _type, force: force);
       if (!mounted || req != _req) return;
+      // 榜单里的 id 就是 mac_vod.vod_id：记进来源账本，详情 / 播放按 CMS 路由，
+      // 不会先按「来源未知」猜一遍。
+      CmsBridge.noteCmsIds(board.items.map((e) => e.vodId));
       setState(() {
-        _items = list;
+        _board = board;
         _loading = false;
         _error = null;
       });
@@ -111,32 +73,28 @@ class _RankPageState extends State<RankPage> {
         _error = msg;
       });
       // 已有榜单时不要整页报错：保留旧数据 + 顶部重试条，再轻提示一次。
-      if (_items.isNotEmpty) fxToast(context, '刷新失败：$msg');
+      if (_board.items.isNotEmpty) fxToast(context, '刷新失败：$msg');
     }
   }
 
-  void _selectType(String key) {
-    if (_type == key) return;
+  void _selectSource(String key) {
+    if (_source == key) return;
     setState(() {
-      _type = key;
-      _items = [];
+      _source = key;
+      _board = PlatformRankBoard.empty;
       _error = null;
       _loading = true;
     });
     _load();
   }
 
-  void _selectPeriod(String key) {
-    if (_period == key) return;
-    // 周期换的是样本窗口（读几页），所以要重新拉一次；不是本地重排。
-    //
-    // RANK_PERIOD（2026-11-15）：必须像切类型一样先清空。原来只把
-    // `_loading` 设成 `_items.isEmpty`（恒为 false）且不清 `_items`，
-    // 结果头部已经显示「月榜」，下面渲染的仍是周榜的片子、还没有加载态；
-    // 拉取失败时旧榜会永久留在「月榜」标题下，用户看到的榜就是错的。
+  void _selectType(int type) {
+    if (_type == type) return;
+    // 换分类必须像换平台一样先清空：否则头部已经显示「动漫」，下面还挂着
+    // 电影那批片子，加载中也没有骨架，看起来就是换了 tab 榜单没变。
     setState(() {
-      _period = key;
-      _items = <VideoCard>[];
+      _type = type;
+      _board = PlatformRankBoard.empty;
       _error = null;
       _loading = true;
     });
@@ -144,64 +102,17 @@ class _RankPageState extends State<RankPage> {
   }
 
   void _openDetail(String id) {
+    if (id.isEmpty) return;
     Navigator.of(context).push(
       FxPageRoute(builder: (_) => DetailPage(id: id)),
     );
   }
 
-  /* -------------------------------------------------- 简介懒加载 */
-
-  void _ensureDesc(VideoCard item) {
-    final id = item.id;
-    if (id.isEmpty || item.desc.isNotEmpty) return;
-    if (_desc.containsKey(id) || _descPending.contains(id)) return;
-    _descPending.add(id);
-    _descQueue.add(id);
-    _pumpDesc();
-  }
-
-  void _pumpDesc() {
-    while (_descActive < _descConcurrency && _descQueue.isNotEmpty) {
-      final id = _descQueue.removeAt(0);
-      _descActive++;
-      _fetchDesc(id);
-    }
-  }
-
-  Future<void> _fetchDesc(String id) async {
-    try {
-      final detail = await CmsBridge.detail(id);
-      if (!mounted) return;
-      setState(() {
-        _desc[id] = detail.desc;
-        final source = detail.sourceLabel;
-        if (source.isNotEmpty) _source[id] = source;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      // 记空串：不再重复请求，卡片显示「暂无简介」而不是留白。
-      setState(() => _desc[id] = '');
-    } finally {
-      _descActive--;
-      _descPending.remove(id);
-      if (mounted) _pumpDesc();
-    }
-  }
-
-  String _descOf(VideoCard item) {
-    if (item.desc.isNotEmpty) return item.desc;
-    return _desc[item.id] ?? '';
-  }
-
-  String _descPlaceholder(VideoCard item) {
-    if (_desc.containsKey(item.id)) return '暂无简介';
-    return '简介加载中…';
-  }
-
-  Color _rankColor(int i) {
-    if (i == 0) return Fx.gold;
-    if (i == 1) return const Color(0xFF8FA7C8);
-    if (i == 2) return const Color(0xFFC79A78);
+  /// 前三名金银铜，其余中性灰。入参是**平台真实名次**，不是列表下标。
+  Color _rankColor(int rank) {
+    if (rank == 1) return Fx.gold;
+    if (rank == 2) return const Color(0xFF8FA7C8);
+    if (rank == 3) return const Color(0xFFC79A78);
     return const Color(0xFFB3BECD);
   }
 
@@ -212,46 +123,9 @@ class _RankPageState extends State<RankPage> {
       child: Column(
         children: [
           _header(),
-          if (_error != null && _items.isNotEmpty) _retryBar(),
+          if (_error != null && _board.items.isNotEmpty) _retryBar(),
           const SizedBox(height: 12),
           Expanded(child: _content()),
-        ],
-      ),
-    );
-  }
-
-  /// 刷新失败但还有旧榜单：顶部细条提示 + 重试，不整页报错。
-  Widget _retryBar() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-      child: Row(
-        children: [
-          const Icon(Icons.error_outline_rounded, size: 14, color: Fx.sub),
-          const SizedBox(width: 6),
-          const Expanded(
-            child: Text(
-              '刷新失败，当前为上次榜单',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                  fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
-            ),
-          ),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _loading ? null : _load,
-            child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-              child: Text(
-                '重试',
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: Fx.accent,
-                ),
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -277,7 +151,7 @@ class _RankPageState extends State<RankPage> {
                             fontWeight: FontWeight.w600,
                             color: Fx.ink)),
                     SizedBox(height: 2),
-                    Text('根据实时热度整理',
+                    Text('腾讯视频 / 爱奇艺 实时热播榜',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -288,10 +162,8 @@ class _RankPageState extends State<RankPage> {
                 ),
               ),
               const SizedBox(width: 8),
-              _periodButton(),
-              const SizedBox(width: 8),
               GestureDetector(
-                onTap: _loading ? null : _load,
+                onTap: _loading ? null : () => _load(force: true),
                 child: Container(
                   width: 36,
                   height: 36,
@@ -316,6 +188,7 @@ class _RankPageState extends State<RankPage> {
             ],
           ),
           const SizedBox(height: 14),
+          // 一级切换：两个平台的榜。
           Container(
             height: 40,
             padding: const EdgeInsets.all(3),
@@ -326,40 +199,38 @@ class _RankPageState extends State<RankPage> {
             ),
             child: Row(
               children: [
-                for (final t in _types)
+                for (final p in PlatformRankApi.platforms)
                   Expanded(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => _selectType(t.key),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        curve: Curves.easeOutCubic,
-                        decoration: BoxDecoration(
-                          gradient: t.key == _type ? Fx.brand : null,
-                          borderRadius: BorderRadius.circular(17),
-                          boxShadow: t.key == _type
-                              ? [
-                                  BoxShadow(
-                                    color: Fx.accent.withValues(alpha: .22),
-                                    blurRadius: 10,
-                                    offset: const Offset(0, 3),
-                                  ),
-                                ]
-                              : null,
-                        ),
-                        child: Center(
-                          child: Text(
-                            t.label,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: t.key == _type
-                                  ? FontWeight.w600
-                                  : FontWeight.w400,
-                              color: t.key == _type ? Colors.white : Fx.sub,
-                            ),
-                          ),
-                        ),
-                      ),
+                    child: _switchCell(
+                      label: p.label,
+                      selected: p.key == _source,
+                      onTap: () => _selectSource(p.key),
+                      radius: 17,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          // 二级切换：分类。
+          Container(
+            height: 36,
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: .42),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: Colors.white.withValues(alpha: .86)),
+            ),
+            child: Row(
+              children: [
+                for (final c in PlatformRankApi.channels)
+                  Expanded(
+                    child: _switchCell(
+                      label: c.label,
+                      selected: c.type == _type,
+                      onTap: () => _selectType(c.type),
+                      radius: 15,
+                      small: true,
                     ),
                   ),
               ],
@@ -370,104 +241,121 @@ class _RankPageState extends State<RankPage> {
     );
   }
 
-  Widget _periodButton() {
-    return PopupMenuButton<String>(
-      tooltip: '',
-      elevation: 10,
-      color: Colors.white,
-      offset: const Offset(0, 36),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      onSelected: _selectPeriod,
-      itemBuilder: (ctx) => [
-        for (final p in _periods)
-          PopupMenuItem<String>(
-            value: p.key,
-            height: 40,
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 18,
-                  child: p.key == _period
-                      ? const Icon(Icons.check_rounded,
-                          size: 15, color: Fx.accent)
-                      : null,
-                ),
-                Text(
-                  p.name,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: p.key == _period ? Fx.accent : Fx.ink,
-                    fontWeight:
-                        p.key == _period ? FontWeight.w600 : FontWeight.w400,
+  Widget _switchCell({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+    required double radius,
+    bool small = false,
+  }) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOutCubic,
+        decoration: BoxDecoration(
+          gradient: selected ? Fx.brand : null,
+          borderRadius: BorderRadius.circular(radius),
+          boxShadow: selected
+              ? [
+                  BoxShadow(
+                    color: Fx.accent.withValues(alpha: .22),
+                    blurRadius: 10,
+                    offset: const Offset(0, 3),
                   ),
-                ),
-              ],
+                ]
+              : null,
+        ),
+        child: Center(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: small ? 12.5 : 13,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+              color: selected ? Colors.white : Fx.sub,
             ),
           ),
-      ],
-      child: Container(
-        height: 36,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: .8),
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: Colors.white),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0xFF50729F).withValues(alpha: .08),
-              blurRadius: 12,
-              offset: const Offset(0, 4),
+        ),
+      ),
+    );
+  }
+
+  /// 刷新失败但还有旧榜单：顶部细条提示 + 重试，不整页报错。
+  Widget _retryBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline_rounded, size: 14, color: Fx.sub),
+          const SizedBox(width: 6),
+          const Expanded(
+            child: Text(
+              '刷新失败，当前为上次榜单',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w400, color: Fx.sub),
             ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(_periodName,
-                style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600, color: Fx.ink)),
-            const SizedBox(width: 2),
-            const Icon(Icons.expand_more_rounded, size: 16, color: Fx.sub),
-          ],
-        ),
+          ),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _loading ? null : () => _load(force: true),
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              child: Text(
+                '重试',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Fx.accent,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _content() {
-    if (_loading && _items.isEmpty) {
+    if (_loading && _board.items.isEmpty) {
       return const FxSkeletonPulse(child: FxRankListSkeleton(count: 6));
     }
-    if (_error != null && _items.isEmpty) {
-      return FxErrorView(message: _error!, onRetry: _load);
-    }
-    if (_items.isEmpty) {
+    // 拿不到平台榜（同步还没跑完 / 接口挂了）时只说「榜单同步中」。
+    // 这里**不能**回落 CmsBridge.rank：那是我们自己库的热度排序，
+    // 挂上「腾讯热播」的标题就成了假榜。
+    if (_board.items.isEmpty) {
       return FxEmptyView(
-        icon: Icons.local_fire_department_outlined,
-        title: '榜单暂时还是空的',
-        subtitle: '换个分类，或稍后刷新试试',
+        icon: Icons.sync_rounded,
+        title: '榜单同步中',
+        subtitle: _error == null
+            ? '${_platform.tag}${_channel.label}榜每 3 小时同步一次，稍后刷新'
+            : '${_platform.tag}${_channel.label}榜暂时取不到（$_error），稍后刷新',
         actionText: '刷新',
-        onAction: _load,
+        onAction: () => _load(force: true),
       );
     }
     return RefreshIndicator(
       color: Fx.accent,
       backgroundColor: Colors.white,
-      onRefresh: _load,
+      onRefresh: () => _load(force: true),
       child: ListView.separated(
-        physics: const AlwaysScrollableScrollPhysics(
-            parent: BouncingScrollPhysics()),
+        physics:
+            const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
         padding: const EdgeInsets.fromLTRB(16, 0, 16, 104),
-        itemCount: _items.length,
+        itemCount: _board.items.length,
         separatorBuilder: (_, __) => const SizedBox(height: 10),
-        itemBuilder: (ctx, i) => _row(_items[i], i),
+        itemBuilder: (ctx, i) => _row(_board.items[i]),
       ),
     );
   }
 
-  Widget _rankBadge(int i) {
-    final top = i < 3;
-    final color = _rankColor(i);
+  Widget _rankBadge(int rank) {
+    final top = rank <= 3;
+    final color = _rankColor(rank);
     return Container(
       width: 30,
       height: 34,
@@ -495,19 +383,26 @@ class _RankPageState extends State<RankPage> {
               ]
             : null,
       ),
-      child: Text(
-        '${i + 1}',
-        style: TextStyle(
-          fontSize: top ? 15 : 13,
-          height: 1,
-          fontWeight: FontWeight.w700,
-          color: top ? Colors.white : Fx.sub,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        // 名次可能到两位数（平台榜 60 条）：挤不下时按宽度缩，不换行不溢出。
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            '$rank',
+            style: TextStyle(
+              fontSize: top ? 15 : 13,
+              height: 1,
+              fontWeight: FontWeight.w700,
+              color: top ? Colors.white : Fx.sub,
+            ),
+          ),
         ),
       ),
     );
   }
 
-  Widget _statusTag(String status) {
+  Widget _metaTag(String text) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
@@ -515,7 +410,7 @@ class _RankPageState extends State<RankPage> {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
-        status,
+        text,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(
@@ -528,50 +423,38 @@ class _RankPageState extends State<RankPage> {
     );
   }
 
-  Widget _row(VideoCard item, int i) {
+  Widget _row(PlatformRankItem item) {
+    final platform = _platform;
+    final channel = _channel;
+    final channelName =
+        _board.channelName.isEmpty ? channel.label : _board.channelName;
     final meta = <String>[
       if (item.year > 0) '${item.year}',
-      if (item.type.isNotEmpty) item.type else fxCategoryName(item.category),
-      if (item.area.isNotEmpty) item.area,
+      channelName,
     ].join(' · ');
-    final status = item.status.isNotEmpty
-        ? item.status
-        : (item.episodes > 0 ? '全 ${item.episodes} 集' : '热度上升中');
-    final badge = fxBadgeText(item);
-    _ensureDesc(item);
-    final desc = _descOf(item);
-    final source = item.sourceLabel.trim().isNotEmpty
-        ? item.sourceLabel.trim()
-        : (_source[item.id] ?? '');
+    final rankText = '${platform.tag}$channelName榜 · 第 ${item.rank} 名';
     return GlassCard(
       padding: const EdgeInsets.all(10),
       radius: 18,
-      opacity: i < 3 ? .72 : .6,
-      onTap: () => _openDetail(item.id),
+      opacity: item.rank <= 3 ? .72 : .6,
+      onTap: () => _openDetail(item.vodId),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _rankBadge(i),
+          _rankBadge(item.rank),
           const SizedBox(width: 8),
           SizedBox(
             width: 66,
             height: 99,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                FxCover(url: item.cover, title: item.title, radius: 10),
-                if (badge != null)
-                  Positioned(
-                    left: 4,
-                    top: 4,
-                    child: FxPosterBadge(badge),
-                  ),
-              ],
+            child: FxCover(
+              url: item.cover,
+              title: item.title,
+              radius: 10,
             ),
           ),
           const SizedBox(width: 10),
           Expanded(
-            // 内容至少与封面同高；大字体下随文字长高，不裁描述也不压住底栏。
+            // 内容至少与封面同高；大字体下随文字长高，不裁字也不压住底栏。
             child: ConstrainedBox(
               constraints: const BoxConstraints(minHeight: 99),
               child: Column(
@@ -588,10 +471,6 @@ class _RankPageState extends State<RankPage> {
                         fontWeight: FontWeight.w600,
                         color: Fx.ink),
                   ),
-                  if (source.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    FxSourceLabel(source),
-                  ],
                   const SizedBox(height: 3),
                   Text(
                     meta.isEmpty ? '影视' : meta,
@@ -603,33 +482,25 @@ class _RankPageState extends State<RankPage> {
                         fontWeight: FontWeight.w400,
                         color: Fx.sub),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Text(
-                    desc.isNotEmpty ? desc : _descPlaceholder(item),
+                    rankText,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
+                    style: const TextStyle(
                       fontSize: 11.5,
-                      height: 1.45,
-                      fontWeight: FontWeight.w400,
-                      color: desc.isNotEmpty
-                          ? const Color(0xFF5A6577)
-                          : const Color(0xFFA6B1C2),
+                      height: 1.35,
+                      fontWeight: FontWeight.w600,
+                      color: Fx.accent,
                     ),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Row(
                     children: [
-                      Flexible(child: _statusTag(status)),
-                      if (item.heat.isNotEmpty) ...[
+                      Flexible(child: _metaTag(platform.tag)),
+                      if (_board.stale) ...[
                         const SizedBox(width: 6),
-                        Text(
-                          '热度 ${item.heat}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 10.5, color: Color(0xFFA6B1C2)),
-                        ),
+                        const Flexible(child: _StaleTag()),
                       ],
                     ],
                   ),
@@ -638,6 +509,34 @@ class _RankPageState extends State<RankPage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 「榜单同步中 · 上次结果」小标：服务端读库失败时给的是 30 分钟内的旧榜，
+/// 必须告诉用户这是上次的结果，不能当成最新名次。
+class _StaleTag extends StatelessWidget {
+  const _StaleTag();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: const Color(0xFFA6B1C2).withValues(alpha: .16),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: const Text(
+        '上次榜单',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 10.5,
+          height: 1.2,
+          fontWeight: FontWeight.w600,
+          color: Color(0xFF7C8798),
+        ),
       ),
     );
   }

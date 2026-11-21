@@ -461,6 +461,29 @@ class Api {
         .toList();
   }
 
+  /// 平台真实热播榜：`GET /api/rank?source=tencent|iqiyi&type=1|2|3|4`。
+  ///
+  /// RANK_BOARD（2026-11-21）：排行榜页不再用库内热度排序，改读腾讯 / 爱奇艺
+  /// 自己的榜（服务端从 `mac_hot_rank` 取，每 3 小时同步一轮）。同一条
+  /// `/api/rank` 路径上，**带 `source` 走平台榜、不带 `source` 仍是旧的库内
+  /// 榜**，所以 [rank] 保持原样、别处照旧能用。
+  ///
+  /// 返回 `data` 原样给上层解析（见 `services/platform_rank.dart`）：
+  /// `{source, type, channel, channelName, count, updatedAt, stale, items:[…]}`。
+  /// 参数非法 / 榜单暂时取不到时服务端回 400 / 502，[ApiException] 照常抛出，
+  /// 由榜单页显示「榜单同步中」。
+  static Future<Map<String, dynamic>> rankBoard({
+    required String source,
+    required int type,
+    int limit = 100,
+  }) {
+    return _get('/rank', <String, dynamic>{
+      'source': source,
+      'type': type,
+      'limit': limit,
+    });
+  }
+
   /// 搜索页热搜词：`GET /api/hotwords`（HOTWORDS 2026-11-20）。
   ///
   /// 服务端读 `mac_hot_rank`（爱奇艺 + 腾讯热播榜，每 3 小时刷新）：

@@ -1819,6 +1819,18 @@ class CmsBridge {
     }
   }
 
+  /// 把「已知来自 CMS 主库」的 id 记进来源账本。
+  ///
+  /// RANK_BOARD（2026-11-21）：平台热播榜（`GET /api/rank?source=…`）直接给
+  /// `mac_vod.vod_id`，但它不经过 [list] / [search]，账本里没有这些 id。
+  /// 不记账的话详情 / 播放会先按「来源未知」猜一遍（CMS 查不到才抛错），
+  /// 记账后行为与其它 CMS 卡片完全一致 —— 只记账，不改任何点播 / 线路逻辑。
+  static void noteCmsIds(Iterable<String> ids) {
+    for (final id in ids) {
+      _mark(id, CmsOrigin.cms);
+    }
+  }
+
   /// 清掉来源账本（切换站点 / 调试用）。
   static void clearCache() {
     _origins.clear();
