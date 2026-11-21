@@ -660,7 +660,7 @@ class _CategoryPageState extends State<CategoryPage> {
         _refreshError = null;
         // MORE_CAP（2026-11-21）：分类页最多给 300 条（热度排序），
         // 再多就让用户直接搜索，避免无意义地一直翻下去。
-        _hasMore = more.hasMore && _items.length < 300;
+        _hasMore = more.hasMore && _items.length < 500;
       });
     } catch (e) {
       if (!mounted || req != _req) return;
