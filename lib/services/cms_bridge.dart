@@ -171,10 +171,10 @@ class CmsBridge {
         // HOME_FALLBACK（2026-11-21）：5 行全部失败时**无条件**回退旧接口，
         // 别让推荐页变成空白/「暂无内容」——服务端每类都有数据（实测 t1~t6 各 20 条），
         // 失败说明新取数路径在那台设备/那次网络下不通，回退至少能出内容。
-        try {
-          final legacy = await _legacyHome(ch);
-          if (legacy.sections.isNotEmpty) return legacy;
-        } catch (_) {}
+        // HOME_NO_LEGACY（2026-11-22）：推荐页**不再回退旧接口**。
+        // 用户实测：回退旧接口后，首页卡片点进去报「该视频已失效」、封面也是空的
+        // —— 旧接口给的 id 和封面本来就是过期数据。宁可让页面显示重试态，
+        // 也不要用无效数据把用户送进死胡同。
         return HomeData(const <BannerItem>[], const <HomeSection>[]);
       }
       if (!legacyEnabled) {
