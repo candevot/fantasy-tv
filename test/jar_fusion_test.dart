@@ -139,11 +139,12 @@ void main() {
     index.attach(title: '八仙', year: 2016, label: '咕噜', vodId: '418792');
     // 白名单只剩 咕噜：这里用同一源的第二条片验证「同片只记一次、不同片能查到」。
     index.attach(title: '八仙', year: 2016, label: '咕噜', vodId: '77');
+    // 白名单只剩 咕噜 一个源：同标题+同源只记一次（换 vodId 也合并）。
     final hits = index.hitsFor(title: '八仙', year: 2016);
-    expect(hits.length, 2);
-    expect(hits.map((e) => e.label), <String>['咕噜', '咕噜']);
+    expect(hits.length, 1);
+    expect(hits.map((e) => e.label), <String>['咕噜']);
     // 年份对不上时退一步按片名找（jar 常把年份写成 0）。
-    expect(index.hitsFor(title: '八仙', year: 0).length, 2);
+    expect(index.hitsFor(title: '八仙', year: 0).length, 1);
     // 没搜过的片一条都没有。
     expect(index.hitsFor(title: '人世间', year: 2022), isEmpty);
   });
