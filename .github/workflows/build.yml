@@ -539,11 +539,19 @@ jobs:
             echo '不许恢复 TVBox 配置导入' >&2
             exit 1
           fi
-          flutter test test/jar_fusion_test.dart
-          flutter test test/jar_source_toggle_test.dart
-          flutter test test/jar_plugin_test.dart
-          flutter test test/tvbox_crypto_test.dart
-          flutter test test/search_group_test.dart test/search_group_pinned_test.dart
+          # 失败时把 flutter test 的真实输出变成 GitHub annotation：
+          # public 仓库拿不到 job log，只能靠 annotation 读失败原因。
+          for t in test/jar_fusion_test.dart test/jar_source_toggle_test.dart \
+                   test/jar_plugin_test.dart test/tvbox_crypto_test.dart \
+                   test/search_group_test.dart test/search_group_pinned_test.dart; do
+            if ! flutter test "$t" > /tmp/t.txt 2>&1; then
+              echo "::error::$t 失败"
+              grep -E "Expected:|Actual:|Which:|^  [a-z_]+_test\.dart|Test failed|Error:" /tmp/t.txt \
+                | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+              tail -60 /tmp/t.txt
+              exit 1
+            fi
+          done
           # ---- JAR_BOOT（2026-11-21 用户实测）：首次进 App 自动装 jar ------
           #
           # 现场：装完 App 打开详情页，四个 jar 源 chips 全灰 —— 根因是

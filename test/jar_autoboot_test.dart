@@ -205,9 +205,9 @@ void main() {
     expect(calls.any((c) => c.method == 'search'), isFalse);
   });
 
-  /* ------------- 4. 装好后：四个源 chips 不再置灰（可合并出子线路） */
+  /* ------------- 4. 装好后：白名单里的源能合并出子线路 */
 
-  test('装好 jar：四个源都能合并子线路 → 四个大类 available（不置灰）',
+  test('装好 jar：源能合并子线路 → 该源大类出现且可点',
       () async {
     installed = true;
     mockJar((method, args) {
@@ -223,7 +223,7 @@ void main() {
     await SourceHub.instance.refreshJarStatus();
     expect(SourceHub.instance.jarReady, isTrue);
 
-    // 搜索期已经命中过这部片（索引里四个源各一条），详情页据此合并。
+    // 搜索期已经命中过这部片（索引里每个启用源各一条），详情页据此合并。
     for (final label in kEnabledJarSources) {
       JarMergeIndex.instance.attach(
         title: '八仙',
@@ -243,16 +243,16 @@ void main() {
       ..._detailOf(title: '八仙').lines,
       ...extra,
     ]);
-    // 第一行：幻想 + 四个 jar 源，全部有线路 = 全部可点（不再置灰）。
+    // 第一行：幻想 + 真的有线路的 jar 源（白名单 = 咕噜 / 剧圈）。
     expect(groups.map((g) => g.label).toList(),
-        <String>['幻想', '咕噜', '橘汁', '剧圈', '下饭']);
+        <String>['幻想', '咕噜', '剧圈']);
     expect(groups.skip(1).every((g) => g.available), isTrue);
     // 第二行：`咕噜·4K` 去掉前缀，且「量子资源」不会和自有的「量子」混。
     final gulu = groups.firstWhere((g) => g.key == '咕噜');
     expect(fxLineSubName(gulu.lines.first, '咕噜'), '4K');
   });
 
-  test('装好 jar 后按片名补命中：四个源各发一次搜索，索引补齐', () async {
+  test('装好 jar 后按片名补命中：每个启用源各发一次搜索，索引补齐', () async {
     installed = true;
     mockJar((method, args) {
       if (method == 'status') {
@@ -270,7 +270,7 @@ void main() {
     expect(hits, kEnabledJarSources.length);
     final searches = calls.where((c) => c.method == 'search').toList();
     expect(searches.length, kEnabledJarSources.length);
-    // 补完索引，详情页同一套合并就能出四个源的子线路。
+    // 补完索引，详情页同一套合并就能出各源的子线路。
     final recorded = JarMergeIndex.instance.hitsFor(title: '八仙', year: 2016);
     expect(recorded.map((h) => h.label).toSet(),
         kEnabledJarSources.toSet());
