@@ -552,7 +552,7 @@ jobs:
       #   · 反面门禁：不许恢复 TVBox 配置导入 / 启动自动安装。
       - name: jar 源（融合 / 两行线路）regressions
         run: |
-          set -e
+          set -ex
           grep -q "const List<String> kEnabledJarSources" lib/services/jar_sources.dart
           # KEEP_GULU_ONLY（2026-11-21）：白名单**只有咕噜**（服务器 jar 实测
           # 八仙 15 条 / 济公传 4 条）。剧圈（App99 系）要特殊两参 + 真 ext 才
