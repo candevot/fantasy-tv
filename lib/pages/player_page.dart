@@ -17,6 +17,7 @@ import '../services/fx_video_geometry.dart';
 import '../services/fallback_match.dart';
 import '../services/playback_progress.dart';
 import '../services/line_cooldown.dart';
+import '../services/line_fallback_order.dart';
 import '../services/line_health.dart';
 import '../services/line_probe.dart';
 import '../services/iq_codec_gate.dart';
@@ -716,32 +717,19 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
   }
 
-  /// 当前线路 + 下一条线路（最多 2 条），用于失败后的自动兜底。
+  /// 当前线路 + 下一条线路（最多 [_maxLineAttempts] 条），用于失败后的自动兜底。
   List<String> _lineAttempts(String targetLine) {
     final lines = widget.detail?.lines ?? const <LineInfo>[];
     final attempts = <String>[];
     if (targetLine.isNotEmpty) attempts.add(targetLine);
-    var index = -1;
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i].id == targetLine) {
-        index = i;
-        break;
-      }
-    }
-    // 候补按「是否已知不健康」排：degraded 线路放最后，
-    // 优先把机会给检测正常的线路，减少用户等待时间。
-    final rest = <LineInfo>[];
-    for (var step = 0; step < lines.length; step++) {
-      final candidate =
-          index >= 0 ? lines[(index + 1 + step) % lines.length] : lines[step];
-      if (candidate.id.isEmpty || attempts.contains(candidate.id)) continue;
-      if (rest.any((l) => l.id == candidate.id)) continue;
-      rest.add(candidate);
-    }
-    rest.sort((a, b) {
-      if (a.degraded == b.degraded) return 0;
-      return a.degraded ? 1 : -1;
-    });
+    // GROUP_ORDER（2026-11-21 用户口径）：候补顺序和整轮自动换线**同一份** ——
+    // 先当前大类的其它子线路，本大类没有别的了才进下一个大类。
+    // 以前是扁平列表 `(index + 1 + step) % lines.length`，健康度 / jar 合并
+    // 重排过的列表会让它跨大类乱跳。
+    // 「degraded 沉后」只在**同一大类内部**做（全局排又会跨大类）。
+    final rest = fxSortDegradedWithinGroups(
+      fxFallbackLineOrder(lines: lines, currentLineId: targetLine),
+    );
     for (final candidate in rest) {
       if (attempts.length >= _maxLineAttempts) break;
       attempts.add(candidate.id);
@@ -1738,24 +1726,29 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // LINE_COOLDOWN：10 分钟内失败过的线路沉到最后；本轮里它们先跳过，
     // 但如果全都还在冷却期（上一次刚全试完），就把冷却清掉重来一遍 ——
     // 宁可多试一次，也不能对着用户说「没线路」。
-    var ordered = FxLineCooldown.sortLines(videoId, lines);
-    if (ordered.every(
+    var cooled = FxLineCooldown.sortLines(videoId, lines);
+    if (cooled.every(
       (l) => FxLineCooldown.isCooling(videoId, l.displayName),
     )) {
       FxLineCooldown.clearFor(videoId);
-      ordered = lines;
+      cooled = lines;
     }
+    // GROUP_ORDER（2026-11-21 用户口径）：候选顺序**按大类走** ——
+    // 先当前大类的其它子线路（按显示顺序），本大类全失败才进下一个大类。
+    // 以前是扁平列表 `(index + 1 + step) % length`，而那份列表被健康度排序 /
+    // jar 合并重排过，会在「幻想 ↔ 咕噜」之间乱跳。顺序只在
+    // [fxFallbackLineOrder] 定义一次，详情页 `_switchNextLine` 用的是同一份。
+    final ordered = fxFallbackLineOrder(
+      lines: cooled,
+      currentLineId: startLine,
+    );
     var attempt = 0;
     var ok = false;
     var skippedCooling = 0;
     var deadSkipped = 0;
     try {
-      var index = startLine.isEmpty
-          ? -1
-          : ordered.indexWhere((l) => l.id == startLine);
-      for (var step = 0; step < ordered.length; step++) {
+      for (final candidate in ordered) {
         if (!mounted) return false;
-        final candidate = ordered[(index + 1 + step) % ordered.length];
         if (!tried.add(candidate.id)) continue;
         // KNOWN_BAD（2026-11-15）：死线路（幻想蓝光 FY-PAN1 / mgtv）本轮
         // 直接跳过，不用试 —— 服务端解析一律 404，试它只是白白多等一个
@@ -1915,7 +1908,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (!mounted) return ok;
     if (ok) return true;
 
-    // 全部线路都试完：回到第一条线路，给最终提示（或交给外层继续跨源）。
+    // 全部大类都试完：回到第一条线路，给最终提示（或交给外层继续跨源）。
+    // GROUP_ORDER：这份提示就是用户定稿的「本片暂无可用线路」
+    // （[fxLineNoUsableText]，与详情页最终错误页同一句）。
     _linesExhausted = true;
     _line = lines.first.id;
     _clearFrozenFrame();
@@ -1923,7 +1918,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       _loading = false;
       _loadedEp = null;
       _error = true;
-      _errorText = fxFallbackAllFailedText;
+      _errorText = fxLineNoUsableText;
       _uiPosition = null;
       _uiDuration = null;
     });
@@ -1932,7 +1927,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       widget.onAllLinesFailed!();
     } else {
       // 没有外层（独立播放页 / 一起看）：停在可重试的错误层，文案不甩锅。
-      showSourceError(fxFallbackAllFailedText);
+      showSourceError(fxLineNoUsableText);
     }
     return false;
   }

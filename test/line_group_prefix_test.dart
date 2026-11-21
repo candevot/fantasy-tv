@@ -55,9 +55,9 @@ void main() {
 
   test('只有 jar 编码的 id 才进 jar 大类', () {
     expect(fxLineGroupKeyOf(jarLine('咕噜', '4K')), '咕噜');
-    expect(fxLineGroupKeyOf(jarLine('剧圈', 'YZ有广')), '剧圈');
-    // 不在白名单里的源（已去掉的橘汁 / 下饭）就算带了 id 也只算自有线路，
-    // 防止老历史数据把它们又拉回第一行。
+    // 不在白名单里的源（已去掉的剧圈 / 橘汁 / 下饭）就算带了 id 也只算自有
+    // 线路，防止老历史数据把它们又拉回第一行。
+    expect(fxLineGroupKeyOf(jarLine('剧圈', 'YZ有广')), kOwnLineGroupKey);
     expect(fxLineGroupKeyOf(jarLine('橘汁', '高清')), kOwnLineGroupKey);
     expect(fxLineGroupKeyOf(jarLine('下饭', '线路2')), kOwnLineGroupKey);
   });
@@ -106,16 +106,18 @@ void main() {
       jarLine('咕噜', '4K'),
       jarLine('咕噜', '暴风资源'),
     ]);
+    // KEEP_GULU_ONLY：白名单只剩咕噜，剧圈那条退回幻想大类、不单独成大类。
     expect(
       groups.map((g) => g.label).toList(),
-      <String>['幻想', '咕噜', '剧圈'],
+      <String>['幻想', '咕噜'],
     );
     expect(groups.every((g) => g.available), isTrue);
+    expect(groups[0].lines.length, 2);
     expect(groups[1].lines.length, 2);
   });
 
-  test('已去掉的源（橘汁 / 下饭）不会出现在第一行', () {
-    expect(kEnabledJarSources, <String>['咕噜', '剧圈']);
+  test('已去掉的源（剧圈 / 橘汁 / 下饭）不会出现在第一行', () {
+    expect(kEnabledJarSources, <String>['咕噜']);
     final groups = fxLineGroups(<LineInfo>[
       line('SH4K'),
       jarLine('橘汁', '高清'),
@@ -125,6 +127,8 @@ void main() {
     expect(groups.map((g) => g.label).toList(), <String>['幻想', '咕噜']);
     // 橘汁 / 下饭的老线路退回幻想大类，不丢数据也不冒充。
     expect(groups[0].lines.length, 3);
+    // 白名单里没有的源，就算带 jar 编码也不出现第二行。
+    expect(groups.map((g) => g.label), <String>['幻想', '咕噜']);
   });
 
   /* --------------------------------------------- 设置页的源状态文案 */
@@ -156,6 +160,7 @@ void main() {
       line('红牛'),
       jarLine('咕噜', '4K'),
       jarLine('咕噜', '暴风资源'),
+      // 剧圈已停用：带 jar 编码的老线路退回幻想大类，不单独成大类。
       jarLine('剧圈', 'YZ有广'),
     ];
     LineInfo? picked;
@@ -171,9 +176,9 @@ void main() {
         ),
       ),
     ));
-    // 第一行：幻想 / 咕噜 / 剧圈（没有线路的源不出现）。
+    // 第一行：幻想 / 咕噜（没有线路的源不出现；剧圈已停用也不出现）。
     expect(find.text('咕噜'), findsOneWidget);
-    expect(find.text('剧圈'), findsOneWidget);
+    expect(find.text('剧圈'), findsNothing);
     expect(find.text('橘汁'), findsNothing);
     expect(find.text('下饭'), findsNothing);
 

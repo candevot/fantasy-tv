@@ -217,6 +217,42 @@ jobs:
           grep -q 'fxTransientCooldownWindow = Duration(minutes: 2)' \
             lib/services/auto_resume.dart
           flutter test test/auto_resume_test.dart
+      # GROUP_ORDER（2026-11-21）：自动切线路的**顺序**。
+      #
+      # 用户明确要求（原话）：
+      #   「播放不了 → 先在当前主线路（大类）里换下一条子线路；
+      #    当前大类的子线路全播不了 → 才切到另一个主线路（另一个大类）」
+      #   「全部大类都失败 → 提示『本片暂无可用线路』」
+      #
+      # 现场 bug：详情页 `_switchNextLine` 与播放器 `autoTryAllLines` 都是拿
+      # 扁平线路列表按 `(index + step) % length` 轮，而那份列表被
+      # `fxOwnLinesFirst` / 健康度排序 / jar 合并**重排过** —— 于是出现
+      # 「幻想第 1 条 → 咕噜第 1 条 → 幻想第 2 条」的跨大类乱跳。
+      #
+      # 现在顺序只在 `lib/services/line_fallback_order.dart` 定义一次，
+      # 两个页面都从它取；这里钉住「谁在用」+「扁平取模不许回来」。
+      - name: Line fallback order (current group first, then next group)
+        run: |
+          set -e
+          F=lib/services/line_fallback_order.dart
+          test -f $F
+          grep -q 'List<LineInfo> fxFallbackLineOrder' $F
+          grep -q 'LineInfo? fxFallbackNextLine' $F
+          # 全部大类失败 = 用户定稿的那句话（与咕噜剔除共用一份字面量）。
+          grep -q 'const String fxLineNoUsableText = fxLineAllPrunedText' $F
+          # 两个入口都走同一份顺序。
+          grep -q 'fxFallbackNextLine(' lib/pages/detail_page.dart
+          grep -q 'fxFallbackLineOrder(' lib/pages/player_page.dart
+          # 最终提示文案也统一到那句话（详情页最终错误页 + 播放器耗尽）。
+          grep -q 'message = fxLineNoUsableText' lib/pages/detail_page.dart
+          grep -q '_errorText = fxLineNoUsableText' lib/pages/player_page.dart
+          # 反面门禁：扁平列表取模（跨大类乱跳的根因）不许再出现。
+          if grep -nE '\[\(index \+ (1 \+ )?step\) % (ordered|lines)\.length\]' \
+               lib/pages/detail_page.dart lib/pages/player_page.dart; then
+            echo '自动换线必须走 fxFallbackLineOrder，不许再按扁平列表取模' >&2
+            exit 1
+          fi
+          flutter test test/line_fallback_order_test.dart
       # LIVE_EDGE（2026-11-20）：直播页现场问题 —— 用户实测播 CCTV-4K，
       # 顶栏有刷新按钮、左下角有暂停按钮、画面明显落后，原话：
       # 「直播要什么暂停按钮，还有刷新按钮，根本就不对，刷新之后还是当前的，
@@ -518,13 +554,18 @@ jobs:
         run: |
           set -e
           grep -q "const List<String> kEnabledJarSources" lib/services/jar_sources.dart
-          # 白名单 = 服务器 jar 实测**真能出线路**的两个源：
-          #   咕噜 csp_Gulu（八仙 15 条 / 济公传 4 条）、剧圈 csp_App99。
+          # KEEP_GULU_ONLY（2026-11-21）：白名单**只有咕噜**（服务器 jar 实测
+          # 八仙 15 条 / 济公传 4 条）。剧圈（App99 系）要特殊两参 + 真 ext 才
+          # 出线路，已从白名单和内置兜底目录里删除，只在注释里留痕。
           grep -q "kEnabledJarSources = <String>['咕噜']" lib/services/jar_sources.dart
           grep -q 'csp_Gulu' lib/services/jar_sources.dart
-          grep -q 'csp_App99' lib/services/jar_sources.dart
+          # 反面门禁：剧圈不许被误回收（内置兜底里也不能再有它）。
+          if grep -q 'csp_App99' lib/services/jar_sources.dart; then
+            echo '剧圈（App99 系）已停用：不许回到白名单 / 内置兜底目录' >&2
+            exit 1
+          fi
           # 反面门禁：实测不可用的源不许回到白名单那一行
-          # （橘汁 csp_AppDrama 的 searchContent 恒空；下饭 csp_JuXiaFan 25～49 秒
+          # （橘汁 AppDrama 的 searchContent 恒空；下饭 JuXiaFan 25～49 秒
           #   回空列表）。它们还留在文件注释里说明原因，所以只查白名单那一行。
           whitelist=$(grep -n "const List<String> kEnabledJarSources" lib/services/jar_sources.dart | cut -d: -f1 | xargs -I{} sed -n "{}p" lib/services/jar_sources.dart)
           echo "白名单：$whitelist"

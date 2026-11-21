@@ -75,25 +75,34 @@ void main() {
   /* -------------------------------------------------- 1. 纯逻辑：白名单 */
 
   test('白名单按源名前缀匹配（咕噜 • APP 命中 咕噜）', () {
-    expect(kEnabledJarSources, <String>['咕噜', '剧圈']);
+    // KEEP_GULU_ONLY（2026-11-21）：白名单只剩咕噜。
+    expect(kEnabledJarSources, <String>['咕噜']);
     expect(fxJarLabelOf('咕噜 • APP'), '咕噜');
     expect(fxJarLabelOf('🕊┃︎咕噜┃APP'), '咕噜');
-    expect(fxJarLabelOf('剧圈99'), '剧圈');
+    // 剧圈已从白名单移除（要两参 + 真 ext 才出线路），别名解析也不再命中。
+    expect(fxJarLabelOf('剧圈99'), '');
     // 实测不可用的源（橘汁 searchContent 恒空 / 下饭 25～49 秒回空）已去掉。
     expect(fxJarLabelOf('橘汁 • APP'), '');
     expect(fxJarLabelOf('下饭 • APP'), '');
     expect(fxJarLabelOf('豆瓣 • 首页'), '');
   });
 
-  test('内置兜底目录只含实测可用的两个源', () {
-    expect(kBuiltinJarSources.length, 2);
+  test('内置兜底目录只剩咕噜一个源', () {
+    expect(kBuiltinJarSources.length, 1);
     expect(
       kBuiltinJarSources.map((e) => e.api).toList(),
-      <String>['csp_Gulu', 'csp_App99'],
+      <String>['csp_Gulu'],
     );
     for (final def in kBuiltinJarSources) {
       expect(fxJarLabelOf(def.name), def.key);
+      // 内置目录 = 白名单的子集：兜底不许放水。
+      expect(kEnabledJarSources, contains(def.key));
     }
+    // 剧圈那条（App99 系 + ext）已从兜底删掉，只留注释备查。
+    expect(
+      kBuiltinJarSources.any((e) => e.key == '剧圈'),
+      isFalse,
+    );
   });
 
   /* -------------------------------------------------- 2. 搜索期：合并 vs 新增 */

@@ -12,6 +12,7 @@ import '../services/jar_sources.dart';
 import '../services/fallback_match.dart';
 import '../services/fx_player.dart';
 import '../services/line_enrich.dart';
+import '../services/line_fallback_order.dart';
 import '../services/line_health.dart';
 import '../services/play_log.dart';
 import '../services/play_path.dart';
@@ -1256,15 +1257,15 @@ class _DetailPageState extends State<DetailPage>
       _showPlaybackError(issue: issue);
       return;
     }
-    final index = lines.indexWhere((l) => l.id == _lineId);
-    LineInfo? next;
-    for (var step = 1; step <= lines.length; step++) {
-      final candidate = lines[(index + step) % lines.length];
-      if (_failedLines.contains(candidate.id)) continue;
-      if (auto && candidate.id == _lineId) continue;
-      next = candidate;
-      break;
-    }
+    // GROUP_ORDER（2026-11-21 用户口径）：**先当前大类的其它子线路，再下一个
+    // 大类**。以前按扁平列表取 `(index + step) % length`，而扁平列表被
+    // `fxOwnLinesFirst` / 健康度排序 / jar 合并重排过，于是会在「幻想 → 咕噜」
+    // 之间来回跳；现在顺序只有一处定义（[fxFallbackLineOrder]）。
+    final next = fxFallbackNextLine(
+      lines: lines,
+      currentLineId: _lineId,
+      skip: _failedLines,
+    );
     if (next == null) {
       if (auto) {
         _showPlaybackError(issue: issue);
@@ -1436,7 +1437,9 @@ class _DetailPageState extends State<DetailPage>
     if (lines.isEmpty) {
       message = '暂无线路，请稍后刷新重试';
     } else {
-      message = fxFallbackAllFailedText;
+      // GROUP_ORDER：全部大类都试过 —— 用户定稿的措辞就是这一句
+      // （和「咕噜线路被剔除」共用 [fxLineNoUsableText]，不许两边各写一份）。
+      message = fxLineNoUsableText;
       final tail = note.trim();
       if (tail.isNotEmpty) message = '$message（$tail）';
       if (issue == SourceIssue.parse) message = '$message · 这些线路都需要现场解析';

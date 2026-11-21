@@ -30,25 +30,32 @@ import 'fallback_match.dart' show fxNormTitle;
 /// 白名单：**只放服务器上实测真能出线路的源**（2026-11-21 服务器 jar 实测）。
 ///
 ///   · `咕噜`（`csp_Gulu`，ext 空）—— search/detail 全通，八仙 15 条线路；
-///   · `剧圈`（`csp_App99` + host/buildSignature）—— 两参 search 通，济公传 2 条；
-///   · `橘汁`（`csp_AppDrama`）—— homeContent 正常但 searchContent **恒空**
+///   · `剧圈`（App99 系 + host/buildSignature）—— 两参 search 通，济公传 2 条，
+///     但必须带真 `ext`，稳定性不如咕噜，**暂不启用**；
+///   · `橘汁`（AppDrama 系）—— homeContent 正常但 searchContent **恒空**
 ///     （换关键词 / 换 ext 都空），已从白名单去掉；
-///   · `下饭`（`csp_JuXiaFan`）—— searchContent 25～49 秒后回空列表，已去掉。
+///   · `下饭`（JuXiaFan 系）—— searchContent 25～49 秒后回空列表，已去掉。
 ///
 /// 去掉的源**不再出现在任何界面**：不显示大类、不置灰、不占位。
 // KEEP_GULU_ONLY（2026-11-21）：用户最终只要「咕噜」一个 jar 源。
-// 剧圈/橘汁/下饭 实测不可用（剧圈要特殊两参+ext 才行、橘汁搜索恒空、下饭类损坏），
+// 剧圈/橘汁/下饭 实测不可用（剧圈要特殊两参+真 ext 才行、橘汁搜索恒空、下饭类损坏），
 // 一律不入白名单。
 const List<String> kEnabledJarSources = <String>['咕噜'];
 
 /// 内置 jar 源目录：类名 + `ext`。
 ///
 /// 这份只是**兜底**（接口 `hx_all.json` 和本地缓存都拿不到时用它，
-/// 见 `jar_config.dart`）。`csp_Gulu` 不需要 `ext`；`csp_App99` 必须带
-/// `ext`（同一个类被多个站点复用，靠 `ext` 里的 host / 包名 / 签名区分），
-/// 传空会直接 `IllegalArgumentException: Empty key`。
+/// 见 `jar_config.dart`）。现在只有「咕噜」一条：`csp_Gulu` 不需要 `ext`。
 ///
-/// 内容与线上 `hx_all.json` 的 `剧圈99` 逐字段一致（2026-11-21 实测）。
+/// KEEP_GULU_ONLY（2026-11-21）：剧圈那条（App99 系 + 真 `ext`）已经**从内置
+/// 目录删除** —— 它必须带 host / 包名 / 签名才不抛 `Empty key`，而用户最终只要
+/// 咕噜一个源。留个注释备查，别让它悄悄回到兜底里：
+/// ```
+/// // 剧圈（App99 系 jar 类，key: '剧圈', name: '剧圈 • APP'）
+/// ext: '{"host":"http://124.221.3.182:19987/app/bn","versionName":"1.2.0",'
+///      '"name":"剧圈圈","package":"com.qingtangxiaozhuan.xyz","buildNumber":"2002",'
+///      '"buildSignature":"054FA8DDA4319C6B6A9B954CA5777541C993F00B1B0BD4394F7EDE48184C4594"}'
+/// ```
 class FxJarSourceDef {
   const FxJarSourceDef({
     required this.key,
@@ -79,14 +86,10 @@ class FxJarSourceDef {
 }
 
 /// 内置目录（只放白名单里那几个；别的肥猫源一概不出现）。
+///
+/// KEEP_GULU_ONLY：只剩咕噜一条（剧圈那条已删，见上面的注释）。
 const List<FxJarSourceDef> kBuiltinJarSources = <FxJarSourceDef>[
   FxJarSourceDef(key: '咕噜', name: '咕噜 • APP', api: 'csp_Gulu'),
-  FxJarSourceDef(
-    key: '剧圈',
-    name: '剧圈 • APP',
-    api: 'csp_App99',
-    ext: '{"host":"http://124.221.3.182:19987/app/bn","versionName":"1.2.0","name":"剧圈圈","package":"com.qingtangxiaozhuan.xyz","buildNumber":"2002","buildSignature":"054FA8DDA4319C6B6A9B954CA5777541C993F00B1B0BD4394F7EDE48184C4594"}',
-  ),
 ];
 
 /// 白名单匹配：源名 / key 以名单里的某一项**开头**即命中。
