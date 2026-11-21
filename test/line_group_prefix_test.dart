@@ -68,13 +68,14 @@ void main() {
       line('咕噜·量子资源'), // 采集入库的子线路
       jarLine('咕噜', '4K'), // jar 真返回
     ]);
-    expect(groups.map((g) => g.label).toList(), <String>['幻想', '咕噜']);
+    expect(groups.map((g) => g.label).toList(), <String>['咕噜', '幻想']);
+    // GROUP_ORDER：咕噜（jar）在前、幻想（采集）在后。
+    expect(groups[0].lines.map((l) => l.name).toList(), <String>['咕噜·4K']);
     expect(
-      groups[0].lines.map((l) => l.name).toList(),
+      groups[1].lines.map((l) => l.name).toList(),
       <String>['咕噜', '咕噜·量子资源'],
     );
-    expect(groups[1].lines.map((l) => l.name).toList(), <String>['咕噜·4K']);
-    expect(groups[1].lines.single.id, isNot(groups[0].lines.first.id));
+    expect(groups[0].lines.single.id, isNot(groups[1].lines.first.id));
   });
 
   /* --------------------------------------------------- 子线路显示名 */
@@ -109,7 +110,7 @@ void main() {
     // KEEP_GULU_ONLY：白名单只剩咕噜，剧圈那条退回幻想大类、不单独成大类。
     expect(
       groups.map((g) => g.label).toList(),
-      <String>['幻想', '咕噜'],
+      <String>['咕噜', '幻想'],
     );
     expect(groups.every((g) => g.available), isTrue);
     expect(groups[0].lines.length, 2);
@@ -124,11 +125,11 @@ void main() {
       jarLine('下饭', '线路2'),
       jarLine('咕噜', '4K'),
     ]);
-    expect(groups.map((g) => g.label).toList(), <String>['幻想', '咕噜']);
+    expect(groups.map((g) => g.label).toList(), <String>['咕噜', '幻想']);
     // 橘汁 / 下饭的老线路退回幻想大类，不丢数据也不冒充。
-    expect(groups[0].lines.length, 3);
+    expect(groups[1].lines.length, 3);
     // 白名单里没有的源，就算带 jar 编码也不出现第二行。
-    expect(groups.map((g) => g.label), <String>['幻想', '咕噜']);
+    expect(groups.map((g) => g.label), <String>['咕噜', '幻想']);
   });
 
   /* --------------------------------------------- 设置页的源状态文案 */

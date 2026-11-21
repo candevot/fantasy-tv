@@ -320,13 +320,10 @@ List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
       byLabel.putIfAbsent(key, () => <LineInfo>[]).add(line);
     }
   }
+  // GROUP_ORDER（2026-11-22）：用户要求「优先使用咕噜」——
+  // 有线路的 jar 源排在前面，幻想（自有）排在最后。
+  // 这样默认选中/默认播放的就是咕噜的第一条子线路。
   return <FxLineGroup>[
-    FxLineGroup(
-      key: kOwnLineGroupKey,
-      label: kOwnLineGroupLabel,
-      lines: own,
-      own: true,
-    ),
     for (final label in kEnabledJarSources)
       if ((byLabel[label] ?? const <LineInfo>[]).isNotEmpty)
         FxLineGroup(
@@ -335,6 +332,13 @@ List<FxLineGroup> fxLineGroups(List<LineInfo> lines) {
           lines: byLabel[label]!,
           own: false,
         ),
+    if (own.isNotEmpty)
+      FxLineGroup(
+        key: kOwnLineGroupKey,
+        label: kOwnLineGroupLabel,
+        lines: own,
+        own: true,
+      ),
   ];
 }
 
