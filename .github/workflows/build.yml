@@ -589,7 +589,7 @@ jobs:
               echo "::error::$t 失败"
               grep -E "Expected:|Actual:|Which:|^  [a-z_]+_test\.dart|Test failed|Error:" /tmp/t.txt \
                 | head -20 | while IFS= read -r line; do echo "::error::$line"; done
-              tail -60 /tmp/t.txt
+              sed -n "/Expected:/,+6p" /tmp/t.txt | head -80; echo "---- tail ----"; tail -80 /tmp/t.txt
               exit 1
             fi
           done
