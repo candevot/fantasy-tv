@@ -168,7 +168,13 @@ class CmsBridge {
       // 用户实测：分类页正常、只有推荐页挂 —— 只要任一行成功就必须出内容；
       // 全部失败也先返回空数据让页面显示自己的重试态，不要再把异常抛给页面。
       if (allFailed && failure != null) {
-        if (legacyEnabled) return _legacyHome(ch);
+        // HOME_FALLBACK（2026-11-21）：5 行全部失败时**无条件**回退旧接口，
+        // 别让推荐页变成空白/「暂无内容」——服务端每类都有数据（实测 t1~t6 各 20 条），
+        // 失败说明新取数路径在那台设备/那次网络下不通，回退至少能出内容。
+        try {
+          final legacy = await _legacyHome(ch);
+          if (legacy.sections.isNotEmpty) return legacy;
+        } catch (_) {}
         return HomeData(const <BannerItem>[], const <HomeSection>[]);
       }
       if (!legacyEnabled) {
