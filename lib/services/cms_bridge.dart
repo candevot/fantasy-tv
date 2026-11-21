@@ -89,7 +89,7 @@ class CmsBridge {
   ];
 
   /// 每行最多给 12 条（首页只显示 10 条，多两条留给横滑）。
-  static const int _rowCount = 40;
+  static const int _rowCount = 30;
 
   /// 首页 banner 取推荐页第一组有数据的分类的前 5 条。
   static const int _bannerCount = 5;
