@@ -557,7 +557,7 @@ jobs:
           # KEEP_GULU_ONLY（2026-11-21）：白名单**只有咕噜**（服务器 jar 实测
           # 八仙 15 条 / 济公传 4 条）。剧圈（App99 系）要特殊两参 + 真 ext 才
           # 出线路，已从白名单和内置兜底目录里删除，只在注释里留痕。
-          grep -q "kEnabledJarSources = <String>['咕噜']" lib/services/jar_sources.dart
+          grep -qF "kEnabledJarSources = <String>['咕噜']" lib/services/jar_sources.dart
           grep -q 'csp_Gulu' lib/services/jar_sources.dart
           # 反面门禁：剧圈不许被误回收（内置兜底里也不能再有它）。
           if grep -q 'csp_App99' lib/services/jar_sources.dart; then
