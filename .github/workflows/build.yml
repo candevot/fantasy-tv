@@ -510,7 +510,7 @@ jobs:
       # 这一层只管**搜索 + 播放解析**：首页 / 分类 / 排行榜仍然只用自有片源。
       #   · 白名单（kEnabledJarSources）里的四个源必须还在、类名必须对得上；
       #   · 融合口径：我们有的片合并线路（`咕噜·4K`），没有的片新增卡片；
-      #   · 两行线路：大类固定五个（幻想 + 四个 jar 源），子线路不带前缀，
+      #   · 两行线路：大类 = 幻想 + **真的返回了线路**的 jar 源，子线路不带前缀，
       #     自有线路恒排 jar 线路前面；
       #   · 播放实时解析：走 playerContent，不读库里存的地址；
       #   · 反面门禁：不许恢复 TVBox 配置导入 / 启动自动安装。
@@ -518,11 +518,20 @@ jobs:
         run: |
           set -e
           grep -q "const List<String> kEnabledJarSources" lib/services/jar_sources.dart
-          grep -q "'咕噜', '橘汁', '剧圈', '下饭'" lib/services/jar_sources.dart
+          # 白名单 = 服务器 jar 实测**真能出线路**的两个源：
+          #   咕噜 csp_Gulu（八仙 15 条 / 济公传 4 条）、剧圈 csp_App99。
+          grep -q "kEnabledJarSources = <String>\['咕噜', '剧圈'\]" lib/services/jar_sources.dart
           grep -q 'csp_Gulu' lib/services/jar_sources.dart
-          grep -q 'csp_AppDrama' lib/services/jar_sources.dart
           grep -q 'csp_App99' lib/services/jar_sources.dart
-          grep -q 'csp_JuXiaFan' lib/services/jar_sources.dart
+          # 反面门禁：实测不可用的源不许回到白名单那一行
+          # （橘汁 csp_AppDrama 的 searchContent 恒空；下饭 csp_JuXiaFan 25～49 秒
+          #   回空列表）。它们还留在文件注释里说明原因，所以只查白名单那一行。
+          whitelist=$(grep -n "const List<String> kEnabledJarSources" lib/services/jar_sources.dart | cut -d: -f1 | xargs -I{} sed -n "{}p" lib/services/jar_sources.dart)
+          echo "白名单：$whitelist"
+          if echo "$whitelist" | grep -qE "橘汁|下饭|AppDrama|JuXiaFan"; then
+            echo '橘汁 / 下饭 实测拿不到数据，不许回白名单' >&2
+            exit 1
+          fi
           # 通道契约不许改（方法名 / 参数名保持原样）
           grep -q "MethodChannel('fantasy_tv/spider')" lib/services/jar_spider.dart
           # 反面门禁：TVBox 配置导入不回来
