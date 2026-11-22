@@ -305,7 +305,8 @@ class FxLineGroup {
   bool get available => lines.isNotEmpty;
 
   @override
-  String toString() => 'FxLineGroup($label, ${lines.length}${pending ? ', pending' : ''})';
+  String toString() =>
+      'FxLineGroup($label, ${lines.length}${pending ? ', pending' : ''})';
 }
 
 /// 把线路按大类切好：**「幻想」+ 真的有线路的 jar 源**。
@@ -382,10 +383,26 @@ List<FxLineGroup> fxLineGroups(
 /// JAR_FIRST（2026-11-22 用户口径）：「优先使用咕噜」。这里只回答「有咕噜
 /// 该选哪条」，没有咕噜时返回 null，调用方回落到原来的健康度默认线
 /// （`LineHealth.defaultLine`）—— 绝不替它做决定、也不碰死线路判断。
+/// 子线路默认优先顺序（JAR_SUB_ORDER 2026-11-22 实测）。
+///
+/// 《八仙》15 条子线路实测：只有 `咕噜4K` 和 `暴风资源` 真能播 ——
+/// 暴风资源首片 577KB/238ms/2371KB/s，咕噜4K 首片 1MB/2293ms/447KB/s，
+/// 其余（咖啡4K 404 / 玫瑰4K 404 / 金牌极速 403 / 电影天堂 404 /
+/// 量子资源 404 / 非凡资源 404 / 蚂蚁 Parse Failed / 旋风 Parse Failed）
+/// 全部不可播。默认线路优先挑这条快线，挑不到才按原顺序。
+const List<String> kJarSubLinePreference = <String>['暴风资源', '咕噜4K'];
+
 LineInfo? fxJarDefaultLine(List<LineInfo> lines) {
   final groups = fxLineGroups(lines);
   for (final group in groups) {
     if (group.own || group.lines.isEmpty) continue;
+    for (final want in kJarSubLinePreference) {
+      for (final line in group.lines) {
+        if (line.displayName.contains(want) || line.id.contains(want)) {
+          return line;
+        }
+      }
+    }
     return group.lines.first;
   }
   return null;

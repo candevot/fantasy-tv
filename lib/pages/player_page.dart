@@ -568,7 +568,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       // 以前要等满 12 秒才强制接管；配上 jar 线路的长判死窗口，用户点了
       // 另一条线路，界面 10 多秒都没反应 —— 用户的原话是「切线路没生效」。
       // 现在超过 2 秒就直接接管（正在跑的那次结果作废，token 已推进）。
-      if (stuckFor < const Duration(seconds: 2)) return;
+      // 用户点了线路就必须立刻接管：一次都不等。
+      if (stuckFor < const Duration(milliseconds: 200)) return;
       debugPrint('[FX] 上一次切换已僵死 ${stuckFor.inSeconds}s，强制接管');
       _switchToken++;
       _switchingLine = false;
@@ -671,7 +672,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         _showControls();
         // 线路已切换：静默，不弹遮挡画面的提示。
         // 自动尝试下一条成功时同步外层高亮，避免 UI 仍指着失败线路。
-        widget.onLineFallback?.call(actualLine);
+        // 只有仍然是「最新那次切换」才回写兜底，过期结果不许改页面状态。
+        if (token == _switchToken) widget.onLineFallback?.call(actualLine);
         // 同步「父级最后一次告诉我的线路」：父级随后 rebuild 会带**这条**
         // 线路 id 下来（onLineFallback → 详情页 setState），不回填就会在
         // didUpdateWidget 里再跑一次换线（同一地址再 open 一遍 = 画面又闪
@@ -697,7 +699,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         });
         _showControls();
         // 切换失败：错误层（含重试）已在上面亮出，不再叠加提示。
-        widget.onLineFallback?.call(lastTried);
+        if (token == _switchToken) widget.onLineFallback?.call(lastTried);
       }
     } finally {
       // 被强制接管的话，这次的结果已经过时，不写状态、不解锁。

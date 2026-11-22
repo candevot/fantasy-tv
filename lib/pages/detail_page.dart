@@ -1334,6 +1334,8 @@ class _DetailPageState extends State<DetailPage>
     // 用户手动选线路视为重新开始，允许重试这一条。
     _failedLines.remove(line.id);
     _retriedLine = null;
+    // 用户亲手点过 = 之后一切自动换线都要让位（_applyJarDefault / 失败兜底）。
+    _linePickedByUser = true;
     setState(() {
       _lineId = line.id;
       _autoLineTries = 0;
@@ -1352,6 +1354,12 @@ class _DetailPageState extends State<DetailPage>
   /// 同步高亮，避免 UI 指着失败线路而实际播的是另一条。
   void _onLineFallback(String lineId) {
     if (!mounted || lineId.isEmpty || lineId == _lineId) return;
+    // USER_FIRST（2026-11-22 真机）：用户已经亲手点过线路，自动兜底不许再把
+    // 高亮（以及随后的播放）改到别的线上 —— 那正是「我点了就是不切」的体感。
+    if (_linePickedByUser) {
+      fxPlayLog('chain keep user pick=$_lineId ignore fallback=$lineId');
+      return;
+    }
     final lines = _detail?.lines ?? const <LineInfo>[];
     if (!lines.any((l) => l.id == lineId)) return;
     setState(() => _lineId = lineId);
@@ -1581,6 +1589,21 @@ class _DetailPageState extends State<DetailPage>
     _stableTimer?.cancel();
     final lineId = _lineId;
     final player = _playerKey.currentState;
+    // STALE_FAIL（2026-11-22 真机）：玩家长时间加载不出来时，用户手动切到
+    // 另一条线路 —— 紧接着**旧线路**的失败回调才到。老代码拿的是此刻的
+    // `_lineId`（= 用户刚点的那条），于是把用户刚选的线路 add 进 _failedLines
+    // 并 `_dropLine` 掉，然后自动跳到别处。用户看到的就是「我点了另一条，
+    // 它不切（被踢回去/消失了）」。
+    // 口径：玩家实际在开的线路和页面当前选中的不一致 = 这条失败是过期的。
+    if (player != null &&
+        player.currentLine.isNotEmpty &&
+        player.currentLine != lineId) {
+      fxPlayLog(
+        'chain ignore stale issue=${issue.name} '
+        'player=${player.currentLine} page=$lineId',
+      );
+      return;
+    }
     // 第一次失败：原线静默重试（**不弹 toast**：起播失败的过程不该打断用户）。
     // reload() 一进来就置 _loading=true、清掉错误层，重试期间显示缓冲态。
     if (lineId.isNotEmpty &&
