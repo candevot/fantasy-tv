@@ -270,7 +270,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   (String, int)? _pendingSwitch;
 
   /// 上一次切换开始时间，用于判定僵死。
-  DateTime _switchStartedAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 正在切换的目标（线路 + 集数）：同目标去重，改目标立刻接管。
+  String _switchTargetLine = '';
+  int _switchTargetEp = 0;
 
   /// 切换代号：被强制接管后，旧的那次必须放弃后续所有状态写入。
   int _switchToken = 0;
@@ -557,25 +560,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 采集线路（红牛/量子/幻想蓝光/4K）是可直接访问的 m3u8，
   /// 交给 mpv 自己拉流最快，也能边下边播大分片。
   Future<void> _switchLine(String targetLine, int targetEp) async {
+    // SWITCH_INSTANT（2026-11-22 用户口径「手动切换，立刻切换线路」）：
+    //   · 目标相同 → 同一次请求的重复触发（didUpdateWidget 会来好几次），直接去重；
+    //   · 目标不同 → 用户改了主意 / 自动兜底要换线：**立刻接管**，
+    //     在飞的那次结果作废（token 已推进），一秒都不排队。
     if (_switchingLine) {
-      // 切换中禁止并发 open，但不能把用户永久锁死：卡顿/上游无响应时
-      // 上一次切换可能一直挂着，这时用户点线路会「点不动」。
-      // 记住这次请求，等当前切换结束时立即执行最新的那一次；
-      // 超过 12 秒仍未结束则判定前一次已僵死，直接接管。
-      _pendingSwitch = (targetLine, targetEp);
-      final stuckFor = DateTime.now().difference(_switchStartedAt);
-      // SWITCH_TAKEOVER（2026-11-22 真机）：用户手点线路必须**立刻**生效。
-      // 以前要等满 12 秒才强制接管；配上 jar 线路的长判死窗口，用户点了
-      // 另一条线路，界面 10 多秒都没反应 —— 用户的原话是「切线路没生效」。
-      // 现在超过 2 秒就直接接管（正在跑的那次结果作废，token 已推进）。
-      // 用户点了线路就必须立刻接管：一次都不等。
-      if (stuckFor < const Duration(milliseconds: 200)) return;
-      debugPrint('[FX] 上一次切换已僵死 ${stuckFor.inSeconds}s，强制接管');
+      if (targetLine == _switchTargetLine && targetEp == _switchTargetEp)
+        return;
+      debugPrint('[FX] 目标变为 $targetLine，立刻接管上一次切换');
       _switchToken++;
       _switchingLine = false;
     }
     final token = ++_switchToken;
-    _switchStartedAt = DateTime.now();
+    _switchTargetLine = targetLine;
+    _switchTargetEp = targetEp;
     _pendingSwitch = null;
     _switchingLine = true;
     widget.onSwitchingChanged?.call(true);
