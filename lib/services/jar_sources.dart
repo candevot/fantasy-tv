@@ -432,12 +432,28 @@ List<LineInfo> fxApplyLineHeadOrder(List<LineInfo> lines) {
 /// 地址是服务端 `/hxparse/...` 的成品地址，服务端有解析器，必须保留
 /// （`test/dead_line_test.dart` 钉着这条）。
 const List<String> kJarDeadSubLineNames = <String>[
+  // 回网页地址、要 WebView 嗅探的（我们没有嗅探器）。
   '爱奇艺',
   '腾讯视频',
   '优酷',
   'bilibili',
   'mgtv',
   '芒果',
+  // JAR_SUB_MEASURED（2026-11-22 实测《八仙》逐条）：
+  //   咖啡4K超清 / 玫瑰4K → 清单 404（k0udeyaayccydz.djvod.ndcimgs.com）
+  //   金牌极速           → 清单 403（ppvod011.blbtgg.com）
+  //   电影天堂 / 量子资源 / 非凡资源 → 96B master，首个 variant 首片 404
+  //   蚂蚁资源 / 旋风VIP → playerContent 直接 Parse Failed
+  // 都不能播，别摆给用户点（用户口径：有就有，没有就消失）。
+  '咖啡4K超清',
+  '咖啡4K',
+  '玫瑰4K',
+  '金牌极速',
+  '电影天堂',
+  '量子资源',
+  '非凡资源',
+  '蚂蚁资源',
+  '旋风VIP',
 ];
 
 /// 是否是可以直接从 jar 列表里删掉的子线路（按名字）。

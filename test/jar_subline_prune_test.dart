@@ -20,6 +20,8 @@ void main() {
       _line('咕噜·腾讯视频', fxJarLineId('咕噜', '1', '腾讯视频')),
       _line('咕噜·bilibili', fxJarLineId('咕噜', '1', 'bilibili')),
       _line('咕噜·mgtv', fxJarLineId('咕噜', '1', 'mgtv')),
+      _line('咕噜·玫瑰4K', fxJarLineId('咕噜', '1', '玫瑰4K')),
+      _line('咕噜·量子资源', fxJarLineId('咕噜', '1', '量子资源')),
     ];
     final kept = fxPruneJarLines(groups);
     expect(kept.length, 1);
