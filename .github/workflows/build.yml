@@ -614,7 +614,9 @@ jobs:
           # ① 默认开关必须是「开」，默认地址 / md5 指向自建服务器那份。
           grep -q "defaultJarAutoInstall = true" lib/services/app_settings.dart
           grep -q "http://125.94.244.87/spider.jar" lib/services/app_settings.dart
-          grep -q "cbe016eb3cb002ae62058604843f5106" lib/services/app_settings.dart
+          # JAR_UPDATE（2026-11-22）：肥猫 spider 更新到 3f9b9cac…（服务端 /spider.jar 已替换），
+          # 这里跟着断言新 md5，否则每次构建都会因为「md5 变了」红掉。
+          grep -q "3f9b9cac793a3e9b818131c8a7208800" lib/services/app_settings.dart
           grep -q "?? defaultJarAutoInstall" lib/services/app_settings.dart
 
           # ② 启动流程真的调了自动安装，而且**不许 await**（不挡首屏）。
