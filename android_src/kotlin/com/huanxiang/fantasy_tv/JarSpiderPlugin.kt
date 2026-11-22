@@ -97,6 +97,9 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
 
     /** MainActivity 里调用：注册通道。 */
     fun attach(messenger: BinaryMessenger) {
+        // FWD_PROXY：咕噜的列表/搜索接口按出口 IP 限流，装一次出口代理
+        // （只代理白名单上游 host，播放分片不经过它），详见 JarUpstreamProxy。
+        JarUpstreamProxy.install()
         channel?.setMethodCallHandler(null)
         channel = MethodChannel(messenger, CHANNEL).also { it.setMethodCallHandler(this) }
         Log.i(TAG, "通道就绪：$CHANNEL")
@@ -122,6 +125,8 @@ class JarSpiderPlugin(private val context: Context) : MethodChannel.MethodCallHa
                 "installBundled" -> installBundled()
                 "selfTest" -> selfTestCall(call)
                 "status" -> status()
+                // FWD_PROXY：出口代理是否生效/有没有降级（排障与状态页用）
+                "proxyStatus" -> JarUpstreamProxy.status()
                 "uninstall" -> uninstall()
                 "destroy" -> {
                     loader?.destroy()

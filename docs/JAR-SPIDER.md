@@ -179,3 +179,68 @@ bash tools/check_jar_perms.sh
 #    更新/卸载前必须改回可写，删一行就红
 python3 tools/check_jar_readonly.py
 ```
+
+---
+
+## 上游出口代理（FWD_PROXY，2026-11-22）
+
+### 症状与根因
+
+咕噜（`csp_Gulu`）能用详情/解析，但**列表和搜索经常整块空**：搜「八仙」返回
+`{"list":[],"parse":0,"jx":0}`，详情页也就没有咕噜线路可点 —— 用户侧看到的就是
+「咕噜放不了 / 线路全消失」。
+
+根因在上游，不在 App：
+
+| 出口 IP | handshake | boot | search 八仙 |
+|---|---|---|---|
+| 手机/影视服务器出口 | 200 | **429** | 空 |
+| 阿里云 47.96.0.112 | 200(287ms) | **200** | **4556 字节真实结果**(257ms) |
+
+咕噜的列表/搜索接口 `http://103.45.132.22:19987/app/bn/v2`（protobuf + AES-GCM，
+先 `handshake()` 换 32 字节会话密钥、再 `boot()` 拿配置，然后才搜索）由
+workerman 按**客户端出口 IP** 计数：同一 IP 短时间第 2 个请求就 `429`，之后整个
+IP 被封一段时间。一次搜索要连打 3 个请求（握手/boot/搜索），所以手机连开几个
+详情页必被封。
+
+### 做法
+
+`JarUpstreamProxy.install()`（在 `JarSpiderPlugin.attach()` 里调一次）给进程装
+一个 `ProxySelector`：**只把白名单里的上游 API host** 指向阿里云
+`47.96.0.112:8787`（那台机器的 relay 兼做正向代理，出口 IP 干净），其它请求
+（封面、解析后的直链、播放分片）一律 `NO_PROXY` 直连。
+
+三条硬约束，改代码时别破坏：
+
+1. **只代理白名单**：白名单必须与阿里云 relay 的 `PROXY_HOSTS` 一致（当前 10 个
+   host：`103.45.132.22` / `111.170.58.215` / `172.247.189.48` /
+   `co4k.1ljx.com` / `api.nbyjson.top` / `jf.hxx2023.cc` / `api.extscreen.com` /
+   `mobilecdnbj.kugou.com` / `krcs.kugou.com` / `lyrics.kugou.com`）。播放分片
+   绝不经过它，否则秒开会退化成绕一圈。
+2. **代理挂了必须退让**：`connectFailed` 后 60s 内全部走直连 —— 宁可撞 429，
+   也不能因为代理不可用把咕噜彻底打死。
+3. **安装要早于任何 spider 建 OkHttpClient**：OkHttp 的 `Builder` 在构造时就把
+   `ProxySelector.getDefault()` 抄下来，晚装了不生效。所以放在 `attach()` 里。
+
+### 服务端（阿里云）
+
+`/opt/relay/relay.js` 在 8787 同一端口兼做正向代理（安全组只放行 8787，不另开
+端口）：请求行是绝对地址的走正向代理、`CONNECT` 走隧道、其余照旧进 `/seg`。
+并发上限 `PROXY_MAX`（默认 32）超了回 503，App 侧按「连不上」降级直连。
+
+```bash
+# 代理统计 / 白名单
+curl -s http://47.96.0.112:8787/proxy/health
+# 播放中转是否还正常（应为 200）
+curl -s -o /dev/null -w '%{http_code}\n' 'http://47.96.0.112:8787/health'
+```
+
+### 验证（影视服务器出口 IP 已被 429 封，正好当反例）
+
+```bash
+java -Dhttp.proxyHost=47.96.0.112 -Dhttp.proxyPort=8787 \
+     -Dhttps.proxyHost=47.96.0.112 -Dhttps.proxyPort=8787 \
+     -cp '.:probe:gulu.jar:okhttp-3.12.13.jar:okio-1.17.5.jar:gson-2.8.9.jar:json-20231013.jar' \
+     GluBoot3 八仙
+# handshake() = true / boot() = true / search len=4556
+```
