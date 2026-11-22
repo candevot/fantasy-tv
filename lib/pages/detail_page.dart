@@ -1060,8 +1060,6 @@ class _DetailPageState extends State<DetailPage>
     return d.category.contains('电影');
   }
 
-
-
   String get _statusText {
     final d = _detail;
     if (d == null) return '';
@@ -1993,6 +1991,25 @@ class _DetailPageState extends State<DetailPage>
     // 播放器判定「这条试过了」不再重试，一次失败就永远卡在 0KB。
     debugPrint('[JAR_FIRST] 默认线路 = ${pick.displayName}（咕噜优先，走手动同路径）');
     _selectLineReady(pick);
+    // JAR_WARM_DETAIL（2026-11-22）：趁用户还在详情页，把咕噜这条线首片拉热。
+    // 咕噜分片的 CDN 边缘冷命中要回源 10~25 秒、热命中 1.6 秒；这一步把冷
+    // 回源挪到「浏览详情」的时间里，用户点播放时就是热命中。
+    unawaited(_warmJarDefaultLine(pick));
+  }
+
+  /// 把默认 jar 线路的首片提前拉热（fire-and-forget，失败静默）。
+  ///
+  /// 只做预热：拿到的地址不参与播放（播放时仍然现签一条新的），所以哪怕
+  /// 令牌几秒后失效也不影响任何事 —— 变的只是 CDN 边缘的缓存状态。
+  Future<void> _warmJarDefaultLine(LineInfo line) async {
+    try {
+      final info = await CmsBridge.play(widget.id, _ep, line.id);
+      final url = CmsBridge.absolutePlayUrl(widget.id, info.url);
+      if (url.isEmpty) return;
+      unawaited(FxPlayer.warmJarFirstSegment(url, headers: info.headers));
+    } catch (_) {
+      // 预热失败不影响任何用户可见行为。
+    }
   }
 
   /// ENRICH（2026-11-15）：按「片名 + 年份」补两条线路。
@@ -2238,7 +2255,8 @@ class _DetailPageState extends State<DetailPage>
                   child: Row(
                     children: [
                       for (var i = 0; i < 4; i++) ...[
-                        Expanded(child: _skeletonBar(skin, height: 52, radius: 10)),
+                        Expanded(
+                            child: _skeletonBar(skin, height: 52, radius: 10)),
                         if (i != 3) const SizedBox(width: 8),
                       ],
                     ],
@@ -2882,8 +2900,7 @@ class _DetailPageState extends State<DetailPage>
                 children: [
                   Text('查看全部',
                       style: TextStyle(fontSize: 11.5, color: skin.hint)),
-                  Icon(Icons.chevron_right_rounded,
-                      size: 16, color: skin.hint),
+                  Icon(Icons.chevron_right_rounded, size: 16, color: skin.hint),
                 ],
               ),
             ),

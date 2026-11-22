@@ -1554,6 +1554,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           noProgress: fxStartupNoProgressWindowFor(
             url: url,
             lineName: openLineName,
+            // JAR_FIRST_WINDOW：jar 线路冷边缘要回源 10~25 秒，8 秒窗口会把
+            // 正常起播判死（用户实测「加载两下就 0KB」）。详见 auto_resume。
+            jarLine: CmsBridge.isJarLine(line),
           ),
         );
         // 被新一次 open 取代：只回收**本次新建**的实例。

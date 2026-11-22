@@ -804,6 +804,17 @@ class FxPlayer implements Listenable {
   Future<Uint8List?> captureFrame() async => null;
 
   /// 打开一个网络地址并等待其就绪。
+  /// 起播前的首片预热入口（详情页拿到 jar 默认线路后立刻调用）。
+  ///
+  /// 只做「拉热 CDN 边缘」这一件事：fire-and-forget、失败静默、不阻塞 UI。
+  /// 目的是把咕噜这类线路 10~25 秒的冷回源挪到用户还在详情页的时候，
+  /// 等他点播放时边缘已经热了（热命中 1.6 秒）。
+  static Future<void> warmJarFirstSegment(
+    String url, {
+    Map<String, String> headers = const <String, String>{},
+  }) =>
+      _FxJarWarm.warm(url, headers);
+
   Future<void> open(
     String url, {
     Map<String, String> headers = const <String, String>{},

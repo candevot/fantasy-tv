@@ -66,8 +66,9 @@ double fxResumeSecondsAfterSwitch({
 }) {
   final snap =
       snapshotSeconds.isFinite && snapshotSeconds > 0 ? snapshotSeconds : 0.0;
-  final cand =
-      candidateSeconds.isFinite && candidateSeconds > 0 ? candidateSeconds : 0.0;
+  final cand = candidateSeconds.isFinite && candidateSeconds > 0
+      ? candidateSeconds
+      : 0.0;
   if (snap <= 0) return cand;
   if (cand <= 0) return snap;
   final rewind = maxRewindSeconds.isFinite && maxRewindSeconds > 0
@@ -126,14 +127,28 @@ bool fxIsTokenParseLine({String url = '', String lineName = ''}) {
   return false;
 }
 
-/// 这次起播「连续无进展」该等多长：令牌线路 20 秒，直链 8 秒。
+/// jar 线路（咕噜这类现签地址）的起播窗口：30 秒。
+///
+/// JAR_FIRST_WINDOW（2026-11-22 用户实测）：咕噜首片落在 xfyvideo.online 这类
+/// 边缘节点上，**冷命中要回源 10~25 秒**，热命中 1.6 秒。原来的 8 秒窗口会把
+/// 冷命中的正常起播判死 → 自动重解析 → 新地址又是冷命中 → 再判死 → 用满两次
+/// 重试后停在 0 KB。用户看到的就是「加载两下就不动了，手点刷新才播」：
+/// 手点刷新时前两次已经把边缘拉热了。这里把 jar 线路的窗口放到 30 秒，
+/// 让第一次冷命中能跑完；配合起播时的首片预热（`_FxJarWarm`），第二次开始
+/// 就是热命中。
+const Duration fxJarStartupNoProgressWindow = Duration(seconds: 30);
+
+/// 这次起播「连续无进展」该等多长：jar 线路 30 秒、令牌线路 20 秒、直链 8 秒。
 Duration fxStartupNoProgressWindowFor({
   String url = '',
   String lineName = '',
-}) =>
-    fxIsTokenParseLine(url: url, lineName: lineName)
-        ? fxTokenStartupNoProgressWindow
-        : fxStartupNoProgressWindow;
+  bool jarLine = false,
+}) {
+  if (jarLine) return fxJarStartupNoProgressWindow;
+  return fxIsTokenParseLine(url: url, lineName: lineName)
+      ? fxTokenStartupNoProgressWindow
+      : fxStartupNoProgressWindow;
+}
 
 /* --------------------------------------------------- 判死前的那一次快速重试 */
 
