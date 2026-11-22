@@ -13,11 +13,24 @@ LineInfo _line(String name, String id) =>
     LineInfo(id, name, 'hls', 0, from: name);
 
 void main() {
-  test('平台网页地址按死线处理', () {
-    expect(isDeadAddress('https://v.qq.com/x/cover/abc.html'), isTrue);
-    expect(isDeadAddress('https://www.iqiyi.com/v_abc.html'), isTrue);
-    expect(isDeadAddress('https://www.youku.com/v_show/id_X.html'), isTrue);
-    expect(isDeadAddress('https://www.bilibili.com/bangumi/play/ep1'), isTrue);
+  test('jar 里回网页地址的平台子线路被剔掉（CMS 的同类线路不受影响）', () {
+    final groups = <LineInfo>[
+      _line('咕噜·暴风资源', fxJarLineId('咕噜', '1', '暴风资源')),
+      _line('咕噜·爱奇艺', fxJarLineId('咕噜', '1', '爱奇艺')),
+      _line('咕噜·腾讯视频', fxJarLineId('咕噜', '1', '腾讯视频')),
+      _line('咕噜·bilibili', fxJarLineId('咕噜', '1', 'bilibili')),
+      _line('咕噜·mgtv', fxJarLineId('咕噜', '1', 'mgtv')),
+    ];
+    final kept = fxPruneJarLines(groups);
+    expect(kept.length, 1);
+    expect(kept.first.displayName.contains('暴风资源'), isTrue);
+  });
+
+  test('CMS 的 bilibili 网页地址不算死线（服务端能解析）', () {
+    expect(
+      isDeadAddress('https://www.bilibili.com/bangumi/play/ep7303508'),
+      isFalse,
+    );
   });
 
   test('真直链不算死线', () {

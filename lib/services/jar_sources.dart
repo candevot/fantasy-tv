@@ -390,6 +390,45 @@ List<FxLineGroup> fxLineGroups(
 /// 其余（咖啡4K 404 / 玫瑰4K 404 / 金牌极速 403 / 电影天堂 404 /
 /// 量子资源 404 / 非凡资源 404 / 蚂蚁 Parse Failed / 旋风 Parse Failed）
 /// 全部不可播。默认线路优先挑这条快线，挑不到才按原顺序。
+/// jar 里「一定播不了」的子线路名（2026-11-22 实测《八仙》15 条子线路）。
+///
+/// 这几条子线路 playerContent 回的是**网页地址**（v.qq.com 195KB 页面、
+/// www.iqiyi.com 49KB 页面、bilibili/mgtv 302 到网页），TVBox 交给 WebView
+/// 嗅探才能出片，我们没有嗅探器 → 点了必然失败。直接从列表里删掉。
+///
+/// 注意：**只对 jar 子线路生效**。CMS 自己的「幻想爱奇艺 / bilibili」线路
+/// 地址是服务端 `/hxparse/...` 的成品地址，服务端有解析器，必须保留
+/// （`test/dead_line_test.dart` 钉着这条）。
+const List<String> kJarDeadSubLineNames = <String>[
+  '爱奇艺',
+  '腾讯视频',
+  '优酷',
+  'bilibili',
+  'mgtv',
+  '芒果',
+];
+
+/// 是否是可以直接从 jar 列表里删掉的子线路（按名字）。
+bool fxIsDeadJarSubLine(LineInfo line) {
+  final name = fxLineSubName(line, groupLabelOfJarSub(line)).trim();
+  final full = line.displayName;
+  return kJarDeadSubLineNames
+      .any((bad) => name == bad || full.endsWith('·$bad') || full == bad);
+}
+
+/// jar 子线路的大类名（`咕噜·暴风资源` → `咕噜`）。
+String groupLabelOfJarSub(LineInfo line) {
+  final full = line.displayName;
+  final cut = full.indexOf('·');
+  return cut > 0 ? full.substring(0, cut) : '';
+}
+
+/// 过滤掉必死的 jar 子线路（保持原顺序）。
+List<LineInfo> fxPruneJarLines(List<LineInfo> lines) => <LineInfo>[
+      for (final line in lines)
+        if (!fxIsDeadJarSubLine(line)) line
+    ];
+
 const List<String> kJarSubLinePreference = <String>['暴风资源', '咕噜4K'];
 
 LineInfo? fxJarDefaultLine(List<LineInfo> lines) {

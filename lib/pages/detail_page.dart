@@ -2006,8 +2006,10 @@ class _DetailPageState extends State<DetailPage>
       // 同一个 id / 同名子线路只留一条（用户口径：「咕噜·4K」只出现一次）。
       final haveId = <String>{for (final line in current.lines) line.id};
       final haveName = <String>{for (final line in current.lines) line.name};
+      // JAR_PLATFORM_WEB：先剔掉「爱奇艺 / 腾讯视频 / 优酷 / bilibili / mgtv」
+      // 这类回网页地址的子线路 —— 我们没有 WebView 嗅探器，点了必然失败。
       final add = <LineInfo>[
-        for (final line in extra)
+        for (final line in fxPruneJarLines(extra))
           if (!haveId.contains(line.id) && !haveName.contains(line.name)) line,
       ];
       if (add.isEmpty) {

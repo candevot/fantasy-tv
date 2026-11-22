@@ -203,21 +203,6 @@ bool isDeadAddress(String address) {
       a.contains('www.mgtv.com')) {
     return true;
   }
-  // JAR_PLATFORM_WEB（2026-11-22 实测《八仙》15 条子线路）：咕噜里挂着
-  // 爱奇艺 / 腾讯视频 / 优酷 / bilibili 这几条子线路，playerContent 回的是
-  // **网页地址**（v.qq.com 195KB 页面、www.iqiyi.com 49KB 页面），要靠 TVBox
-  // 的 WebView 嗅探才能出片。我们播放器没有嗅探器 → 点了一定失败。
-  // 归一化后这类地址一律按死线处理，直接从线路列表里消失（用户口径：
-  // 「有就有，没有就跳、消失」，不给用户点一条必然失败的路）。
-  const webHosts = <String>[
-    'www.iqiyi.com',
-    'v.qq.com',
-    'www.youku.com',
-    'v.youku.com',
-    'www.bilibili.com',
-    'm.bilibili.com',
-  ];
-  if (webHosts.any(a.contains)) return true;
   return false;
 }
 
