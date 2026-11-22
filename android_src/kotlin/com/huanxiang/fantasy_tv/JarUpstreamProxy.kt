@@ -67,6 +67,9 @@ object JarUpstreamProxy {
     @Volatile
     private var routed = 0L
 
+    /** host 大小写无关命中白名单。 */
+    private fun allowed(host: String): Boolean = HOSTS.any { it.equals(host, ignoreCase = true) }
+
     /** 在 [JarSpiderPlugin.attach] 里调用一次即可。 */
     fun install() {
         if (installed) return
@@ -76,8 +79,10 @@ object JarUpstreamProxy {
                 ProxySelector.setDefault(
                     object : ProxySelector() {
                         override fun select(uri: URI?): List<Proxy> {
-                            val host = uri?.host?.toLowerCase()
-                            if (host == null || host !in HOSTS) {
+                            // 用 equals(ignoreCase) 而不是 lowercase()：Kotlin 2.x 把
+                            // String.toLowerCase() 标成 ERROR 级弃用，写了就直接编译红。
+                            val host = uri?.host
+                            if (host == null || !allowed(host)) {
                                 return listOf(Proxy.NO_PROXY)
                             }
                             if (System.currentTimeMillis() < downUntil) {
