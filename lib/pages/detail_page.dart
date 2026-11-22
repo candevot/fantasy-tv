@@ -2435,6 +2435,20 @@ class _DetailPageState extends State<DetailPage>
           // NO_BLANK_FIRST_FRAME（2026-11-23 真机）：这里原来会「等 jar 线路
           // 到齐再挂播放器」，结果播放区一直是空白（既没有缓冲网速，也不显示
           // 正在加载的线路名）。两次起播总比白屏好，所以直接不拦。
+          if (_lineId.trim().isEmpty) {
+            // EMPTY_LINE_WAIT：线路还没定就挂播放器，等于让它拿空线路去要地址
+            // → 播放区空白、无网速、无线路名（真机症状）。这里显式等一下。
+            return SizedBox(
+              height: stageHeight,
+              child: const ColoredBox(
+                color: Colors.black,
+                child: Center(
+                  child: Text('正在准备线路…',
+                      style: TextStyle(color: Colors.white70, fontSize: 13)),
+                ),
+              ),
+            );
+          }
           return SizedBox(
             height: stageHeight,
             child: PlayerView(

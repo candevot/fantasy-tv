@@ -490,6 +490,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     });
     unawaited(_loadMark());
     unawaited(_restoreSleepTimer());
+    // EMPTY_LINE_WAIT（2026-11-23 真机）：详情页还没定下线路时 widget.line 是
+    // 空串，老代码照样 bootstrap → 拿空线路去要地址，必然失败且**不显示线路名**
+    // （加载层只在有线路名时才显示），用户看到的就是「播放区空白、没有网速」。
+    // 现在等线路到了（didUpdateWidget → _switchLine）再起播。
+    if (widget.line.trim().isEmpty) {
+      _loading = true;
+      return;
+    }
     // FX_FALLBACK：跨源换源带来的「第 N 集 + 位置」优先于本地进度。
     final start = widget.startSeconds;
     _bootstrap(
