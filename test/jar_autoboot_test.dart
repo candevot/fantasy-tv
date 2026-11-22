@@ -92,7 +92,8 @@ void main() {
   test('「首次使用自动安装」默认开，地址与 md5 指向自建服务器那份', () async {
     expect(AppSettings.defaultJarAutoInstall, isTrue);
     expect(AppSettings.defaultJarUrl, 'http://125.94.244.87/spider.jar');
-    expect(AppSettings.defaultJarMd5, 'cbe016eb3cb002ae62058604843f5106');
+    // JAR_UPDATE（2026-11-22）：肥猫 spider 更新，服务端 /spider.jar 已替换。
+    expect(AppSettings.defaultJarMd5, '3f9b9cac793a3e9b818131c8a7208800');
     await AppSettings.instance.init();
     // 没存过任何设置时就是默认值（不是 false）。
     expect(AppSettings.instance.jarAutoInstall, isTrue);

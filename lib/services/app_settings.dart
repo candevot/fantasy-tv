@@ -92,8 +92,15 @@ class AppSettings extends ChangeNotifier {
   /// 「首次使用自动安装 spider.jar」的默认值。
   static const bool defaultJarAutoInstall = true;
 
-  /// 服务器上那份 spider.jar 的 md5（2026-11-15 实测 1,929,492 B）。
-  static const String defaultJarMd5 = 'cbe016eb3cb002ae62058604843f5106';
+  /// 服务器上那份 spider.jar 的 md5。
+  ///
+  /// JAR_UPDATE（2026-11-22）：肥猫接口更新，spider 从
+  /// `.../3f9b9-….png;md5;3f9b9cac…` 换成新构建（1,152,135 B，构建时间
+  /// 2026-11-22 04:46），服务端 /spider.jar 已同步替换 —— md5 必须跟着改，
+  /// 否则「设置 → 片源管理 → 安装/更新」会判成校验不过、用回旧 jar。
+  /// 实测咕噜侧行为不变（子线路还是只有 暴风资源 / 咕噜4K 能播），换它的
+  /// 目的是跟住上游：老 jar 一旦和上游接口脱节，咕噜会整块失效。
+  static const String defaultJarMd5 = '3f9b9cac793a3e9b818131c8a7208800';
 
   /// jar 插件默认下载地址（服务器上放的肥猫 spider.jar）。
   static const String defaultJarUrl = 'http://125.94.244.87/spider.jar';
