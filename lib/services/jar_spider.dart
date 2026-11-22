@@ -94,7 +94,8 @@ class JarInstallProgress {
   });
 
   factory JarInstallProgress.fromMap(Object? raw) {
-    final map = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    final map =
+        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
     final phase = switch ('${map['phase'] ?? ''}') {
       'start' => JarInstallPhase.start,
       'download' => JarInstallPhase.download,
@@ -128,9 +129,8 @@ class JarInstallProgress {
 
   String get label => switch (phase) {
         JarInstallPhase.start => '准备下载 jar…',
-        JarInstallPhase.download => determinate
-            ? '正在下载 jar $percent%'
-            : '正在下载 jar（${_mb(received)}）',
+        JarInstallPhase.download =>
+          determinate ? '正在下载 jar $percent%' : '正在下载 jar（${_mb(received)}）',
         JarInstallPhase.verify => '校验 md5 / jar 结构…',
         JarInstallPhase.install => '正在安装…',
         JarInstallPhase.done => 'jar 安装完成',
@@ -168,7 +168,8 @@ class JarSelfTest {
   });
 
   factory JarSelfTest.fromMap(Object? raw) {
-    final map = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    final map =
+        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
     return JarSelfTest(
       ok: map['ok'] == true,
       api: _text(map['api']),
@@ -310,7 +311,9 @@ class JarSearchReport {
 
   /// 是不是靠回退（第二次 quick）才拿到的结果。
   bool get usedFallback =>
-      attempts.length > 1 && attempts.first.count == 0 && attempts.last.count > 0;
+      attempts.length > 1 &&
+      attempts.first.count == 0 &&
+      attempts.last.count > 0;
 
   /// 最后一次尝试（日志 / 状态文案用）。
   JarSearchAttempt? get last => attempts.isEmpty ? null : attempts.last;
@@ -426,7 +429,8 @@ class JarSpider {
       for (final item in flags)
         if (item.trim().isNotEmpty) item.trim(),
     ];
-    _vipFlags = cleaned.isEmpty ? defaultVipFlags : List<String>.unmodifiable(cleaned);
+    _vipFlags =
+        cleaned.isEmpty ? defaultVipFlags : List<String>.unmodifiable(cleaned);
   }
 
   static const int _detailCacheLimit = 60;
@@ -442,7 +446,8 @@ class JarSpider {
 
   static final Map<String, _JarDetail> _details = <String, _JarDetail>{};
 
-  static final Map<String, List<JarClass>> _classes = <String, List<JarClass>>{};
+  static final Map<String, List<JarClass>> _classes =
+      <String, List<JarClass>>{};
 
   /// 通道只在 Android 上存在（桌面 / Web 调试时直接报错，别静默返回空）。
   ///
@@ -490,7 +495,8 @@ class JarSpider {
       return _status!;
     }
     try {
-      final raw = await channel.invokeMethod<Object?>('status').timeout(timeout);
+      final raw =
+          await channel.invokeMethod<Object?>('status').timeout(timeout);
       final map = _mapOf(raw);
       _status = JarStatus(
         installed: map['installed'] == true,
@@ -742,7 +748,8 @@ class JarSpider {
     final q = key.trim();
     final who = label.trim().isEmpty ? api.trim() : label.trim();
     if (q.isEmpty) {
-      return const JarSearchReport(cards: <VideoCard>[], attempts: <JarSearchAttempt>[]);
+      return const JarSearchReport(
+          cards: <VideoCard>[], attempts: <JarSearchAttempt>[]);
     }
     final total = budget ?? searchBudget;
     final deadline = DateTime.now().add(total);
@@ -752,13 +759,16 @@ class JarSpider {
       final left = deadline.difference(DateTime.now());
       if (left <= const Duration(milliseconds: 300)) {
         // 预算用完：记一条，别让第二个模式把整轮搜索拖过 12 秒。
-        fxJarLog('source=$who key=$q ${quick ? 'quick=true' : 'quick=false'} → 跳过(预算已用完)');
+        fxJarLog(
+            'source=$who key=$q ${quick ? 'quick=true' : 'quick=false'} → 跳过(预算已用完)');
         break;
       }
       // quick=false 拿大头（真搜索本来就是慢的），quick=true 用剩余预算。
       final slice = quick
           ? left
-          : (left > const Duration(seconds: 7) ? const Duration(seconds: 7) : left);
+          : (left > const Duration(seconds: 7)
+              ? const Duration(seconds: 7)
+              : left);
       final started = DateTime.now();
       try {
         final cards = await search(
@@ -777,7 +787,8 @@ class JarSpider {
         );
         attempts.add(attempt);
         fxJarLog('source=$who key=$q ${attempt.describe()}');
-        if (cards.isNotEmpty) return JarSearchReport(cards: cards, attempts: attempts);
+        if (cards.isNotEmpty)
+          return JarSearchReport(cards: cards, attempts: attempts);
       } on ApiException catch (e) {
         final attempt = JarSearchAttempt(
           quick: quick,
@@ -802,7 +813,6 @@ class JarSpider {
     fxJarLog('source=$who key=$q 两种模式都没结果（已试 ${attempts.length} 次）');
     return JarSearchReport(cards: const <VideoCard>[], attempts: attempts);
   }
-
 
   /// 分类列表。
   static Future<List<VideoCard>> category({
@@ -915,8 +925,8 @@ class JarSpider {
   /// 这条记录能不能留：没给播放字段（搜索接口常态）= 能留；
   /// 给了但全是空段 / 占位 = 空壳，丢掉。
   static bool _playableOrUnspecified(Map<String, dynamic> vod) {
-    final hasField = vod.containsKey('vod_play_url') ||
-        vod.containsKey('vod_play_from');
+    final hasField =
+        vod.containsKey('vod_play_url') || vod.containsKey('vod_play_from');
     if (!hasField) return true;
     return CmsApi.usableLineCount(vod) > 0;
   }
@@ -939,11 +949,13 @@ class JarSpider {
 
   /// `{"parse":0,"url":"…","header":{…}}` → [PlayInfo]。
   static PlayInfo playOf(Object? body, {String lineName = ''}) {
-    final map = body is Map ? Map<String, dynamic>.from(body) : <String, dynamic>{};
+    final map =
+        body is Map ? Map<String, dynamic>.from(body) : <String, dynamic>{};
     final url = _text(map['url']);
     final parse = _intOf(map['parse']);
     if (url.isEmpty) {
-      throw ApiException(_text(map['msg']).isEmpty ? '这个源没有给出播放地址' : _text(map['msg']));
+      throw ApiException(
+          _text(map['msg']).isEmpty ? '这个源没有给出播放地址' : _text(map['msg']));
     }
     // parse != 0：TVBox 会交给 WebView 去嗅探，这里没有嗅探器；
     // 但有些源会把直链也标成 1，所以先看地址本身能不能直接播。
@@ -951,12 +963,27 @@ class JarSpider {
       throw ApiException('这条线路需要网页解析，换一条线路试试');
     }
     final headers = <String, String>{};
+    // JAR_HEADER_JSON（2026-11-22 实测咕噜）：TVBox 的 `header` 有两种写法 ——
+    // 规范是对象，但咕噜（csp_Gulu）返回的是**字符串化的 JSON**：
+    //   "header": "{\"User-Agent\":\"Dalvik/2.1.0 (Linux; U; Android 11; Pixel 4)\"}"
+    // 老代码只认 Map，字符串直接被丢掉 → 我们拿默认 UA 去请求上游，跟壳
+    // （FongMi/TVBox 会把这段解析出来照发）不是一个身份。这里两种都收。
     final rawHeader = map['header'];
-    if (rawHeader is Map) {
-      for (final entry in rawHeader.entries) {
+    Object? headerObj = rawHeader;
+    if (rawHeader is String && rawHeader.trim().startsWith('{')) {
+      try {
+        headerObj = jsonDecode(rawHeader.trim());
+      } catch (_) {
+        headerObj = null;
+      }
+    }
+    if (headerObj is Map) {
+      for (final entry in headerObj.entries) {
         final key = '${entry.key}'.trim();
         if (key.isEmpty) continue;
-        headers[key] = '${entry.value}'.trim();
+        final value = '${entry.value}'.trim();
+        if (value.isEmpty) continue;
+        headers[key] = value;
       }
     }
     if (!headers.keys.any((k) => k.toLowerCase() == 'user-agent')) {

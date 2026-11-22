@@ -16,7 +16,6 @@ import 'live_edge.dart';
 import 'local_hls_proxy.dart';
 import 'playback_progress.dart';
 import 'playback_recovery.dart';
-import 'play_path.dart';
 import 'play_log.dart';
 
 /// FxPlayer 打开/播放失败时抛出的异常，调用方可据此尝试备用地址。
@@ -2778,7 +2777,6 @@ class _CachedPlayInfo {
 class _FxJarWarm {
   static const Duration _ttl = Duration(seconds: 60);
   static const int _playlistMaxBytes = 512 * 1024;
-  static const int _segmentWarmBytes = 1024 * 1024;
   static final Map<String, DateTime> _warmed = <String, DateTime>{};
 
   static Future<void> warm(
@@ -2796,11 +2794,12 @@ class _FxJarWarm {
       _warmed.remove(_warmed.keys.first);
     }
     try {
-      final text = await _getText(url, headers);
-      if (text.isEmpty) return;
-      final seg = fxFirstSegmentOf(text, url);
-      if (seg.isEmpty) return;
-      await _getBytes(seg, headers);
+      // 只热「清单 + TLS/DNS」，不热分片。
+      //
+      // 曾经在这里顺带拉过首片前 1MB，实测是负收益：这条线路的 CDN 单连接
+      // 只有 300KB/s~2MB/s，预热那 1MB 会跟播放器自己的首片抢带宽，首帧反而
+      // 更慢。壳（FongMi）起播时也只有播放器那一次请求 —— 对齐它。
+      await _getText(url, headers);
     } catch (_) {
       // 预热失败一律静默：它只是让快更快，不能变成新的失败点。
     }
@@ -2825,28 +2824,6 @@ class _FxJarWarm {
         return acc;
       }).timeout(const Duration(seconds: 10));
       return String.fromCharCodes(bytes);
-    } finally {
-      client.close(force: true);
-    }
-  }
-
-  static Future<void> _getBytes(
-    String url,
-    Map<String, String> headers,
-  ) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
-    try {
-      final req = await client.getUrl(Uri.parse(url));
-      req.headers.set('Range', 'bytes=0-${_segmentWarmBytes - 1}');
-      headers.forEach(req.headers.set);
-      final res = await req.close().timeout(const Duration(seconds: 8));
-      if (res.statusCode < 200 || res.statusCode >= 400) {
-        await res.drain<void>();
-        return;
-      }
-      await res
-          .fold<int>(0, (n, chunk) => n + chunk.length)
-          .timeout(const Duration(seconds: 25));
     } finally {
       client.close(force: true);
     }
