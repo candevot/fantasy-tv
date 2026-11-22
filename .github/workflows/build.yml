@@ -158,6 +158,16 @@ jobs:
       - name: Playback recovery regressions
         run: flutter test test/playback_regressions_test.dart
 
+      # GULU_FIRST_PLAY（2026-11-22）：咕噜线路首播一直 0 KB/s 卡「正在加载」，
+      # 手点右上角「刷新」立刻秒播。根因是首播读了详情页 warm() 预解析的地址，
+      # 而 jar 的 playerContent 每次都现签新地址。这一组用例钉死：
+      #   1. 短寿命线路不预热、peek 恒空、首播必现签（缓存一条都不许命中）；
+      #   2. 首播地址 vs 刷新地址是两条不同的地址（= 用户看到的差异）；
+      #   3. 失败自动重新解析最多 2 次、慢网 30s 不参与，日志是
+      #      `[JarPlay] retry=1 … old=… new=…`。
+      - name: Gulu first-play regressions
+        run: flutter test test/gulu_first_play_test.dart
+
       # AUTO_RESUME / SH4K_RETRY（2026-11-20）：两个现场问题的门禁。
       #
       # ① 「自动切线路之后画面停着不动，要手动点播放」。

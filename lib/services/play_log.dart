@@ -23,3 +23,36 @@ const String fxPlayTag = 'FxPlay';
 void fxPlayLog(String message) {
   debugPrint('[$fxPlayTag] $message');
 }
+
+/// 「首播失败 → 自动重新解析再起播」的日志正文（GULU_FIRST_PLAY 2026-11-22）。
+///
+/// 调用方用 [fxJarLog] 带上 tag（jar 线路 `[JarPlay]`、其余 `[FxPlay]`），
+/// 于是排障时一条 grep 就能拼出**首播地址 vs 重解析地址**的完整对比：
+///
+/// ```
+/// [JarPlay] retry=1 line=咕噜·金牌极速 ep=1 reason=播放超时 old=<首播地址> action=reparse
+/// [JarPlay] retry=1 line=咕噜·金牌极速 ep=1 reason=播放超时 old=<首播地址> new=<重解析地址>
+/// ```
+///
+/// `old=` 永远是卡住那一条，`new=` 是重解析签出来的新地址 —— 两者不同就说明
+/// 根因在「首播用的是旧地址」，和用户手点「刷新」拿到新地址秒播是同一件事。
+String fxRetryLog({
+  required int retry,
+  required String line,
+  required int ep,
+  required String reason,
+  required String oldUrl,
+  String newUrl = '',
+  String action = '',
+}) {
+  final parts = <String>[
+    'retry=$retry',
+    'line=$line',
+    'ep=$ep',
+    'reason=${reason.trim().isEmpty ? 'no_progress' : reason.trim()}',
+    'old=$oldUrl',
+  ];
+  if (newUrl.isNotEmpty) parts.add('new=$newUrl');
+  if (action.isNotEmpty) parts.add('action=$action');
+  return parts.join(' ');
+}

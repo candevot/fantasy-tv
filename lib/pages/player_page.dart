@@ -22,6 +22,7 @@ import '../services/line_health.dart';
 import '../services/line_probe.dart';
 import '../services/iq_codec_gate.dart';
 import '../services/iqiyi_codec.dart';
+import '../services/jar_log.dart' show fxJarLog, fxJarPlayTag;
 import '../services/play_log.dart';
 import '../services/play_orientation.dart';
 import '../services/play_path.dart';
@@ -255,6 +256,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   /// 正在切换线路（防止重复点击并发 open）。
   bool _switchingLine = false;
+
+  /// 换线期间被排队的「原线重试」（RELOAD_DEFER，见 [reload]）。
+  bool _pendingReload = false;
 
   /// 切换卡死时暂存用户最新选择的线路，当前切换一结束就立刻执行。
   (String, int)? _pendingSwitch;
@@ -695,6 +699,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
           _switchingLine = false;
         }
         widget.onSwitchingChanged?.call(false);
+        // RELOAD_DEFER（GULU_FIRST_PLAY 2026-11-22）：换线过程中报上来的
+        // 起播失败，原线重试以前被 `reload()` 开头的 `if (_switchingLine) return;`
+        // 当场吞掉 —— 而外层 `_reportLineIssue` 在调它之前就已经把
+        // `_retriedLine` 记成「这一条试过了」，于是那一次首播失败**永远拿不到
+        // 原线重试**（用户看到的就是一直转圈，只能自己手点刷新）。
+        // 现在改成排队：换线一收尾立刻补跑一次（force 重解析 = 手点刷新）。
+        final deferredReload = _pendingReload;
+        _pendingReload = false;
+        if (deferredReload && mounted) unawaited(reload());
       }
       if (!superseded) {
         // 切换期间点过的下一集：等本次切换结束再执行，不并发 open。
@@ -1179,6 +1192,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     }
   }
 
+  /// 一次起播最多「自动重新解析再起播」几次：见 `play_path.dart` 的
+  /// [fxFirstPlayReparseMax]（GULU_FIRST_PLAY 2026-11-22，用户口径 = 2 次，
+  /// 日志留痕 `[JarPlay] retry=N …`）。用满就走原来的失败链。
   Future<bool> _bootstrapSourceGuarded({
     required bool seekToSaved,
     required bool saveOld,
@@ -1189,8 +1205,20 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     required bool forcePlayInfo,
     double? resumeSeconds,
     bool? playOverride,
+    /// 第几次「重新解析后重起播」（0 = 首播）。重试沿用同一个代际，
+    /// 不再 `++_loadToken` —— 否则上一层的 `_openingToken` 会对不上，
+    /// 用户这时点线路会被判成「重复请求」而吞掉。
+    int reparse = 0,
+    /// 上一次失败用的地址（打进 `[JarPlay] retry=N … old=`）。
+    String prevUrl = '',
+    /// 上一次失败的原因（打进 `retry=N … reason=`）。
+    String retryReason = '',
   }) async {
-    final token = ++_loadToken;
+    final token = reparse == 0 ? ++_loadToken : _loadToken;
+    // 纯取值，提前算好：重试路径（见下面的 retry 递归）也要用它们打日志。
+    final openLineName =
+        fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], line);
+    final openSource = CmsBridge.isCms(widget.videoId) ? 'cms' : 'legacy';
     _hideTimer?.cancel();
     // 先抓最后一帧，再换播放器：Video 在 open 期间会清空纹理，
     // 用快照顶住加载窗口，新流首帧就绪后淡出。
@@ -1257,6 +1285,21 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       return false;
     }
     if (!mounted || token != _loadToken) return false;
+    // GULU_FIRST_PLAY：第 2 次起播 = 上一次自动重新解析拿回来的新地址。
+    // 这行就是验收要的证据：`old=` 是卡住的那条，`new=` 是重解析签出来的那条。
+    if (reparse > 0) {
+      fxJarLog(
+        fxRetryLog(
+          retry: reparse,
+          line: openLineName,
+          ep: ep,
+          reason: retryReason,
+          oldUrl: prevUrl,
+          newUrl: info.url,
+        ),
+        tag: CmsBridge.isJarLine(line) ? fxJarPlayTag : fxPlayTag,
+      );
+    }
     _info = info;
     _activeCastUrl = null;
 
@@ -1341,10 +1384,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 用户报障时只要 `adb logcat | grep FxPlay` 就能看到
     // `line=… url=… source=cms|legacy kind=direct|parse`，
     // 以及失败时的 `FAIL … elapsed=…`，不用再猜走了哪条路。
+    // openLineName / openSource 在函数开头就算好了（重试路径也要用）。
     final openWatch = Stopwatch()..start();
-    final openLineName =
-        fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], line);
-    final openSource = CmsBridge.isCms(widget.videoId) ? 'cms' : 'legacy';
+    // 最后一次真正交给内核的地址：自动重新解析时打进 `retry=N … old=`。
+    var lastOpenedUrl = '';
     // SWITCH_INSTANCE_REUSE（改动 ④）：换集 / 换线路**复用同一个 FxPlayer**。
     //
     // 以前每次 open 都 `FxPlayer.create()`，成功后 `previous.dispose()`：
@@ -1374,6 +1417,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     for (final target in targets) {
       if (!mounted || token != _loadToken) return false;
       final url = target.url;
+      lastOpenedUrl = url;
       if (target.degradeFromHevc) fxPlayLog(iqDegradeLog(url));
       final controller = reusable ?? FxPlayer.create();
       // BG_SERVICE / MEDIA_SESSION（2026-11-15）：通知栏 + 锁屏的
@@ -1434,6 +1478,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
               // 用服务端声明的类型：幻想自建的地址没有 .m3u8 后缀，
               // 按后缀猜会被当成普通视频，直接解析失败。
               isHls: info.isHls,
+              // GULU_FIRST_PLAY：短寿命线路不做任何前置动作（不预检、
+              // 不预取拖动索引）—— 它们抓的就是播放器正在用的这条地址，
+              // 抢一次就可能让首播 0 KB/s 卡住。详见 FxPlayer.open 的说明。
+              preflight: !FxPlayCache.isShortLived(line),
               // 只有「平台签名线路」才走本地代理（需要代理改写签名、
               // 定时换新地址）。普通采集线路直接交给 mpv 边下边播。
               //
@@ -1646,6 +1694,48 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
     if (!ok) {
       if (!mounted || token != _loadToken) return false;
+      // GULU_FIRST_PLAY（2026-11-22，用户钉死的口径）：首播失败或无进展时
+      // **自动重新解析再起播**，最多 2 次，等价于用户手点右上角「刷新」
+      // （实测：咕噜首播 0 KB/s 卡死，手点刷新立刻秒播）。
+      //
+      // 两条不许破的既有规则：
+      //   · 慢网硬上限（30s 到点直接换下一条）不参与重试 —— 那是用户定的
+      //     「到点就切」，不能被这里拖成 30s × 3；
+      //   · 重试用尽才落到最后的失败分支（原线重试 → 全线路轮 → 跨源），
+      //     自动切线路的既有逻辑一行没动。
+      final reason = _lastOpenError.trim().isEmpty
+          ? 'no_progress'
+          : _lastOpenError.trim();
+      if (fxShouldReparsePlay(reparse: reparse, reason: reason)) {
+        openWatch.stop();
+        final next = reparse + 1;
+        fxJarLog(
+          fxRetryLog(
+            retry: next,
+            line: openLineName,
+            ep: ep,
+            reason: reason,
+            oldUrl: lastOpenedUrl,
+            action: 'reparse',
+          ),
+          tag: CmsBridge.isJarLine(line) ? fxJarPlayTag : fxPlayTag,
+        );
+        FxPlayCache.invalidate(widget.videoId, ep, line);
+        return _bootstrapSourceGuarded(
+          seekToSaved: seekToSaved,
+          saveOld: false,
+          line: line,
+          ep: ep,
+          commitLine: commitLine,
+          reportFailure: reportFailure,
+          forcePlayInfo: true,
+          resumeSeconds: resumeSeconds,
+          playOverride: playOverride,
+          reparse: next,
+          prevUrl: lastOpenedUrl,
+          retryReason: reason,
+        );
+      }
       openWatch.stop();
       fxPlayLog(
         'FAIL line=$openLineName ep=$ep source=$openSource '
@@ -1942,6 +2032,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
 
   /// 平台线路（腾讯 / 芒果等）签名失效：重新请求 /api/play 拿新签名地址。
   /// 本地代理会每 90 秒或遇到分片 403/404 时调用；失败返回 null。
+  ///
+  /// GULU_FIRST_PLAY（2026-11-22）：这条救援链**覆盖 jar 线路**，已确认 ——
+  /// `CmsBridge.play` 进来先判 `fxParseJarLineId(line)`，命中就走
+  /// `JarSpider.play`（playerContent 现场解析），`fresh` 对它没有额外语义
+  /// （jar 分支本来就没有服务端缓存，每次都是新签）。所以咕噜首播卡住时，
+  /// 救援链①拿到的一定是**新地址**，和手点「刷新」同一条路。
+  /// 唯一补的一处：地址统一过 `absolutePlayUrl`，和首播建候选地址的口径一致
+  /// （站内相对路径不补全，救援链重开就会拿相对路径去连，必然失败）。
   Future<String?> _refreshPlatformUrl(String line, int ep) async {
     if (widget.videoId.isEmpty || line.isEmpty) return null;
     try {
@@ -1951,7 +2049,14 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       if (url.isEmpty) return null;
       // 旧签名已失效，清掉缓存，避免稍后切回本线路又命中过期地址。
       FxPlayCache.invalidate(widget.videoId, ep, line);
-      return url;
+      final abs = CmsBridge.absolutePlayUrl(widget.videoId, url);
+      final resolved = abs.isEmpty ? url : abs;
+      fxJarLog(
+        'refresh line=$line ep=$ep jar=${CmsBridge.isJarLine(line)} '
+        'url=$resolved',
+        tag: CmsBridge.isJarLine(line) ? fxJarPlayTag : fxPlayTag,
+      );
+      return resolved;
     } catch (_) {
       return null;
     }
@@ -1988,6 +2093,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   ///   · 失败静默，绝不影响当前播放。
   void _maybePreloadNextNative() {
     if (!mounted || !ExoPlayerEngine.isSupported) return;
+    // GULU_FIRST_PLAY：短寿命线路不预载下一集。播放器切集时会**现签**一条
+    // 新地址（见 FxPlayCache.isShortLived），这里按旧地址预取的分片永远
+    // 命中不了 —— 白跑一次 playerContent 还白占带宽。
+    if (FxPlayCache.isShortLived(_line)) return;
     final c = _controller;
     final loaded = _loadedEp;
     if (c == null || loaded == null || loaded != _ep) return;
@@ -2533,7 +2642,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 现在重试带 `force: true`（真发一次，代价最多一次接口），并且在这次
   /// 重试自己失败时**收尾**：亮明确错误 + 通知外层换线路，绝不留悬空 loading。
   Future<void> reload() async {
-    if (_switchingLine) return;
+    // RELOAD_DEFER（GULU_FIRST_PLAY 2026-11-22）：换线正在跑时**不许当场
+    // 放弃** —— 外层 `_reportLineIssue` 在调用前就已经把 `_retriedLine` 记成
+    // 「这条试过了」，这里直接 return 就等于把那次原线重试白白烧掉，首播失败
+    // 再也拿不到一次 force 重解析。改成排队，换线收尾时补跑。
+    if (_switchingLine) {
+      _pendingReload = true;
+      return;
+    }
+    _pendingReload = false;
     // AUTO_LINE_FULL：上一次已经把全部线路试完 —— 点「重试」等于重新开始：
     // 从第一条线路重新轮一轮，并且让外层重置降级状态（这次可以再跨源找一次）。
     if (_linesExhausted) {

@@ -673,6 +673,9 @@ class FxPlayer implements Listenable {
 
   /// 本次 open 的类型提示（来自服务端的 type 字段）。
   bool? _typeHint;
+
+  /// 本次 open 要不要做任何「前置动作」（见 [open] 的 `preflight` 参数）。
+  bool _preflightEnabled = true;
   DateTime _lastFlowAt = DateTime.now();
   int _rescueRounds = 0;
   Duration _lastFlowPos = Duration.zero;
@@ -823,6 +826,16 @@ class FxPlayer implements Listenable {
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
     FxLineRescue? rescueLines,
+    /// 起播前还要不要做任何「前置动作」：并行线路预检（PROBE 2026-11-15）
+    /// 与首帧后的拖动索引预取 —— 两者都会拿**播放器正在用的那条地址**
+    /// 再发一次请求。
+    ///
+    /// GULU_FIRST_PLAY（2026-11-22）：短寿命线路必须传 false。预检会拿
+    /// **播放器马上要用的那条地址**去拉清单 + 首片，等于在起播前先把这条
+    /// 现签的地址消费一次；咕噜这类上游按单次 / 短窗口放行，抢在前面那次
+    /// 会让真正起播的请求一直 0 KB/s。用户口径是「不做任何前置验证，
+    /// 点进去直接播」—— 这类线路预检和索引预取一起关掉。
+    bool preflight = true,
   }) {
     if (_disposed) {
       return Future<void>.error(const FxPlayerException('播放器已释放'));
@@ -841,6 +854,7 @@ class FxPlayer implements Listenable {
     _lastProbe = null;
     // 记下服务端声明的类型，供 _openMedia / 救援重开使用。
     _typeHint = isHls;
+    _preflightEnabled = preflight;
     final startMs = startPosition.inMilliseconds < 0
         ? 0
         : startPosition.inMilliseconds;
@@ -997,10 +1011,14 @@ class FxPlayer implements Listenable {
       // TOKEN_ONCE（2026-11-15）：本站 `/hxparse/xo?u=` 这类包装地址背后是
       // 一次性令牌，再抓一次清单就把播放器那条烧成 403（表现为清单到手、
       // 分片 0 KB/s）。索引只服务拖动，令牌丢了整集都播不了，所以直接跳过。
-      if (!HlsSegmentIndex.isOneTimePlaylist(opened.url)) {
-        unawaited(_primeSegmentIndex(opened.url, opened.headers, token));
-      } else {
+      // GULU_FIRST_PLAY：短寿命线路（preflight=false）同理 —— 索引要拿的
+      // 就是播放器正在用的那条地址，再要一次可能把整集的分片一起拖死。
+      if (HlsSegmentIndex.isOneTimePlaylist(opened.url)) {
         _logFx('INDEX 跳过：一次性令牌清单 ${opened.url}');
+      } else if (!_preflightEnabled) {
+        _logFx('INDEX 跳过：短寿命线路不再多要一次清单 ${opened.url}');
+      } else {
+        unawaited(_primeSegmentIndex(opened.url, opened.headers, token));
       }
     }
   }
@@ -1163,6 +1181,11 @@ class FxPlayer implements Listenable {
   ) async {
     _lastProbe = null;
     if (!FxLineProbeCache.enabled) return const FxLineProbeResult.skipped();
+    // GULU_FIRST_PLAY：短寿命线路不预检（会把现签地址提前消费一次）。
+    if (!_preflightEnabled) {
+      _logFx('PROBE 跳过：短寿命线路不预检（起播直接用现签地址）');
+      return const FxLineProbeResult.skipped();
+    }
     final url = source.url.trim();
     if (url.isEmpty) return const FxLineProbeResult.skipped();
     final lower = url.toLowerCase();
@@ -2478,10 +2501,38 @@ class _PlaybackSource {
 /// - 缓存 10 分钟内有效，最多 8 条，避免 URL 长期失效与内存膨胀；
 /// - 同一集并发请求走同一个 Future，不会重复打接口；
 /// - [prewarm] 会先清掉旧结果再请求，并把下一集的 m3u8 也预热好，
-///   切集时 open 只差一个本地 playlist 往返。
+///   切集时 open 只差一个本地 playlist 往返；
+/// - **短寿命线路（[isShortLived]，咕噜这类 jar 现签地址）整套缓存全部绕开**：
+///   不预热、不读缓存、每次现解析。详见 [isShortLived]。
 class FxPlayCache {
   static const Duration _ttl = Duration(minutes: 10);
   static const int _maxEntries = 8;
+
+  /// 这条线路的播放地址是不是「短寿命 / 现签」型（GULU_FIRST_PLAY 2026-11-22）。
+  ///
+  /// 用户实测（v1.0.493）：咕噜线路**首播**永远 0 KB/s 卡在「正在加载」，
+  /// 手点右上角「刷新」立刻秒播。两条路只差一件事 ——
+  ///
+  /// ```
+  /// 首播  FxPlayCache.resolve(force:false) → 命中详情页 warm() 预解析的地址
+  /// 刷新  FxPlayCache.resolve(force:true)  → 丢缓存 → CmsBridge.play →
+  ///       jar 分支 JarSpider.play → playerContent **现签**一条新地址
+  /// ```
+  ///
+  /// jar 源（`csp_Gulu`）的 `playerContent` 是**现场**调上游解析接口签地址，
+  /// 每次签出来的都不一样、且寿命以秒计（上游按会话 / 单次使用放行）。
+  /// 把它放进 10 分钟 TTL 的缓存里，首播拿到的必然是「上一次」签的那条 ——
+  /// 这就是根因。
+  ///
+  /// **为什么选「首播强制现解析」而不是「把 TTL 缩到秒级」**：
+  /// `detail_page._loadDetail` 的 `warm()` 和播放器首播几乎在同一帧发生
+  /// （`warm` 同步写 `_inflight`，首播 `resolve` 直接复用同一个 Future），
+  /// 也就是说首播拿到的地址 age≈0 —— 无论 TTL 是 10 分钟还是 1 秒，
+  /// 首播命中的都是**同一条预解析地址**。TTL 只决定「第二次以后」还能不能
+  /// 复用，治不了首播这一次；而用户钉死的口径正是「首播要能直接播」。
+  /// 所以对这类线路干脆不缓存：省掉预解析（不阻塞、也不白跑），
+  /// 每次要播都现签，等价于用户手点「刷新」。
+  static bool isShortLived(String line) => CmsBridge.isJarLine(line);
 
   static final Map<String, _CachedPlayInfo> _cache =
       <String, _CachedPlayInfo>{};
@@ -2519,10 +2570,22 @@ class FxPlayCache {
   }
 
   /// 只看缓存不请求；UI 可用于判断是否可秒开。
+  ///
+  /// 短寿命线路永远返回 null：它的地址没有「可复用」这回事，
+  /// 返回非空会让首播误判成 cacheHit、跳过现解析（见 [isShortLived]）。
   static PlayInfo? peek(String id, int ep, String line) =>
-      _fresh(_key(id, ep, line));
+      isShortLived(line) ? null : _fresh(_key(id, ep, line));
 
   /// 取播放地址：优先缓存 / 正在请求的结果，[force] 时强制重新请求。
+  ///
+  /// 短寿命线路（[isShortLived]）等价于 `force: true`：每次都现签。
+  /// 日志固定一行，排障时 `adb logcat | grep FxPlay` 就能看出首播到底用的是
+  /// 缓存地址还是现签地址：
+  /// ```
+  /// [FxPlay] resolve line=咕噜·金牌极速 ep=1 cache=short-lived url=https://…
+  /// [FxPlay] resolve line=量子 ep=1 cache=hit age=12430ms url=https://…
+  /// [FxPlay] resolve line=量子 ep=1 cache=miss url=https://…
+  /// ```
   static Future<PlayInfo> resolve(
     String id,
     int ep,
@@ -2530,14 +2593,29 @@ class FxPlayCache {
     bool force = false,
   }) {
     final key = _key(id, ep, line);
-    if (force) {
+    final shortLived = isShortLived(line);
+    var cacheState = 'miss';
+    if (force || shortLived) {
+      cacheState = force && !shortLived ? 'force' : 'short-lived';
       _cache.remove(key);
     } else {
+      final entry = _cache[key];
       final cached = _fresh(key);
-      if (cached != null) return Future<PlayInfo>.value(cached);
+      if (cached != null) {
+        final age = entry == null
+            ? 0
+            : DateTime.now().difference(entry.at).inMilliseconds;
+        fxPlayLog(
+          'resolve line=$line ep=$ep cache=hit age=${age}ms url=${cached.url}',
+        );
+        return Future<PlayInfo>.value(cached);
+      }
     }
     final pending = _inflight[key];
-    if (pending != null) return pending;
+    if (pending != null) {
+      fxPlayLog('resolve line=$line ep=$ep cache=inflight');
+      return pending;
+    }
     // 播放地址统一走 CmsBridge：CMS 影片按 vod_id 现解析，旧接口的影片
     // 照旧走 /api/play —— 两套编号不能互换（见 cms_bridge 的说明）。
     final resolveWatch = Stopwatch()..start();
@@ -2554,8 +2632,15 @@ class FxPlayCache {
       resolveWatch.stop();
       _lastResolveMs = resolveWatch.elapsedMilliseconds;
       _lastResolveAt = DateTime.now();
-      _cache[key] = _CachedPlayInfo(info, DateTime.now());
-      _trim();
+      // 短寿命地址不进缓存：存下来只会在下一次首播里变成「过期的那一条」。
+      if (!shortLived) {
+        _cache[key] = _CachedPlayInfo(info, DateTime.now());
+        _trim();
+      }
+      fxPlayLog(
+        'resolve line=$line ep=$ep cache=$cacheState '
+        'cost=${_lastResolveMs}ms url=${info.url}',
+      );
       return info;
     });
     _inflight[key] = future;
@@ -2566,7 +2651,15 @@ class FxPlayCache {
 
   /// 页面进入 / 下一集预热：已有缓存直接复用，不重复请求接口。
   /// 只发请求并预热 m3u8，不创建播放器。
+  ///
+  /// 短寿命线路直接跳过（GULU_FIRST_PLAY）：预解析出来的地址到用户真点播放
+  /// 时已经不是「要播的那一条」了，白跑一次 playerContent 只会多签一条废地址。
+  /// 首播由 [resolve] 现签，**不增加任何等待**。
   static void warm(String id, int ep, String line) {
+    if (isShortLived(line)) {
+      fxPlayLog('warm skip short-lived line=$line ep=$ep（首播现解析）');
+      return;
+    }
     final key = _key(id, ep, line);
     if (_fresh(key) != null) return;
     _resolveAndWarm(id, ep, line);
@@ -2575,6 +2668,7 @@ class FxPlayCache {
   /// 播放 30 秒后调用：后台清空并刷新下一集 /api/play 结果与 m3u8。
   /// 只发请求，不 open；失败静默，不影响当前播放。
   static void prewarm(String id, int ep, String line) {
+    if (isShortLived(line)) return;
     _cache.remove(_key(id, ep, line));
     _resolveAndWarm(id, ep, line);
   }

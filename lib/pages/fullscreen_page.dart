@@ -938,6 +938,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
               // 只有爱奇艺 /api/iqiyi.m3u8 这类站内包装地址才需要。
               // HLS 一律交给本地代理，才能享受整集预加载（与主播放页一致）。
               direct: fxShouldUseHlsProxy(url, isHls: source.isHls),
+              // GULU_FIRST_PLAY：短寿命线路不做任何前置动作（与主播放页一致）。
+              preflight: !FxPlayCache.isShortLived(_line),
               refreshPlay: _refreshPlatformUrl,
               onPlayExpired: _onPlatformExpired,
               rescueLines: _rescueLineSource,
@@ -1046,6 +1048,8 @@ class _FullPlayerPageState extends State<FullPlayerPage>
             // 重开也要带着原进度打开：位置 0 会先把中转名额用掉。
             startPosition: resume,
             direct: fxShouldUseHlsProxy(url, isHls: _info?.isHls ?? true),
+            // GULU_FIRST_PLAY：短寿命线路不做任何前置动作（与主播放页一致）。
+            preflight: !FxPlayCache.isShortLived(_line),
             refreshPlay: _refreshPlatformUrl,
             onPlayExpired: _onPlatformExpired,
             rescueLines: _rescueLineSource,
@@ -1435,7 +1439,11 @@ class _FullPlayerPageState extends State<FullPlayerPage>
       final url = info.url.trim();
       if (url.isEmpty) return null;
       FxPlayCache.invalidate(widget.videoId, _ep, _line);
-      return url;
+      // 和主播放页同口径：站内相对地址补全后再交给救援链重开。
+      // jar 线路（咕噜）走 CmsBridge.play 的 jar 分支，fresh 之后一定是
+      // playerContent 现签的新地址 —— 救援链①对 jar 同样有效。
+      final abs = CmsBridge.absolutePlayUrl(widget.videoId, url);
+      return abs.isEmpty ? url : abs;
     } catch (_) {
       return null;
     }

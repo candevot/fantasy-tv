@@ -125,6 +125,28 @@ bool shouldReuseOpen({
     pendingKey == key &&
     pendingToken == currentToken;
 
+/// 首播失败后最多「自动重新解析再起播」几次（GULU_FIRST_PLAY 2026-11-22）。
+///
+/// 用户口径：首播失败或无进展时，**自动**重新解析（等价于手点右上角「刷新」）
+/// 并重试起播，最多 2 次，日志留痕 `[JarPlay] retry=N …`。
+const int fxFirstPlayReparseMax = 2;
+
+/// 这一次失败值不值得再来一轮「重新解析 + 重新起播」。
+///
+/// 只有两条否决项，其余一律放行：
+///   1. 次数用满（[fxFirstPlayReparseMax]）—— 用满就回到原来的失败链
+///      （原线重试 → 全线路轮 → 跨源），**自动切线路的节奏一行不改**；
+///   2. `慢网超时` —— 30 秒硬上限是用户定的「到点直接换下一条」，
+///      不许被重试拖成 30s × 3。
+///
+/// [reason] 是 `_lastOpenError` 的口径（`播放超时` / `线路不可用(403)` /
+/// `连续 8 秒无进展` …）；空串按「无进展」处理，照样值得再签一条地址。
+bool fxShouldReparsePlay({required int reparse, required String reason}) {
+  if (reparse >= fxFirstPlayReparseMax) return false;
+  if (reason.trim().contains('慢网超时')) return false;
+  return true;
+}
+
 String _hostOf(String address) {
   if (address.isEmpty) return '';
   final uri = Uri.tryParse(address);

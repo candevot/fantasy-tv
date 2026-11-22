@@ -99,6 +99,13 @@ class ResumePrefetch {
   /// 不该给用户任何感知。
   static Future<void> warm(ResumeTarget target) async {
     if (!ExoPlayerEngine.isSupported || !target.isValid) return;
+    // GULU_FIRST_PLAY：短寿命线路不预取。播放时会现签一条新地址
+    // （见 FxPlayCache.isShortLived），这里签出来的那条没人会用，
+    // 清单 + 分片全是白拉，还平白多打一次上游解析接口。
+    if (FxPlayCache.isShortLived(target.line)) {
+      _log('短寿命线路跳过预取 ${target.signature}');
+      return;
+    }
     final key = target.key;
     if (isWarmed(key)) return;
     _attempts[key] = (_attempts[key] ?? 0) + 1;
