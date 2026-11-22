@@ -1985,14 +1985,14 @@ class _DetailPageState extends State<DetailPage>
     if (pick == null || pick.id == _lineId) return;
     final current = _detail;
     if (current == null) return;
-    setState(() {
-      _lineId = pick.id;
-      _ep = _clampEpisode(_episodesOf(current, pick.id), _ep);
-      _groupIndex = _groupIndexOf(_episodeGroups, _ep);
-      _autoLineTries = 0;
-    });
-    unawaited(_saveHistory());
-    debugPrint('[JAR_FIRST] 默认线路 = ${pick.displayName}（咕噜优先）');
+    // JAR_AUTO_SAME_PATH（2026-11-22 用户实测）：自动默认选中**必须走手动
+    // 选线同一条路径**（_selectLineReady），而不是自己 setState 改 _lineId。
+    // 差异在手动路径会清掉 _failedLines / _retriedLine / _autoLineTries 并
+    // 夹集数；只改 _lineId 时这些状态原样保留 —— 用户实测「手动切咕噜能播、
+    // 自动默认选中一直 0KB」就是这个状态差：自动切带着旧的失败/重试状态，
+    // 播放器判定「这条试过了」不再重试，一次失败就永远卡在 0KB。
+    debugPrint('[JAR_FIRST] 默认线路 = ${pick.displayName}（咕噜优先，走手动同路径）');
+    _selectLineReady(pick);
   }
 
   /// ENRICH（2026-11-15）：按「片名 + 年份」补两条线路。
