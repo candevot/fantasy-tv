@@ -35,7 +35,13 @@ class FxLineGroupSelector extends StatefulWidget {
     this.showHint = true,
     this.selectFirstOnGroupChange = true,
     this.pendingGroups = const <String>[],
+    this.merged = false,
   });
+
+  /// MERGED_LINES（2026-11-22 用户口径）：不再分「咕噜 / 幻想」两行 ——
+  /// 所有线路排成**一行**，顺序由调用方给定（头部固定 咕噜4K → SH4K →
+  /// 幻想爱奇艺，其余按原序）。置 true 时下面的分组行整条不再渲染。
+  final bool merged;
 
   /// 全部线路（自有 + jar 混在一起，组件自己按大类分组）。
   final List<LineInfo> lines;
@@ -136,8 +142,20 @@ class _FxLineGroupSelectorState extends State<FxLineGroupSelector> {
     return kOwnLineGroupKey;
   }
 
-  List<FxLineGroup> _groups() =>
-      fxLineGroups(widget.lines, pendingLabels: widget.pendingGroups);
+  List<FxLineGroup> _groups() {
+    if (!widget.merged) {
+      return fxLineGroups(widget.lines, pendingLabels: widget.pendingGroups);
+    }
+    // 融合成一组：key 用 own，label 留空（不渲染第一行）。
+    return <FxLineGroup>[
+      FxLineGroup(
+        key: kOwnLineGroupKey,
+        label: '',
+        lines: widget.lines,
+        own: true,
+      ),
+    ];
+  }
 
   /// 当前线路属于哪个大类；找不到时优先停在「正在加载」的大类，其次第一个
   /// 有线路的大类。
@@ -203,30 +221,31 @@ class _FxLineGroupSelectorState extends State<FxLineGroupSelector> {
               ),
             ),
           ),
-        SizedBox(
-          height: kFxLineGroupRowHeight,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: widget.padding,
-            itemCount: groups.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 8),
-            itemBuilder: (context, i) {
-              final group = groups[i];
-              return _GroupChip(
-                label: group.label,
-                count: group.lines.length,
-                own: group.own,
-                active: group.key == active.key,
-                // 大类里没有任何可用子线路：置灰不可点（用户口径第 4 条）。
-                // pending（正在取线路）同样不可点，但**看得见**。
-                enabled: group.available,
-                pending: group.pending,
-                onTap: () => _pickGroup(group),
-              );
-            },
+        if (!widget.merged)
+          SizedBox(
+            height: kFxLineGroupRowHeight,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: widget.padding,
+              itemCount: groups.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (context, i) {
+                final group = groups[i];
+                return _GroupChip(
+                  label: group.label,
+                  count: group.lines.length,
+                  own: group.own,
+                  active: group.key == active.key,
+                  // 大类里没有任何可用子线路：置灰不可点（用户口径第 4 条）。
+                  // pending（正在取线路）同样不可点，但**看得见**。
+                  enabled: group.available,
+                  pending: group.pending,
+                  onTap: () => _pickGroup(group),
+                );
+              },
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
+        if (!widget.merged) const SizedBox(height: 8),
         SizedBox(
           height: kFxLineGroupRowHeight,
           child: ListView.separated(

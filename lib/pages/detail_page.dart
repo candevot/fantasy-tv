@@ -2567,7 +2567,9 @@ class _DetailPageState extends State<DetailPage>
         // 直接把咕噜大类的「加载中」占位显示出来（JAR_PENDING）。
         if (d.lines.isNotEmpty || _jarPending)
           FxLineGroupSelector(
-            lines: d.lines,
+            // MERGED_LINES：不再分「咕噜 / 幻想」两行，融合成一行。
+            lines: fxApplyLineHeadOrder(d.lines),
+            merged: true,
             currentLineId: _lineId,
             onSelected: _selectLine,
             // JAR_PENDING：咕噜正在取线路时先按「加载中」占位（顺序固定
