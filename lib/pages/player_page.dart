@@ -165,7 +165,13 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   /// 慢网下一条线路正常也要十几二十秒，按时间封顶等于专挑慢网下手。
   /// 现在每条线路只在「连续 8 秒毫无进展」或「原生报真失败」时才被放弃，
   /// 所以这里的 3 次是「真失败时的连续失败次数」，不是时间预算。
-  static const int _maxLineAttempts = 3;
+  /// 换线 / 失败兜底时最多试几条线路。
+  ///
+  /// LINE_ATTEMPTS（2026-11-22 真机）：jar 源一个片子常有 6~14 条子线路
+  /// （咕噜4K / 咖啡4K / 金牌极速 / 玫瑰4K…），只试 3 条经常全落在坏线上，
+  /// 用户看到的就是「失败也不自动切」。放到 5 条：坏线 8 秒内判死（判死
+  /// 口径已修，见 FxProgressWindow.stalledFor），5 条最多也就几十秒。
+  static const int _maxLineAttempts = 5;
 
   /// 停摆 / 出错的自愈已整体搬进 FxPlayer：连续 30 秒无字节流动才判定
   /// 失败（缓冲中只显示「缓冲中 xx%」），随后静默跑
@@ -558,7 +564,11 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       // 超过 12 秒仍未结束则判定前一次已僵死，直接接管。
       _pendingSwitch = (targetLine, targetEp);
       final stuckFor = DateTime.now().difference(_switchStartedAt);
-      if (stuckFor < const Duration(seconds: 12)) return;
+      // SWITCH_TAKEOVER（2026-11-22 真机）：用户手点线路必须**立刻**生效。
+      // 以前要等满 12 秒才强制接管；配上 jar 线路的长判死窗口，用户点了
+      // 另一条线路，界面 10 多秒都没反应 —— 用户的原话是「切线路没生效」。
+      // 现在超过 2 秒就直接接管（正在跑的那次结果作废，token 已推进）。
+      if (stuckFor < const Duration(seconds: 2)) return;
       debugPrint('[FX] 上一次切换已僵死 ${stuckFor.inSeconds}s，强制接管');
       _switchToken++;
       _switchingLine = false;

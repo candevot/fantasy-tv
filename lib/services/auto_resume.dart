@@ -136,7 +136,7 @@ bool fxIsTokenParseLine({String url = '', String lineName = ''}) {
 /// 手点刷新时前两次已经把边缘拉热了。这里把 jar 线路的窗口放到 30 秒，
 /// 让第一次冷命中能跑完；配合起播时的首片预热（`_FxJarWarm`），第二次开始
 /// 就是热命中。
-const Duration fxJarStartupNoProgressWindow = Duration(seconds: 30);
+const Duration fxJarStartupNoProgressWindow = Duration(seconds: 25);
 
 /// 这次起播「连续无进展」该等多长：jar 线路 30 秒、令牌线路 20 秒、直链 8 秒。
 Duration fxStartupNoProgressWindowFor({

@@ -241,8 +241,14 @@ class FxProgressWindow {
   /// 已经连续多久**完全**没有进展。
   Duration get stalledFor {
     final last = latest;
-    if (last == null || _lastMoveAtMs < 0) return Duration.zero;
-    final gap = last.atMs - _lastMoveAtMs;
+    if (last == null) return Duration.zero;
+    // STALL_FROM_START（2026-11-22 真机）：以前「一次都没动过」返回 0，
+    // 于是**从第一个字节就没到**的死线路永远不算卡死 —— 8 秒判死形同虚设，
+    // 只能等 30 秒慢网硬上限，再叠加两次重解析就是 60~90 秒才有反应。
+    // 用户看到的就是「切线路没反应、失败也不自动切」。
+    // 正确口径：还没动过 = 从第一次采样算起一直在停。
+    final since = _lastMoveAtMs < 0 ? 0 : _lastMoveAtMs;
+    final gap = last.atMs - since;
     return Duration(milliseconds: gap < 0 ? 0 : gap);
   }
 

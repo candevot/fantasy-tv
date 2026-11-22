@@ -9,18 +9,18 @@ import 'package:fantasy_tv/services/auto_resume.dart';
 import 'package:fantasy_tv/services/playback_progress.dart';
 
 void main() {
-  test('jar 线路用 30 秒窗口，且与地址形态无关', () {
+  test('jar 线路用 25 秒窗口，且与地址形态无关', () {
     expect(
       fxStartupNoProgressWindowFor(
         url: 'https://xfyvideo.online/m.php?data=abc',
         lineName: '咕噜',
         jarLine: true,
       ),
-      const Duration(seconds: 30),
+      const Duration(seconds: 25),
     );
     expect(
       fxStartupNoProgressWindowFor(jarLine: true),
-      const Duration(seconds: 30),
+      const Duration(seconds: 25),
     );
   });
 
