@@ -195,11 +195,28 @@ class _DetailPageState extends State<DetailPage>
   /// 已经跑过一轮 jar 合并（成功 / 空都算）：刷新详情时不再重复挂占位。
   bool _jarMergeDone = false;
 
+  /// JAR_SINGLE_OPEN（2026-11-22）：等咕噜线路到齐再起播。
+  ///
+  /// 用户实测「点进去自动播放会加载两下，然后 0 KB 不动，手点刷新才播」。
+  /// 两次加载来自这里：播放器一挂上就 bootstrap **自有线路**（幻想4K…），
+  /// 等 jar 合并完再把默认线路改成咕噜，播放器又切一次 —— 第二次起播正好
+  /// 赶在第一次的销毁/接管窗口里，落成 0 KB。
+  ///
+  /// 现在 jar 可用且还没合并完时，播放区先显示占位（最多 [_jarBootWaitMs]），
+  /// 合并一结束就带着咕噜线路**只起播一次**。jar 不可用时一行都不等。
+
   /// 用户亲手点过线路：之后到达的 jar 线路**不许**再改默认选中。
   bool _linePickedByUser = false;
 
   /// 占位的兜底计时器：jar 源再慢也不能让「加载中」一直转。
   Timer? _jarPendingTimer;
+
+  /// 见 [_jarBootWait] 的注释；超时回落自有线路，绝不把播放卡死在这里。
+  bool _jarBootWait = false;
+  Timer? _jarBootWaitTimer;
+
+  /// 等 jar 线路的最长时间：jar 搜索一般 1~3 秒，超过就直接用自有线路起播。
+  static const int _jarBootWaitMs = 2600;
 
   /// 上一次看到的「jar 已就绪」状态：false → true 那一刻要补一次 jar 线路
   /// （JAR_BOOT 2026-11-21：冷启动边装边用，装好的时候详情页可能已经开着）。
@@ -318,9 +335,35 @@ class _DetailPageState extends State<DetailPage>
   }
 
   /// 把咕噜大类挂成「加载中」占位（幂等；已经合并过就不再挂）。
+  /// 开「等 jar 线路再起播」的窗口（幂等，超时自动放行）。
+  void _startJarBootWait() {
+    if (!mounted || !_jarUsable || _jarMergeDone) return;
+    _jarBootWaitTimer?.cancel();
+    _jarBootWaitTimer = Timer(const Duration(milliseconds: _jarBootWaitMs), () {
+      if (!mounted || !_jarBootWait) return;
+      setState(() => _jarBootWait = false);
+      debugPrint('[JAR_SINGLE_OPEN] 等 jar 超时，回落自有线路起播');
+    });
+    if (_jarBootWait) return;
+    setState(() => _jarBootWait = true);
+  }
+
+  void _stopJarBootWait() {
+    _jarBootWaitTimer?.cancel();
+    _jarBootWaitTimer = null;
+    if (!_jarBootWait) return;
+    if (!mounted) {
+      _jarBootWait = false;
+      return;
+    }
+    setState(() => _jarBootWait = false);
+  }
+
   void _startJarPending() {
+    _startJarBootWait();
     if (!mounted || !_jarUsable || _jarMergeDone) return;
     _jarPendingTimer?.cancel();
+    _jarBootWaitTimer?.cancel();
     _jarPendingTimer = Timer(const Duration(seconds: 20), () {
       if (!mounted || !_jarPending) return;
       setState(() => _jarPending = false);
@@ -499,10 +542,14 @@ class _DetailPageState extends State<DetailPage>
         // 正是用户说的「先显示幻想再突然跳成咕噜」。
         _jarPending =
             _jarUsable && !_jarMergeDone && !CmsBridge.isJarLine(lineId);
+        // JAR_SINGLE_OPEN：这一帧就开始等 jar 线路（最多 2.6 秒），
+        // 免得播放器先起播自有线路、再被切到咕噜造成两次起播。
+        _jarBootWait = _jarUsable && !_jarMergeDone;
         // 从历史 / 播放器带集数进来时，选集条要切到能看见这一集的分组，
         // 才能高亮并滚动到对应集数。
         _groupIndex = _groupIndexOf(_episodeGroups, ep);
       });
+      _startJarBootWait();
       // ENRICH（2026-11-15）：搜索命中后补线路（幻想爱奇艺 / SH4K）。
       // 后台跑，不阻塞详情页；命中就追加到线路列表，并参与现有排序
       // （付费线在前、按实测分辨率）与自动切线。
@@ -1962,6 +2009,8 @@ class _DetailPageState extends State<DetailPage>
       _jarMerging = false;
       _jarMergeDone = true;
       _stopJarPending();
+      // 线路已定（含咕噜默认）→ 放心起播，这一次就是最终线路。
+      _stopJarBootWait();
     }
   }
 
@@ -2347,12 +2396,21 @@ class _DetailPageState extends State<DetailPage>
           // 视频区明显变小）。竖屏短剧按自身比例变高，上限 62% 屏高，
           // 否则 9:16 的片子会把整页顶下去、选集要滑很远。
           final screenHeight = MediaQuery.sizeOf(context).height;
+          final stageHeight = fxPlayerStageHeight(
+            width: constraints.maxWidth,
+            videoRatio: _videoAspect,
+            maxHeight: screenHeight * .62,
+          );
+          // JAR_SINGLE_OPEN：等咕噜线路到齐再挂播放器 —— 否则会先起播自有
+          // 线路、再被切到咕噜，用户看到的就是「加载两下然后 0 KB」。
+          if (_jarBootWait && !_jarMergeDone) {
+            return SizedBox(
+              height: stageHeight,
+              child: const _JarBootPlaceholder(),
+            );
+          }
           return SizedBox(
-            height: fxPlayerStageHeight(
-              width: constraints.maxWidth,
-              videoRatio: _videoAspect,
-              maxHeight: screenHeight * .62,
-            ),
+            height: stageHeight,
             child: PlayerView(
               key: _playerKey,
               videoId: widget.id,
@@ -3168,6 +3226,29 @@ class _DetailPageState extends State<DetailPage>
         child: Text(
           '— 已经到底啦 —',
           style: TextStyle(fontSize: 10.5, color: skin.hint),
+        ),
+      ),
+    );
+  }
+}
+
+/// JAR_SINGLE_OPEN：等咕噜线路到齐时的播放区占位。
+///
+/// 只占位置、不动播放器 —— 合并一结束它就被真正的 [PlayerView] 换掉，
+/// 那一次起播用的就是最终线路（默认咕噜），不会再有「先播幻想再切咕噜」。
+class _JarBootPlaceholder extends StatelessWidget {
+  const _JarBootPlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return const ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: SizedBox(
+          width: 26,
+          height: 26,
+          child: CircularProgressIndicator(
+              strokeWidth: 2.4, color: Colors.white70),
         ),
       ),
     );
