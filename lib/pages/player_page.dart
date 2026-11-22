@@ -967,7 +967,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     // 片尾窗口内一律归零：用户在最后几十秒退出很常见（等片尾曲、
     // 看预告），若照原样存下来，下次打开就从那里播 —— 表现就是
     // 「一打开就是片尾、总共只有几十秒」。
-    if (!ended && fxIsFinishedPosition(positionMs / 1000.0, durationMs / 1000.0)) {
+    if (!ended &&
+        fxIsFinishedPosition(positionMs / 1000.0, durationMs / 1000.0)) {
       seconds = 0;
     }
     await fxSaveProgress(widget.videoId, ep, seconds);
@@ -1205,12 +1206,15 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     required bool forcePlayInfo,
     double? resumeSeconds,
     bool? playOverride,
+
     /// 第几次「重新解析后重起播」（0 = 首播）。重试沿用同一个代际，
     /// 不再 `++_loadToken` —— 否则上一层的 `_openingToken` 会对不上，
     /// 用户这时点线路会被判成「重复请求」而吞掉。
     int reparse = 0,
+
     /// 上一次失败用的地址（打进 `[JarPlay] retry=N … old=`）。
     String prevUrl = '',
+
     /// 上一次失败的原因（打进 `retry=N … reason=`）。
     String retryReason = '',
   }) async {
@@ -1352,8 +1356,10 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         if (!isDeadAddress(u)) u,
     ];
     if (usable.isEmpty) {
-      final name = fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], line);
-      fxPlayLog('FAIL line=$name ep=$ep reason=dead_line url=${candidates.first}');
+      final name =
+          fxLineNameOf(widget.detail?.lines ?? const <LineInfo>[], line);
+      fxPlayLog(
+          'FAIL line=$name ep=$ep reason=dead_line url=${candidates.first}');
       FxLineCooldown.markFailed(widget.videoId, name);
       if (!mounted || token != _loadToken) return false;
       setState(() {
@@ -1464,77 +1470,79 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
             ),
           );
         };
-        final openFuture = controller
-            .open(
-              url,
-              headers: info.headers,
-              play: shouldPlay,
-              // 续播：起始位置直接交给 open（原生 prepare 之前 seekTo），
-              // 首个分片请求就是目标片。以前先拉第 0 片再 seek，第 0 片会
-              // 把服务端 /api/seg 的首片中转名额用掉，续播反而更慢。
-              startPosition: Duration(
-                milliseconds: saved.isFinite ? (saved * 1000).round() : 0,
-              ),
-              // 用服务端声明的类型：幻想自建的地址没有 .m3u8 后缀，
-              // 按后缀猜会被当成普通视频，直接解析失败。
-              isHls: info.isHls,
-              // GULU_FIRST_PLAY：短寿命线路不做任何前置动作（不预检、
-              // 不预取拖动索引）—— 它们抓的就是播放器正在用的这条地址，
-              // 抢一次就可能让首播 0 KB/s 卡住。详见 FxPlayer.open 的说明。
-              preflight: !FxPlayCache.isShortLived(line),
-              // 只有「平台签名线路」才走本地代理（需要代理改写签名、
-              // 定时换新地址）。普通采集线路直接交给 mpv 边下边播。
-              //
-              // 这是 4K 卡顿的根因：代理是「整片下完再交给 mpv」，
-              // 1080P 分片 1~2MB 看不出来，4K 分片 10~40MB 时
-              // mpv 要等整个分片下完才能解码，表现就是一直卡、
-              // 一直转圈。别的播放器没这问题就是因为它直接让 mpv 拉流。
-              // 按实际地址判断：腾讯直连是 CDN 绝对地址，不需要代理；
-              // 只有爱奇艺 /api/iqiyi.m3u8 这类站内包装地址才需要。
-              // HLS 一律交给本地代理：整集预加载 / 预取让位 / 下一片保护
-              // 全都做在代理里，采集线路（红牛/量子/蓝光/4K）也是公网直链，
-              // 之前被判「不需要代理」就完全享受不到这些优化。
-              direct: fxShouldUseHlsProxy(url, isHls: info.isHls),
-              // 平台线路签名过期时，代理会回调这里重新走 /api/play。
-              refreshPlay: () => _refreshPlatformUrl(line, ep),
-              onPlayExpired: () {
-                if (!mounted || token != _loadToken) return;
-                _emitSourceIssue(SourceIssue.expired);
-              },
-              // 无感救援链第③步：本线路 ①refreshPlay ②同地址重开都失败后，
-              // 播放器会静默回调这里换下一条线路（并 seek 回原进度）。
-              rescueLines: () async {
-                if (!mounted || token != _loadToken) return null;
-                final lines = widget.detail?.lines ?? const <LineInfo>[];
-                if (lines.length < 2) return null;
-                final index = lines.indexWhere((l) => l.id == line);
-                for (var k = 1; k <= lines.length; k++) {
-                  final next = lines[(index + k) % lines.length];
-                  if (next.id == line || next.id.trim().isEmpty) continue;
-                  try {
-                    final fresh =
-                        await CmsBridge.play(widget.videoId, ep, next.id);
-                    // 救援换线同样补成绝对地址，避免新线路退化成走代理。
-                    final freshUrl =
-                        CmsBridge.absolutePlayUrl(widget.videoId, fresh.url);
-                    if (freshUrl.isEmpty) continue;
-                    FxPlayCache.invalidate(widget.videoId, ep, line);
-                    if (mounted && token == _loadToken) {
-                      setState(() => _line = next.id);
-                      _activeCastUrl = null;
-                    }
-                    return FxLineSource(
-                      url: freshUrl,
-                      headers: fresh.headers,
-                      direct: fresh.direct && fresh.isHls,
-                    );
-                  } catch (_) {
-                    // 这条也取不到地址就继续试下一条线路。
-                  }
+        final openFuture = controller.open(
+          url,
+          headers: info.headers,
+          play: shouldPlay,
+          // 续播：起始位置直接交给 open（原生 prepare 之前 seekTo），
+          // 首个分片请求就是目标片。以前先拉第 0 片再 seek，第 0 片会
+          // 把服务端 /api/seg 的首片中转名额用掉，续播反而更慢。
+          startPosition: Duration(
+            milliseconds: saved.isFinite ? (saved * 1000).round() : 0,
+          ),
+          // 用服务端声明的类型：幻想自建的地址没有 .m3u8 后缀，
+          // 按后缀猜会被当成普通视频，直接解析失败。
+          isHls: info.isHls,
+          // GULU_FIRST_PLAY：短寿命线路不做任何前置动作（不预检、
+          // 不预取拖动索引）—— 它们抓的就是播放器正在用的这条地址，
+          // 抢一次就可能让首播 0 KB/s 卡住。详见 FxPlayer.open 的说明。
+          preflight: !FxPlayCache.isShortLived(line),
+          // JAR_WARM（2026-11-22）：jar 线路并行拉热首片前 1MB。
+          // 实测冷边缘 10~25 秒、热边缘 1.6 秒，这一步只读数据、不碰
+          // 现签令牌，也不阻塞 open。详见 _FxJarWarm 的注释。
+          warmSegments: FxPlayCache.isShortLived(line),
+          // 只有「平台签名线路」才走本地代理（需要代理改写签名、
+          // 定时换新地址）。普通采集线路直接交给 mpv 边下边播。
+          //
+          // 这是 4K 卡顿的根因：代理是「整片下完再交给 mpv」，
+          // 1080P 分片 1~2MB 看不出来，4K 分片 10~40MB 时
+          // mpv 要等整个分片下完才能解码，表现就是一直卡、
+          // 一直转圈。别的播放器没这问题就是因为它直接让 mpv 拉流。
+          // 按实际地址判断：腾讯直连是 CDN 绝对地址，不需要代理；
+          // 只有爱奇艺 /api/iqiyi.m3u8 这类站内包装地址才需要。
+          // HLS 一律交给本地代理：整集预加载 / 预取让位 / 下一片保护
+          // 全都做在代理里，采集线路（红牛/量子/蓝光/4K）也是公网直链，
+          // 之前被判「不需要代理」就完全享受不到这些优化。
+          direct: fxShouldUseHlsProxy(url, isHls: info.isHls),
+          // 平台线路签名过期时，代理会回调这里重新走 /api/play。
+          refreshPlay: () => _refreshPlatformUrl(line, ep),
+          onPlayExpired: () {
+            if (!mounted || token != _loadToken) return;
+            _emitSourceIssue(SourceIssue.expired);
+          },
+          // 无感救援链第③步：本线路 ①refreshPlay ②同地址重开都失败后，
+          // 播放器会静默回调这里换下一条线路（并 seek 回原进度）。
+          rescueLines: () async {
+            if (!mounted || token != _loadToken) return null;
+            final lines = widget.detail?.lines ?? const <LineInfo>[];
+            if (lines.length < 2) return null;
+            final index = lines.indexWhere((l) => l.id == line);
+            for (var k = 1; k <= lines.length; k++) {
+              final next = lines[(index + k) % lines.length];
+              if (next.id == line || next.id.trim().isEmpty) continue;
+              try {
+                final fresh = await CmsBridge.play(widget.videoId, ep, next.id);
+                // 救援换线同样补成绝对地址，避免新线路退化成走代理。
+                final freshUrl =
+                    CmsBridge.absolutePlayUrl(widget.videoId, fresh.url);
+                if (freshUrl.isEmpty) continue;
+                FxPlayCache.invalidate(widget.videoId, ep, line);
+                if (mounted && token == _loadToken) {
+                  setState(() => _line = next.id);
+                  _activeCastUrl = null;
                 }
-                return null;
-              },
-            );
+                return FxLineSource(
+                  url: freshUrl,
+                  headers: fresh.headers,
+                  direct: fresh.direct && fresh.isHls,
+                );
+              } catch (_) {
+                // 这条也取不到地址就继续试下一条线路。
+              }
+            }
+            return null;
+          },
+        );
         // IQ_CODEC：HEVC 候选的「无进展」窗口收紧到 8 秒（解码器起不来时
         // 不值得拖），超时 / 解码报错都会落到 catch，下一条就是它的 AVC 地址。
         await _awaitOpenWithProgress(
@@ -1703,9 +1711,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       //     「到点就切」，不能被这里拖成 30s × 3；
       //   · 重试用尽才落到最后的失败分支（原线重试 → 全线路轮 → 跨源），
       //     自动切线路的既有逻辑一行没动。
-      final reason = _lastOpenError.trim().isEmpty
-          ? 'no_progress'
-          : _lastOpenError.trim();
+      final reason =
+          _lastOpenError.trim().isEmpty ? 'no_progress' : _lastOpenError.trim();
       if (fxShouldReparsePlay(reparse: reparse, reason: reason)) {
         openWatch.stop();
         final next = reparse + 1;
@@ -1756,9 +1763,9 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
         // 独立播放页），播放器自己换下一条线路 —— 需求是「起播失败要有明确
         // 提示并且能自动换下一条」，这几种页面没有外层可换，只能这里换。
         // AUTO_LINE_FULL（2026-11-15）：外层没接失败回调时（独立播放页 / 一起看）
-    // 播放器自己把本片所有线路轮一遍；接了回调的（详情页）由外层统一驱动，
-    // 免得两边同时开轮、互相打断。
-    if (widget.onSourceFailed == null) _autoSwitchNextLine();
+        // 播放器自己把本片所有线路轮一遍；接了回调的（详情页）由外层统一驱动，
+        // 免得两边同时开轮、互相打断。
+        if (widget.onSourceFailed == null) _autoSwitchNextLine();
       }
       return false;
     }
@@ -2043,8 +2050,7 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
   Future<String?> _refreshPlatformUrl(String line, int ep) async {
     if (widget.videoId.isEmpty || line.isEmpty) return null;
     try {
-      final info =
-          await CmsBridge.play(widget.videoId, ep, line, fresh: true);
+      final info = await CmsBridge.play(widget.videoId, ep, line, fresh: true);
       final url = info.url.trim();
       if (url.isEmpty) return null;
       // 旧签名已失效，清掉缓存，避免稍后切回本线路又命中过期地址。
@@ -2270,7 +2276,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
     if (!mounted || !_loading) return;
     _openWaited = elapsed;
     setState(() {});
-    final slow = elapsed >= fxSlowNoticeAfter && verdict == FxProgressState.slow;
+    final slow =
+        elapsed >= fxSlowNoticeAfter && verdict == FxProgressState.slow;
     if (slow == _slowNotice) return;
     _setSlowNotice(slow);
     if (slow) {
@@ -2585,7 +2592,8 @@ class PlayerViewState extends State<PlayerView> with WidgetsBindingObserver {
       fxHasAdjacentEpisode(_episodeList, ep, delta, _episodeCount);
 
   /// 上一集（和 [_nextEpNumber] 同一套口径：明确集数表优先，否则按总集数算）。
-  int? _prevEpNumber() => fxAdjacentEpisode(_episodeList, _ep, -1, _episodeCount);
+  int? _prevEpNumber() =>
+      fxAdjacentEpisode(_episodeList, _ep, -1, _episodeCount);
 
   int? _nextEpNumber() {
     final list = _episodeList;

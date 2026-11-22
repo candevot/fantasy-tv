@@ -85,7 +85,8 @@ String parseKindFor(String lineName, String address) {
 ///
 /// `unknown`（来源未知）同样不允许：宁可把 CMS 的真实错误透给页面，也不要
 /// 在用户等待里再塞 16 秒。
-bool legacyPlayAllowed({required bool legacyEnabled, required CmsOrigin origin}) =>
+bool legacyPlayAllowed(
+        {required bool legacyEnabled, required CmsOrigin origin}) =>
     legacyEnabled && origin == CmsOrigin.legacy;
 
 /// 一条播放记录来自哪个后端。
@@ -120,10 +121,7 @@ bool shouldReuseOpen({
   required int currentToken,
   required bool force,
 }) =>
-    hasPending &&
-    !force &&
-    pendingKey == key &&
-    pendingToken == currentToken;
+    hasPending && !force && pendingKey == key && pendingToken == currentToken;
 
 /// 首播失败后最多「自动重新解析再起播」几次（GULU_FIRST_PLAY 2026-11-22）。
 ///
@@ -141,6 +139,25 @@ const int fxFirstPlayReparseMax = 2;
 ///
 /// [reason] 是 `_lastOpenError` 的口径（`播放超时` / `线路不可用(403)` /
 /// `连续 8 秒无进展` …）；空串按「无进展」处理，照样值得再签一条地址。
+/// 从 m3u8 正文里取「第一条分片」的绝对地址（相对地址按 [baseUrl] 补全）。
+///
+/// JAR_WARM（2026-11-22）：咕噜这类 jar 线路的 CDN 边缘冷启动极慢，起播前
+/// 要先把首片拉热一点。这段逻辑独立成纯函数，方便单测覆盖相对地址 / 注释行 /
+/// 空正文三种情况，别在下层网络代码里现写一遍。
+String fxFirstSegmentOf(String playlist, String baseUrl) {
+  for (final raw in playlist.split('\n')) {
+    final line = raw.trim();
+    if (line.isEmpty || line.startsWith('#')) continue;
+    if (line.startsWith('http://') || line.startsWith('https://')) return line;
+    try {
+      return Uri.parse(baseUrl).resolve(line).toString();
+    } catch (_) {
+      return line;
+    }
+  }
+  return '';
+}
+
 bool fxShouldReparsePlay({required int reparse, required String reason}) {
   if (reparse >= fxFirstPlayReparseMax) return false;
   if (reason.trim().contains('慢网超时')) return false;
@@ -217,6 +234,6 @@ bool isDeadLine(String name, Iterable<String> addresses) {
     for (final a in addresses)
       if (a.trim().isNotEmpty) a.trim(),
   ];
-  if (list.isEmpty) return true;   // 没有地址 = 没得播
+  if (list.isEmpty) return true; // 没有地址 = 没得播
   return list.every(isDeadAddress);
 }

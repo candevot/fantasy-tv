@@ -16,6 +16,7 @@ import 'live_edge.dart';
 import 'local_hls_proxy.dart';
 import 'playback_progress.dart';
 import 'playback_recovery.dart';
+import 'play_path.dart';
 import 'play_log.dart';
 
 /// FxPlayer 打开/播放失败时抛出的异常，调用方可据此尝试备用地址。
@@ -222,9 +223,8 @@ class FxPlayerValue {
   /// 以上取整（`320 KB/s`）。两处文案必须一致，否则顶栏和缓冲层会显示
   /// 两个不同的数。
   String get realSpeedText {
-    final b = bytesLoadedPerSec > 0
-        ? bytesLoadedPerSec.toDouble()
-        : bytesPerSecond;
+    final b =
+        bytesLoadedPerSec > 0 ? bytesLoadedPerSec.toDouble() : bytesPerSecond;
     if (b <= 0) return '';
     if (b >= 1024 * 1024) return '${(b / 1024 / 1024).toStringAsFixed(1)} MB/s';
     final kb = b / 1024;
@@ -493,8 +493,8 @@ class FxPlayer implements Listenable {
     )? onSample,
   }) async {
     final watch = Stopwatch()..start();
-    final window =
-        progress ?? FxProgressWindow(window: noProgress ?? fxStartupNoProgressWindow);
+    final window = progress ??
+        FxProgressWindow(window: noProgress ?? fxStartupNoProgressWindow);
     if (noProgress != null) window.window = noProgress;
     var slowCapMs = fxSlowStartupCap.inMilliseconds;
     var lastLogMs = -1000;
@@ -809,6 +809,7 @@ class FxPlayer implements Listenable {
     Map<String, String> headers = const <String, String>{},
     bool play = false,
     bool direct = false,
+
     /// 服务端给的类型（PlayInfo.isHls）。给了就以它为准，不再靠地址后缀猜。
     ///
     /// 幻想自建（pt_zijian）返回的是 `.../cloud/flv/xxx` 这种没有 .m3u8 的
@@ -816,6 +817,7 @@ class FxPlayer implements Listenable {
     /// ProgressiveMediaSource，直接解析失败 —— 表现就是「自建线路播不出来」。
     /// libmpv 时代能播是因为 ffmpeg 会自己嗅探格式，ExoPlayer 不会。
     bool? isHls,
+
     /// 起始播放位置（续播 / 跟房主进度）。
     ///
     /// 原生侧在 `prepare()` 之前就 `seekTo(起始位置)`：ExoPlayer 会直接
@@ -826,6 +828,17 @@ class FxPlayer implements Listenable {
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
     FxLineRescue? rescueLines,
+
+    /// JAR_WARM（2026-11-22）：短寿命 jar 线路起播时，要不要**并行**把首片
+    /// 前 1MB 拉热（fire-and-forget，不阻塞 open、不改地址、失败静默）。
+    ///
+    /// 为什么需要：咕噜这类线路的分片落在 xfyvideo.online 这类边缘节点上，
+    /// 冷命中要 10~25 秒，热命中 1.6 秒（实测同一 6.2MB 分片）。用户实测
+    /// 「默认线路是咕噜时要等 20 秒，手动刷新 5 秒就好」就是冷/热差；以前
+    /// 是并行预检顺带把边缘拉热的，GULU_FIRST_PLAY 关掉预检（怕吃掉现签
+    /// 地址）之后就没人热身了。这里补一个只读数据、不碰签名的热身。
+    bool warmSegments = false,
+
     /// 起播前还要不要做任何「前置动作」：并行线路预检（PROBE 2026-11-15）
     /// 与首帧后的拖动索引预取 —— 两者都会拿**播放器正在用的那条地址**
     /// 再发一次请求。
@@ -855,9 +868,8 @@ class FxPlayer implements Listenable {
     // 记下服务端声明的类型，供 _openMedia / 救援重开使用。
     _typeHint = isHls;
     _preflightEnabled = preflight;
-    final startMs = startPosition.inMilliseconds < 0
-        ? 0
-        : startPosition.inMilliseconds;
+    final startMs =
+        startPosition.inMilliseconds < 0 ? 0 : startPosition.inMilliseconds;
     final key = _openKey(url, headers, direct, startMs);
     final pending = _opening;
     if (pending != null && pending.key == key) return pending.future;
@@ -870,6 +882,7 @@ class FxPlayer implements Listenable {
       refreshPlay,
       onPlayExpired,
       rescueLines,
+      warmSegments,
     );
     final request = _OpenRequest(key, future);
     _opening = request;
@@ -889,9 +902,10 @@ class FxPlayer implements Listenable {
     final suffix = direct ? '|direct=1' : '';
     final start = startPositionMs > 0 ? '|from=$startPositionMs' : '';
     if (headers.isEmpty) return '$url$suffix$start';
-    final entries =
-        headers.entries.map((entry) => '${entry.key}=${entry.value}').toList()
-          ..sort();
+    final entries = headers.entries
+        .map((entry) => '${entry.key}=${entry.value}')
+        .toList()
+      ..sort();
     return '$url$suffix$start|${entries.join('&')}';
   }
 
@@ -904,6 +918,7 @@ class FxPlayer implements Listenable {
     PlayUrlRefresher? refreshPlay,
     PlayExpiredCallback? onPlayExpired,
     FxLineRescue? rescueLines,
+    bool warmSegments,
   ) async {
     _playIntent = play;
     final token = ++_openToken;
@@ -926,6 +941,7 @@ class FxPlayer implements Listenable {
     _notify();
     _sourceUrl = url;
     _sourceHeaders = headers;
+    if (warmSegments) unawaited(_FxJarWarm.warm(url, headers));
     _sourceDirect = direct;
     _refreshPlay = refreshPlay;
     _onPlayExpired = onPlayExpired;
@@ -974,6 +990,7 @@ class FxPlayer implements Listenable {
         play: play,
         token: token,
         startPositionMs: startPositionMs,
+        warmSegments: warmSegments,
         // 毫秒数交给原生，并进同一条时间线（原生时间线的起点就是 open）。
         // 加上 FxPlayCache 记下的 /api/play（hxparse）耗时：那一步在 open
         // 之前，属于同一次「用户点播放」的等待。
@@ -1102,7 +1119,8 @@ class FxPlayer implements Listenable {
       if (fatal.isNotEmpty && fatal != _lastFatalCode) {
         _lastFatalCode = fatal;
         _logFx('OPEN 放弃：真失败 $fatal ${_shortUrl(_sourceUrl)}');
-        _noteStartupFailure(fatal, resolveFailure: fxIsResolveFailureCode(fatal));
+        _noteStartupFailure(fatal,
+            resolveFailure: fxIsResolveFailureCode(fatal));
         _fail('线路不可用($fatal)');
         throw FxPlayerException('线路不可用($fatal)');
       }
@@ -1300,6 +1318,8 @@ class FxPlayer implements Listenable {
     required bool play,
     required int token,
     int startPositionMs = 0,
+    bool warmSegments = false,
+
     /// Dart 侧解析地址花掉的毫秒数；透传给原生并进它的起播时间线。
     int resolveMs = 0,
   }) async {
@@ -1540,8 +1560,7 @@ class FxPlayer implements Listenable {
     final v = _value;
     if (!v.isInitialized || v.hasError) return false;
     final pos = v.position;
-    final rewound =
-        expected > const Duration(seconds: 5) &&
+    final rewound = expected > const Duration(seconds: 5) &&
         pos + const Duration(seconds: 3) < expected;
     final frozen = wasPlaying && !v.isPlaying;
     if (!rewound && !frozen) return false;
@@ -1724,8 +1743,7 @@ class FxPlayer implements Listenable {
     );
 
     final secondChanged = shown.inSeconds != _value.position.inSeconds;
-    final stateChanged =
-        next.isPlaying != _value.isPlaying ||
+    final stateChanged = next.isPlaying != _value.isPlaying ||
         next.isBuffering != _value.isBuffering ||
         // 首帧状态翻转必须立刻通知：加载层就是靠它收起的。
         next.hasRenderedFirstFrame != _value.hasRenderedFirstFrame ||
@@ -1982,7 +2000,10 @@ class FxPlayer implements Listenable {
     if (_disposed || _rescueBusy) return;
     final v = _value;
     if (v.hasError) return;
-    if (_opening != null || _ready != null || !v.isInitialized || v.isCompleted) {
+    if (_opening != null ||
+        _ready != null ||
+        !v.isInitialized ||
+        v.isCompleted) {
       _lastFlowAt = DateTime.now();
       return;
     }
@@ -2024,8 +2045,7 @@ class FxPlayer implements Listenable {
     final posMoved = v.position != _lastFlowPos;
     final bufferedMoved = v.buffered != _lastFlowBuffered;
     final stateMoved = st.state != _lastFlowState;
-    final bytesMoved =
-        st.bytesLoaded >= 0 && st.bytesLoaded != _lastFlowBytes;
+    final bytesMoved = st.bytesLoaded >= 0 && st.bytesLoaded != _lastFlowBytes;
     if (bytesMoved) _lastFlowBytes = st.bytesLoaded;
     _lastFlowPos = v.position;
     _lastFlowBuffered = v.buffered;
@@ -2331,9 +2351,8 @@ class FxPlayer implements Listenable {
           source,
           play: !reopenPaused,
           token: token,
-          startPositionMs: live || resume <= Duration.zero
-              ? 0
-              : resume.inMilliseconds,
+          startPositionMs:
+              live || resume <= Duration.zero ? 0 : resume.inMilliseconds,
           resolveMs:
               resolveWatch.elapsedMilliseconds + FxPlayCache.recentResolveMs(),
         ).timeout(_rescueOpenTimeout);
@@ -2628,7 +2647,8 @@ class FxPlayCache {
       );
       if (enriched != null) return enriched;
       return CmsBridge.play(id, ep, line);
-    }().then((info) {
+    }()
+        .then((info) {
       resolveWatch.stop();
       _lastResolveMs = resolveWatch.elapsedMilliseconds;
       _lastResolveAt = DateTime.now();
@@ -2733,6 +2753,95 @@ class _CachedPlayInfo {
 /// 壳（FongMi/TV）压根没有这一步：解析出直链就 `setMediaSource` + `prepare`。
 /// 所以这里只保留「系统 DNS 预热」——几毫秒、不产生 HTTP 请求、不占连接，
 /// 而且对 ExoPlayer 的 HttpURLConnection 也有效（同一个系统解析缓存）。
+/// JAR_WARM（2026-11-22）：jar 线路首片边缘预热。
+///
+/// 只做两件事、全部 fire-and-forget：
+///   1. 拉一次 m3u8 正文（上限 512KB），取出第一条分片地址；
+///   2. 用 `Range: bytes=0-1048575` 拉首片前 1MB 然后丢掉。
+///
+/// 目的不是「替播放器下载」，而是让 CDN 边缘把这一片从源站回源好 ——
+/// 播放器自己那次请求随后就到，命中热边缘即秒开。
+///
+/// 三条约束：不阻塞 open；不修改地址（现签令牌原样使用）；同一地址 60 秒
+/// 内只热一次。任何失败都静默，绝不影响播放。
+class _FxJarWarm {
+  static const Duration _ttl = Duration(seconds: 60);
+  static const int _playlistMaxBytes = 512 * 1024;
+  static const int _segmentWarmBytes = 1024 * 1024;
+  static final Map<String, DateTime> _warmed = <String, DateTime>{};
+
+  static Future<void> warm(
+    String url,
+    Map<String, String> headers,
+  ) async {
+    if (url.isEmpty) return;
+    final uri = Uri.tryParse(url);
+    if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) return;
+    final now = DateTime.now();
+    final at = _warmed[url];
+    if (at != null && now.difference(at) < _ttl) return;
+    _warmed[url] = now;
+    if (_warmed.length > 32) {
+      _warmed.remove(_warmed.keys.first);
+    }
+    try {
+      final text = await _getText(url, headers);
+      if (text.isEmpty) return;
+      final seg = fxFirstSegmentOf(text, url);
+      if (seg.isEmpty) return;
+      await _getBytes(seg, headers);
+    } catch (_) {
+      // 预热失败一律静默：它只是让快更快，不能变成新的失败点。
+    }
+  }
+
+  static Future<String> _getText(
+    String url,
+    Map<String, String> headers,
+  ) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+    try {
+      final req = await client.getUrl(Uri.parse(url));
+      req.headers.set('Range', 'bytes=0-$_playlistMaxBytes');
+      headers.forEach(req.headers.set);
+      final res = await req.close().timeout(const Duration(seconds: 8));
+      if (res.statusCode < 200 || res.statusCode >= 400) {
+        await res.drain<void>();
+        return '';
+      }
+      final bytes = await res.fold<List<int>>(<int>[], (acc, chunk) {
+        if (acc.length < _playlistMaxBytes) acc.addAll(chunk);
+        return acc;
+      }).timeout(const Duration(seconds: 10));
+      return String.fromCharCodes(bytes);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static Future<void> _getBytes(
+    String url,
+    Map<String, String> headers,
+  ) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+    try {
+      final req = await client.getUrl(Uri.parse(url));
+      req.headers.set('Range', 'bytes=0-${_segmentWarmBytes - 1}');
+      headers.forEach(req.headers.set);
+      final res = await req.close().timeout(const Duration(seconds: 8));
+      if (res.statusCode < 200 || res.statusCode >= 400) {
+        await res.drain<void>();
+        return;
+      }
+      await res
+          .fold<int>(0, (n, chunk) => n + chunk.length)
+          .timeout(const Duration(seconds: 25));
+    } finally {
+      client.close(force: true);
+    }
+  }
+}
+
 class _FxHlsWarmup {
   static const Duration _ttl = Duration(minutes: 8);
   static final Map<String, DateTime> _warmed = <String, DateTime>{};
