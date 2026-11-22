@@ -383,6 +383,38 @@ List<FxLineGroup> fxLineGroups(
 /// JAR_FIRST（2026-11-22 用户口径）：「优先使用咕噜」。这里只回答「有咕噜
 /// 该选哪条」，没有咕噜时返回 null，调用方回落到原来的健康度默认线
 /// （`LineHealth.defaultLine`）—— 绝不替它做决定、也不碰死线路判断。
+/// 线路显示顺序的固定头部（用户钉死）：咕噜4K → SH4K → 幻想爱奇艺。
+///
+/// 用户口径（2026-11-22）：「咕噜4k，sh4k，幻想爱奇艺，然后报一下后面的
+/// 顺序，前面三个是我要求的」。所以这三条永远排在最前，其余保持原有相对
+/// 顺序（健康度排序、jar 合并顺序都不动）。
+const List<String> kLineHeadOrder = <String>['咕噜4K', 'SH4K', '幻想爱奇艺'];
+
+/// 按 [kLineHeadOrder] 重排：命中头部的按给定顺序提到最前，其余原序跟随。
+List<LineInfo> fxApplyLineHeadOrder(List<LineInfo> lines) {
+  if (lines.isEmpty) return lines;
+  final taken = <int>{};
+  final head = <LineInfo>[];
+  for (final want in kLineHeadOrder) {
+    for (var i = 0; i < lines.length; i++) {
+      if (taken.contains(i)) continue;
+      final full = lines[i].displayName;
+      final sub = fxLineSubName(lines[i], fxLineGroupLabelOfName(full)).trim();
+      if (full.trim() == want || sub == want || full.endsWith('·$want')) {
+        taken.add(i);
+        head.add(lines[i]);
+        break;
+      }
+    }
+  }
+  if (head.isEmpty) return lines;
+  return <LineInfo>[
+    ...head,
+    for (var i = 0; i < lines.length; i++)
+      if (!taken.contains(i)) lines[i],
+  ];
+}
+
 /// 子线路默认优先顺序（JAR_SUB_ORDER 2026-11-22 实测）。
 ///
 /// 《八仙》15 条子线路实测：只有 `咕噜4K` 和 `暴风资源` 真能播 ——

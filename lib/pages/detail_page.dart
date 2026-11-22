@@ -2016,12 +2016,12 @@ class _DetailPageState extends State<DetailPage>
         debugPrint('[JAR_PENDING] 这部片在 jar 源里没有线路，大类回落到幻想');
         return;
       }
-      final merged = fxOwnLinesFirst(
+      final merged = fxApplyLineHeadOrder(fxOwnLinesFirst(
         LineHealth.instance.rankLines(widget.id, <LineInfo>[
           ...current.lines,
           ...add,
         ]),
-      );
+      ));
       setState(() {
         _detail = current.copyWith(lines: merged);
       });
