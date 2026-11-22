@@ -47,6 +47,34 @@ const Duration fxStallNoProgressWindow = Duration(seconds: 6);
 /// 到点**直接切**下一条（不问用户：他也不会点「继续等待」，反而更烦）。
 const Duration fxSlowStartupCap = Duration(seconds: 30);
 
+/// 起播「太慢」判死的门槛（2026-11-22 真机，用户口径 = 极致秒播）。
+///
+/// 真机截图：咕噜·玫瑰4K 停在 **0.4 KB/s**，咕噜·咕噜4K 停在 **0 KB/s** ——
+/// 字节确实在动（所以我们既有的「停滞判死」抓不到它），但按这个速度别说秒播，
+/// 一分钟都出不了画面。对「秒播」这个验收标准来说，这种「活着但废」的线路
+/// 跟死线等价，必须尽快切走。
+///
+/// 门槛取 40 KB/s：4K 首片 6.2MB 要在 30 秒内到也需要 200KB/s；40KB/s 以下
+/// 连 1080P 都给不出首帧，留着只会把用户的时间吃掉。
+const int fxMinStartupKBps = 40;
+
+/// 观察多久之后开始用「平均速度」判太慢（避免把刚建连的 1~2 秒误杀）。
+const Duration fxMinSpeedAfter = Duration(seconds: 12);
+
+/// 起播阶段是否该以「太慢」判死：过了观察期，且平均速度低于门槛。
+bool fxStartupTooSlow({
+  required Duration elapsed,
+  required int bytesLoaded,
+  Duration after = fxMinSpeedAfter,
+  int minKBps = fxMinStartupKBps,
+}) {
+  if (elapsed < after) return false;
+  final seconds = elapsed.inMilliseconds / 1000.0;
+  if (seconds <= 0) return false;
+  final kbps = (bytesLoaded / 1024.0) / seconds;
+  return kbps < minKBps;
+}
+
 /// 慢网提示的门槛：等了 15 秒还没出画面就写一行「网速较慢（已等 N 秒）」。
 ///
 /// 目的不是让用户做决定（30 秒到点就切），而是让他知道**在等什么**：

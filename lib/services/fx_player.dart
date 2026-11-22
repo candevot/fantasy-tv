@@ -549,6 +549,17 @@ class FxPlayer implements Listenable {
       if (verdict == FxProgressState.stuck) {
         throw FxPlayerException('连续 ${window.stalledFor.inSeconds} 秒无进展');
       }
+      // TOO_SLOW（2026-11-22 真机）：字节在动但慢到没有意义（0.4 KB/s 那种
+      // 「活着但废」）也要尽快判死换线 —— 秒播是硬指标，等 30 秒硬上限太亏。
+      if (fxStartupTooSlow(
+        elapsed: watch.elapsed,
+        bytesLoaded: v.bytesLoaded,
+      )) {
+        throw FxPlayerException(
+          '起播太慢(<${fxMinStartupKBps}KB/s, ${v.bytesLoaded ~/ 1024}KB/'
+          '${watch.elapsed.inSeconds}s)',
+        );
+      }
       if (watch.elapsedMilliseconds >= slowCapMs) {
         // 慢但一直在动：到 30 秒硬上限**直接切**（用户口径：到点就切，
         // 不弹「继续等待 / 换条线路」——问了也不会点，反而更烦）。
