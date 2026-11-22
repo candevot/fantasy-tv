@@ -388,7 +388,16 @@ List<FxLineGroup> fxLineGroups(
 /// 用户口径（2026-11-22）：「咕噜4k，sh4k，幻想爱奇艺，然后报一下后面的
 /// 顺序，前面三个是我要求的」。所以这三条永远排在最前，其余保持原有相对
 /// 顺序（健康度排序、jar 合并顺序都不动）。
-const List<String> kLineHeadOrder = <String>['咕噜4K', 'SH4K', '幻想爱奇艺'];
+const List<String> kLineHeadOrder = <String>['腾讯4K', '咕噜4K', 'SH4K', '幻想爱奇艺'];
+
+/// 头部线路名的别名（线路真实名 → 用户叫法）。
+///
+/// 用户口径（2026-11-22）：「把他放在首位腾讯4k，没有4k降级1080」。
+/// 腾讯这条线路在库里的 `vod_play_from` 是 `qq`，实测经福影 jx4k 解析后
+/// 返回「臻彩视听 MAX 4K 60帧」（首片 20MB/s），所以显示成「腾讯4K」。
+const Map<String, List<String>> kLineHeadAlias = <String, List<String>>{
+  '腾讯4K': <String>['qq', '腾讯', '腾讯视频'],
+};
 
 /// 按 [kLineHeadOrder] 重排：命中头部的按给定顺序提到最前，其余原序跟随。
 List<LineInfo> fxApplyLineHeadOrder(List<LineInfo> lines) {
@@ -400,7 +409,15 @@ List<LineInfo> fxApplyLineHeadOrder(List<LineInfo> lines) {
       if (taken.contains(i)) continue;
       final full = lines[i].displayName;
       final sub = fxLineSubName(lines[i], fxLineGroupLabelOfName(full)).trim();
-      if (full.trim() == want || sub == want || full.endsWith('·$want')) {
+      final alias = kLineHeadAlias[want] ?? const <String>[];
+      final hitAlias = alias.any((a) =>
+          full.trim() == a ||
+          sub == a ||
+          full.toLowerCase() == a.toLowerCase());
+      if (hitAlias ||
+          full.trim() == want ||
+          sub == want ||
+          full.endsWith('·$want')) {
         taken.add(i);
         head.add(lines[i]);
         break;
@@ -505,6 +522,9 @@ LineInfo? fxJarDefaultLine(List<LineInfo> lines) {
 String fxLineSubName(LineInfo line, String groupLabel) {
   final full = line.displayName.trim();
   if (full.isEmpty) return line.id;
+  // LINE_RENAME（2026-11-22 用户口径）：腾讯这条在库里叫 `qq`，实测解析出来
+  // 是「臻彩视听 MAX 4K 60帧」，界面上就叫「腾讯4K」。
+  if (full.toLowerCase() == 'qq') return '腾讯4K';
   final label = groupLabel.trim();
   if (label.isEmpty) return full;
   if (full == label) return kBareLineSubName;
