@@ -15,10 +15,10 @@ void main() {
       _l('SH4K', 'd'),
       _l('咕噜·咕噜4K', fxJarLineId('咕噜', '1', '咕噜4K')),
       _l('暴风资源', fxJarLineId('咕噜', '1', '暴风资源')),
-      _l('qq', 'qq'),
+      _l('幻想腾讯', 'pt_tencent'),
     ];
     final out = fxApplyLineHeadOrder(lines).map((e) => e.displayName).toList();
-    expect(out[0], 'qq'); // 腾讯4K 首位
+    expect(out[0], '幻想腾讯'); // 平台腾讯线首位
     expect(out[1].contains('咕噜4K'), isTrue);
     expect(out[2], 'SH4K');
     expect(out[3], '幻想爱奇艺');

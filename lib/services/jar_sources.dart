@@ -388,7 +388,7 @@ List<FxLineGroup> fxLineGroups(
 /// 用户口径（2026-11-22）：「咕噜4k，sh4k，幻想爱奇艺，然后报一下后面的
 /// 顺序，前面三个是我要求的」。所以这三条永远排在最前，其余保持原有相对
 /// 顺序（健康度排序、jar 合并顺序都不动）。
-const List<String> kLineHeadOrder = <String>['腾讯4K', '咕噜4K', 'SH4K', '幻想爱奇艺'];
+const List<String> kLineHeadOrder = <String>['幻想腾讯', '咕噜4K', 'SH4K', '幻想爱奇艺'];
 
 /// 头部线路名的别名（线路真实名 → 用户叫法）。
 ///
@@ -396,10 +396,9 @@ const List<String> kLineHeadOrder = <String>['腾讯4K', '咕噜4K', 'SH4K', '�
 /// 腾讯这条线路在库里的 `vod_play_from` 是 `qq`，实测经福影 jx4k 解析后
 /// 返回「臻彩视听 MAX 4K 60帧」（首片 20MB/s），所以显示成「腾讯4K」。
 const Map<String, List<String>> kLineHeadAlias = <String, List<String>>{
-  // 只认库里的真实线路名 `qq`。别把「腾讯视频」也写进来 —— 那是 jar 里
-  // 回网页地址的子线路（已删），写进来会和 `qq` 抢首位（用户实测「腾讯4K
-  // 和 qq 冲突」）。
-  '腾讯4K': <String>['qq'],
+  // 平台线在服务端的名字就是「幻想腾讯」（index.js PLATFORM_LINE_DEFS）。
+  // 不要映射到库里的 `qq` —— 那是采集线，只有 814 分辨率。
+  '幻想腾讯': <String>['pt_tencent'],
 };
 
 /// 按 [kLineHeadOrder] 重排：命中头部的按给定顺序提到最前，其余原序跟随。
@@ -525,9 +524,10 @@ LineInfo? fxJarDefaultLine(List<LineInfo> lines) {
 String fxLineSubName(LineInfo line, String groupLabel) {
   final full = line.displayName.trim();
   if (full.isEmpty) return line.id;
-  // LINE_RENAME（2026-11-22 用户口径）：腾讯这条在库里叫 `qq`，实测解析出来
-  // 是「臻彩视听 MAX 4K 60帧」，界面上就叫「腾讯4K」。
-  if (full.toLowerCase() == 'qq') return '腾讯4K';
+  // 撤回 LINE_RENAME（2026-11-23 真机）：库里的 `qq` 是**采集来的腾讯地址**，
+  // 播放出来只有 814 分辨率；真正的 4K 是服务端平台线「幻想腾讯」
+  // （pt_tencent，福盈解析，实测 139KB 清单 / 首片 20MB/s / 4K 60帧）。
+  // 把 qq 改名成「腾讯4K」是错的，会让人以为在播 4K。
   final label = groupLabel.trim();
   if (label.isEmpty) return full;
   if (full == label) return kBareLineSubName;
