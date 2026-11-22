@@ -496,17 +496,21 @@ class _DetailPageState extends State<DetailPage>
           // JAR_FIRST（2026-11-22 用户口径）：**优先咕噜**。
           // 这次详情如果已经把 jar 子线路带回来了（索引命中 / 外部 jar 记录），
           // 默认就选咕噜的第一条子线路；没有咕噜才用原来的健康度默认线。
-          final jarPick = fxJarDefaultLine(lines);
+          // HEAD_ORDER_DEFAULT（2026-11-22 用户口径）：默认线路 = 线路列表
+          // 的第 1 条（现在头部固定 腾讯4K）。以前默认走 fxJarDefaultLine
+          // 选「咕噜第一条」，和界面上排第一的腾讯4K 不是同一条 ——
+          // 表现就是「默认播放不了（其实点的是另一条）」。
+          final ordered = fxApplyLineHeadOrder(lines);
           final LineInfo? pick =
-              (jarPick != null && !isDeadLineName(jarPick.displayName))
-                  ? jarPick
+              ordered.isNotEmpty && !isDeadLineName(ordered.first.displayName)
+                  ? ordered.first
                   : LineHealth.instance.defaultLine(widget.id, lines);
           lineId = pick?.id ?? '';
           if (pick != null) {
             fxPlayLog(
               'default line=${pick.displayName} '
               'from=${fromRoute?.displayName ?? '-'} '
-              'jar=${jarPick != null} '
+              'head=${ordered.isNotEmpty} '
               'total=${lines.length} skip=${lines.length - 1}',
             );
           }
@@ -2428,12 +2432,9 @@ class _DetailPageState extends State<DetailPage>
           );
           // JAR_SINGLE_OPEN：等咕噜线路到齐再挂播放器 —— 否则会先起播自有
           // 线路、再被切到咕噜，用户看到的就是「加载两下然后 0 KB」。
-          if (_jarBootWait && !_jarMergeDone) {
-            return SizedBox(
-              height: stageHeight,
-              child: const _JarBootPlaceholder(),
-            );
-          }
+          // NO_BLANK_FIRST_FRAME（2026-11-23 真机）：这里原来会「等 jar 线路
+          // 到齐再挂播放器」，结果播放区一直是空白（既没有缓冲网速，也不显示
+          // 正在加载的线路名）。两次起播总比白屏好，所以直接不拦。
           return SizedBox(
             height: stageHeight,
             child: PlayerView(
@@ -3253,29 +3254,6 @@ class _DetailPageState extends State<DetailPage>
         child: Text(
           '— 已经到底啦 —',
           style: TextStyle(fontSize: 10.5, color: skin.hint),
-        ),
-      ),
-    );
-  }
-}
-
-/// JAR_SINGLE_OPEN：等咕噜线路到齐时的播放区占位。
-///
-/// 只占位置、不动播放器 —— 合并一结束它就被真正的 [PlayerView] 换掉，
-/// 那一次起播用的就是最终线路（默认咕噜），不会再有「先播幻想再切咕噜」。
-class _JarBootPlaceholder extends StatelessWidget {
-  const _JarBootPlaceholder();
-
-  @override
-  Widget build(BuildContext context) {
-    return const ColoredBox(
-      color: Colors.black,
-      child: Center(
-        child: SizedBox(
-          width: 26,
-          height: 26,
-          child: CircularProgressIndicator(
-              strokeWidth: 2.4, color: Colors.white70),
         ),
       ),
     );

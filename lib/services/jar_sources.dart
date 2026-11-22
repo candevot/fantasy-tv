@@ -396,7 +396,10 @@ const List<String> kLineHeadOrder = <String>['腾讯4K', '咕噜4K', 'SH4K', '�
 /// 腾讯这条线路在库里的 `vod_play_from` 是 `qq`，实测经福影 jx4k 解析后
 /// 返回「臻彩视听 MAX 4K 60帧」（首片 20MB/s），所以显示成「腾讯4K」。
 const Map<String, List<String>> kLineHeadAlias = <String, List<String>>{
-  '腾讯4K': <String>['qq', '腾讯', '腾讯视频'],
+  // 只认库里的真实线路名 `qq`。别把「腾讯视频」也写进来 —— 那是 jar 里
+  // 回网页地址的子线路（已删），写进来会和 `qq` 抢首位（用户实测「腾讯4K
+  // 和 qq 冲突」）。
+  '腾讯4K': <String>['qq'],
 };
 
 /// 按 [kLineHeadOrder] 重排：命中头部的按给定顺序提到最前，其余原序跟随。
