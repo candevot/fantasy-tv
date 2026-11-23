@@ -41,7 +41,7 @@ void main() {
         isFalse);
   });
 
-  test('默认子线路优先挑暴风资源', () {
+  test('默认子线路优先挑咕噜4K', () {
     final lines = <LineInfo>[
       _line('咕噜·咕噜4K', fxJarLineId('咕噜', '1', '咕噜4K')),
       _line('咕噜·暴风资源', fxJarLineId('咕噜', '1', '暴风资源')),
@@ -49,7 +49,7 @@ void main() {
     ];
     final pick = fxJarDefaultLine(lines);
     expect(pick, isNotNull);
-    expect(pick!.displayName.contains('暴风资源'), isTrue);
+    expect(pick!.displayName.contains('咕噜4K'), isTrue);
   });
 
   test('没有首选时退回原顺序第一条', () {

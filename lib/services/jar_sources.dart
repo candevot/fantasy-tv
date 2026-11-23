@@ -496,7 +496,9 @@ List<LineInfo> fxPruneJarLines(List<LineInfo> lines) => <LineInfo>[
         if (!fxIsDeadJarSubLine(line)) line
     ];
 
-const List<String> kJarSubLinePreference = <String>['暴风资源', '咕噜4K'];
+/// 默认子线路优先顺序（2026-11-23 用户口径）：**咕噜4K 必须排第一**，
+/// 暴风资源第二。之前把暴风放第一位，默认就播成暴风了。
+const List<String> kJarSubLinePreference = <String>['咕噜4K', '暴风资源'];
 
 LineInfo? fxJarDefaultLine(List<LineInfo> lines) {
   final groups = fxLineGroups(lines);
