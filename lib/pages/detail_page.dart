@@ -483,16 +483,10 @@ class _DetailPageState extends State<DetailPage>
         // 现在统一走 [LineHealth.defaultLine]：死线路沉到最后且不选，
         // 冷却中 / 预检判坏 / 服务端 degraded 的排在健康线路后面。
         // 历史里带进来的线路同样过一遍这道闸（老记录可能存着死线路名）。
-        LineInfo? fromRoute;
-        for (final l in lines) {
-          if (l.id == widget.line) {
-            fromRoute = l;
-            break;
-          }
-        }
-        if (fromRoute != null && !isDeadLineName(fromRoute.displayName)) {
-          lineId = widget.line;
-        } else {
+        // HEAD_DEFAULT（2026-11-23 真机）：历史/路由里存的线路（上次点过的）
+        // 不许再决定默认 —— 用户实测「默认播的怎么能是暴风」。默认永远是
+        // 线路列表第 1 条（头部顺序：幻想腾讯 → 咕噜4K → SH4K → 幻想爱奇艺）。
+        {
           // JAR_FIRST（2026-11-22 用户口径）：**优先咕噜**。
           // 这次详情如果已经把 jar 子线路带回来了（索引命中 / 外部 jar 记录），
           // 默认就选咕噜的第一条子线路；没有咕噜才用原来的健康度默认线。
@@ -509,7 +503,7 @@ class _DetailPageState extends State<DetailPage>
           if (pick != null) {
             fxPlayLog(
               'default line=${pick.displayName} '
-              'from=${fromRoute?.displayName ?? '-'} '
+              'from=${widget.line} '
               'head=${ordered.isNotEmpty} '
               'total=${lines.length} skip=${lines.length - 1}',
             );
