@@ -11,6 +11,7 @@ import 'api.dart';
 import 'auth.dart';
 import 'fx_globals.dart';
 import 'services/app_settings.dart';
+import 'services/line_config.dart';
 import 'services/app_update_service.dart';
 import 'services/playback_params.dart';
 import 'services/download_service.dart';
@@ -32,6 +33,8 @@ import 'pages/player_page.dart';
 import 'utils/fx_route.dart';
 
 void main() {
+  // LINE_CONFIG：线路顺序/删减由服务端 hx_lines.json 决定，改线路不用发版
+  unawaited(FxLineConfig.load());
   // 所有 Dart 异步异常的最后一道网；Framework / 平台异常另行接管。
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
@@ -234,8 +237,8 @@ Future<List<LineHealthTarget>> _bootProbeTargets() async {
   final targets = <LineHealthTarget>[];
   for (final card in cards) {
     try {
-      final detail = await CmsBridge.detail(card.id)
-          .timeout(const Duration(seconds: 6));
+      final detail =
+          await CmsBridge.detail(card.id).timeout(const Duration(seconds: 6));
       LineInfo? line;
       for (final candidate in detail.lines) {
         if (candidate.id.trim().isEmpty || candidate.degraded) continue;
@@ -588,7 +591,8 @@ class _RootShellState extends State<RootShell> {
     super.initState();
     // 进主界面后延迟 ~1.7s 再查更新：避开启动动画 / 首页首屏请求。
     // 每次冷启动只查一次；本次会话弹过（版本没变）就不再弹。
-    _updateTimer = Timer(const Duration(milliseconds: 1700), _checkUpdateOnStart);
+    _updateTimer =
+        Timer(const Duration(milliseconds: 1700), _checkUpdateOnStart);
   }
 
   @override
@@ -727,8 +731,8 @@ class Nav {
                 year: year,
               )));
 
-  static Future<void> search(BuildContext c) => Navigator.of(c)
-      .push(FxPageRoute(builder: (_) => const SearchPage()));
+  static Future<void> search(BuildContext c) =>
+      Navigator.of(c).push(FxPageRoute(builder: (_) => const SearchPage()));
 
   static Future<TogetherExitResult?> together(
     BuildContext c, {
@@ -761,7 +765,7 @@ class Nav {
 ///   同时带一点柔和的光晕，图标 / 文字颜色跟着渐变。
 ///
 /// 实现要点：
-///   · 用等宽布局算位置，AnimatedPositioned 只做 left 的补间 —— 
+///   · 用等宽布局算位置，AnimatedPositioned 只做 left 的补间 ——
 ///     比「每个 item 各自动画」省事，也不会出现两块高亮重叠。
 ///   · 高亮本身用渐变 + accent 光晕，不用图片，跟着主题色走。
 ///   · 图标做 0.92 → 1 的轻微放大，跟滑动同时收尾。
@@ -869,7 +873,8 @@ class _FxBottomBar extends StatelessWidget {
                             style: TextStyle(
                               fontSize: 10.5,
                               color: on ? Fx.accent : const Color(0xFF9AA6B8),
-                              fontWeight: on ? FontWeight.w700 : FontWeight.w400,
+                              fontWeight:
+                                  on ? FontWeight.w700 : FontWeight.w400,
                             ),
                             child: Text(item.label),
                           ),

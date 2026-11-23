@@ -21,6 +21,7 @@
 library;
 
 import '../models.dart';
+import 'line_config.dart';
 import 'fallback_match.dart' show fxNormTitle;
 
 /// 用户挑中的 jar 源（**默认启用名单**，也是设置页「片源管理」的唯一内容）。
@@ -388,7 +389,7 @@ List<FxLineGroup> fxLineGroups(
 /// 用户口径（2026-11-22）：「咕噜4k，sh4k，幻想爱奇艺，然后报一下后面的
 /// 顺序，前面三个是我要求的」。所以这三条永远排在最前，其余保持原有相对
 /// 顺序（健康度排序、jar 合并顺序都不动）。
-const List<String> kLineHeadOrder = <String>['幻想腾讯', '咕噜4K', 'SH4K', '幻想爱奇艺'];
+List<String> get kLineHeadOrder => FxLineConfig.head;
 
 /// 头部线路名的别名（线路真实名 → 用户叫法）。
 ///
@@ -450,30 +451,7 @@ List<LineInfo> fxApplyLineHeadOrder(List<LineInfo> lines) {
 /// 注意：**只对 jar 子线路生效**。CMS 自己的「幻想爱奇艺 / bilibili」线路
 /// 地址是服务端 `/hxparse/...` 的成品地址，服务端有解析器，必须保留
 /// （`test/dead_line_test.dart` 钉着这条）。
-const List<String> kJarDeadSubLineNames = <String>[
-  // 回网页地址、要 WebView 嗅探的（我们没有嗅探器）。
-  '爱奇艺',
-  '腾讯视频',
-  '优酷',
-  'bilibili',
-  'mgtv',
-  '芒果',
-  // JAR_SUB_MEASURED（2026-11-22 实测《八仙》逐条）：
-  //   咖啡4K超清 / 玫瑰4K → 清单 404（k0udeyaayccydz.djvod.ndcimgs.com）
-  //   金牌极速           → 清单 403（ppvod011.blbtgg.com）
-  //   电影天堂 / 量子资源 / 非凡资源 → 96B master，首个 variant 首片 404
-  //   蚂蚁资源 / 旋风VIP → playerContent 直接 Parse Failed
-  // 都不能播，别摆给用户点（用户口径：有就有，没有就消失）。
-  '咖啡4K超清',
-  '咖啡4K',
-  '玫瑰4K',
-  '金牌极速',
-  '电影天堂',
-  '量子资源',
-  '非凡资源',
-  '蚂蚁资源',
-  '旋风VIP',
-];
+List<String> get kJarDeadSubLineNames => FxLineConfig.jarDead;
 
 /// 是否是可以直接从 jar 列表里删掉的子线路（按名字）。
 bool fxIsDeadJarSubLine(LineInfo line) {
@@ -498,7 +476,7 @@ List<LineInfo> fxPruneJarLines(List<LineInfo> lines) => <LineInfo>[
 
 /// 默认子线路优先顺序（2026-11-23 用户口径）：**咕噜4K 必须排第一**，
 /// 暴风资源第二。之前把暴风放第一位，默认就播成暴风了。
-const List<String> kJarSubLinePreference = <String>['咕噜4K', '暴风资源'];
+List<String> get kJarSubLinePreference => FxLineConfig.jarPrefer;
 
 LineInfo? fxJarDefaultLine(List<LineInfo> lines) {
   final groups = fxLineGroups(lines);
